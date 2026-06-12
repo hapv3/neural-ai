@@ -1,36 +1,45 @@
 OUTPUT_ARCH(riscv)
-ENTRY(main)
+ENTRY(_start)
 
 MEMORY
 {
-    TCDM (rwx) : ORIGIN = 0x10000000, LENGTH = 512K
+    itcm (rx)  : ORIGIN = 0x10000000, LENGTH = 32K
+    dtcm (rw)  : ORIGIN = 0x10008000, LENGTH = 8K
 }
 
 SECTIONS
 {
-    .text : {
+    .text :
+    {
         *(.text.init)
         *(.text)
         *(.text.*)
-    } > TCDM
+    } > itcm
 
-    .rodata : {
+    .rodata :
+    {
         *(.rodata)
         *(.rodata.*)
-    } > TCDM
+    } > dtcm
 
-    .data : {
+    .data :
+    {
         *(.data)
         *(.data.*)
         *(.sdata)
-    } > TCDM
+        *(.sdata.*)
+    } > dtcm
 
-    .bss : {
+    .bss :
+    {
+        __bss_start = .;
         *(.bss)
         *(.bss.*)
         *(.sbss)
-    } > TCDM
+        *(.sbss.*)
+        __bss_end = .;
+    } > dtcm
 
-    /* Define a stack pointer */
-    PROVIDE(__stack_top = ORIGIN(TCDM) + LENGTH(TCDM) - 8);
+    /* Define Stack top at the end of D-TCM */
+    __stack_top = ORIGIN(dtcm) + LENGTH(dtcm);
 }

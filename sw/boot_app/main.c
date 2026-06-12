@@ -2,9 +2,9 @@
 #include "npu_memory_map.h"
 #include "hal_dma.h"
 
-// For testing purposes, we use TCDM memory addresses
-#define TEST_SRC_ADDR 0x10000000 // TCDM Bank 0
-#define TEST_DST_ADDR 0x10000100 // TCDM Bank 0 offset 0x100
+// For testing purposes, we use Shared Data TCDM
+#define TEST_SRC_ADDR 0x10100000 // TCDM Bank 0
+#define TEST_DST_ADDR 0x10100100 // TCDM Bank 0 offset 0x100
 #define TEST_LEN      64
 
 volatile uint32_t *src_array = (volatile uint32_t*)TEST_SRC_ADDR;
@@ -26,6 +26,7 @@ int main(void) {
     uint32_t readback = REG_READ(REG_DMA_LEN);
     if (readback != 0x1234) {
         // MMIO write/read failed, halt here
+        *((volatile uint32_t*)(NPU_DTCM_BASE)) = 0xBADBAD01;
         while(1);
     }
 
@@ -42,17 +43,16 @@ int main(void) {
         }
     }
 
-    // 6. Signal completion
-    // We can write a special signature to a known address for the testbench to catch
+    // 6. Signal completion to D-TCM (so testbench can backdoor read it)
     if (success) {
-        *((volatile uint32_t*)(NPU_TCDM_BASE + 0xFFC)) = 0xDEADBEEF; // Success signature
+        *((volatile uint32_t*)(NPU_DTCM_BASE)) = 0xDEADBEEF; // Success signature
     } else {
-        *((volatile uint32_t*)(NPU_TCDM_BASE + 0xFFC)) = 0xBADBAD00; // Failure signature
+        *((volatile uint32_t*)(NPU_DTCM_BASE)) = 0xBADBAD00; // Failure signature
     }
 
     // Sleep or idle
     while(1) {
-        // Assembly wfi could be used here
+        // Halt
     }
 
     return 0;
