@@ -5,17 +5,10 @@ import npu_cluster_pkg::*;
 module npu_cluster (
     input  logic clk_i,       // 1 GHz NPU Core Clock
     input  logic rst_ni,      // NPU Core Reset
-    
-    //---------------------------------------------------------
-    // APB Clock Domain
-    //---------------------------------------------------------
-    input  logic apb_clk_i,   // 100 MHz APB Clock
-    input  logic apb_rst_ni,  // APB Reset
 
     //---------------------------------------------------------
-    // AXI4 Interface (To External Memory / Manager Core)
+    // AXI4 Master Interface (To External Memory via DMA)
     //---------------------------------------------------------
-    // Address Write Channel
     output logic [AXI_ADDR_WIDTH-1:0]       axi_aw_addr_o,
     output logic [7:0]                      axi_aw_len_o,
     output logic [2:0]                      axi_aw_size_o,
@@ -23,19 +16,16 @@ module npu_cluster (
     output logic                            axi_aw_valid_o,
     input  logic                            axi_aw_ready_i,
 
-    // Write Channel
     output logic [AXI_DATA_WIDTH-1:0]       axi_w_data_o,
     output logic [(AXI_DATA_WIDTH/8)-1:0]   axi_w_strb_o,
     output logic                            axi_w_last_o,
     output logic                            axi_w_valid_o,
     input  logic                            axi_w_ready_i,
 
-    // Write Response Channel
     input  logic [1:0]                      axi_b_resp_i,
     input  logic                            axi_b_valid_i,
     output logic                            axi_b_ready_o,
 
-    // Address Read Channel
     output logic [AXI_ADDR_WIDTH-1:0]       axi_ar_addr_o,
     output logic [7:0]                      axi_ar_len_o,
     output logic [2:0]                      axi_ar_size_o,
@@ -43,7 +33,6 @@ module npu_cluster (
     output logic                            axi_ar_valid_o,
     input  logic                            axi_ar_ready_i,
 
-    // Read Channel
     input  logic [AXI_DATA_WIDTH-1:0]       axi_r_data_i,
     input  logic [1:0]                      axi_r_resp_i,
     input  logic                            axi_r_last_i,
@@ -51,16 +40,37 @@ module npu_cluster (
     output logic                            axi_r_ready_o,
 
     //---------------------------------------------------------
-    // C. Control Interface (APB Slave for CSRs)
+    // AXI4 Slave Interface (For Host Firmware Boot & Control)
     //---------------------------------------------------------
-    input  logic [31:0]                     apb_paddr_i,
-    input  logic                            apb_psel_i,
-    input  logic                            apb_penable_i,
-    input  logic                            apb_pwrite_i,
-    input  logic [31:0]                     apb_pwdata_i,
-    output logic                            apb_pready_o,
-    output logic [31:0]                     apb_prdata_o,
-    output logic                            apb_pslverr_o,
+    input  logic [AXI_ADDR_WIDTH-1:0]       s_axi_aw_addr_i,
+    input  logic [7:0]                      s_axi_aw_len_i,
+    input  logic [2:0]                      s_axi_aw_size_i,
+    input  logic [1:0]                      s_axi_aw_burst_i,
+    input  logic                            s_axi_aw_valid_i,
+    output logic                            s_axi_aw_ready_o,
+
+    input  logic [AXI_DATA_WIDTH-1:0]       s_axi_w_data_i,
+    input  logic [(AXI_DATA_WIDTH/8)-1:0]   s_axi_w_strb_i,
+    input  logic                            s_axi_w_last_i,
+    input  logic                            s_axi_w_valid_i,
+    output logic                            s_axi_w_ready_o,
+
+    output logic [1:0]                      s_axi_b_resp_o,
+    output logic                            s_axi_b_valid_o,
+    input  logic                            s_axi_b_ready_i,
+
+    input  logic [AXI_ADDR_WIDTH-1:0]       s_axi_ar_addr_i,
+    input  logic [7:0]                      s_axi_ar_len_i,
+    input  logic [2:0]                      s_axi_ar_size_i,
+    input  logic [1:0]                      s_axi_ar_burst_i,
+    input  logic                            s_axi_ar_valid_i,
+    output logic                            s_axi_ar_ready_o,
+
+    output logic [AXI_DATA_WIDTH-1:0]       s_axi_r_data_o,
+    output logic [1:0]                      s_axi_r_resp_o,
+    output logic                            s_axi_r_last_o,
+    output logic                            s_axi_r_valid_o,
+    input  logic                            s_axi_r_ready_i,
 
     //---------------------------------------------------------
     // Interrupts
@@ -71,11 +81,12 @@ module npu_cluster (
     //---------------------------------------------------------
     // 1. TCDM Interconnect (Crossbar)
     //---------------------------------------------------------
-    localparam int unsigned NUM_MASTERS = 4;
-    // Master 0: Snitch Core D-TCM (MMIO and Local Data)
+    localparam int unsigned NUM_MASTERS = 5;
+    // Master 0: Snitch Core D-TCM (MMIO and Local Data) via OBI Demux
     // Master 1: Spatz Vector Engine
     // Master 2: DMA Engine
-    // Master 3: Snitch Core I-TCDM (Instruction Fetch)
+    // Master 3: Snitch Core I-TCM (Instruction Fetch)
+    // Master 4: Host AXI Slave Interface (Bootloader)
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -83,7 +94,6 @@ module npu_cluster (
     obi_req_t [TCDM_NUM_BANKS-1:0] slave_req;
     obi_rsp_t [TCDM_NUM_BANKS-1:0] slave_rsp;
 
-    // Unpack logic arrays for tcdm_interconnect
     logic [NUM_MASTERS-1:0]                      mst_req, mst_we, mst_gnt, mst_rvalid;
     logic [NUM_MASTERS-1:0][OBI_ADDR_WIDTH-1:0]  mst_addr;
     logic [NUM_MASTERS-1:0][(OBI_DATA_WIDTH/8)-1:0] mst_be;
@@ -109,9 +119,7 @@ module npu_cluster (
     for (genvar b = 0; b < TCDM_NUM_BANKS; b++) begin
         assign slave_req[b].req   = slv_req[b];
         assign slave_req[b].we    = slv_we[b];
-        // Tính toán địa chỉ Word bên trong từng Bank
-        // Bỏ qua 5 bit Byte Offset và 4 bit Bank Select
-        assign slave_req[b].addr  = slv_addr[b] >> 9;
+        assign slave_req[b].addr  = slv_addr[b] >> 9; // Offset for 512-bit banking logic
         assign slave_req[b].be    = slv_be[b];
         assign slave_req[b].wdata = slv_wdata[b];
         
@@ -164,7 +172,7 @@ module npu_cluster (
     end
 
     //---------------------------------------------------------
-    // 3. Cluster Control Registers (APB Slave)
+    // 3. Cluster Control Registers (OBI Slave)
     //---------------------------------------------------------
     logic        cfg_dma_start;
     logic [31:0] cfg_dma_src_addr;
@@ -172,69 +180,213 @@ module npu_cluster (
     logic [31:0] cfg_dma_length;
     logic        cfg_dma_done;
 
+    logic        cfg_sys_start;
+    logic [31:0] cfg_sys_w_ptr;
+    logic [31:0] cfg_sys_i_ptr;
+    logic [31:0] cfg_sys_o_ptr;
+    logic [31:0] cfg_sys_dim_m;
+    logic        cfg_sys_done;
+
+    logic                      reg_req;
+    logic                      reg_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] reg_addr;
+    logic                      reg_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] reg_be;
+    logic [OBI_DATA_WIDTH-1:0] reg_wdata;
+    logic                      reg_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] reg_rdata;
+
     cluster_ctrl_regs #(
-        .APB_ADDR_WIDTH(32),
-        .APB_DATA_WIDTH(32)
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH)
     ) u_ctrl_regs (
-        .clk_i              (apb_clk_i),
-        .rst_ni             (apb_rst_ni),
-        .paddr_i            (apb_paddr_i),
-        .psel_i             (apb_psel_i),
-        .penable_i          (apb_penable_i),
-        .pwrite_i           (apb_pwrite_i),
-        .pwdata_i           (apb_pwdata_i),
-        .pready_o           (apb_pready_o),
-        .prdata_o           (apb_prdata_o),
-        .pslverr_o          (apb_pslverr_o),
+        .clk_i              (clk_i),
+        .rst_ni             (rst_ni),
+        .req_i              (reg_req),
+        .gnt_o              (reg_gnt),
+        .addr_i             (reg_addr),
+        .we_i               (reg_we),
+        .be_i               (reg_be),
+        .wdata_i            (reg_wdata),
+        .rvalid_o           (reg_rvalid),
+        .rdata_o            (reg_rdata),
+
         .cfg_dma_start_o    (cfg_dma_start),
         .cfg_dma_src_addr_o (cfg_dma_src_addr),
         .cfg_dma_dst_addr_o (cfg_dma_dst_addr),
         .cfg_dma_length_o   (cfg_dma_length),
-        .cfg_dma_done_i     (cfg_dma_done_apb_pulse)
+        .cfg_dma_done_i     (cfg_dma_done),
+
+        .cfg_sys_start_o      (cfg_sys_start),
+        .cfg_sys_weight_ptr_o (cfg_sys_w_ptr),
+        .cfg_sys_ifm_ptr_o    (cfg_sys_i_ptr),
+        .cfg_sys_ofm_ptr_o    (cfg_sys_o_ptr),
+        .cfg_sys_dim_m_o      (cfg_sys_dim_m),
+        .cfg_sys_done_i       (cfg_sys_done)
     );
 
     //---------------------------------------------------------
-    // CDC Logic: APB (100MHz) <-> NPU (1GHz) using cdc_2phase
+    // 4. Snitch Core & OBI Demux
     //---------------------------------------------------------
-    // 1. APB -> NPU: Sync cfg_dma_start
-    logic dma_start_pulse;
-    cdc_2phase #(
-        .T(logic)
-    ) u_cdc_start (
-        .src_rst_ni  (apb_rst_ni),
-        .src_clk_i   (apb_clk_i),
-        .src_data_i  (1'b0),
-        .src_valid_i (cfg_dma_start),
-        .src_ready_o (),
-        .dst_rst_ni  (rst_ni),
-        .dst_clk_i   (clk_i),
-        .dst_data_o  (),
-        .dst_valid_o (dma_start_pulse),
-        .dst_ready_i (1'b1)
+    logic                      snitch_d_req;
+    logic                      snitch_d_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] snitch_d_addr;
+    logic                      snitch_d_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] snitch_d_be;
+    logic [OBI_DATA_WIDTH-1:0] snitch_d_wdata;
+    logic                      snitch_d_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] snitch_d_rdata;
+
+    logic                      snitch_i_req;
+    logic                      snitch_i_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] snitch_i_addr;
+    logic                      snitch_i_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] snitch_i_be;
+    logic [OBI_DATA_WIDTH-1:0] snitch_i_wdata;
+    logic                      snitch_i_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] snitch_i_rdata;
+
+    snitch_core #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .BOOT_ADDR (32'h1000_0000) // TCDM Base Addr
+    ) u_snitch_core (
+        .clk_i            (clk_i),
+        .rst_ni           (rst_ni),
+        .hart_id_i        (32'd0),
+
+        .obi_i_req_o      (snitch_i_req),
+        .obi_i_gnt_i      (snitch_i_gnt),
+        .obi_i_addr_o     (snitch_i_addr),
+        .obi_i_we_o       (snitch_i_we),
+        .obi_i_be_o       (snitch_i_be),
+        .obi_i_wdata_o    (snitch_i_wdata),
+        .obi_i_rvalid_i   (snitch_i_rvalid),
+        .obi_i_rdata_i    (snitch_i_rdata),
+
+        .obi_d_req_o      (snitch_d_req),
+        .obi_d_gnt_i      (snitch_d_gnt),
+        .obi_d_addr_o     (snitch_d_addr),
+        .obi_d_we_o       (snitch_d_we),
+        .obi_d_be_o       (snitch_d_be),
+        .obi_d_wdata_o    (snitch_d_wdata),
+        .obi_d_rvalid_i   (snitch_d_rvalid),
+        .obi_d_rdata_i    (snitch_d_rdata)
     );
 
-    // 2. NPU -> APB: Sync cfg_dma_done
-    logic dma_engine_done;
-    logic cfg_dma_done_apb_pulse;
-    cdc_2phase #(
-        .T(logic)
-    ) u_cdc_done (
-        .src_rst_ni  (rst_ni),
-        .src_clk_i   (clk_i),
-        .src_data_i  (1'b0),
-        .src_valid_i (dma_engine_done),
-        .src_ready_o (),
-        .dst_rst_ni  (apb_rst_ni),
-        .dst_clk_i   (apb_clk_i),
-        .dst_data_o  (),
-        .dst_valid_o (cfg_dma_done_apb_pulse),
-        .dst_ready_i (1'b1)
+    assign master_req[3].req   = snitch_i_req;
+    assign master_req[3].we    = snitch_i_we;
+    assign master_req[3].be    = snitch_i_be;
+    assign master_req[3].addr  = snitch_i_addr;
+    assign master_req[3].wdata = snitch_i_wdata;
+    assign snitch_i_gnt        = master_rsp[3].gnt;
+    assign snitch_i_rvalid     = master_rsp[3].rvalid;
+    assign snitch_i_rdata      = master_rsp[3].rdata;
+
+    obi_demux #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .TCDM_BASE (32'h1000_0000),
+        .TCDM_MASK (32'hFFF0_0000),
+        .REGS_BASE (32'h2000_0000),
+        .REGS_MASK (32'hFFFF_0000)
+    ) u_obi_demux (
+        .clk_i        (clk_i),
+        .rst_ni       (rst_ni),
+        
+        .slv_req_i    (snitch_d_req),
+        .slv_gnt_o    (snitch_d_gnt),
+        .slv_addr_i   (snitch_d_addr),
+        .slv_we_i     (snitch_d_we),
+        .slv_be_i     (snitch_d_be),
+        .slv_wdata_i  (snitch_d_wdata),
+        .slv_rvalid_o (snitch_d_rvalid),
+        .slv_rdata_o  (snitch_d_rdata),
+
+        .m0_req_o     (master_req[0].req),
+        .m0_gnt_i     (master_rsp[0].gnt),
+        .m0_addr_o    (master_req[0].addr),
+        .m0_we_o      (master_req[0].we),
+        .m0_be_o      (master_req[0].be),
+        .m0_wdata_o   (master_req[0].wdata),
+        .m0_rvalid_i  (master_rsp[0].rvalid),
+        .m0_rdata_i   (master_rsp[0].rdata),
+
+        .m1_req_o     (reg_req),
+        .m1_gnt_i     (reg_gnt),
+        .m1_addr_o    (reg_addr),
+        .m1_we_o      (reg_we),
+        .m1_be_o      (reg_be),
+        .m1_wdata_o   (reg_wdata),
+        .m1_rvalid_i  (reg_rvalid),
+        .m1_rdata_i   (reg_rdata)
     );
 
     //---------------------------------------------------------
-    // 4. DMA Engine (AXI to OBI)
+    // 5. Host AXI to OBI Bootloader Interface
     //---------------------------------------------------------
-    // Mở cổng tín hiệu OBI riêng lẻ để truyền vào DMA
+    logic                      s_axi_obi_req;
+    logic                      s_axi_obi_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] s_axi_obi_addr;
+    logic                      s_axi_obi_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] s_axi_obi_be;
+    logic [OBI_DATA_WIDTH-1:0] s_axi_obi_wdata;
+    logic                      s_axi_obi_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] s_axi_obi_rdata;
+
+    axi_lite_to_obi #(
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
+        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+        .OBI_ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .OBI_DATA_WIDTH(OBI_DATA_WIDTH)
+    ) u_axi_to_obi (
+        .clk_i            (clk_i),
+        .rst_ni           (rst_ni),
+
+        .s_axi_aw_addr_i  (s_axi_aw_addr_i),
+        .s_axi_aw_valid_i (s_axi_aw_valid_i),
+        .s_axi_aw_ready_o (s_axi_aw_ready_o),
+        .s_axi_w_data_i   (s_axi_w_data_i),
+        .s_axi_w_strb_i   (s_axi_w_strb_i),
+        .s_axi_w_valid_i  (s_axi_w_valid_i),
+        .s_axi_w_ready_o  (s_axi_w_ready_o),
+        .s_axi_b_resp_o   (s_axi_b_resp_o),
+        .s_axi_b_valid_o  (s_axi_b_valid_o),
+        .s_axi_b_ready_i  (s_axi_b_ready_i),
+        .s_axi_ar_addr_i  (s_axi_ar_addr_i),
+        .s_axi_ar_valid_i (s_axi_ar_valid_i),
+        .s_axi_ar_ready_o (s_axi_ar_ready_o),
+        .s_axi_r_data_o   (s_axi_r_data_o),
+        .s_axi_r_resp_o   (s_axi_r_resp_o),
+        .s_axi_r_valid_o  (s_axi_r_valid_o),
+        .s_axi_r_ready_i  (s_axi_r_ready_i),
+
+        .obi_req_o        (s_axi_obi_req),
+        .obi_gnt_i        (s_axi_obi_gnt),
+        .obi_addr_o       (s_axi_obi_addr),
+        .obi_we_o         (s_axi_obi_we),
+        .obi_be_o         (s_axi_obi_be),
+        .obi_wdata_o      (s_axi_obi_wdata),
+        .obi_rvalid_i     (s_axi_obi_rvalid),
+        .obi_rdata_i      (s_axi_obi_rdata)
+    );
+
+    assign master_req[4].req   = s_axi_obi_req;
+    assign master_req[4].we    = s_axi_obi_we;
+    assign master_req[4].be    = s_axi_obi_be;
+    assign master_req[4].addr  = s_axi_obi_addr;
+    assign master_req[4].wdata = s_axi_obi_wdata;
+    
+    assign s_axi_obi_gnt       = master_rsp[4].gnt;
+    assign s_axi_obi_rvalid    = master_rsp[4].rvalid;
+    assign s_axi_obi_rdata     = master_rsp[4].rdata;
+
+    assign s_axi_r_last_o      = s_axi_r_valid_o; // AXI Lite has 1-beat responses
+
+
+    //---------------------------------------------------------
+    // 6. DMA Engine (AXI Master to OBI Master 2)
+    //---------------------------------------------------------
     logic                      dma_obi_req;
     logic                      dma_obi_gnt;
     logic [OBI_ADDR_WIDTH-1:0] dma_obi_addr;
@@ -254,10 +406,9 @@ module npu_cluster (
         .cfg_src_addr_i (cfg_dma_src_addr),
         .cfg_dst_addr_i (cfg_dma_dst_addr),
         .cfg_length_i   (cfg_dma_length),
-        .cfg_start_i    (dma_start_pulse),
-        .cfg_done_o     (dma_engine_done),
+        .cfg_start_i    (cfg_dma_start),
+        .cfg_done_o     (cfg_dma_done),
 
-        // AXI4
         .axi_aw_addr_o  (axi_aw_addr_o),
         .axi_aw_len_o   (axi_aw_len_o),
         .axi_aw_size_o  (axi_aw_size_o),
@@ -284,7 +435,6 @@ module npu_cluster (
         .axi_r_valid_i  (axi_r_valid_i),
         .axi_r_ready_o  (axi_r_ready_o),
 
-        // OBI
         .obi_req_o      (dma_obi_req),
         .obi_gnt_i      (dma_obi_gnt),
         .obi_addr_o     (dma_obi_addr),
@@ -295,7 +445,6 @@ module npu_cluster (
         .obi_rdata_i    (dma_obi_rdata)
     );
 
-    // Gắn DMA vào Master Port 2
     assign master_req[2].req   = dma_obi_req;
     assign master_req[2].we    = dma_obi_we;
     assign master_req[2].be    = dma_obi_be;
@@ -307,88 +456,12 @@ module npu_cluster (
     assign dma_obi_rdata  = master_rsp[2].rdata;
 
     //---------------------------------------------------------
-    // 4. Memory-Mapped Registers (MMIO) for Systolic
+    // 7. Spatz Vector Engine (Phase 3B Placeholder)
     //---------------------------------------------------------
-    logic sys_weight_load, sys_clear_acc, sys_compute_en;
-    
-    // Giả lập logic bắt gói tin (Intercept) từ Master 0 (Snitch)
-    // Nếu địa chỉ rơi vào vùng MMIO SYSTOLIC_MMR_BASE, Snitch sẽ ghi thanh ghi
-    // Tạm thời nối cứng (Hardcode) phục vụ Testbench
-    // ...
-
-    //---------------------------------------------------------
-    // 5. NPU Systolic Array
-    //---------------------------------------------------------
-    // Nối tín hiệu giả lập phục vụ test (Có thể đưa ra ngoài qua port tạm thời)
-    logic [31:0] debug_ofm_valid;
-    
-    npu_systolic_array #(
-        .ARRAY_DIM(32)
-    ) u_systolic_array (
-        .clk_i            (clk_i),
-        .rst_ni           (rst_ni),
-        .weight_load_en_i (sys_weight_load),
-        .clear_acc_i      (sys_clear_acc),
-        .compute_en_i     (sys_compute_en),
-        
-        // Data inputs từ TCDM: Thiết kế nâng cao sẽ có DMA riêng (local DMA) 
-        // hoặc đọc trực tiếp từ bộ nhớ bằng cổng OBI.
-        // Tạm thời gắn cố định '0 để tránh lỗi compile, Phase 2 tập trung ghép nối Cluster & AXI.
-        .weight_data_i    ('0),
-        .ifm_data_i       ('0),
-        .psum_data_i      ('0),
-        .ofm_data_o       (),
-        .ofm_valid_o      (debug_ofm_valid[0])
-    );
-
-    //---------------------------------------------------------
-    // 6. Spatz Vector Engine
-    //---------------------------------------------------------
-    logic                      spatz_obi_req;
-    logic                      spatz_obi_gnt;
-    logic [31:0]               spatz_obi_addr;
-    logic                      spatz_obi_we;
-    logic [31:0]               spatz_obi_be;
-    logic [255:0]              spatz_obi_wdata;
-    logic                      spatz_obi_rvalid;
-    logic [255:0]              spatz_obi_rdata;
-
-    spatz_wrapper u_spatz (
-        .clk_i                (clk_i),
-        .rst_ni               (rst_ni),
-        .coprocessor_req_i    (1'b0),
-        .coprocessor_insn_i   ('0),
-        .coprocessor_rs1_i    ('0),
-        .coprocessor_rs2_i    ('0),
-        .coprocessor_gnt_o    (),
-        .coprocessor_valid_o  (),
-        .coprocessor_result_o (),
-        .obi_req_o            (spatz_obi_req),
-        .obi_gnt_i            (spatz_obi_gnt),
-        .obi_addr_o           (spatz_obi_addr),
-        .obi_we_o             (spatz_obi_we),
-        .obi_be_o             (spatz_obi_be),
-        .obi_wdata_o          (spatz_obi_wdata),
-        .obi_rvalid_i         (spatz_obi_rvalid),
-        .obi_rdata_i          (spatz_obi_rdata)
-    );
-
-    assign master_req[1].req   = spatz_obi_req;
-    assign master_req[1].we    = spatz_obi_we;
-    assign master_req[1].be    = spatz_obi_be;
-    assign master_req[1].addr  = spatz_obi_addr;
-    assign master_req[1].wdata = spatz_obi_wdata;
-    
-    assign spatz_obi_gnt    = master_rsp[1].gnt;
-    assign spatz_obi_rvalid = master_rsp[1].rvalid;
-    assign spatz_obi_rdata  = master_rsp[1].rdata;
-
-    //---------------------------------------------------------
-    // 7. Snitch Core (Placeholder)
-    //---------------------------------------------------------
-    // Gắn giá trị mặc định cho các Master không dùng để tránh lỏng dây (Floating)
-    assign master_req[0] = '0; // Snitch D
-    assign master_req[1] = '0; // Spatz
-    assign master_req[3] = '0; // Snitch I
+    assign master_req[1].req   = 1'b0;
+    assign master_req[1].we    = 1'b0;
+    assign master_req[1].be    = '0;
+    assign master_req[1].addr  = '0;
+    assign master_req[1].wdata = '0;
 
 endmodule

@@ -6,20 +6,30 @@ module tb_npu_cluster (
     input  logic        clk_i,       // 1 GHz NPU Clock
     input  logic        rst_ni,      // NPU Reset
     
-    input  logic        apb_clk_i,   // 100 MHz APB Clock
-    input  logic        apb_rst_ni,  // APB Reset
+    // AXI Slave Interface for Cocotb to load firmware
+    input  logic [31:0] s_axi_aw_addr_i,
+    input  logic        s_axi_aw_valid_i,
+    output logic        s_axi_aw_ready_o,
 
-    // Expose APB ports for Cocotb to drive MMIO
-    input  logic [31:0] apb_paddr_i,
-    input  logic        apb_psel_i,
-    input  logic        apb_penable_i,
-    input  logic        apb_pwrite_i,
-    input  logic [31:0] apb_pwdata_i,
-    output logic        apb_pready_o,
-    output logic [31:0] apb_prdata_o,
-    output logic        apb_pslverr_o,
+    input  logic [31:0] s_axi_w_data_i,
+    input  logic [3:0]  s_axi_w_strb_i,
+    input  logic        s_axi_w_valid_i,
+    output logic        s_axi_w_ready_o,
 
-    // Backdoor port for Python to initialize axi_sim_mem
+    output logic [1:0]  s_axi_b_resp_o,
+    output logic        s_axi_b_valid_o,
+    input  logic        s_axi_b_ready_i,
+
+    input  logic [31:0] s_axi_ar_addr_i,
+    input  logic        s_axi_ar_valid_i,
+    output logic        s_axi_ar_ready_o,
+
+    output logic [31:0] s_axi_r_data_o,
+    output logic [1:0]  s_axi_r_resp_o,
+    output logic        s_axi_r_valid_o,
+    input  logic        s_axi_r_ready_i,
+
+    // Backdoor port for Python to initialize axi_sim_mem (DMA target)
     input  logic        backdoor_we_i,
     input  logic [31:0] backdoor_addr_i,
     input  logic [7:0]  backdoor_data_i
@@ -44,54 +54,73 @@ module tb_npu_cluster (
 
     // Instance of NPU Cluster
     npu_cluster u_npu_cluster (
-        .clk_i          (clk_i),
-        .rst_ni         (rst_ni),
-        .apb_clk_i      (apb_clk_i),
-        .apb_rst_ni     (apb_rst_ni),
+        .clk_i            (clk_i),
+        .rst_ni           (rst_ni),
 
-        // AXI Master
-        .axi_aw_addr_o  (axi_req.aw.addr),
-        .axi_aw_len_o   (axi_req.aw.len),
-        .axi_aw_size_o  (axi_req.aw.size),
-        .axi_aw_burst_o (axi_req.aw.burst),
-        .axi_aw_valid_o (axi_req.aw_valid),
-        .axi_aw_ready_i (axi_rsp.aw_ready),
+        // AXI Master (DMA)
+        .axi_aw_addr_o    (axi_req.aw.addr),
+        .axi_aw_len_o     (axi_req.aw.len),
+        .axi_aw_size_o    (axi_req.aw.size),
+        .axi_aw_burst_o   (axi_req.aw.burst),
+        .axi_aw_valid_o   (axi_req.aw_valid),
+        .axi_aw_ready_i   (axi_rsp.aw_ready),
 
-        .axi_w_data_o   (axi_req.w.data),
-        .axi_w_strb_o   (axi_req.w.strb),
-        .axi_w_last_o   (axi_req.w.last),
-        .axi_w_valid_o  (axi_req.w_valid),
-        .axi_w_ready_i  (axi_rsp.w_ready),
+        .axi_w_data_o     (axi_req.w.data),
+        .axi_w_strb_o     (axi_req.w.strb),
+        .axi_w_last_o     (axi_req.w.last),
+        .axi_w_valid_o    (axi_req.w_valid),
+        .axi_w_ready_i    (axi_rsp.w_ready),
 
-        .axi_b_resp_i   (axi_rsp.b.resp),
-        .axi_b_valid_i  (axi_rsp.b_valid),
-        .axi_b_ready_o  (axi_req.b_ready),
+        .axi_b_resp_i     (axi_rsp.b.resp),
+        .axi_b_valid_i    (axi_rsp.b_valid),
+        .axi_b_ready_o    (axi_req.b_ready),
 
-        .axi_ar_addr_o  (axi_req.ar.addr),
-        .axi_ar_len_o   (axi_req.ar.len),
-        .axi_ar_size_o  (axi_req.ar.size),
-        .axi_ar_burst_o (axi_req.ar.burst),
-        .axi_ar_valid_o (axi_req.ar_valid),
-        .axi_ar_ready_i (axi_rsp.ar_ready),
+        .axi_ar_addr_o    (axi_req.ar.addr),
+        .axi_ar_len_o     (axi_req.ar.len),
+        .axi_ar_size_o    (axi_req.ar.size),
+        .axi_ar_burst_o   (axi_req.ar.burst),
+        .axi_ar_valid_o   (axi_req.ar_valid),
+        .axi_ar_ready_i   (axi_rsp.ar_ready),
 
-        .axi_r_data_i   (axi_rsp.r.data),
-        .axi_r_resp_i   (axi_rsp.r.resp),
-        .axi_r_last_i   (axi_rsp.r.last),
-        .axi_r_valid_i  (axi_rsp.r_valid),
-        .axi_r_ready_o  (axi_req.r_ready),
+        .axi_r_data_i     (axi_rsp.r.data),
+        .axi_r_resp_i     (axi_rsp.r.resp),
+        .axi_r_last_i     (axi_rsp.r.last),
+        .axi_r_valid_i    (axi_rsp.r_valid),
+        .axi_r_ready_o    (axi_req.r_ready),
 
-        // APB Slave
-        .apb_paddr_i    (apb_paddr_i),
-        .apb_psel_i     (apb_psel_i),
-        .apb_penable_i  (apb_penable_i),
-        .apb_pwrite_i   (apb_pwrite_i),
-        .apb_pwdata_i   (apb_pwdata_i),
-        .apb_pready_o   (apb_pready_o),
-        .apb_prdata_o   (apb_prdata_o),
-        .apb_pslverr_o  (apb_pslverr_o),
+        // AXI Slave (Host Boot)
+        .s_axi_aw_addr_i  (s_axi_aw_addr_i),
+        .s_axi_aw_len_i   (8'h0),
+        .s_axi_aw_size_i  (3'b010), // 4 bytes
+        .s_axi_aw_burst_i (2'b01),  // INCR
+        .s_axi_aw_valid_i (s_axi_aw_valid_i),
+        .s_axi_aw_ready_o (s_axi_aw_ready_o),
 
-        // Interrupts (Not used in this test)
-        .irq_o          ()
+        .s_axi_w_data_i   (s_axi_w_data_i),
+        .s_axi_w_strb_i   (s_axi_w_strb_i),
+        .s_axi_w_last_i   (1'b1),
+        .s_axi_w_valid_i  (s_axi_w_valid_i),
+        .s_axi_w_ready_o  (s_axi_w_ready_o),
+
+        .s_axi_b_resp_o   (s_axi_b_resp_o),
+        .s_axi_b_valid_o  (s_axi_b_valid_o),
+        .s_axi_b_ready_i  (s_axi_b_ready_i),
+
+        .s_axi_ar_addr_i  (s_axi_ar_addr_i),
+        .s_axi_ar_len_i   (8'h0),
+        .s_axi_ar_size_i  (3'b010), // 4 bytes
+        .s_axi_ar_burst_i (2'b01),  // INCR
+        .s_axi_ar_valid_i (s_axi_ar_valid_i),
+        .s_axi_ar_ready_o (s_axi_ar_ready_o),
+
+        .s_axi_r_data_o   (s_axi_r_data_o),
+        .s_axi_r_resp_o   (s_axi_r_resp_o),
+        .s_axi_r_last_o   (), // Ignoring last out
+        .s_axi_r_valid_o  (s_axi_r_valid_o),
+        .s_axi_r_ready_i  (s_axi_r_ready_i),
+
+        // Interrupts
+        .irq_o            ()
     );
 
     // Tie off unused AXI struct fields from DMA Engine
