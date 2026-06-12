@@ -1,0 +1,12 @@
+[submodule "hw/spatz"]
+	path = hw/spatz
+	url = https://github.com/pulp-platform/spatz.git
+[submodule "hw/axi"]
+	path = hw/axi
+	url = https://github.com/pulp-platform/axi.git
+[submodule "hw/common_cells"]
+	path = hw/common_cells
+	url = https://github.com/pulp-platform/common_cells.git
+[submodule "hw/snitch_cluster"]
+	path = hw/snitch_cluster
+	url = https://github.com/pulp-platform/snitch_cluster.git
