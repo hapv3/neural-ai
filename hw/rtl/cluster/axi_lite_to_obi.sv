@@ -43,13 +43,14 @@ module axi_lite_to_obi #(
     input  logic [OBI_DATA_WIDTH-1:0] obi_rdata_i
 );
 
-    typedef enum logic [1:0] {IDLE, WAIT_GNT, WAIT_RVALID} state_e;
+    typedef enum logic [2:0] {IDLE, WAIT_W, WAIT_AW, WAIT_GNT, WAIT_RVALID, WAIT_BREADY, WAIT_RREADY} state_e;
     state_e state_q, state_d;
 
     logic [AXI_ADDR_WIDTH-1:0] aw_addr_q;
     logic [AXI_DATA_WIDTH-1:0] w_data_q;
     logic [(AXI_DATA_WIDTH/8)-1:0] w_strb_q;
     logic [AXI_ADDR_WIDTH-1:0] ar_addr_q;
+    logic [AXI_DATA_WIDTH-1:0] r_data_q, r_data_d;
     logic is_write_q, is_write_d;
 
     assign s_axi_b_resp_o = 2'b00; // OKAY
@@ -68,9 +69,11 @@ module axi_lite_to_obi #(
             w_data_q   <= '0;
             w_strb_q   <= '0;
             ar_addr_q  <= '0;
+            r_data_q   <= '0;
         end else begin
             state_q    <= state_d;
             is_write_q <= is_write_d;
+            r_data_q   <= r_data_d;
             if (aw_hs) aw_addr_q <= s_axi_aw_addr_i;
             if (w_hs) begin
                 w_data_q <= s_axi_w_data_i;
@@ -83,12 +86,14 @@ module axi_lite_to_obi #(
     always_comb begin
         state_d          = state_q;
         is_write_d       = is_write_q;
+        r_data_d         = r_data_q;
+        
         s_axi_aw_ready_o = 1'b0;
         s_axi_w_ready_o  = 1'b0;
         s_axi_ar_ready_o = 1'b0;
         s_axi_b_valid_o  = 1'b0;
         s_axi_r_valid_o  = 1'b0;
-        s_axi_r_data_o   = '0;
+        s_axi_r_data_o   = r_data_q;
         
         obi_req_o   = 1'b0;
         obi_addr_o  = '0;
@@ -98,15 +103,36 @@ module axi_lite_to_obi #(
 
         case (state_q)
             IDLE: begin
-                // Priority to Write
                 if (s_axi_aw_valid_i && s_axi_w_valid_i) begin
                     s_axi_aw_ready_o = 1'b1;
                     s_axi_w_ready_o  = 1'b1;
                     is_write_d       = 1'b1;
                     state_d          = WAIT_GNT;
+                end else if (s_axi_aw_valid_i) begin
+                    s_axi_aw_ready_o = 1'b1;
+                    is_write_d       = 1'b1;
+                    state_d          = WAIT_W;
+                end else if (s_axi_w_valid_i) begin
+                    s_axi_w_ready_o  = 1'b1;
+                    is_write_d       = 1'b1;
+                    state_d          = WAIT_AW;
                 end else if (s_axi_ar_valid_i) begin
                     s_axi_ar_ready_o = 1'b1;
                     is_write_d       = 1'b0;
+                    state_d          = WAIT_GNT;
+                end
+            end
+
+            WAIT_W: begin
+                if (s_axi_w_valid_i) begin
+                    s_axi_w_ready_o = 1'b1;
+                    state_d         = WAIT_GNT;
+                end
+            end
+
+            WAIT_AW: begin
+                if (s_axi_aw_valid_i) begin
+                    s_axi_aw_ready_o = 1'b1;
                     state_d          = WAIT_GNT;
                 end
             end
@@ -116,9 +142,12 @@ module axi_lite_to_obi #(
                 if (is_write_q) begin
                     obi_we_o    = 1'b1;
                     obi_addr_o  = aw_addr_q;
-                    // Map 32-bit write to 256-bit OBI bus based on addr[4:2]
-                    obi_be_o    = w_strb_q << (aw_addr_q[4:2] * 4);
-                    obi_wdata_o = {8{w_data_q}}; // Replicate data to all lanes
+                    // AXI w_strb is already aligned to AXI_DATA_WIDTH.
+                    // We only shift by the offset of the AXI_DATA_WIDTH word within the OBI_DATA_WIDTH line.
+                    obi_be_o    = {{(OBI_DATA_WIDTH/8 - AXI_DATA_WIDTH/8){1'b0}}, w_strb_q} << ((aw_addr_q[4:0] / (AXI_DATA_WIDTH/8)) * (AXI_DATA_WIDTH/8));
+                    
+                    // Replicate the AXI data to fill the OBI data width
+                    obi_wdata_o = {(OBI_DATA_WIDTH/AXI_DATA_WIDTH){w_data_q}};
                 end else begin
                     obi_we_o    = 1'b0;
                     obi_addr_o  = ar_addr_q;
@@ -134,14 +163,33 @@ module axi_lite_to_obi #(
                 if (obi_rvalid_i) begin
                     if (is_write_q) begin
                         s_axi_b_valid_o = 1'b1;
-                        if (s_axi_b_ready_i) state_d = IDLE;
+                        if (s_axi_b_ready_i) begin
+                            state_d = IDLE;
+                        end else begin
+                            state_d = WAIT_BREADY;
+                        end
                     end else begin
                         s_axi_r_valid_o = 1'b1;
-                        // Extract 32-bit data from 256-bit OBI bus based on ar_addr_q[4:2]
-                        s_axi_r_data_o  = obi_rdata_i >> (ar_addr_q[4:2] * 32);
-                        if (s_axi_r_ready_i) state_d = IDLE;
+                        r_data_d        = obi_rdata_i >> ((ar_addr_q[4:0] / (AXI_DATA_WIDTH/8)) * AXI_DATA_WIDTH);
+                        s_axi_r_data_o  = r_data_d;
+                        if (s_axi_r_ready_i) begin
+                            state_d = IDLE;
+                        end else begin
+                            state_d = WAIT_RREADY;
+                        end
                     end
                 end
+            end
+            
+            WAIT_BREADY: begin
+                s_axi_b_valid_o = 1'b1;
+                if (s_axi_b_ready_i) state_d = IDLE;
+            end
+            
+            WAIT_RREADY: begin
+                s_axi_r_valid_o = 1'b1;
+                s_axi_r_data_o  = r_data_q;
+                if (s_axi_r_ready_i) state_d = IDLE;
             end
         endcase
     end

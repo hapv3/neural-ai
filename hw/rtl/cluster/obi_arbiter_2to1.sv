@@ -52,6 +52,11 @@ module obi_arbiter_2to1 #(
     assign m0_gnt_o = slv_gnt_i & sel_m0;
     assign m1_gnt_o = slv_gnt_i & ~sel_m0 & m1_req_i;
 
+    always_comb begin
+        if (m0_req_i || m1_req_i) begin
+        end
+    end
+
     // Track which master was granted for the response
     logic resp_sel_q;
     always_ff @(posedge clk_i or negedge rst_ni) begin

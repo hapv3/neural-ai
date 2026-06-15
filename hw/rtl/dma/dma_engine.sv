@@ -174,15 +174,21 @@ module dma_engine #(
             state_q <= state_d;
 
             if (state_q == IDLE && cfg_start_i) begin
+                $display("[DMA_ENGINE] START Transfer: Src=%h, Dst=%h, Len=%d", cfg_src_addr_i, cfg_dst_addr_i, cfg_length_i);
                 src_addr_q   <= cfg_src_addr_i;
                 dst_addr_q   <= cfg_dst_addr_i;
                 bytes_left_q <= cfg_length_i;
             end else if (state_q == AXI_READ_WAIT && axi_r_valid_i && axi_r_ready_o) begin
+                $display("[DMA_ENGINE] AXI_READ Complete: Data=%h", axi_r_data_i);
                 data_buffer_q <= axi_r_data_i;
             end else if (state_q == OBI_WRITE && obi_gnt_i) begin
+                $display("[DMA_ENGINE] OBI_WRITE Granted: Addr=%h", dst_addr_q);
                 src_addr_q   <= src_addr_q + 32;
                 dst_addr_q   <= dst_addr_q + 32;
                 bytes_left_q <= bytes_left_q - 32;
+            end
+            if (state_q == OBI_WRITE && bytes_left_q <= 32 && obi_gnt_i) begin
+                $display("[DMA_ENGINE] DONE");
             end
         end
     end

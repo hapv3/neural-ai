@@ -1,14 +1,30 @@
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
-from cocotbext.axi import AxiLiteMaster, AxiBus
+from cocotbext.axi import AxiLiteMaster, AxiLiteBus
 import os
 
 async def reset_dut(dut):
     dut.rst_ni.value = 0
+    dut.backdoor_we_i.value = 0
     await Timer(20, units="ns")
     dut.rst_ni.value = 1
     await Timer(20, units="ns")
+
+async def init_axi_sim_mem(dut, base_addr, data_words):
+    dut.backdoor_we_i.value = 0
+    await RisingEdge(dut.clk_i)
+    
+    for i, word in enumerate(data_words):
+        # Write 4 bytes (little endian)
+        for byte_idx in range(4):
+            dut.backdoor_we_i.value = 1
+            dut.backdoor_addr_i.value = base_addr + (i * 4) + byte_idx
+            dut.backdoor_data_i.value = (word >> (byte_idx * 8)) & 0xFF
+            await RisingEdge(dut.clk_i)
+            
+    dut.backdoor_we_i.value = 0
+    await RisingEdge(dut.clk_i)
 
 async def load_firmware_axi(dut, axi_master, filename, base_addr=0x10000000):
     with open(filename, "rb") as f:
@@ -16,11 +32,13 @@ async def load_firmware_axi(dut, axi_master, filename, base_addr=0x10000000):
 
     print(f"Loading {len(firmware)} bytes from {filename} into I-TCM via AXI Lite...")
     
-    # Write 4 bytes at a time
-    for i in range(0, len(firmware), 4):
-        word = firmware[i:i+4]
-        if len(word) < 4:
-            word += b'\x00' * (4 - len(word))
+    # Write firmware word by word (64-bit AXI bus width)
+    # Pad firmware to 8 bytes if necessary
+    if len(firmware) % 8 != 0:
+        firmware += b'\x00' * (8 - (len(firmware) % 8))
+
+    for i in range(0, len(firmware), 8):
+        word = firmware[i:i+8]
         await axi_master.write(base_addr + i, word)
     
     print("Firmware loaded successfully via AXI.")
@@ -29,7 +47,7 @@ def read_dtcm_signature(dut):
     # D-TCM base is 0x1000_8000. We wrote signature to offset 0 (word 0).
     # mem array is 256-bit wide (32 bytes).
     # Index 0 contains bytes 0..31.
-    val_256 = dut.u_sram_d_tcm.mem[0].value
+    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[0].value
     if not val_256.is_resolvable:
         return 0
     
@@ -43,14 +61,22 @@ async def test_snitch_boot(dut):
     clock = Clock(dut.clk_i, 1, units="ns") # 1GHz
     cocotb.start_soon(clock.start())
 
-    # Initialize AXI Lite Master
-    axi_master = AxiLiteMaster(AxiBus.from_prefix(dut, "s_axi"), dut.clk_i, dut.rst_ni)
+    # Initialize AXI Lite Master, reset_active_level=False because rst_ni is active-low
+    axi_master = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axi"), dut.clk_i, dut.rst_ni, reset_active_level=False)
 
-    await reset_dut(dut)
-
-    # 1. Load firmware via AXI (tests AXI->OBI and I-TCM Arbiter)
-    fw_path = os.path.join(os.path.dirname(__file__), "../../../sw/boot_app/boot.bin")
+    dut._log.info("STARTING TEST"); await reset_dut(dut)
+    
+    # Load firmware using AXI while core might be executing garbage
+    fw_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/boot_app/boot.bin")
     await load_firmware_axi(dut, axi_master, fw_path, 0x10000000)
+
+    # Initialize AXI Sim Mem with test data so the DMA has data to read
+    # TEST_LEN is 64 bytes (16 words). Snitch writes 0xCAFEBABE + i
+    test_data = [0xCAFEBABE + i for i in range(16)]
+    await init_axi_sim_mem(dut, 0x10100000, test_data)
+
+    # Reset again so Snitch core boots cleanly from 0x1000_0000 with loaded firmware
+    dut._log.info("STARTING TEST"); await reset_dut(dut)
 
     # 2. Release reset to Snitch? Wait, Snitch was running while we were loading!
     # If Snitch is running from address 0 while we load, it might fetch garbage.
@@ -75,7 +101,11 @@ async def test_snitch_boot(dut):
             dut._log.info("TEST PASSED: Firmware reported success signature (0xDEADBEEF)!")
             return
         elif val == 0xBADBAD00:
-            dut._log.error("TEST FAILED: Firmware reported failure signature (0xBADBAD00).")
+            val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[0].value.integer
+            dst_val = (val_256 >> 128) & 0xFFFFFFFF
+            src_val = (val_256 >> 160) & 0xFFFFFFFF
+            idx_val = (val_256 >> 192) & 0xFFFFFFFF
+            dut._log.error(f"TEST FAILED: Firmware reported failure signature (0xBADBAD00). Mismatch at idx {idx_val}: dst={dst_val:08x}, src={src_val:08x}")
             assert False, "Firmware test failed."
         elif val == 0xBADBAD01:
             dut._log.error("TEST FAILED: Firmware MMIO test failed (0xBADBAD01).")

@@ -6,28 +6,26 @@ module tb_npu_cluster (
     input  logic        clk_i,       // 1 GHz NPU Clock
     input  logic        rst_ni,      // NPU Reset
     
-    // AXI Slave Interface for Cocotb to load firmware
-    input  logic [31:0] s_axi_aw_addr_i,
-    input  logic        s_axi_aw_valid_i,
-    output logic        s_axi_aw_ready_o,
-
-    input  logic [31:0] s_axi_w_data_i,
-    input  logic [3:0]  s_axi_w_strb_i,
-    input  logic        s_axi_w_valid_i,
-    output logic        s_axi_w_ready_o,
-
-    output logic [1:0]  s_axi_b_resp_o,
-    output logic        s_axi_b_valid_o,
-    input  logic        s_axi_b_ready_i,
-
-    input  logic [31:0] s_axi_ar_addr_i,
-    input  logic        s_axi_ar_valid_i,
-    output logic        s_axi_ar_ready_o,
-
-    output logic [31:0] s_axi_r_data_o,
-    output logic [1:0]  s_axi_r_resp_o,
-    output logic        s_axi_r_valid_o,
-    input  logic        s_axi_r_ready_i,
+    // AXI Slave Interface
+    input  logic [31:0] s_axi_awaddr,
+    input  logic [2:0]  s_axi_awprot,
+    input  logic        s_axi_awvalid,
+    output logic        s_axi_awready,
+    input  logic [npu_cluster_pkg::AXI_DATA_WIDTH-1:0] s_axi_wdata,
+    input  logic [(npu_cluster_pkg::AXI_DATA_WIDTH/8)-1:0] s_axi_wstrb,
+    input  logic        s_axi_wvalid,
+    output logic        s_axi_wready,
+    output logic [1:0]  s_axi_bresp,
+    output logic        s_axi_bvalid,
+    input  logic        s_axi_bready,
+    input  logic [31:0] s_axi_araddr,
+    input  logic [2:0]  s_axi_arprot,
+    input  logic        s_axi_arvalid,
+    output logic        s_axi_arready,
+    output logic [npu_cluster_pkg::AXI_DATA_WIDTH-1:0] s_axi_rdata,
+    output logic [1:0]  s_axi_rresp,
+    output logic        s_axi_rvalid,
+    input  logic        s_axi_rready,
 
     // Backdoor port for Python to initialize axi_sim_mem (DMA target)
     input  logic        backdoor_we_i,
@@ -89,35 +87,31 @@ module tb_npu_cluster (
         .axi_r_ready_o    (axi_req.r_ready),
 
         // AXI Slave (Host Boot)
-        .s_axi_aw_addr_i  (s_axi_aw_addr_i),
+        .s_axi_aw_addr_i  (s_axi_awaddr),
         .s_axi_aw_len_i   (8'h0),
         .s_axi_aw_size_i  (3'b010), // 4 bytes
         .s_axi_aw_burst_i (2'b01),  // INCR
-        .s_axi_aw_valid_i (s_axi_aw_valid_i),
-        .s_axi_aw_ready_o (s_axi_aw_ready_o),
-
-        .s_axi_w_data_i   (s_axi_w_data_i),
-        .s_axi_w_strb_i   (s_axi_w_strb_i),
+        .s_axi_aw_valid_i (s_axi_awvalid),
+        .s_axi_aw_ready_o (s_axi_awready),
+        .s_axi_w_data_i   (s_axi_wdata),
+        .s_axi_w_strb_i   (s_axi_wstrb),
         .s_axi_w_last_i   (1'b1),
-        .s_axi_w_valid_i  (s_axi_w_valid_i),
-        .s_axi_w_ready_o  (s_axi_w_ready_o),
-
-        .s_axi_b_resp_o   (s_axi_b_resp_o),
-        .s_axi_b_valid_o  (s_axi_b_valid_o),
-        .s_axi_b_ready_i  (s_axi_b_ready_i),
-
-        .s_axi_ar_addr_i  (s_axi_ar_addr_i),
+        .s_axi_w_valid_i  (s_axi_wvalid),
+        .s_axi_w_ready_o  (s_axi_wready),
+        .s_axi_b_resp_o   (s_axi_bresp),
+        .s_axi_b_valid_o  (s_axi_bvalid),
+        .s_axi_b_ready_i  (s_axi_bready),
+        .s_axi_ar_addr_i  (s_axi_araddr),
         .s_axi_ar_len_i   (8'h0),
         .s_axi_ar_size_i  (3'b010), // 4 bytes
         .s_axi_ar_burst_i (2'b01),  // INCR
-        .s_axi_ar_valid_i (s_axi_ar_valid_i),
-        .s_axi_ar_ready_o (s_axi_ar_ready_o),
-
-        .s_axi_r_data_o   (s_axi_r_data_o),
-        .s_axi_r_resp_o   (s_axi_r_resp_o),
+        .s_axi_ar_valid_i (s_axi_arvalid),
+        .s_axi_ar_ready_o (s_axi_arready),
+        .s_axi_r_data_o   (s_axi_rdata),
+        .s_axi_r_resp_o   (s_axi_rresp),
         .s_axi_r_last_o   (), // Ignoring last out
-        .s_axi_r_valid_o  (s_axi_r_valid_o),
-        .s_axi_r_ready_i  (s_axi_r_ready_i),
+        .s_axi_r_valid_o  (s_axi_rvalid),
+        .s_axi_r_ready_i  (s_axi_rready),
 
         // Interrupts
         .irq_o            ()

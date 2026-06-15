@@ -39,6 +39,9 @@ int main(void) {
     for (int i = 0; i < TEST_LEN/4; i++) {
         if (dst_array[i] != src_array[i]) {
             success = 0;
+            *((volatile uint32_t*)(NPU_DTCM_BASE + 0x10)) = dst_array[i];
+            *((volatile uint32_t*)(NPU_DTCM_BASE + 0x14)) = src_array[i];
+            *((volatile uint32_t*)(NPU_DTCM_BASE + 0x18)) = i;
             break;
         }
     }
