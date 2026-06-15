@@ -144,14 +144,25 @@ module npu_cluster (
     logic                      snitch_d_gnt;
     logic [OBI_ADDR_WIDTH-1:0] snitch_d_addr;
     logic                      snitch_d_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] snitch_d_be;
-    logic [OBI_DATA_WIDTH-1:0] snitch_d_wdata;
+    logic [(64/8)-1:0]         snitch_d_be;
+    logic [64-1:0]             snitch_d_wdata;
     logic                      snitch_d_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] snitch_d_rdata;
+    logic [64-1:0]             snitch_d_rdata;
+
+    // Wide signals for D-Bus
+    logic                      snitch_d_wide_req;
+    logic                      snitch_d_wide_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] snitch_d_wide_addr;
+    logic                      snitch_d_wide_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] snitch_d_wide_be;
+    logic [OBI_DATA_WIDTH-1:0] snitch_d_wide_wdata;
+    logic                      snitch_d_wide_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] snitch_d_wide_rdata;
 
     snitch_core #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .I_DATA_WIDTH(OBI_DATA_WIDTH),
+        .D_DATA_WIDTH(64),
         .BOOT_ADDR (32'h1000_0000) // I-TCM Base Addr
     ) u_snitch_core (
         .clk_i            (clk_i),
@@ -194,14 +205,14 @@ module npu_cluster (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
         
-        .m0_req_i    (s_axi_obi_req),
-        .m0_gnt_o    (s_axi_obi_gnt),
-        .m0_addr_i   (s_axi_obi_addr),
-        .m0_we_i     (s_axi_obi_we),
-        .m0_be_i     (s_axi_obi_be),
-        .m0_wdata_i  (s_axi_obi_wdata),
-        .m0_rvalid_o (s_axi_obi_rvalid),
-        .m0_rdata_o  (s_axi_obi_rdata),
+        .m0_req_i    (sys_m0_req),
+        .m0_gnt_o    (sys_m0_gnt),
+        .m0_addr_i   (sys_m0_addr),
+        .m0_we_i     (sys_m0_we),
+        .m0_be_i     (sys_m0_be),
+        .m0_wdata_i  (sys_m0_wdata),
+        .m0_rvalid_o (sys_m0_rvalid),
+        .m0_rdata_o  (sys_m0_rdata),
         
         .m1_req_i    (snitch_i_req),
         .m1_gnt_o    (snitch_i_gnt),
@@ -231,7 +242,7 @@ module npu_cluster (
         .rst_ni  (rst_ni),
         .req_i   (itcm_req),
         .we_i    (itcm_we),
-        .addr_i  (itcm_addr >> 5), // Bank offset for 256-bit width
+        .addr_i  ((itcm_addr & 32'h0000_7FFF) >> 5), // Bank offset for 256-bit width
         .wdata_i (itcm_wdata),
         .be_i    (itcm_be),
         .gnt_o   (itcm_gnt),
@@ -270,51 +281,142 @@ module npu_cluster (
     logic                      reg_rvalid;
     logic [OBI_DATA_WIDTH-1:0] reg_rdata;
 
-    obi_demux_1to3 #(
+    // System Arbiter (AXI Lite vs Snitch D-Bus)
+    logic                      sys_req;
+    logic                      sys_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] sys_addr;
+    logic                      sys_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] sys_be;
+    logic [OBI_DATA_WIDTH-1:0] sys_wdata;
+    logic                      sys_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] sys_rdata;
+
+    obi_arbiter_2to1 #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH)
+    ) u_sys_arbiter (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        
+        .m0_req_i    (s_axi_obi_req),
+        .m0_gnt_o    (s_axi_obi_gnt),
+        .m0_addr_i   (s_axi_obi_addr),
+        .m0_we_i     (s_axi_obi_we),
+        .m0_be_i     (s_axi_obi_be),
+        .m0_wdata_i  (s_axi_obi_wdata),
+        .m0_rvalid_o (s_axi_obi_rvalid),
+        .m0_rdata_o  (s_axi_obi_rdata),
+        
+        .m1_req_i    (snitch_d_wide_req),
+        .m1_gnt_o    (snitch_d_wide_gnt),
+        .m1_addr_i   (snitch_d_wide_addr),
+        .m1_we_i     (snitch_d_wide_we),
+        .m1_be_i     (snitch_d_wide_be),
+        .m1_wdata_i  (snitch_d_wide_wdata),
+        .m1_rvalid_o (snitch_d_wide_rvalid),
+        .m1_rdata_o  (snitch_d_wide_rdata),
+        
+        .slv_req_o   (sys_req),
+        .slv_gnt_i   (sys_gnt),
+        .slv_addr_o  (sys_addr),
+        .slv_we_o    (sys_we),
+        .slv_be_o    (sys_be),
+        .slv_wdata_o (sys_wdata),
+        .slv_rvalid_i(sys_rvalid),
+        .slv_rdata_i (sys_rdata)
+    );
+
+    // System Demux 1-to-4
+    logic                      sys_m0_req;
+    logic                      sys_m0_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] sys_m0_addr;
+    logic                      sys_m0_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] sys_m0_be;
+    logic [OBI_DATA_WIDTH-1:0] sys_m0_wdata;
+    logic                      sys_m0_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] sys_m0_rdata;
+
+    // Narrow-to-Wide Adapter for Snitch D-Bus
+    obi_narrow_to_wide #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .M_DATA_WIDTH(64),
+        .S_DATA_WIDTH(OBI_DATA_WIDTH)
+    ) u_d_narrow_to_wide (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .mst_req_i   (snitch_d_req),
+        .mst_gnt_o   (snitch_d_gnt),
+        .mst_addr_i  (snitch_d_addr),
+        .mst_we_i    (snitch_d_we),
+        .mst_be_i    (snitch_d_be),
+        .mst_wdata_i (snitch_d_wdata),
+        .mst_rvalid_o(snitch_d_rvalid),
+        .mst_rdata_o (snitch_d_rdata),
+        
+        .slv_req_o   (snitch_d_wide_req),
+        .slv_gnt_i   (snitch_d_wide_gnt),
+        .slv_addr_o  (snitch_d_wide_addr),
+        .slv_we_o    (snitch_d_wide_we),
+        .slv_be_o    (snitch_d_wide_be),
+        .slv_wdata_o (snitch_d_wide_wdata),
+        .slv_rvalid_i(snitch_d_wide_rvalid),
+        .slv_rdata_i (snitch_d_wide_rdata)
+    );
+
+    obi_demux_1to4 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .M0_BASE (32'h1000_8000), .M0_MASK (32'hFFFF_8000), // D-TCM
-        .M1_BASE (32'h1010_0000), .M1_MASK (32'hFFF0_0000), // Shared Data
-        .M2_BASE (32'h2000_0000), .M2_MASK (32'hFFFF_0000)  // MMIO
-    ) u_obi_demux_dbus (
-        .clk_i        (clk_i),
-        .rst_ni       (rst_ni),
-        
-        .slv_req_i    (snitch_d_req),
-        .slv_gnt_o    (snitch_d_gnt),
-        .slv_addr_i   (snitch_d_addr),
-        .slv_we_i     (snitch_d_we),
-        .slv_be_i     (snitch_d_be),
-        .slv_wdata_i  (snitch_d_wdata),
-        .slv_rvalid_o (snitch_d_rvalid),
-        .slv_rdata_o  (snitch_d_rdata),
+        .M0_BASE (32'h1000_0000), .M0_MASK (32'hFFFF_8000), // I-TCM
+        .M1_BASE (32'h1000_8000), .M1_MASK (32'hFFFF_8000), // D-TCM
+        .M2_BASE (32'h1010_0000), .M2_MASK (32'hFFF0_0000), // Shared Data
+        .M3_BASE (32'h2000_0000), .M3_MASK (32'hFFFF_0000)  // MMIO
+    ) u_sys_demux_1to4 (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .slv_req_i   (sys_req),
+        .slv_gnt_o   (sys_gnt),
+        .slv_addr_i  (sys_addr),
+        .slv_we_i    (sys_we),
+        .slv_be_i    (sys_be),
+        .slv_wdata_i (sys_wdata),
+        .slv_rvalid_o(sys_rvalid),
+        .slv_rdata_o (sys_rdata),
 
-        .m0_req_o     (dtcm_req),
-        .m0_gnt_i     (dtcm_gnt),
-        .m0_addr_o    (dtcm_addr),
-        .m0_we_o      (dtcm_we),
-        .m0_be_o      (dtcm_be),
-        .m0_wdata_o   (dtcm_wdata),
-        .m0_rvalid_i  (dtcm_rvalid),
-        .m0_rdata_i   (dtcm_rdata),
+        .m0_req_o     (sys_m0_req),
+        .m0_gnt_i     (sys_m0_gnt),
+        .m0_addr_o    (sys_m0_addr),
+        .m0_we_o      (sys_m0_we),
+        .m0_be_o      (sys_m0_be),
+        .m0_wdata_o   (sys_m0_wdata),
+        .m0_rvalid_i  (sys_m0_rvalid),
+        .m0_rdata_i   (sys_m0_rdata),
 
-        .m1_req_o     (ddata_req),
-        .m1_gnt_i     (ddata_gnt),
-        .m1_addr_o    (ddata_addr),
-        .m1_we_o      (ddata_we),
-        .m1_be_o      (ddata_be),
-        .m1_wdata_o   (ddata_wdata),
-        .m1_rvalid_i  (ddata_rvalid),
-        .m1_rdata_i   (ddata_rdata),
+        .m1_req_o     (dtcm_req),
+        .m1_gnt_i     (dtcm_gnt),
+        .m1_addr_o    (dtcm_addr),
+        .m1_we_o      (dtcm_we),
+        .m1_be_o      (dtcm_be),
+        .m1_wdata_o   (dtcm_wdata),
+        .m1_rvalid_i  (dtcm_rvalid),
+        .m1_rdata_i   (dtcm_rdata),
 
-        .m2_req_o     (reg_req),
-        .m2_gnt_i     (reg_gnt),
-        .m2_addr_o    (reg_addr),
-        .m2_we_o      (reg_we),
-        .m2_be_o      (reg_be),
-        .m2_wdata_o   (reg_wdata),
-        .m2_rvalid_i  (reg_rvalid),
-        .m2_rdata_i   (reg_rdata)
+        .m2_req_o     (ddata_req),
+        .m2_gnt_i     (ddata_gnt),
+        .m2_addr_o    (ddata_addr),
+        .m2_we_o      (ddata_we),
+        .m2_be_o      (ddata_be),
+        .m2_wdata_o   (ddata_wdata),
+        .m2_rvalid_i  (ddata_rvalid),
+        .m2_rdata_i   (ddata_rdata),
+
+        .m3_req_o     (reg_req),
+        .m3_gnt_i     (reg_gnt),
+        .m3_addr_o    (reg_addr),
+        .m3_we_o      (reg_we),
+        .m3_be_o      (reg_be),
+        .m3_wdata_o   (reg_wdata),
+        .m3_rvalid_i  (reg_rvalid),
+        .m3_rdata_i   (reg_rdata)
     );
 
     // D-TCM SRAM Bank (8 KB)

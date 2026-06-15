@@ -26,6 +26,7 @@ module cluster_sram_bank #(
 
     logic rvalid_q;
     logic [DATA_WIDTH-1:0] rdata_q;
+    logic [DATA_WIDTH-1:0] temp_data;
 
     // Grant is immediate for simple SRAM
     assign gnt_o = req_i;
@@ -34,24 +35,27 @@ module cluster_sram_bank #(
         if (!rst_ni) begin
             rvalid_q <= 1'b0;
             rdata_q  <= '0;
-            // Khởi tạo bộ nhớ với giá trị 0 (để dễ debug)
-            for (int i = 0; i < NUM_WORDS; i++) begin
-                mem[i] <= '0;
-            end
+            // Do NOT clear memory on reset, otherwise we wipe the loaded firmware
+            // Real SRAMs don't clear on reset anyway.
         end else begin
-            rvalid_q <= req_i & ~we_i; // rvalid takes 1 cycle
+            rvalid_q <= req_i; // OBI requires rvalid for both reads and writes
             
             if (req_i) begin
                 if (we_i) begin
+                    $display("[SRAM %m] WRITE to Addr=%h, Data=%h, BE=%h", addr_i, wdata_i, be_i);
                     // Write with Byte Enable
+                    // Workaround for Verilator partial array assignment bug
+                    temp_data = mem[addr_i[ADDR_BITS-1:0]];
                     for (int i = 0; i < DATA_WIDTH/8; i++) begin
                         if (be_i[i]) begin
-                            mem[addr_i[ADDR_BITS-1:0]][i*8 +: 8] <= wdata_i[i*8 +: 8];
+                            temp_data[i*8 +: 8] = wdata_i[i*8 +: 8];
                         end
                     end
+                    mem[addr_i[ADDR_BITS-1:0]] <= temp_data;
                 end else begin
                     // Read
                     rdata_q <= mem[addr_i[ADDR_BITS-1:0]];
+                    $display("[SRAM %m] READ from Addr=%h, DataWord=%h", addr_i, mem[addr_i[ADDR_BITS-1:0]]);
                 end
             end
         end

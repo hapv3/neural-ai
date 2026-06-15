@@ -10,3 +10,12 @@
 [submodule "hw/snitch_cluster"]
 	path = hw/snitch_cluster
 	url = https://github.com/pulp-platform/snitch_cluster.git
+[submodule "hw/fpnew"]
+	path = hw/fpnew
+	url = https://github.com/pulp-platform/cvfpu.git
+[submodule "hw/tech_cells"]
+	path = hw/tech_cells
+	url = https://github.com/pulp-platform/tech_cells_generic.git
+[submodule "hw/riscv-dbg"]
+	path = hw/riscv-dbg
+	url = https://github.com/pulp-platform/riscv-dbg.git

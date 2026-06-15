@@ -1,19 +1,21 @@
 `default_nettype none
 
-module obi_demux_1to3 #(
+module obi_demux_1to4 #(
     parameter int unsigned ADDR_WIDTH = 32,
     parameter int unsigned DATA_WIDTH = 256,
-    parameter logic [ADDR_WIDTH-1:0] M0_BASE = 32'h1000_8000,
+    parameter logic [ADDR_WIDTH-1:0] M0_BASE = 32'h1000_0000,
     parameter logic [ADDR_WIDTH-1:0] M0_MASK = 32'hFFFF_8000,
-    parameter logic [ADDR_WIDTH-1:0] M1_BASE = 32'h1010_0000,
-    parameter logic [ADDR_WIDTH-1:0] M1_MASK = 32'hFFF0_0000,
-    parameter logic [ADDR_WIDTH-1:0] M2_BASE = 32'h2000_0000,
-    parameter logic [ADDR_WIDTH-1:0] M2_MASK = 32'hFFFF_0000
+    parameter logic [ADDR_WIDTH-1:0] M1_BASE = 32'h1000_8000,
+    parameter logic [ADDR_WIDTH-1:0] M1_MASK = 32'hFFFF_8000,
+    parameter logic [ADDR_WIDTH-1:0] M2_BASE = 32'h1010_0000,
+    parameter logic [ADDR_WIDTH-1:0] M2_MASK = 32'hFFF0_0000,
+    parameter logic [ADDR_WIDTH-1:0] M3_BASE = 32'h2000_0000,
+    parameter logic [ADDR_WIDTH-1:0] M3_MASK = 32'hFFFF_0000
 )(
     input  logic clk_i,
     input  logic rst_ni,
 
-    // Slave Port (from Snitch D-Bus)
+    // Slave Port
     input  logic                      slv_req_i,
     output logic                      slv_gnt_o,
     input  logic [ADDR_WIDTH-1:0]     slv_addr_i,
@@ -23,7 +25,7 @@ module obi_demux_1to3 #(
     output logic                      slv_rvalid_o,
     output logic [DATA_WIDTH-1:0]     slv_rdata_o,
 
-    // Master Port 0 (to D-TCM)
+    // Master Port 0
     output logic                      m0_req_o,
     input  logic                      m0_gnt_i,
     output logic [ADDR_WIDTH-1:0]     m0_addr_o,
@@ -33,7 +35,7 @@ module obi_demux_1to3 #(
     input  logic                      m0_rvalid_i,
     input  logic [DATA_WIDTH-1:0]     m0_rdata_i,
 
-    // Master Port 1 (to Shared Data TCDM)
+    // Master Port 1
     output logic                      m1_req_o,
     input  logic                      m1_gnt_i,
     output logic [ADDR_WIDTH-1:0]     m1_addr_o,
@@ -43,7 +45,7 @@ module obi_demux_1to3 #(
     input  logic                      m1_rvalid_i,
     input  logic [DATA_WIDTH-1:0]     m1_rdata_i,
 
-    // Master Port 2 (to MMIO)
+    // Master Port 2
     output logic                      m2_req_o,
     input  logic                      m2_gnt_i,
     output logic [ADDR_WIDTH-1:0]     m2_addr_o,
@@ -51,45 +53,61 @@ module obi_demux_1to3 #(
     output logic [(DATA_WIDTH/8)-1:0] m2_be_o,
     output logic [DATA_WIDTH-1:0]     m2_wdata_o,
     input  logic                      m2_rvalid_i,
-    input  logic [DATA_WIDTH-1:0]     m2_rdata_i
+    input  logic [DATA_WIDTH-1:0]     m2_rdata_i,
+
+    // Master Port 3
+    output logic                      m3_req_o,
+    input  logic                      m3_gnt_i,
+    output logic [ADDR_WIDTH-1:0]     m3_addr_o,
+    output logic                      m3_we_o,
+    output logic [(DATA_WIDTH/8)-1:0] m3_be_o,
+    output logic [DATA_WIDTH-1:0]     m3_wdata_o,
+    input  logic                      m3_rvalid_i,
+    input  logic [DATA_WIDTH-1:0]     m3_rdata_i
 );
 
-    logic sel_m0, sel_m1, sel_m2;
+    logic sel_m0, sel_m1, sel_m2, sel_m3;
 
     assign sel_m0 = ((slv_addr_i & M0_MASK) == (M0_BASE & M0_MASK));
     assign sel_m1 = ((slv_addr_i & M1_MASK) == (M1_BASE & M1_MASK));
     assign sel_m2 = ((slv_addr_i & M2_MASK) == (M2_BASE & M2_MASK));
+    assign sel_m3 = ((slv_addr_i & M3_MASK) == (M3_BASE & M3_MASK));
 
     // Request Routing
     assign m0_req_o   = slv_req_i & sel_m0;
     assign m1_req_o   = slv_req_i & sel_m1;
     assign m2_req_o   = slv_req_i & sel_m2;
+    assign m3_req_o   = slv_req_i & sel_m3;
 
     assign m0_addr_o  = slv_addr_i;
     assign m1_addr_o  = slv_addr_i;
     assign m2_addr_o  = slv_addr_i;
+    assign m3_addr_o  = slv_addr_i;
 
     assign m0_we_o    = slv_we_i;
     assign m1_we_o    = slv_we_i;
     assign m2_we_o    = slv_we_i;
+    assign m3_we_o    = slv_we_i;
 
     assign m0_be_o    = slv_be_i;
     assign m1_be_o    = slv_be_i;
     assign m2_be_o    = slv_be_i;
+    assign m3_be_o    = slv_be_i;
 
     assign m0_wdata_o = slv_wdata_i;
     assign m1_wdata_o = slv_wdata_i;
     assign m2_wdata_o = slv_wdata_i;
+    assign m3_wdata_o = slv_wdata_i;
 
     // Grant Routing
-    assign slv_gnt_o  = (sel_m0 & m0_gnt_i) | (sel_m1 & m1_gnt_i) | (sel_m2 & m2_gnt_i);
+    assign slv_gnt_o  = (sel_m0 & m0_gnt_i) | (sel_m1 & m1_gnt_i) | (sel_m2 & m2_gnt_i) | (sel_m3 & m3_gnt_i);
+
+    always_comb begin
+        if (slv_req_i) begin
+        end
+    end
 
     // Response Routing
-    // OBI rvalid/rdata is decoupled from req. We need a FIFO to track which master
-    // was granted to route the responses back correctly.
-    // For simplicity, assuming in-order responses across all masters and only one outstanding
-    // request to different masters at a time. This is true for a single scalar core.
-    
     logic [1:0] out_sel_q;
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -98,6 +116,7 @@ module obi_demux_1to3 #(
             if (sel_m0) out_sel_q <= 2'b00;
             else if (sel_m1) out_sel_q <= 2'b01;
             else if (sel_m2) out_sel_q <= 2'b10;
+            else if (sel_m3) out_sel_q <= 2'b11;
         end
     end
 
@@ -116,6 +135,10 @@ module obi_demux_1to3 #(
             2'b10: begin
                 slv_rvalid_o = m2_rvalid_i;
                 slv_rdata_o  = m2_rdata_i;
+            end
+            2'b11: begin
+                slv_rvalid_o = m3_rvalid_i;
+                slv_rdata_o  = m3_rdata_i;
             end
             default: ;
         endcase

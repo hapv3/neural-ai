@@ -118,7 +118,7 @@ module tcdm_interconnect #(
         end
 
         // Master read valid and data
-        assign master_rvalid_o[m] = master_req_q[m] & ~master_we_q[m];
+        assign master_rvalid_o[m] = master_req_q[m];
         assign master_rdata_o[m]  = bank_rdata_i[master_bank_sel_q[m]];
     end
 
