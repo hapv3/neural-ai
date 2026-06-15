@@ -19,3 +19,10 @@ __pycache__/
 ehthumbs.db
 Thumbs.db
 *.log
+
+# Compiled firmware
+*.bin
+*.elf
+*.hex
+*.o
+*.map
