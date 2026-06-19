@@ -24,5 +24,7 @@ Thumbs.db
 *.bin
 *.elf
 *.hex
+*.dump
 *.o
 *.map
+**/obj_dir/

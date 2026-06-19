@@ -21,64 +21,53 @@ To achieve high-performance matrix and vector operations, the architecture integ
 
 ## 2. Cluster Micro-Architecture & Interfaces
 
-```mermaid
-flowchart TD
-    Host["Host CPU"]
-    L2["L2 / DRAM (External)"]
-    
-    subgraph Cluster["NPU Cluster (1 of 5, clk = 1 GHz)"]
-        direction TB
-        Bootloader["AXI4-Lite Slave\n(Bootloader)"]
-        
-        subgraph ITCM_Block["I-TCM Subsystem"]
-            IArbiter{"I-TCM Arbiter\n(2-to-1 OBI)"}
-            ITCM[("I-TCM\n(32 KB)")]
-        end
-        
-        Snitch["Snitch Core\n(RV32IMAC)"]
-        
-        Demux{"OBI Demux 1-to-4\n(addr-decoded)"}
-        
-        DTCM[("Snitch D-TCM\n(private, 8 KB)")]
-        MMIO["MMIO/CSR\n(cluster_ctrl_regs)"]
-        
-        subgraph Data_TCDM_Block["Data TCDM Subsystem"]
-            TCDM_Interconnect{"Shared Data TCDM Interconnect\n(256-bit Crossbar)"}
-            TCDM_SRAM[("Data TCDM SRAM\n(16 banks x 32 KB)")]
-        end
-        
-        Systolic["Matrix Engine\n(Systolic Array)"]
-        Vector["Vector Engine\n(Spatz)"]
-        DMA["DMA Engine"]
-        
-        Bootloader -- "(B) AXI-to-OBI" --> IArbiter
-        Snitch -- "(A) I-Fetch (256-bit native)" --> IArbiter
-        IArbiter --> ITCM
-        
-        Snitch -- "(D) D-Bus (256-bit)" --> Demux
-        Demux -- "M0: 0x1000_0000" --> ITCM
-        Demux -- "M1: 0x1000_8000" --> DTCM
-        Demux -- "M3: 0x2000_0000" --> MMIO
-        Demux -- "M2: 0x1010_0000" --> TCDM_Interconnect
-        
-        Systolic --> TCDM_Interconnect
-        Vector --> TCDM_Interconnect
-        DMA --> TCDM_Interconnect
-        TCDM_Interconnect <--> TCDM_SRAM
-    end
-    
-    DMA -- "(G) AXI4 Master" --> L2
-    Host -- "(H) AXI4-Lite" --> Bootloader
-
-    classDef cluster fill:#f9f9f9,stroke:#333,stroke-width:2px;
-    classDef mem fill:#d4f1f4,stroke:#189ab4,stroke-width:2px;
-    classDef engine fill:#fbeea1,stroke:#f4d160,stroke-width:2px;
-    classDef core fill:#e2d5f8,stroke:#8e44ad,stroke-width:2px;
-    
-    class Cluster cluster;
-    class ITCM,DTCM,TCDM_SRAM mem;
-    class Systolic,Vector,DMA engine;
-    class Snitch core;
+```text
++----------------------------------------------------------------------------------------------------+
+|                                      Host CPU / External L2 DRAM                                   |
++----------------------------------------------------------------------------------------------------+
+                                           | (AXI4-Lite)
+                                           v
++----------------------------------------------------------------------------------------------------+
+|                                    NPU Cluster (1 of 5)                                            |
+|                                                                                                    |
+|  +--------------------+                                                                            |
+|  | Bootloader (AXI4)  |                                                                            |
+|  +---------+----------+                                                                            |
+|            | (AXI-to-OBI)                                                                          |
+|            v                                                                                       |
+|  +-------------------------------------------------------------+                                   |
+|  |                        I-TCM Arbiter                        |                                   |
+|  +---------+------------------------------------------+--------+                                   |
+|            |                                          ^ (I-Fetch)                                  |
+|            v                                          |                                            |
+|  +--------------------+                     +---------+----------+                                 |
+|  |   I-TCM (32 KB)    |<---(M0 0x10000000)--|  Snitch Core       |                                 |
+|  +--------------------+                     |   (RV32IMAC)       |                                 |
+|                                             +---------+----------+                                 |
+|                                                       | (D-Bus)                                    |
+|                                                       v                                            |
+|                                             +--------------------+                                 |
+|                                             |  OBI Demux (1-to-4)|                                 |
+|                                             +--------------------+                                 |
+|                                              /      |          \                                   |
+|                     (M1 0x10008000)---------+       |           +-------(M3 0x20000000)            |
+|                    /                                |                               \              |
+|          +--------v---------+             (M2 0x10100000)                   +-------v--+           |
+|          | D-TCM (32 KB)    |                       |                       | MMIO/CSR |           |
+|          +------------------+                       |                       +----------+           |
+|                                                     v                                              |
+|  +----------------------------------------------------------------------------------------------+  |
+|  |                          Shared Data TCDM Interconnect (256-bit)                             |  |
+|  +-------+--------------------+---------------------+-----------------------+-------------------+  |
+|          ^                    ^                     ^                       |                      |
+|          |                    |                     |                       v                      |
+| +--------+--------+  +--------+--------+  +---------+---------+   +-------------------+            |
+| | Systolic Array  |  | Spatz Vector    |  | DMA Engine        |<--|  Data TCDM SRAM   |            |
+| | (Matrix Engine) |  | (Vector Engine) |  | (AXI4 Master to L2|   | (12 I-TCDM Banks) |            |
+| +-----------------+  +-----------------+  +-------------------+   | (4 O-TCDM Banks)  |            |
+|                                                                   +-------------------+            |
+|                                                                                                    |
++----------------------------------------------------------------------------------------------------+
 ```
 
 ### Interface Reference
@@ -96,12 +85,59 @@ flowchart TD
 
 ---
 
-## 3. Memory Map (Per Cluster)
+## 3. Systolic Array Micro-Architecture
+
+```text
++------------------------------------------------------------------------------------------------+
+|                                    Systolic Array (32x32)                                      |
+|                                                                                                |
+|                                       [Weights (W) loaded sequentially downwards]              |
+|                                            |     |     |           |                           |
+|  +-----------------+                       v     v     v           v                           |
+|  |                 |    IFM_Row[0]      +-----+-----+-----+     +-----+                        |
+|  | Input Skewing   |------------------->|PE0,0|PE0,1|PE0,2| ... |P0,31| (Delay 0 for IFM)      |
+|  | (Triangle       |                    +-----+-----+-----+     +-----+                        |
+|  |  Delay Regs)    |                       |     |     |           |                           |
+|  |                 |    IFM_Row[1] (d=1)+-----+-----+-----+     +-----+                        |
+|  |   IFM           |------------------->|PE1,0|PE1,1|PE1,2| ... |P1,31|                        |
+|  |  ------>        |                    +-----+-----+-----+     +-----+                        |
+|  |                 |                       |     |     |           |                           |
+|  |                 |    IFM_Row[2] (d=2)+-----+-----+-----+     +-----+                        |
+|  |                 |------------------->|PE2,0|PE2,1|PE2,2| ... |P2,31|                        |
+|  |                 |                    +-----+-----+-----+     +-----+                        |
+|  |                 |                       |     |     |           |                           |
+|  |                 |                      ...   ...   ...  ...    ...                          |
+|  |                 |                       |     |     |           |                           |
+|  |                 |    IFM_Row[31]     +-----+-----+-----+     +-----+                        |
+|  |                 |------------------->|P31,0|P31,1|P31,2| ... |31,31| (Delay 31 for IFM)     |
+|  +-----------------+                    +-----+-----+-----+     +-----+                        |
+|                                            |     |     |           |                           |
+|                                            v     v     v           v  Psums                    |
+|  +------------------------------------------------------------------------------------------+  |
+|  |                                  Output Deskewing (Reverse Triangle)                     |  |
+|  |                                 (Delay 31) (Delay 30)      (Delay 0)                     |  |
+|  +------------------------------------------------------------------------------------------+  |
+|                                            |     |     |           |                           |
+|                                            v     v     v           v                           |
+|                                          +-------------------------------+                     |
+|                                          |    Final Deskewed OFM Row     |                     |
+|                                          +-------------------------------+                     |
++------------------------------------------------------------------------------------------------+
+
+PE (Processing Element) Internal Logic:
+- Weight-Stationary: W is pre-loaded into local registers before compute phase.
+- Compute: Psum_out <= Psum_in + (W * IFM_in)
+- IFM Forwarding: IFM_out <= IFM_in
+```
+
+---
+
+## 4. Memory Map (Per Cluster)
 
 | Address Range | Size | Module | Vai trò |
 |--------------|------|--------|---------|
 | `0x1000_0000 – 0x1000_7FFF` | 32 KB | **I-TCM** | Firmware Snitch (instruction). Đọc/ghi qua D-Bus M0. |
-| `0x1000_8000 – 0x1000_BFFF` | 8 KB  | **Snitch D-TCM** | Private data (stack, scalars) qua D-Bus M1. |
+| `0x1000_8000 – 0x1000_FFFF` | 32 KB | **Snitch D-TCM** | Private data (stack, scalars) qua D-Bus M1. |
 | `0x1010_0000 – 0x101F_FFFF` | 1 MB  | **Shared Data TCDM** | Weights, IFM, OFM (chia cho tất cả compute units). |
 | `0x2000_0000 – 0x2000_FFFF` | 64 KB | **MMIO / CSR** | `cluster_ctrl_regs`, cấu hình DMA. |
 
@@ -110,7 +146,7 @@ flowchart TD
 
 ---
 
-## 4. Boot Sequence
+## 5. Boot Sequence
 
 ```
 1. Host ghi firmware vào I-TCM qua AXI4-Lite Slave (cổng B/H)
@@ -135,7 +171,7 @@ flowchart TD
 
 ---
 
-## 5. SRAM Allocation Analysis (2.5 MB Budget)
+## 6. SRAM Allocation Analysis (2.5 MB Budget)
 
 Tổng on-chip SRAM budget: **2.5 MB (2560 KB)**.
 
@@ -151,7 +187,7 @@ Tổng on-chip SRAM budget: **2.5 MB (2560 KB)**.
 | Bank | Size | Địa chỉ | Vai trò |
 |------|------|---------|---------|
 | I-TCM | 32 KB | `0x1000_0000` | Cluster firmware |
-| Snitch D-TCM | 8 KB | `0x1000_8000` | Private scalar data |
+| Snitch D-TCM | 32 KB | `0x1000_8000` | Private scalar data |
 | Weight Buffer | 2 × 128 KB | Data TCDM | Ping-pong weight stationary |
 | IFM Buffer | 2 × 50 KB | Data TCDM | Input feature map tiles |
 | OFM Buffer | 2 × 50 KB | Data TCDM | Output / INT32 accumulator |
@@ -160,7 +196,7 @@ Tổng on-chip SRAM budget: **2.5 MB (2560 KB)**.
 
 ---
 
-## 6. Development Phases
+## 7. Development Phases
 
 | Phase | Nội dung | Trạng thái |
 |-------|----------|-----------|
@@ -168,20 +204,22 @@ Tổng on-chip SRAM budget: **2.5 MB (2560 KB)**.
 | 2 | Data TCDM Interconnect (N-bank crossbar) | ✅ Done |
 | 2.5 | AXI→OBI bridge, DMA-to-TCM test | ✅ Done |
 | **3A** | **Snitch Core Integration: I-TCM, D-TCM isolation, Boot via AXI** | **✅ Done** |
-| 3B | Systolic Array + Spatz integration (1 GHz cluster) | ⬜ Planned |
+| 3B-A | Systolic Array + Matrix Engine cluster integration | ✅ Done |
+| 3B-B | Spatz Vector Engine integration (1 GHz cluster) | ⬜ Planned |
 | 4 | Top-Level: 5-cluster integration + Manager Snitch | ⬜ Planned |
 | 5 | Full YOLO layer end-to-end simulation | ⬜ Planned |
 
 ---
 
-## 7. Hardware Verification Plan
+## 8. Hardware Verification Plan
 
 ### Unit Testing (Block-Level)
 - **Snitch Boot TB** (`test_snitch_boot`): Nạp firmware qua AXI4-Lite, release reset, xác nhận Snitch viết signature `0xDEADBEEF` vào MMIO. *(Passed)*
 - **I-TCM Arbiter TB**: Kiểm tra ưu tiên AXI vs Snitch, không có collision. *(Passed)*
 - **OBI Demux TB**: Kiểm tra address decoding chính xác (I-TCM / D-TCM / Data TCDM / MMIO). *(Passed)*
-- **Matrix Engine TB** *(Phase 3B)*: Verify 32×32 Systolic Array vs Python golden model.
-- **Spatz Vector TB** *(Phase 3B)*: Test RVV instructions.
+- **Matrix Engine TB** *(Phase 3B-A)*: Verify 32×32 Systolic Array vs Python golden model. *(Passed)*
+- **Cluster MatMul TB** *(Phase 3B-A)*: Snitch firmware trigger DMA, Systolic Array compute, OFM writeback; 10 randomized MatMul iterations. *(Passed)*
+- **Spatz Vector TB** *(Phase 3B-B)*: Test RVV instructions.
 
 ### Cluster-Level Verification
 - **TCDM Arbitration**: Snitch, Spatz, Systolic Array đồng thời access Data TCDM → không deadlock.
