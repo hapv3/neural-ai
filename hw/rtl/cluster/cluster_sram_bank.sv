@@ -20,6 +20,7 @@ module cluster_sram_bank #(
 
     localparam int unsigned NUM_WORDS = SIZE_BYTES / (DATA_WIDTH / 8);
     localparam int unsigned ADDR_BITS = $clog2(NUM_WORDS);
+    localparam int unsigned WORD_OFFSET = $clog2(DATA_WIDTH / 8);
 
     // BRAM memory array
     logic [DATA_WIDTH-1:0] mem [NUM_WORDS];
@@ -42,7 +43,6 @@ module cluster_sram_bank #(
             
             if (req_i) begin
                 if (we_i) begin
-                    $display("[SRAM %m] WRITE to Addr=%h, Data=%h, BE=%h", addr_i, wdata_i, be_i);
                     // Write with Byte Enable
                     // Workaround for Verilator partial array assignment bug
                     temp_data = mem[addr_i[ADDR_BITS-1:0]];
@@ -51,11 +51,9 @@ module cluster_sram_bank #(
                             temp_data[i*8 +: 8] = wdata_i[i*8 +: 8];
                         end
                     end
-                    mem[addr_i[ADDR_BITS-1:0]] <= temp_data;
+                    mem[addr_i[ADDR_BITS-1:0]] = temp_data;
                 end else begin
-                    // Read
                     rdata_q <= mem[addr_i[ADDR_BITS-1:0]];
-                    $display("[SRAM %m] READ from Addr=%h, DataWord=%h", addr_i, mem[addr_i[ADDR_BITS-1:0]]);
                 end
             end
         end

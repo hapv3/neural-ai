@@ -14,10 +14,11 @@ package npu_cluster_pkg;
 
     //---------------------------------------------------------
     // TCDM Configuration (512KB Total)
-    // 16 Banks of 32KB each
     //---------------------------------------------------------
-    localparam int unsigned TCDM_NUM_BANKS = 16;
     localparam int unsigned TCDM_BANK_SIZE = 32 * 1024; // 32 KB
+    localparam int unsigned I_TCDM_NUM_BANKS = 12; // 384 KB
+    localparam int unsigned O_TCDM_NUM_BANKS = 4;  // 128 KB
+    localparam int unsigned TCDM_NUM_BANKS = I_TCDM_NUM_BANKS + O_TCDM_NUM_BANKS;
     localparam int unsigned TCDM_TOTAL_SIZE = TCDM_NUM_BANKS * TCDM_BANK_SIZE;
 
     //---------------------------------------------------------
@@ -27,21 +28,27 @@ package npu_cluster_pkg;
     localparam logic [31:0] ITCDM_BASE_ADDR = 32'h1000_0000;
     localparam logic [31:0] ITCDM_SIZE      = 32'h0000_8000;
 
-    // D-TCM (Snitch private scalar data) - 8KB
-    localparam logic [31:0] DTCM_BASE_ADDR  = 32'h1001_0000;
-    localparam logic [31:0] DTCM_SIZE       = 32'h0000_2000;
+    // D-TCM (Snitch private scalar data) - 32KB
+    localparam logic [31:0] DTCM_BASE_ADDR  = 32'h1000_8000;
+    localparam logic [31:0] DTCM_SIZE       = 32'h0000_8000;
 
-    // D-TCDM (Shared Vector Data: Weights, IFM, OFM) - 512KB
-    localparam logic [31:0] DTCDM_BASE_ADDR = 32'h1008_0000;
-    localparam logic [31:0] DTCDM_SIZE      = 32'h0008_0000;
+    // D-TCDM (Shared Vector Data: Weights, IFM) - 384KB
+    localparam logic [31:0] I_TCDM_BASE_ADDR = 32'h1010_0000;
+    localparam logic [31:0] I_TCDM_SIZE      = I_TCDM_NUM_BANKS * TCDM_BANK_SIZE;
 
-    // Logical Buffers Pointers inside D-TCDM
-    localparam logic [31:0] WEIGHT_PING_ADDR = 32'h1008_0000; // 128KB
-    localparam logic [31:0] WEIGHT_PONG_ADDR = 32'h100A_0000; // 128KB
-    localparam logic [31:0] IFM_PING_ADDR    = 32'h100C_0000; // 50KB
-    localparam logic [31:0] IFM_PONG_ADDR    = 32'h100C_C800; // 50KB
-    localparam logic [31:0] OFM_PING_ADDR    = 32'h100D_9000; // 50KB
-    localparam logic [31:0] OFM_PONG_ADDR    = 32'h100E_5800; // 50KB
+    // O-TCDM (Shared Vector Data: OFM) - 128KB
+    localparam logic [31:0] O_TCDM_BASE_ADDR = 32'h1020_0000;
+    localparam logic [31:0] O_TCDM_SIZE      = O_TCDM_NUM_BANKS * TCDM_BANK_SIZE;
+
+    // Logical Buffers Pointers inside I-TCDM
+    localparam logic [31:0] WEIGHT_PING_ADDR = 32'h1011_0000;
+    localparam logic [31:0] WEIGHT_PONG_ADDR = 32'h1012_0000;
+    localparam logic [31:0] IFM_PING_ADDR    = 32'h1012_0000;
+    localparam logic [31:0] IFM_PONG_ADDR    = 32'h1014_C800;
+    
+    // Logical Buffers Pointers inside O-TCDM
+    localparam logic [31:0] OFM_PING_ADDR    = 32'h1020_0000;
+    localparam logic [31:0] OFM_PONG_ADDR    = 32'h1020_C800;
 
     // Memory-Mapped Registers (MMR) for Systolic Array
     localparam logic [31:0] SYSTOLIC_MMR_BASE = 32'h2000_0000;

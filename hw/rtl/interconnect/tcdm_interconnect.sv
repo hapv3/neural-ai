@@ -38,7 +38,7 @@ module tcdm_interconnect #(
     // 1. Address decoding (Word-interleaved banking)
     for (genvar m = 0; m < NUM_MASTERS; m++) begin : gen_addr_decode
         logic [BANK_SEL_BITS-1:0] target_bank;
-        assign target_bank = master_addr_i[m][BYTE_SEL_BITS +: BANK_SEL_BITS];
+        assign target_bank = (master_addr_i[m] >> BYTE_SEL_BITS) % NUM_BANKS;
         
         for (genvar b = 0; b < NUM_BANKS; b++) begin : gen_req_matrix
             assign bank_req_matrix[b][m] = master_req_i[m] & (target_bank == b);
@@ -73,7 +73,7 @@ module tcdm_interconnect #(
             bank_wdata_o[b] = '0;
             for (int m = 0; m < NUM_MASTERS; m++) begin
                 if (grant_oh[m]) begin
-                    bank_addr_o[b]  = master_addr_i[m];
+                    bank_addr_o[b]  = ((master_addr_i[m] >> BYTE_SEL_BITS) / NUM_BANKS) << BYTE_SEL_BITS;
                     bank_we_o[b]    = master_we_i[m];
                     bank_be_o[b]    = master_be_i[m];
                     bank_wdata_o[b] = master_wdata_i[m];
@@ -97,7 +97,7 @@ module tcdm_interconnect #(
             for (int m = 0; m < NUM_MASTERS; m++) begin
                 if (master_gnt_o[m]) begin
                     master_req_q[m]      <= 1'b1;
-                    master_bank_sel_q[m] <= master_addr_i[m][BYTE_SEL_BITS +: BANK_SEL_BITS];
+                    master_bank_sel_q[m] <= (master_addr_i[m] >> BYTE_SEL_BITS) % NUM_BANKS;
                     master_we_q[m]       <= master_we_i[m];
                 end else begin
                     master_req_q[m]      <= 1'b0;

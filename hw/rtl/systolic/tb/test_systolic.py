@@ -44,6 +44,11 @@ async def systolic_array_test(dut):
     dut._log.info("[TEST] Đợi Pipeline đẩy nốt dữ liệu cuối cùng...")
     for _ in range(50):
         await cocotb.triggers.RisingEdge(dut.clk_i)
+
+    assert scoreboard.compare_count > 0, "Scoreboard did not capture any OFM output."
+    assert scoreboard.last_error_count == 0, (
+        f"Systolic output mismatch: {scoreboard.last_error_count} columns differ."
+    )
         
     dut._log.info("==================================================")
     dut._log.info("[TEST] Hoàn thành luồng kiểm thử!")

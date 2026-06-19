@@ -88,10 +88,14 @@ $(REPO_ROOT)/hw/rtl/cluster/npu_cluster_pkg.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_sram_bank.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_arbiter_2to1.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to4.sv
+$(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to5.sv
+$(REPO_ROOT)/hw/rtl/cluster/obi_narrow_to_wide.sv
 $(REPO_ROOT)/hw/rtl/cluster/axi_lite_to_obi.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_ctrl_regs.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/dma/dma_engine.sv
+$(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
+$(REPO_ROOT)/hw/rtl/systolic/npu_systolic_array.sv
 $(REPO_ROOT)/hw/rtl/cluster/snitch_core.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_cluster.sv
 $(REPO_ROOT)/hw/rtl/cluster/tb/tb_npu_cluster.sv

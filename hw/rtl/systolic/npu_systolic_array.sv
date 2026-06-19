@@ -100,13 +100,52 @@ module npu_systolic_array #(
         assign psum_wire[0][c]   = psum_data_i[c];
     end
 
+    // Input Skewing
+    logic signed [7:0] skewed_ifm [ARRAY_DIM];
+    
     for (genvar r = 0; r < ARRAY_DIM; r++) begin : gen_left_edge
-        assign ifm_wire[r][0] = ifm_data_i[r];
+        if (r == 0) begin
+            assign skewed_ifm[r] = ifm_data_i[r];
+        end else begin
+            logic signed [7:0] skew_regs [r];
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni) begin
+                    for (int i = 0; i < r; i++) skew_regs[i] <= '0;
+                end else begin
+                    skew_regs[0] <= ifm_data_i[r];
+                    for (int i = 1; i < r; i++) begin
+                        skew_regs[i] <= skew_regs[i-1];
+                    end
+                end
+            end
+            assign skewed_ifm[r] = skew_regs[r-1];
+        end
+        assign ifm_wire[r][0] = skewed_ifm[r];
     end
 
     // 2. Connect boundary outputs
+    // Output Deskewing
+    logic signed [31:0] deskewed_ofm [ARRAY_DIM];
+    
     for (genvar c = 0; c < ARRAY_DIM; c++) begin : gen_bottom_edge
-        assign ofm_data_o[c] = psum_wire[ARRAY_DIM][c];
+        localparam int DELAY = ARRAY_DIM - 1 - c;
+        if (DELAY == 0) begin
+            assign deskewed_ofm[c] = psum_wire[ARRAY_DIM][c];
+        end else begin
+            logic signed [31:0] deskew_regs [DELAY];
+            always_ff @(posedge clk_i or negedge rst_ni) begin
+                if (!rst_ni) begin
+                    for (int i = 0; i < DELAY; i++) deskew_regs[i] <= '0;
+                end else begin
+                    deskew_regs[0] <= psum_wire[ARRAY_DIM][c];
+                    for (int i = 1; i < DELAY; i++) begin
+                        deskew_regs[i] <= deskew_regs[i-1];
+                    end
+                end
+            end
+            assign deskewed_ofm[c] = deskew_regs[DELAY-1];
+        end
+        assign ofm_data_o[c] = deskewed_ofm[c];
     end
 
     // 3. Generate 32x32 Grid of Processing Elements (PEs)
@@ -129,16 +168,18 @@ module npu_systolic_array #(
 
     // 4. Validity Shift Register
     // Data takes ARRAY_DIM cycles to propagate from top-left to bottom-right.
-    logic [ARRAY_DIM-1:0] valid_sr;
+    // Plus (ARRAY_DIM - 1) cycles for deskewing the output to align all columns.
+    localparam int VALID_DELAY = 2 * ARRAY_DIM - 1;
+    logic [VALID_DELAY-1:0] valid_sr;
     
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             valid_sr <= '0;
         end else begin
-            valid_sr <= {valid_sr[ARRAY_DIM-2:0], compute_en_i};
+            valid_sr <= {valid_sr[VALID_DELAY-2:0], compute_en_i};
         end
     end
     
-    assign ofm_valid_o = valid_sr[ARRAY_DIM-1];
+    assign ofm_valid_o = valid_sr[VALID_DELAY-1];
 
 endmodule

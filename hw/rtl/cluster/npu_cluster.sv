@@ -419,10 +419,10 @@ module npu_cluster (
         .m3_rdata_i   (reg_rdata)
     );
 
-    // D-TCM SRAM Bank (8 KB)
+    // D-TCM SRAM Bank (32 KB — matches link.ld)
     cluster_sram_bank #(
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .SIZE_BYTES(8192)
+        .SIZE_BYTES(32768)
     ) u_sram_d_tcm (
         .clk_i   (clk_i),
         .rst_ni  (rst_ni),
@@ -482,13 +482,17 @@ module npu_cluster (
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (4 Masters)
+    // 5. Shared Data TCDM Interconnect (8 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 4;
+    localparam int unsigned NUM_MASTERS = 8;
     // Master 0: Snitch D-Bus
-    // Master 1: Spatz Vector Engine
+    // Master 1: Spatz Vector Engine (Placeholder)
     // Master 2: DMA Engine
-    // Master 3: Systolic Array (Phase 3B)
+    // Master 3: Systolic Controller Read (I-TCDM)
+    // Master 4: Systolic Controller Write Port 0 (O-TCDM)
+    // Master 5: Systolic Controller Write Port 1 (O-TCDM)
+    // Master 6: Systolic Controller Write Port 2 (O-TCDM)
+    // Master 7: Systolic Controller Write Port 3 (O-TCDM)
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -521,12 +525,12 @@ module npu_cluster (
     for (genvar b = 0; b < TCDM_NUM_BANKS; b++) begin
         assign slave_req[b].req   = slv_req[b];
         assign slave_req[b].we    = slv_we[b];
-        // Subtract base 0x1010_0000, then shift by 5 (32 bytes per 256-bit word) 
-        // Wait, tcdm_interconnect distributes addresses to banks via low bits.
-        // Bank ID = addr[8:5]. Word offset in bank = addr[18:9].
-        // The address output from tcdm_interconnect (slv_addr[b]) is the original address!
-        // We need to mask the base address:
-        assign slave_req[b].addr  = (slv_addr[b] & 32'h000F_FFFF) >> 9;
+        // tcdm_interconnect already computes the de-interleaved address:
+        //   bank_addr_o = ((addr >> BYTE_SEL) / NUM_BANKS) << BYTE_SEL
+        // This gives a byte-address within the bank. cluster_sram_bank
+        // indexes with addr_i[ADDR_BITS-1:0], so we just need to convert
+        // the byte-address to a word-address by shifting right by BYTE_SEL (5).
+        assign slave_req[b].addr  = slv_addr[b] >> 5;
         assign slave_req[b].be    = slv_be[b];
         assign slave_req[b].wdata = slv_wdata[b];
         
@@ -663,11 +667,117 @@ module npu_cluster (
     assign dma_obi_rvalid = master_rsp[2].rvalid;
     assign dma_obi_rdata  = master_rsp[2].rdata;
 
-    // Master 3: Systolic Array (Phase 3B Placeholder)
-    assign master_req[3].req   = 1'b0;
-    assign master_req[3].we    = 1'b0;
-    assign master_req[3].be    = '0;
-    assign master_req[3].addr  = '0;
-    assign master_req[3].wdata = '0;
+    //=========================================================
+    // 7. Systolic Array (Matrix Engine)
+    //=========================================================
+    // Wires between systolic_controller and npu_systolic_array
+    logic                      sys_weight_load_en;
+    logic                      sys_clear_acc;
+    logic                      sys_compute_en;
+    logic signed [31:0][7:0]   sys_weight_data;
+    logic signed [31:0][7:0]   sys_ifm_data;
+    logic signed [31:0][31:0]  sys_psum_data;
+    logic signed [31:0][31:0]  sys_ofm_data;
+    logic                      sys_ofm_valid;
+
+    // Systolic Controller OBI signals
+    logic                      sys_obi_i_req;
+    logic                      sys_obi_i_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] sys_obi_i_addr;
+    logic                      sys_obi_i_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] sys_obi_i_be;
+    logic [OBI_DATA_WIDTH-1:0] sys_obi_i_wdata;
+    logic                      sys_obi_i_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] sys_obi_i_rdata;
+
+    logic [3:0]                      sys_obi_o_req;
+    logic [3:0]                      sys_obi_o_gnt;
+    logic [3:0][OBI_ADDR_WIDTH-1:0]  sys_obi_o_addr;
+    logic [3:0]                      sys_obi_o_we;
+    logic [3:0][(OBI_DATA_WIDTH/8)-1:0] sys_obi_o_be;
+    logic [3:0][OBI_DATA_WIDTH-1:0]  sys_obi_o_wdata;
+    logic [3:0]                      sys_obi_o_rvalid;
+    logic [3:0][OBI_DATA_WIDTH-1:0]  sys_obi_o_rdata;
+
+    systolic_controller #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH)
+    ) u_sys_ctrl (
+        .clk_i              (clk_i),
+        .rst_ni             (rst_ni),
+
+        .cfg_sys_start_i    (cfg_sys_start),
+        .cfg_sys_weight_ptr_i(cfg_sys_w_ptr),
+        .cfg_sys_ifm_ptr_i  (cfg_sys_i_ptr),
+        .cfg_sys_ofm_ptr_i  (cfg_sys_o_ptr),
+        .cfg_sys_dim_m_i    (cfg_sys_dim_m),
+        .cfg_sys_done_o     (cfg_sys_done),
+
+        .obi_i_req_o        (sys_obi_i_req),
+        .obi_i_gnt_i        (sys_obi_i_gnt),
+        .obi_i_addr_o       (sys_obi_i_addr),
+        .obi_i_we_o         (sys_obi_i_we),
+        .obi_i_be_o         (sys_obi_i_be),
+        .obi_i_wdata_o      (sys_obi_i_wdata),
+        .obi_i_rvalid_i     (sys_obi_i_rvalid),
+        .obi_i_rdata_i      (sys_obi_i_rdata),
+
+        .obi_o_req_o        (sys_obi_o_req),
+        .obi_o_gnt_i        (sys_obi_o_gnt),
+        .obi_o_addr_o       (sys_obi_o_addr),
+        .obi_o_we_o         (sys_obi_o_we),
+        .obi_o_be_o         (sys_obi_o_be),
+        .obi_o_wdata_o      (sys_obi_o_wdata),
+        .obi_o_rvalid_i     (sys_obi_o_rvalid),
+        .obi_o_rdata_i      (sys_obi_o_rdata),
+
+        .weight_load_en_o   (sys_weight_load_en),
+        .clear_acc_o        (sys_clear_acc),
+        .compute_en_o       (sys_compute_en),
+        .weight_data_o      (sys_weight_data),
+        .ifm_data_o         (sys_ifm_data),
+        .psum_data_o        (sys_psum_data),
+        .ofm_data_i         (sys_ofm_data),
+        .ofm_valid_i        (sys_ofm_valid)
+    );
+
+    npu_systolic_array #(
+        .ARRAY_DIM(32)
+    ) u_systolic_array (
+        .clk_i              (clk_i),
+        .rst_ni             (rst_ni),
+        .weight_load_en_i   (sys_weight_load_en),
+        .clear_acc_i        (sys_clear_acc),
+        .compute_en_i       (sys_compute_en),
+        .weight_data_i      (sys_weight_data),
+        .ifm_data_i         (sys_ifm_data),
+        .psum_data_i        (sys_psum_data),
+        .ofm_data_o         (sys_ofm_data),
+        .ofm_valid_o        (sys_ofm_valid)
+    );
+
+    // Master 3: Systolic Controller Read Port (I-TCDM)
+    assign master_req[3].req   = sys_obi_i_req;
+    assign master_req[3].we    = sys_obi_i_we;
+    assign master_req[3].be    = sys_obi_i_be;
+    assign master_req[3].addr  = sys_obi_i_addr;
+    assign master_req[3].wdata = sys_obi_i_wdata;
+
+    assign sys_obi_i_gnt    = master_rsp[3].gnt;
+    assign sys_obi_i_rvalid = master_rsp[3].rvalid;
+    assign sys_obi_i_rdata  = master_rsp[3].rdata;
+
+    // Masters 4-7: Systolic Controller Write Ports (O-TCDM)
+    for (genvar i = 0; i < 4; i++) begin : gen_sys_obi_o
+        assign master_req[4+i].req   = sys_obi_o_req[i];
+        assign master_req[4+i].we    = sys_obi_o_we[i];
+        assign master_req[4+i].be    = sys_obi_o_be[i];
+        assign master_req[4+i].addr  = sys_obi_o_addr[i];
+        assign master_req[4+i].wdata = sys_obi_o_wdata[i];
+
+        assign sys_obi_o_gnt[i]    = master_rsp[4+i].gnt;
+        assign sys_obi_o_rvalid[i] = master_rsp[4+i].rvalid;
+        assign sys_obi_o_rdata[i]  = master_rsp[4+i].rdata;
+    end
 
 endmodule

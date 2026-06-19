@@ -10,6 +10,8 @@ class SystolicScoreboard:
         self.dut = dut
         self.item = item
         self.array_dim = 32
+        self.compare_count = 0
+        self.last_error_count = None
 
     def calculate_golden(self):
         self.dut._log.info("[Scoreboard] Bắt đầu tính toán Golden Model (Expected Results)...")
@@ -25,24 +27,21 @@ class SystolicScoreboard:
             for c in range(self.array_dim):
                 W_hw[r][c] = self.item.weights[31 - r][c]
                 
-        # 2. Tính toán PSum lan truyền cho chu kỳ Valid đầu tiên (t=32)
-        # Tại t=32, OFM của cột c là tổng hợp của W_hw[r][c] * IFM_in(r, t_in)
-        # Với t_in = r - c (độ trễ lan truyền chéo của IFM)
+        # 2. Với input skew + output deskew, valid đầu tiên ứng với
+        # dot-product của IFM row đầu tiên với toàn bộ weight matrix.
         for c in range(self.array_dim):
             acc = 0
             for r in range(self.array_dim):
-                ifm_time = r - c
-                # Nếu ifm_time nằm trong phạm vi 32 chu kỳ đã stream
-                if 0 <= ifm_time < self.array_dim:
-                    w_val = W_hw[r][c]
-                    i_val = self.item.ifms[ifm_time][r]
-                    acc += w_val * i_val
+                w_val = W_hw[r][c]
+                i_val = self.item.ifms[0][r]
+                acc += w_val * i_val
             self.item.expected_ofms[c] = acc
             
         self.dut._log.info("[Scoreboard] Tính toán Golden Model hoàn tất.")
 
     def compare(self, actual_ofm):
         """Hàm callback được gọi bởi Monitor mỗi khi capture được Output."""
+        self.compare_count += 1
         self.dut._log.info(f"[Scoreboard] Nhận dữ liệu thực tế từ Monitor: {hex(int(actual_ofm))}")
         
         # Giải nén chuỗi 1024-bit của phần cứng thành mảng 32 phần tử (32-bit signed int)
@@ -68,3 +67,4 @@ class SystolicScoreboard:
             self.dut._log.info("[Scoreboard] PASS! Toàn bộ 32 kết quả khớp 100% với Golden Model.")
         else:
             self.dut._log.error(f"[Scoreboard] FAIL! Có {error_count} lỗi sai lệch dữ liệu.")
+        self.last_error_count = error_count

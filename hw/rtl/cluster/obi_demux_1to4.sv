@@ -102,10 +102,7 @@ module obi_demux_1to4 #(
     // Grant Routing
     assign slv_gnt_o  = (sel_m0 & m0_gnt_i) | (sel_m1 & m1_gnt_i) | (sel_m2 & m2_gnt_i) | (sel_m3 & m3_gnt_i);
 
-    always_comb begin
-        if (slv_req_i) begin
-        end
-    end
+
 
     // Response Routing
     logic [1:0] out_sel_q;

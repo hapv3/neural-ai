@@ -30,7 +30,8 @@ module tb_npu_cluster (
     // Backdoor port for Python to initialize axi_sim_mem (DMA target)
     input  logic        backdoor_we_i,
     input  logic [31:0] backdoor_addr_i,
-    input  logic [7:0]  backdoor_data_i
+    input  logic [7:0]  backdoor_data_i,
+    output logic [7:0]  backdoor_rdata_o
 );
 
     // AXI Bus between NPU Cluster DMA and axi_sim_mem
@@ -51,6 +52,7 @@ module tb_npu_cluster (
     axi_resp_t axi_rsp;
 
     // Instance of NPU Cluster
+    initial $display("BOOT_ADDR is %h", u_npu_cluster.u_snitch_core.BOOT_ADDR);
     npu_cluster u_npu_cluster (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -177,5 +179,8 @@ module tb_npu_cluster (
             u_axi_sim_mem.mem[backdoor_addr_i] = backdoor_data_i;
         end
     end
+
+    // Backdoor read logic
+    assign backdoor_rdata_o = u_axi_sim_mem.mem[backdoor_addr_i];
 
 endmodule
