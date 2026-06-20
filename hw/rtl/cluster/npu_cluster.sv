@@ -569,11 +569,6 @@ module npu_cluster (
     logic [31:0] cfg_dma_length;
     logic        cfg_dma_done;
 
-    logic        cfg_idma_start;
-    logic [31:0] cfg_idma_src_addr;
-    logic [31:0] cfg_idma_dst_addr;
-    logic [31:0] cfg_idma_length;
-
     logic        cfg_sys_start;
     logic [31:0] cfg_sys_w_ptr;
     logic [31:0] cfg_sys_i_ptr;
@@ -610,42 +605,20 @@ module npu_cluster (
         .cfg_sys_done_i       (cfg_sys_done)
     );
 
-    npu_idma_ctrl_mm #(
-        .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH),
-        .BASE_ADDR (32'h2000_1000)
-    ) u_idma_ctrl_mm (
-        .clk_i              (clk_i),
-        .rst_ni             (rst_ni),
-        .req_i              (idma_mm_req),
-        .gnt_o              (idma_mm_gnt),
-        .addr_i             (idma_mm_addr),
-        .we_i               (idma_mm_we),
-        .be_i               (idma_mm_be),
-        .wdata_i            (idma_mm_wdata),
-        .rvalid_o           (idma_mm_rvalid),
-        .rdata_o            (idma_mm_rdata),
-
-        .cfg_dma_start_o    (cfg_idma_start),
-        .cfg_dma_src_addr_o (cfg_idma_src_addr),
-        .cfg_dma_dst_addr_o (cfg_idma_dst_addr),
-        .cfg_dma_length_o   (cfg_idma_length),
-        .cfg_dma_done_i     (cfg_dma_done)
-    );
-
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (9 Masters)
+    // 5. Shared Data TCDM Interconnect (10 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 9;
+    localparam int unsigned NUM_MASTERS = 10;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
-    // Master 2: DMA Engine
+    // Master 2: PULP iDMA AXI2OBI write port
     // Master 3: Systolic Controller Read (I-TCDM)
     // Master 4: Systolic Controller Write Port 0 (O-TCDM)
     // Master 5: Systolic Controller Write Port 1 (O-TCDM)
     // Master 6: Systolic Controller Write Port 2 (O-TCDM)
     // Master 7: Systolic Controller Write Port 3 (O-TCDM)
     // Master 8: Spatz Vector Engine (VLSU port 1)
+    // Master 9: PULP iDMA OBI2AXI read port
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -931,74 +904,125 @@ module npu_cluster (
     assign spatz_obi_rvalid[1] = master_rsp[8].rvalid;
     assign spatz_obi_rdata[1]  = master_rsp[8].rdata;
 
-    // Master 2: DMA Engine
-    logic                      dma_obi_req;
-    logic                      dma_obi_gnt;
-    logic [OBI_ADDR_WIDTH-1:0] dma_obi_addr;
-    logic                      dma_obi_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] dma_obi_be;
-    logic [OBI_DATA_WIDTH-1:0] dma_obi_wdata;
-    logic                      dma_obi_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] dma_obi_rdata;
+    // Masters 2/9: PULP iDMA MMIO frontend + AXI/OBI backends
+    logic                      idma_obi_read_req;
+    logic                      idma_obi_read_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] idma_obi_read_addr;
+    logic                      idma_obi_read_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] idma_obi_read_be;
+    logic [OBI_DATA_WIDTH-1:0] idma_obi_read_wdata;
+    logic                      idma_obi_read_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] idma_obi_read_rdata;
 
-    dma_engine #(
-        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
-        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
-        .OBI_DATA_WIDTH(OBI_DATA_WIDTH)
-    ) u_dma_engine (
-        .clk_i          (clk_i),
-        .rst_ni         (rst_ni),
-        .cfg_src_addr_i (cfg_idma_start ? cfg_idma_src_addr : cfg_dma_src_addr),
-        .cfg_dst_addr_i (cfg_idma_start ? cfg_idma_dst_addr : cfg_dma_dst_addr),
-        .cfg_length_i   (cfg_idma_start ? cfg_idma_length   : cfg_dma_length),
-        .cfg_start_i    (cfg_dma_start | cfg_idma_start),
-        .cfg_done_o     (cfg_dma_done),
+    logic                      idma_obi_write_req;
+    logic                      idma_obi_write_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] idma_obi_write_addr;
+    logic                      idma_obi_write_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] idma_obi_write_be;
+    logic [OBI_DATA_WIDTH-1:0] idma_obi_write_wdata;
+    logic                      idma_obi_write_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] idma_obi_write_rdata;
 
-        .axi_aw_addr_o  (axi_aw_addr_o),
-        .axi_aw_len_o   (axi_aw_len_o),
-        .axi_aw_size_o  (axi_aw_size_o),
-        .axi_aw_burst_o (axi_aw_burst_o),
-        .axi_aw_valid_o (axi_aw_valid_o),
-        .axi_aw_ready_i (axi_aw_ready_i),
-        .axi_w_data_o   (axi_w_data_o),
-        .axi_w_strb_o   (axi_w_strb_o),
-        .axi_w_last_o   (axi_w_last_o),
-        .axi_w_valid_o  (axi_w_valid_o),
-        .axi_w_ready_i  (axi_w_ready_i),
-        .axi_b_resp_i   (axi_b_resp_i),
-        .axi_b_valid_i  (axi_b_valid_i),
-        .axi_b_ready_o  (axi_b_ready_o),
-        .axi_ar_addr_o  (axi_ar_addr_o),
-        .axi_ar_len_o   (axi_ar_len_o),
-        .axi_ar_size_o  (axi_ar_size_o),
-        .axi_ar_burst_o (axi_ar_burst_o),
-        .axi_ar_valid_o (axi_ar_valid_o),
-        .axi_ar_ready_i (axi_ar_ready_i),
-        .axi_r_data_i   (axi_r_data_i),
-        .axi_r_resp_i   (axi_r_resp_i),
-        .axi_r_last_i   (axi_r_last_i),
-        .axi_r_valid_i  (axi_r_valid_i),
-        .axi_r_ready_o  (axi_r_ready_o),
+    logic idma_irq_a2o_busy;
+    logic idma_irq_a2o_start;
+    logic idma_irq_a2o_done;
+    logic idma_irq_a2o_error;
+    logic idma_irq_o2a_busy;
+    logic idma_irq_o2a_start;
+    logic idma_irq_o2a_done;
+    logic idma_irq_o2a_error;
 
-        .obi_req_o      (dma_obi_req),
-        .obi_gnt_i      (dma_obi_gnt),
-        .obi_addr_o     (dma_obi_addr),
-        .obi_we_o       (dma_obi_we),
-        .obi_be_o       (dma_obi_be),
-        .obi_wdata_o    (dma_obi_wdata),
-        .obi_rvalid_i   (dma_obi_rvalid),
-        .obi_rdata_i    (dma_obi_rdata)
+    assign cfg_dma_done = idma_irq_a2o_done | idma_irq_o2a_done;
+
+    npu_pulp_idma_ctrl_mm #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .BASE_ADDR (32'h2000_1000)
+    ) u_idma_ctrl_mm (
+        .clk_i              (clk_i),
+        .rst_ni             (rst_ni),
+        .req_i              (idma_mm_req),
+        .gnt_o              (idma_mm_gnt),
+        .addr_i             (idma_mm_addr),
+        .we_i               (idma_mm_we),
+        .be_i               (idma_mm_be),
+        .wdata_i            (idma_mm_wdata),
+        .rvalid_o           (idma_mm_rvalid),
+        .rdata_o            (idma_mm_rdata),
+
+        .axi_aw_addr_o      (axi_aw_addr_o),
+        .axi_aw_len_o       (axi_aw_len_o),
+        .axi_aw_size_o      (axi_aw_size_o),
+        .axi_aw_burst_o     (axi_aw_burst_o),
+        .axi_aw_valid_o     (axi_aw_valid_o),
+        .axi_aw_ready_i     (axi_aw_ready_i),
+        .axi_w_data_o       (axi_w_data_o),
+        .axi_w_strb_o       (axi_w_strb_o),
+        .axi_w_last_o       (axi_w_last_o),
+        .axi_w_valid_o      (axi_w_valid_o),
+        .axi_w_ready_i      (axi_w_ready_i),
+        .axi_b_resp_i       (axi_b_resp_i),
+        .axi_b_valid_i      (axi_b_valid_i),
+        .axi_b_ready_o      (axi_b_ready_o),
+        .axi_ar_addr_o      (axi_ar_addr_o),
+        .axi_ar_len_o       (axi_ar_len_o),
+        .axi_ar_size_o      (axi_ar_size_o),
+        .axi_ar_burst_o     (axi_ar_burst_o),
+        .axi_ar_valid_o     (axi_ar_valid_o),
+        .axi_ar_ready_i     (axi_ar_ready_i),
+        .axi_r_data_i       (axi_r_data_i),
+        .axi_r_resp_i       (axi_r_resp_i),
+        .axi_r_last_i       (axi_r_last_i),
+        .axi_r_valid_i      (axi_r_valid_i),
+        .axi_r_ready_o      (axi_r_ready_o),
+
+        .obi_read_req_o     (idma_obi_read_req),
+        .obi_read_gnt_i     (idma_obi_read_gnt),
+        .obi_read_addr_o    (idma_obi_read_addr),
+        .obi_read_we_o      (idma_obi_read_we),
+        .obi_read_be_o      (idma_obi_read_be),
+        .obi_read_wdata_o   (idma_obi_read_wdata),
+        .obi_read_rvalid_i  (idma_obi_read_rvalid),
+        .obi_read_rdata_i   (idma_obi_read_rdata),
+
+        .obi_write_req_o    (idma_obi_write_req),
+        .obi_write_gnt_i    (idma_obi_write_gnt),
+        .obi_write_addr_o   (idma_obi_write_addr),
+        .obi_write_we_o     (idma_obi_write_we),
+        .obi_write_be_o     (idma_obi_write_be),
+        .obi_write_wdata_o  (idma_obi_write_wdata),
+        .obi_write_rvalid_i (idma_obi_write_rvalid),
+        .obi_write_rdata_i  (idma_obi_write_rdata),
+
+        .irq_a2o_busy_o     (idma_irq_a2o_busy),
+        .irq_a2o_start_o    (idma_irq_a2o_start),
+        .irq_a2o_done_o     (idma_irq_a2o_done),
+        .irq_a2o_error_o    (idma_irq_a2o_error),
+        .irq_o2a_busy_o     (idma_irq_o2a_busy),
+        .irq_o2a_start_o    (idma_irq_o2a_start),
+        .irq_o2a_done_o     (idma_irq_o2a_done),
+        .irq_o2a_error_o    (idma_irq_o2a_error)
     );
 
-    assign master_req[2].req   = dma_obi_req;
-    assign master_req[2].we    = dma_obi_we;
-    assign master_req[2].be    = dma_obi_be;
-    assign master_req[2].addr  = dma_obi_addr;
-    assign master_req[2].wdata = dma_obi_wdata;
-    
-    assign dma_obi_gnt    = master_rsp[2].gnt;
-    assign dma_obi_rvalid = master_rsp[2].rvalid;
-    assign dma_obi_rdata  = master_rsp[2].rdata;
+    assign master_req[2].req   = idma_obi_write_req;
+    assign master_req[2].we    = idma_obi_write_we;
+    assign master_req[2].be    = idma_obi_write_be;
+    assign master_req[2].addr  = idma_obi_write_addr;
+    assign master_req[2].wdata = idma_obi_write_wdata;
+
+    assign idma_obi_write_gnt    = master_rsp[2].gnt;
+    assign idma_obi_write_rvalid = master_rsp[2].rvalid;
+    assign idma_obi_write_rdata  = master_rsp[2].rdata;
+
+    assign master_req[9].req   = idma_obi_read_req;
+    assign master_req[9].we    = idma_obi_read_we;
+    assign master_req[9].be    = idma_obi_read_be;
+    assign master_req[9].addr  = idma_obi_read_addr;
+    assign master_req[9].wdata = idma_obi_read_wdata;
+
+    assign idma_obi_read_gnt    = master_rsp[9].gnt;
+    assign idma_obi_read_rvalid = master_rsp[9].rvalid;
+    assign idma_obi_read_rdata  = master_rsp[9].rdata;
 
     //=========================================================
     // 7. Systolic Array (Matrix Engine)

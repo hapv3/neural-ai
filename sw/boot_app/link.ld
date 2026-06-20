@@ -16,6 +16,10 @@ SECTIONS
         *(.text.*)
     } > itcm
 
+    .status (NOLOAD) : {
+        . = . + 0x100;
+    } > dtcm
+
     .rodata :
     {
         *(.rodata)

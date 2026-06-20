@@ -126,74 +126,17 @@ To achieve high-performance matrix and vector operations, the architecture integ
 |  +------------------------------------------------------------------------------------------+  |
 |                                            |     |     |           |                           |
 |                                            v     v     v           v                           |
-|                                          +-------------------------------+                     |
-|                                          |    Final Deskewed OFM Row     |                     |
-|                                          +-------------------------------+                     |
-+------------------------------------------------------------------------------------------------+
+## 4. Data TCDM SRAM Micro-Architecture (Detailed)
 
-PE (Processing Element) Internal Logic:
-- Weight-Stationary: W is pre-loaded into local registers before compute phase.
-- Compute: Psum_out <= Psum_in + (W * IFM_in)
-- IFM Forwarding: IFM_out <= IFM_in
-```
-
----
-
-## 4. Data TCDM SRAM Micro-Architecture
+> **Lưu ý Kiến trúc (Architecture Update):**
+> Kiến trúc TCDM Interconnect hiện tại đang được lên kế hoạch nâng cấp sang mô hình phân nhóm (Grouped Tree Topology) học hỏi từ dự án MAGIA để giải quyết triệt để các vấn đề về Priority Starvation và Bank Conflict. 
+> Chi tiết thiết kế và kế hoạch nâng cấp xem tại: [tcdm_interconnect_upgrade.md](file:///home/dev01/neural-ai/docs/tcdm_interconnect_upgrade.md).
 
 Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không phải cache: mọi tile được firmware/DMA đặt vào địa chỉ rõ ràng, deterministic latency, và arbitration được xử lý bởi TCDM interconnect.
 
-```text
-                            +-------------------------------------+
-Snitch D-Bus -------------->| M0                                  |
-Spatz Vector Placeholder -->| M1                                  |
-DMA OBI Master ------------>| M2   TCDM Interconnect (256-bit)    |
-Systolic Read Port -------->| M3                                  |
-Systolic OFM Write Port 0 ->| M4                                  |
-Systolic OFM Write Port 1 ->| M5                                  |
-Systolic OFM Write Port 2 ->| M6                                  |
-Systolic OFM Write Port 3 ->| M7                                  |
-                            +------------------+------------------+
-                                               |
-                                               v
-                  +--------------------------------------------------------+
-                  | Data TCDM SRAM: 16 banks × 32 KB = 512 KB physical     |
-                  +----------------------------+---------------------------+
-                  | 12 I-TCDM banks = 384 KB  | 4 O-TCDM banks = 128 KB   |
-                  | Weights + IFM tiles       | OFM / INT32 accumulator   |
-                  +----------------------------+---------------------------+
-```
+*(Chi tiết về kiến trúc TCDM hiện tại và phương án nâng cấp sang mô hình phân nhóm Grouped Tree Topology đã được chuyển sang tài liệu chuyên đề: [tcdm_interconnect_upgrade.md](file:///home/dev01/neural-ai/docs/tcdm_interconnect_upgrade.md))*
 
-### Physical Organization
-
-| Field | Value | Ghi chú |
-|-------|-------|---------|
-| Data width | 256-bit | 32 bytes per OBI beat / SRAM word |
-| Banks | 16 | Word-interleaved banking |
-| Bank size | 32 KB | 1024 × 256-bit words per bank |
-| Total physical size | 512 KB | 16 × 32 KB |
-| I-TCDM allocation | 384 KB | 12 banks for weights and IFM |
-| O-TCDM allocation | 128 KB | 4 banks for OFM writeback |
-
-### Banking and Addressing
-
-- TCDM interconnect chọn bank bằng 256-bit word address modulo số bank: `bank = (addr >> 5) % 16`.
-- Interconnect de-interleave địa chỉ thành byte-address nội bộ mỗi bank.
-- `npu_cluster` chuyển byte-address nội bộ sang 256-bit word index bằng `>> 5` trước khi đưa vào `cluster_sram_bank`.
-- Mỗi bank là SRAM 1-cycle style trong mô phỏng: grant cùng chu kỳ, read response ở chu kỳ sau.
-- Nếu nhiều master cùng truy cập một bank, fixed-priority arbitration được áp dụng; hiện tại Master 0 có priority cao nhất.
-
-### Master Port Usage
-
-| Master | Producer | Direction | Typical traffic |
-|--------|----------|-----------|-----------------|
-| M0 | Snitch D-Bus | Read/write | Scalar access vào Shared Data TCDM khi firmware cần inspect/debug |
-| M1 | Spatz Vector Engine | Read/write | Placeholder cho Phase 3B-B |
-| M2 | DMA Engine | Read/write | L2↔L1 tile transfer và L1↔L1 copy |
-| M3 | Systolic Controller | Read | Load weights và stream IFM rows |
-| M4–M7 | Systolic Controller | Write | Ghi 32 OFM INT32 values thành 4 beats × 256-bit |
-
-### Current Logical Buffers
+#### Current Logical Buffers
 
 | Buffer | Address | Region | Vai trò |
 |--------|---------|--------|---------|
@@ -201,13 +144,6 @@ Systolic OFM Write Port 3 ->| M7                                  |
 | `IFM_PING_ADDR` | `0x1012_0000` | I-TCDM | M×32 INT8 IFM tile |
 | `OFM_PING_ADDR` | `0x1020_0000` | O-TCDM | M×32 INT32 output tile |
 
-> **Important**: Snitch D-Bus currently decodes the Shared Data TCDM aperture through the `0x1010_0000` window. DMA and Systolic Controller are direct TCDM masters and can use the logical O-TCDM address window at `0x1020_0000` for OFM. This is why firmware configures OFM at `0x1020_0000`, while Snitch itself normally does not directly read/write that range.
-
----
-
-## 5. Memory Map (Per Cluster)
-
-| Address Range | Size | Module | Vai trò |
 |--------------|------|--------|---------|
 | `0x1000_0000 – 0x1000_7FFF` | 32 KB | **I-TCM** | Firmware Snitch (instruction). Đọc/ghi qua D-Bus M0. |
 | `0x1000_8000 – 0x1000_FFFF` | 32 KB | **Snitch D-TCM** | Private data (stack, scalars) qua D-Bus M1. |

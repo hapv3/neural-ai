@@ -4,30 +4,24 @@ GCC_BIN = $(SPATZ_INSTALL)/riscv-gcc/bin
 
 CC = $(LLVM_BIN)/clang
 OBJCOPY = $(LLVM_BIN)/llvm-objcopy
-OBJDUMP = $(LLVM_BIN)/llvm-objdump
 HEXOBJCOPY = $(GCC_BIN)/riscv32-unknown-elf-objcopy
 
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -O2 -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
-         -T link.ld -Wl,--no-relax
+         -I../lib -T link.ld -Wl,--no-relax
 
-TESTS = basic_mem_arith memory_width arith_mask reduction
+SRCS = start.S main.c ../lib/spatz_ops.c ../lib/spatz_ops.S
 
-.SECONDARY: $(addsuffix .elf,$(TESTS))
+all: spatz_ops_test.bin spatz_ops_test.hex
 
-all: $(addsuffix .bin,$(TESTS)) $(addsuffix .hex,$(TESTS))
+spatz_ops_test.elf: $(SRCS) link.ld
+	$(CC) $(CFLAGS) $(SRCS) -o $@
 
-%.elf: tests/%.S link.ld
-	$(CC) $(CFLAGS) $< -o $@
-
-%.bin: %.elf
+spatz_ops_test.bin: spatz_ops_test.elf
 	$(OBJCOPY) -O binary $< $@
 
-%.hex: %.elf
+spatz_ops_test.hex: spatz_ops_test.elf
 	$(HEXOBJCOPY) -O verilog $< $@
-
-dump: $(addsuffix .elf,$(TESTS))
-	$(OBJDUMP) -d --mcpu=snitch --mattr=+v $^
 
 clean:
 	rm -f *.elf *.bin *.hex

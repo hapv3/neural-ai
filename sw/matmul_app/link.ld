@@ -15,6 +15,10 @@ SECTIONS
         *(.text.*)
     } > I_TCM
 
+    .status (NOLOAD) : {
+        . = . + 0x100;
+    } > D_TCM
+
     .data : {
         *(.data)
         *(.data.*)
