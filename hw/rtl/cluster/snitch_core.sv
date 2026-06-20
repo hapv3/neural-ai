@@ -34,97 +34,200 @@ module snitch_core #(
     output logic [(D_DATA_WIDTH/8)-1:0] obi_d_be_o,
     output logic [D_DATA_WIDTH-1:0]     obi_d_wdata_o,
     input  logic                      obi_d_rvalid_i,
-    input  logic [D_DATA_WIDTH-1:0]     obi_d_rdata_i
+    input  logic [D_DATA_WIDTH-1:0]     obi_d_rdata_i,
+
+    // Accelerator Offload Interface (Snitch → Spatz)
+    output logic                      acc_qvalid_o,
+    input  logic                      acc_qready_i,
+    output logic [31:0]               acc_qdata_op_o,    // instruction word
+    output logic [D_DATA_WIDTH-1:0]   acc_qdata_arga_o,  // rs1
+    output logic [D_DATA_WIDTH-1:0]   acc_qdata_argb_o,  // rs2
+    output logic [ADDR_WIDTH-1:0]     acc_qdata_argc_o,  // rs3/addr
+    output logic [4:0]                acc_qid_o,         // rd
+    input  logic                      acc_qaccept_i,
+    input  logic                      acc_qwriteback_i,
+    input  logic                      acc_qloadstore_i,
+    input  logic                      acc_qexception_i,
+    input  logic                      acc_qisfloat_i,
+    input  logic [1:0]                acc_mem_finished_i,
+    input  logic [1:0]                acc_mem_str_finished_i,
+
+    // Accelerator Response Interface (Spatz → Snitch)
+    input  logic                      acc_pvalid_i,
+    output logic                      acc_pready_o,
+    input  logic [4:0]                acc_pid_i,
+    input  logic [D_DATA_WIDTH-1:0]   acc_pdata_i,
+    input  logic                      acc_perror_i,
+
+    // FPU side-channel
+    output logic [2:0]                fpu_rnd_mode_o,
+    output logic                      fpu_fmt_mode_o,
+    input  logic [4:0]                fpu_status_i
 );
 
     import snitch_pkg::*;
 
-    localparam type dreq_t = `SNITCH_DATA_REQ_STRUCT(D_DATA_WIDTH, ADDR_WIDTH);
-    localparam type drsp_t = `SNITCH_DATA_RSP_STRUCT(D_DATA_WIDTH);
-    localparam type ireq_t = `SNITCH_INSTR_REQ_STRUCT(ADDR_WIDTH);
-    localparam type irsp_t = `SNITCH_INSTR_RSP_STRUCT;
+    typedef struct packed {
+        logic [ADDR_WIDTH-1:0] addr;
+        logic                  write;
+        reqrsp_pkg::amo_op_e   amo;
+        logic [D_DATA_WIDTH-1:0] data;
+        logic [(D_DATA_WIDTH/8)-1:0] strb;
+        logic [63:0]           user;
+        reqrsp_pkg::size_t     size;
+    } data_req_chan_t;
 
-    // Dummy types for unused accelerator interface
-    localparam type acc_req_t      = `SNITCH_ACC_REQ_STRUCT(D_DATA_WIDTH, ADDR_WIDTH);
-    localparam type acc_rsp_t      = `SNITCH_ACC_RSP_STRUCT(D_DATA_WIDTH);
-    localparam type x_issue_req_t  = `CV_X_IF_ISSUE_REQ_STRUCT(4);
-    localparam type x_issue_resp_t = `CV_X_IF_ISSUE_RESP_STRUCT;
-    localparam type x_register_t   = `CV_X_IF_REGISTER_STRUCT(4);
-    localparam type x_commit_t     = `CV_X_IF_COMMIT_STRUCT(4);
-    localparam type x_result_t     = `CV_X_IF_RESULT_STRUCT(4);
-    localparam type ptw_req_t      = `SNITCH_PTW_REQ_STRUCT(ADDR_WIDTH);
-    localparam type ptw_rsp_t      = `SNITCH_PTW_RSP_STRUCT(ADDR_WIDTH);
+    typedef struct packed {
+        data_req_chan_t q;
+        logic           q_valid;
+        logic           p_ready;
+    } data_req_t;
 
-    ireq_t         inst_req;
-    irsp_t         inst_rsp;
-    dreq_t         data_req;
-    drsp_t         data_rsp;
+    typedef struct packed {
+        logic [D_DATA_WIDTH-1:0] data;
+        logic                    error;
+    } data_rsp_chan_t;
 
-    // Tie-off unused signals
-    acc_req_t      acc_req;
-    acc_rsp_t      acc_rsp;
-    x_issue_req_t  x_issue_req;
-    x_issue_resp_t x_issue_resp;
-    x_register_t   x_register;
-    x_commit_t     x_commit;
-    x_result_t     x_result;
-    ptw_req_t [1:0] ptw_req;
-    ptw_rsp_t [1:0] ptw_rsp;
+    typedef struct packed {
+        data_rsp_chan_t p;
+        logic           p_valid;
+        logic           q_ready;
+    } data_rsp_t;
 
-    assign acc_rsp = '0;
-    assign x_issue_resp = '0;
-    assign x_result = '0;
-    assign ptw_rsp = '0;
+    typedef struct packed {
+        snitch_pkg::acc_addr_e addr;
+        logic [4:0]            id;
+        logic [31:0]           data_op;
+        logic [D_DATA_WIDTH-1:0] data_arga;
+        logic [D_DATA_WIDTH-1:0] data_argb;
+        logic [ADDR_WIDTH-1:0] data_argc;
+    } acc_issue_req_t;
+
+    typedef struct packed {
+        logic accept;
+        logic writeback;
+        logic loadstore;
+        logic exception;
+        logic isfloat;
+    } acc_issue_rsp_t;
+
+    typedef struct packed {
+        logic [4:0]              id;
+        logic                    error;
+        logic [D_DATA_WIDTH-1:0] data;
+    } acc_rsp_t;
+
+    localparam type pa_t = logic [ADDR_WIDTH-1:0];
+    typedef struct packed {
+        pa_t                  pa;
+        snitch_pkg::pte_flags_t flags;
+    } l0_pte_t;
+
+    logic [ADDR_WIDTH-1:0] inst_addr;
+    logic                  inst_cacheable;
+    logic                  inst_valid;
+    logic                  inst_ready;
+    logic [31:0]           inst_data;
+    data_req_t             data_req;
+    data_rsp_t             data_rsp;
+    acc_issue_req_t        acc_issue_req;
+    acc_issue_rsp_t        acc_issue_rsp;
+    acc_rsp_t              acc_rsp;
+    logic [1:0]            ptw_valid;
+    logic [1:0]            ptw_ready;
+    snitch_pkg::va_t [1:0] ptw_va;
+    pa_t [1:0]             ptw_ppn;
+    l0_pte_t [1:0]         ptw_pte;
+    logic [1:0]            ptw_is_4mega;
+
+    assign ptw_ready     = '0;
+    assign ptw_pte       = '0;
+    assign ptw_is_4mega  = '0;
+
+    assign acc_qdata_op_o   = acc_issue_req.data_op;
+    assign acc_qdata_arga_o = acc_issue_req.data_arga;
+    assign acc_qdata_argb_o = acc_issue_req.data_argb;
+    assign acc_qdata_argc_o = acc_issue_req.data_argc;
+    assign acc_qid_o        = acc_issue_req.id;
+
+    assign acc_issue_rsp = '{
+        accept:    acc_qaccept_i,
+        writeback: acc_qwriteback_i,
+        loadstore: acc_qloadstore_i,
+        exception: acc_qexception_i,
+        isfloat:   acc_qisfloat_i
+    };
+
+    assign acc_rsp.id    = acc_pid_i;
+    assign acc_rsp.data  = acc_pdata_i;
+    assign acc_rsp.error = acc_perror_i;
 
     snitch #(
-        .BootAddr (BOOT_ADDR),
-        .AddrWidth(ADDR_WIDTH),
-        .DataWidth(D_DATA_WIDTH),
+        .BootAddr              (BOOT_ADDR),
+        .AddrWidth             (ADDR_WIDTH),
+        .DataWidth             (D_DATA_WIDTH),
+        .RVE                   (0),
+        .Xdma                  (0),
+        .Xssr                  (0),
+        .FP_EN                 (0),
+        .RVF                   (0),
+        .RVD                   (0),
+        .XF16                  (0),
+        .XF16ALT               (0),
+        .XF8                   (0),
+        .XF8ALT                (0),
+        .XDivSqrt              (0),
+        .RVV                   (1),
+        .XFVEC                 (0),
+        .XFDOTP                (0),
+        .XFAUX                 (0),
+        .FLEN                  (D_DATA_WIDTH),
         .NumIntOutstandingLoads(1),
         .NumIntOutstandingMem(1),
-        .VMSupport(0),
-        .EnableXif(0)
+        .VMSupport             (0),
+        .Xipu                  (0),
+        .dreq_t                (data_req_t),
+        .drsp_t                (data_rsp_t),
+        .acc_issue_req_t       (acc_issue_req_t),
+        .acc_issue_rsp_t       (acc_issue_rsp_t),
+        .acc_rsp_t             (acc_rsp_t),
+        .pa_t                  (pa_t),
+        .l0_pte_t              (l0_pte_t),
+        .NumDTLBEntries        (0),
+        .NumITLBEntries        (0)
     ) i_snitch (
-        .clk_i             (clk_i),
-        .rst_i             (~rst_ni),
-        .hart_id_i         (hart_id_i),
-        .irq_i             ('0),
-        .flush_i_valid_o   (),
-        .flush_i_ready_i   (1'b1),
-        .inst_req_o        (inst_req),
-        .inst_rsp_i        (inst_rsp),
-        .acc_req_o         (acc_req),
-        .acc_rsp_i         (acc_rsp),
-        .x_issue_req_o     (x_issue_req),
-        .x_issue_resp_i    (x_issue_resp),
-        .x_issue_valid_o   (),
-        .x_issue_ready_i   (1'b0),
-        .x_register_o      (x_register),
-        .x_register_valid_o(),
-        .x_register_ready_i(1'b0),
-        .x_commit_o        (x_commit),
-        .x_commit_valid_o  (),
-        .x_result_i        (x_result),
-        .x_result_valid_i  (1'b0),
-        .x_result_ready_o  (),
-        .i2f_rdata_o       (),
-        .i2f_rvalid_o      (),
-        .i2f_rready_i      (1'b0),
-        .f2i_wdata_i       ('0),
-        .f2i_wvalid_i      (1'b0),
-        .f2i_wready_o      (),
-        .data_req_o        (data_req),
-        .data_rsp_i        (data_rsp),
-        .ptw_req_o         (ptw_req),
-        .ptw_rsp_i         (ptw_rsp),
-        .fpu_rnd_mode_o    (),
-        .fpu_fmt_mode_o    (),
-        .fpu_status_i      ('0),
-        .caq_pvalid_i      (1'b0),
-        .core_events_o     (),
-        .en_copift_o       (),
-        .barrier_o         (),
-        .barrier_i         (1'b0)
+        .clk_i                  (clk_i),
+        .rst_i                  (~rst_ni),
+        .hart_id_i              (hart_id_i),
+        .irq_i                  ('0),
+        .flush_i_valid_o        (),
+        .flush_i_ready_i        (1'b1),
+        .inst_addr_o            (inst_addr),
+        .inst_cacheable_o       (inst_cacheable),
+        .inst_data_i            (inst_data),
+        .inst_valid_o           (inst_valid),
+        .inst_ready_i           (inst_ready),
+        .acc_qreq_o             (acc_issue_req),
+        .acc_qrsp_i             (acc_issue_rsp),
+        .acc_qvalid_o           (acc_qvalid_o),
+        .acc_qready_i           (acc_qready_i),
+        .acc_prsp_i             (acc_rsp),
+        .acc_pvalid_i           (acc_pvalid_i),
+        .acc_pready_o           (acc_pready_o),
+        .acc_mem_finished_i     (acc_mem_finished_i),
+        .acc_mem_str_finished_i (acc_mem_str_finished_i),
+        .data_req_o             (data_req),
+        .data_rsp_i             (data_rsp),
+        .ptw_valid_o            (ptw_valid),
+        .ptw_ready_i            (ptw_ready),
+        .ptw_va_o               (ptw_va),
+        .ptw_ppn_o              (ptw_ppn),
+        .ptw_pte_i              (ptw_pte),
+        .ptw_is_4mega_i         (ptw_is_4mega),
+        .fpu_rnd_mode_o         (fpu_rnd_mode_o),
+        .fpu_fmt_mode_o         (fpu_fmt_mode_o),
+        .fpu_status_i           (fpu_status_i),
+        .core_events_o          ()
     );
 
     // --- Instruction Fetch Interface Adapter ---
@@ -136,9 +239,9 @@ module snitch_core #(
     ) u_if_adapter (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
-        .snitch_req_valid_i (inst_req.q_valid),
-        .snitch_req_ready_o (inst_rsp.q_ready),
-        .snitch_req_addr_i  (inst_req.addr),
+        .snitch_req_valid_i (inst_valid),
+        .snitch_req_ready_o (inst_ready),
+        .snitch_req_addr_i  (inst_addr),
         .snitch_rsp_data_o  (adapter_rsp_data),
         .obi_req_o          (obi_i_req_o),
         .obi_gnt_i          (obi_i_gnt_i),
@@ -148,8 +251,7 @@ module snitch_core #(
     );
 
     // Combinationally select the correct 32-bit instruction from the 256-bit line
-    assign inst_rsp.data    = adapter_rsp_data >> (inst_req.addr[$clog2(I_DATA_WIDTH/8)-1:2] * 32);
-    assign inst_rsp.error   = 1'b0;
+    assign inst_data        = adapter_rsp_data >> (inst_addr[$clog2(I_DATA_WIDTH/8)-1:2] * 32);
 
     assign obi_i_we_o       = 1'b0;
     assign obi_i_be_o       = '1;

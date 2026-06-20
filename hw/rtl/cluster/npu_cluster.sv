@@ -159,6 +159,30 @@ module npu_cluster (
     logic                      snitch_d_wide_rvalid;
     logic [OBI_DATA_WIDTH-1:0] snitch_d_wide_rdata;
 
+    // Accelerator interface wires (Snitch ↔ Spatz)
+    logic        acc_qvalid;
+    logic        acc_qready;
+    logic [31:0] acc_qdata_op;
+    logic [63:0] acc_qdata_arga;
+    logic [63:0] acc_qdata_argb;
+    logic [31:0] acc_qdata_argc;
+    logic [4:0]  acc_qid;
+    logic        acc_qaccept;
+    logic        acc_qwriteback;
+    logic        acc_qloadstore;
+    logic        acc_qexception;
+    logic        acc_qisfloat;
+    logic [1:0]  acc_mem_finished;
+    logic [1:0]  acc_mem_str_finished;
+    logic        acc_pvalid;
+    logic        acc_pready;
+    logic [4:0]  acc_pid;
+    logic [63:0] acc_pdata;
+    logic        acc_perror;
+    logic [2:0]  fpu_rnd_mode;
+    logic        fpu_fmt_mode;
+    logic [4:0]  fpu_status;
+
     snitch_core #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .I_DATA_WIDTH(OBI_DATA_WIDTH),
@@ -185,7 +209,33 @@ module npu_cluster (
         .obi_d_be_o       (snitch_d_be),
         .obi_d_wdata_o    (snitch_d_wdata),
         .obi_d_rvalid_i   (snitch_d_rvalid),
-        .obi_d_rdata_i    (snitch_d_rdata)
+        .obi_d_rdata_i    (snitch_d_rdata),
+
+        // Accelerator Offload → Spatz
+        .acc_qvalid_o     (acc_qvalid),
+        .acc_qready_i     (acc_qready),
+        .acc_qdata_op_o   (acc_qdata_op),
+        .acc_qdata_arga_o (acc_qdata_arga),
+        .acc_qdata_argb_o (acc_qdata_argb),
+        .acc_qdata_argc_o (acc_qdata_argc),
+        .acc_qid_o        (acc_qid),
+        .acc_qaccept_i    (acc_qaccept),
+        .acc_qwriteback_i (acc_qwriteback),
+        .acc_qloadstore_i (acc_qloadstore),
+        .acc_qexception_i (acc_qexception),
+        .acc_qisfloat_i   (acc_qisfloat),
+        .acc_mem_finished_i    (acc_mem_finished),
+        .acc_mem_str_finished_i(acc_mem_str_finished),
+        // Accelerator Response ← Spatz
+        .acc_pvalid_i     (acc_pvalid),
+        .acc_pready_o     (acc_pready),
+        .acc_pid_i        (acc_pid),
+        .acc_pdata_i      (acc_pdata),
+        .acc_perror_i     (acc_perror),
+        // FPU side-channel
+        .fpu_rnd_mode_o   (fpu_rnd_mode),
+        .fpu_fmt_mode_o   (fpu_fmt_mode),
+        .fpu_status_i     (fpu_status)
     );
 
     // Arbiter for I-TCM
@@ -482,17 +532,18 @@ module npu_cluster (
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (8 Masters)
+    // 5. Shared Data TCDM Interconnect (9 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 8;
+    localparam int unsigned NUM_MASTERS = 9;
     // Master 0: Snitch D-Bus
-    // Master 1: Spatz Vector Engine (Placeholder)
+    // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: DMA Engine
     // Master 3: Systolic Controller Read (I-TCDM)
     // Master 4: Systolic Controller Write Port 0 (O-TCDM)
     // Master 5: Systolic Controller Write Port 1 (O-TCDM)
     // Master 6: Systolic Controller Write Port 2 (O-TCDM)
     // Master 7: Systolic Controller Write Port 3 (O-TCDM)
+    // Master 8: Spatz Vector Engine (VLSU port 1)
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -591,12 +642,192 @@ module npu_cluster (
     assign ddata_rvalid = master_rsp[0].rvalid;
     assign ddata_rdata  = master_rsp[0].rdata;
 
-    // Master 1: Spatz Vector Engine (Phase 3B Placeholder)
-    assign master_req[1].req   = 1'b0;
-    assign master_req[1].we    = 1'b0;
-    assign master_req[1].be    = '0;
-    assign master_req[1].addr  = '0;
-    assign master_req[1].wdata = '0;
+    //=========================================================
+    // 6a. Spatz Vector Engine + TCDM-to-OBI Bridge (Master 1)
+    //=========================================================
+    // Spatz issue request matches Snitch's accelerator request channel.
+    localparam type spatz_issue_req_t = `SNITCH_ACC_REQ_CHAN_STRUCT(64, OBI_ADDR_WIDTH);
+    typedef struct packed {
+        logic accept;
+        logic writeback;
+        logic loadstore;
+        logic exception;
+        logic isfloat;
+    } spatz_issue_rsp_t;
+    localparam type spatz_rsp_t = `SNITCH_ACC_RSP_CHAN_STRUCT(64);
+
+    typedef struct packed {
+        logic [OBI_ADDR_WIDTH-1:0] addr;
+        logic                      write;
+        reqrsp_pkg::amo_op_e       amo;
+        logic [31:0]               data;
+        logic [3:0]                strb;
+        logic                      user;
+    } spatz_tcdm_req_chan_t;
+
+    typedef struct packed {
+        logic [31:0] data;
+    } spatz_tcdm_rsp_chan_t;
+
+    // Spatz VLSU TCDM memory signals (2 ports for 2-lane INT-only config)
+    localparam int unsigned SPATZ_MEM_PORTS = 2;
+    spatz_tcdm_req_chan_t [SPATZ_MEM_PORTS-1:0] spatz_mem_req;
+    logic                 [SPATZ_MEM_PORTS-1:0] spatz_mem_req_valid;
+    logic                 [SPATZ_MEM_PORTS-1:0] spatz_mem_req_ready;
+    spatz_tcdm_rsp_chan_t [SPATZ_MEM_PORTS-1:0] spatz_mem_rsp;
+    logic                 [SPATZ_MEM_PORTS-1:0] spatz_mem_rsp_valid;
+
+    // Reconstruct full reqrsp structs for Spatz issue interface
+    spatz_issue_req_t spatz_issue_req;
+    assign spatz_issue_req.addr       = snitch_pkg::SPATZ;
+    assign spatz_issue_req.data_op    = acc_qdata_op;
+    assign spatz_issue_req.data_arga  = acc_qdata_arga;
+    assign spatz_issue_req.data_argb  = acc_qdata_argb;
+    assign spatz_issue_req.data_argc  = acc_qdata_argc;
+    assign spatz_issue_req.id         = acc_qid;
+
+    spatz_issue_rsp_t spatz_issue_rsp;
+    assign acc_qaccept    = spatz_issue_rsp.accept;
+    assign acc_qwriteback = spatz_issue_rsp.writeback;
+    assign acc_qloadstore = spatz_issue_rsp.loadstore;
+    assign acc_qexception = spatz_issue_rsp.exception;
+    assign acc_qisfloat   = spatz_issue_rsp.isfloat;
+
+    // Spatz response → Snitch
+    spatz_rsp_t spatz_rsp;
+
+    // Dummy FP LSU interface (tied off — no FPU)
+    typedef struct packed {
+        logic [OBI_ADDR_WIDTH-1:0] addr;
+        logic                      write;
+        reqrsp_pkg::amo_op_e       amo;
+        logic [63:0]               data;
+        logic [7:0]                strb;
+        logic [63:0]               user;
+        reqrsp_pkg::size_t         size;
+    } spatz_dreq_chan_t;
+    typedef struct packed {
+        spatz_dreq_chan_t q;
+        logic             q_valid;
+        logic             p_ready;
+    } spatz_dreq_t;
+    typedef struct packed {
+        logic [63:0] data;
+        logic        error;
+    } spatz_drsp_chan_t;
+    typedef struct packed {
+        spatz_drsp_chan_t p;
+        logic             p_valid;
+        logic             q_ready;
+    } spatz_drsp_t;
+    spatz_dreq_t fp_lsu_mem_req;
+    spatz_drsp_t fp_lsu_mem_rsp;
+    assign fp_lsu_mem_rsp = '0;
+
+    spatz #(
+        .NrMemPorts         (SPATZ_MEM_PORTS),
+        .NumOutstandingLoads(8),
+        .RegisterRsp        (0),
+        .dreq_t             (spatz_dreq_t),
+        .drsp_t             (spatz_drsp_t),
+        .spatz_mem_req_t    (spatz_tcdm_req_chan_t),
+        .spatz_mem_rsp_t    (spatz_tcdm_rsp_chan_t),
+        .spatz_issue_req_t  (spatz_issue_req_t),
+        .spatz_issue_rsp_t  (spatz_issue_rsp_t),
+        .spatz_rsp_t        (spatz_rsp_t)
+    ) u_spatz (
+        .clk_i                   (clk_i),
+        .rst_ni                  (rst_ni),
+        .testmode_i              (1'b0),
+        .hart_id_i               (32'd0),
+        // Snitch Issue Interface
+        .issue_valid_i           (acc_qvalid),
+        .issue_ready_o           (acc_qready),
+        .issue_req_i             (spatz_issue_req),
+        .issue_rsp_o             (spatz_issue_rsp),
+        // Snitch Response Interface
+        .rsp_valid_o             (acc_pvalid),
+        .rsp_ready_i             (acc_pready),
+        .rsp_o                   (spatz_rsp),
+        // VLSU Memory Port
+        .spatz_mem_req_o         (spatz_mem_req),
+        .spatz_mem_req_valid_o   (spatz_mem_req_valid),
+        .spatz_mem_req_ready_i   (spatz_mem_req_ready),
+        .spatz_mem_rsp_i         (spatz_mem_rsp),
+        .spatz_mem_rsp_valid_i   (spatz_mem_rsp_valid),
+        .spatz_mem_finished_o    (acc_mem_finished),
+        .spatz_mem_str_finished_o(acc_mem_str_finished),
+        // FP LSU (tied off)
+        .fp_lsu_mem_req_o        (fp_lsu_mem_req),
+        .fp_lsu_mem_rsp_i        (fp_lsu_mem_rsp),
+        // FPU side-channel
+        .fpu_rnd_mode_i          (fpnew_pkg::roundmode_e'(fpu_rnd_mode)),
+        .fpu_fmt_mode_i          (fpnew_pkg::fmt_mode_t'(fpu_fmt_mode)),
+        .fpu_status_o            (fpu_status)
+    );
+
+    // Wire Spatz response back to Snitch
+    assign acc_pid    = spatz_rsp.id;
+    assign acc_pdata  = spatz_rsp.data;
+    assign acc_perror = spatz_rsp.error;
+
+    // TCDM-to-OBI Bridges for Spatz VLSU → Masters 1 and 8
+    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_req;
+    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_gnt;
+    logic [SPATZ_MEM_PORTS-1:0][OBI_ADDR_WIDTH-1:0] spatz_obi_addr;
+    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_we;
+    logic [SPATZ_MEM_PORTS-1:0][31:0]               spatz_obi_be;
+    logic [SPATZ_MEM_PORTS-1:0][255:0]              spatz_obi_wdata;
+    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_rvalid;
+    logic [SPATZ_MEM_PORTS-1:0][255:0]              spatz_obi_rdata;
+
+    for (genvar p = 0; p < SPATZ_MEM_PORTS; p++) begin : gen_spatz_tcdm_bridge
+        tcdm_to_obi_bridge #(
+            .ADDR_WIDTH(OBI_ADDR_WIDTH),
+            .DATA_WIDTH(32)  // Spatz ELEN=32 (INT-only)
+        ) u_spatz_tcdm_bridge (
+            .clk_i             (clk_i),
+            .rst_ni            (rst_ni),
+            .tcdm_req_addr_i   (spatz_mem_req[p].addr),
+            .tcdm_req_write_i  (spatz_mem_req[p].write),
+            .tcdm_req_data_i   (spatz_mem_req[p].data),
+            .tcdm_req_strb_i   (spatz_mem_req[p].strb),
+            .tcdm_req_valid_i  (spatz_mem_req_valid[p]),
+            .tcdm_req_ready_o  (spatz_mem_req_ready[p]),
+            .tcdm_rsp_data_o   (spatz_mem_rsp[p].data),
+            .tcdm_rsp_valid_o  (spatz_mem_rsp_valid[p]),
+            .obi_req_o         (spatz_obi_req[p]),
+            .obi_gnt_i         (spatz_obi_gnt[p]),
+            .obi_addr_o        (spatz_obi_addr[p]),
+            .obi_we_o          (spatz_obi_we[p]),
+            .obi_be_o          (spatz_obi_be[p]),
+            .obi_wdata_o       (spatz_obi_wdata[p]),
+            .obi_rvalid_i      (spatz_obi_rvalid[p]),
+            .obi_rdata_i       (spatz_obi_rdata[p])
+        );
+    end
+
+    // Master 1: Spatz VLSU port 0 via TCDM-to-OBI Bridge
+    assign master_req[1].req   = spatz_obi_req[0];
+    assign master_req[1].we    = spatz_obi_we[0];
+    assign master_req[1].be    = spatz_obi_be[0];
+    assign master_req[1].addr  = spatz_obi_addr[0];
+    assign master_req[1].wdata = spatz_obi_wdata[0];
+
+    assign spatz_obi_gnt[0]    = master_rsp[1].gnt;
+    assign spatz_obi_rvalid[0] = master_rsp[1].rvalid;
+    assign spatz_obi_rdata[0]  = master_rsp[1].rdata;
+
+    // Master 8: Spatz VLSU port 1 via TCDM-to-OBI Bridge
+    assign master_req[8].req   = spatz_obi_req[1];
+    assign master_req[8].we    = spatz_obi_we[1];
+    assign master_req[8].be    = spatz_obi_be[1];
+    assign master_req[8].addr  = spatz_obi_addr[1];
+    assign master_req[8].wdata = spatz_obi_wdata[1];
+
+    assign spatz_obi_gnt[1]    = master_rsp[8].gnt;
+    assign spatz_obi_rvalid[1] = master_rsp[8].rvalid;
+    assign spatz_obi_rdata[1]  = master_rsp[8].rdata;
 
     // Master 2: DMA Engine
     logic                      dma_obi_req;
