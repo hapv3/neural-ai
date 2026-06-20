@@ -27,12 +27,18 @@
 +incdir+$(REPO_ROOT)/hw/snitch_cluster/hw/snitch_fp_ss/include
 +incdir+$(REPO_ROOT)/hw/spatz/hw/ip/reqrsp_interface/include
 +incdir+$(REPO_ROOT)/hw/spatz/hw/ip/tcdm_interface/include
++incdir+$(REPO_ROOT)/hw/obi/include
++incdir+$(REPO_ROOT)/hw/register_interface/include
++incdir+$(REPO_ROOT)/hw/axi_stream/include
++incdir+$(REPO_ROOT)/hw/idma/src/include
++incdir+$(REPO_ROOT)/hw/idma/target/rtl/include
 
 // -----------------------------------------------------------
 // 1. AXI package + simulation model (needed by tb_npu_cluster)
 // -----------------------------------------------------------
 $(REPO_ROOT)/hw/axi/src/axi_pkg.sv
 $(REPO_ROOT)/hw/axi/src/axi_sim_mem.sv
+$(REPO_ROOT)/hw/obi/src/obi_pkg.sv
 $(REPO_ROOT)/hw/spatz/hw/ip/reqrsp_interface/src/reqrsp_pkg.sv
 
 // -----------------------------------------------------------
@@ -61,6 +67,8 @@ $(REPO_ROOT)/hw/common_cells/src/stream_register.sv
 $(REPO_ROOT)/hw/common_cells/src/id_queue.sv
 $(REPO_ROOT)/hw/common_cells/src/rr_arb_tree.sv
 $(REPO_ROOT)/hw/common_cells/src/delta_counter.sv
+$(REPO_ROOT)/hw/common_cells/src/counter.sv
+$(REPO_ROOT)/hw/common_cells/src/stream_fifo_optimal_wrap.sv
 $(REPO_ROOT)/hw/common_cells/src/deprecated/rrarbiter.sv
 $(REPO_ROOT)/hw/common_cells/src/deprecated/find_first_one.sv
 
@@ -100,9 +108,37 @@ $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to5.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_narrow_to_wide.sv
 $(REPO_ROOT)/hw/rtl/cluster/axi_lite_to_obi.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_ctrl_regs.sv
-$(REPO_ROOT)/hw/rtl/cluster/npu_idma_ctrl_mm.sv
+$(REPO_ROOT)/hw/rtl/cluster/cv32e40x_pkg_stub.sv
+$(REPO_ROOT)/hw/idma/src/idma_pkg.sv
+$(REPO_ROOT)/hw/magia/hw/mesh/magia_pkg.sv
+$(REPO_ROOT)/hw/magia/hw/tile/magia_tile_pkg.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_axil_read.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_axil_write.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_axi_read.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_axi_write.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_axis_read.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_axis_write.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_channel_coupler.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_dataflow_element.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_error_handler.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_init_read.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_init_write.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_legalizer_page_splitter.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_legalizer_pow2_splitter.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_obi_read.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_obi_write.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_tilelink_read.sv
+$(REPO_ROOT)/hw/idma/src/backend/idma_tilelink_write.sv
+$(REPO_ROOT)/hw/idma/src/midend/idma_nd_midend.sv
+$(REPO_ROOT)/hw/idma/src/frontend/idma_transfer_id_gen.sv
+$(REPO_ROOT)/hw/idma/target/rtl/idma_generated.sv
+$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_arb.sv
+$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_ext.sv
+$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg.sv
+$(REPO_ROOT)/hw/magia/hw/tile/idma_obi_ctrl_decoder.sv
+$(REPO_ROOT)/hw/magia/hw/tile/idma_axi_obi_transfer_ch.sv
+$(REPO_ROOT)/hw/rtl/cluster/npu_pulp_idma_ctrl_mm.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
-$(REPO_ROOT)/hw/rtl/dma/dma_engine.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
 $(REPO_ROOT)/hw/rtl/systolic/npu_systolic_array.sv
 $(REPO_ROOT)/hw/rtl/cluster/snitch_core.sv

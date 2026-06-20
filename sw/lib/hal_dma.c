@@ -2,18 +2,18 @@
 
 static uint32_t last_dma_dir;
 static uint32_t last_dma_id;
-static uint32_t last_dma_legacy;
+static uint32_t last_dma_cpu_copy;
 
 static uint32_t dma_is_l1_addr(uint32_t addr) {
     return ((addr >> 24) == 0x10u);
 }
 
-static void legacy_dma_start_transfer(uint32_t src_addr, uint32_t dst_addr, uint32_t length) {
-    REG_WRITE(REG_DMA_SRC, src_addr);
-    REG_WRITE(REG_DMA_DST, dst_addr);
-    REG_WRITE(REG_DMA_LEN, length);
-    REG_WRITE(REG_DMA_DONE, 0);
-    REG_WRITE(REG_DMA_START, 1);
+static void cpu_copy_transfer(uint32_t src_addr, uint32_t dst_addr, uint32_t length) {
+    volatile uint8_t *dst = (volatile uint8_t *)dst_addr;
+    volatile const uint8_t *src = (volatile const uint8_t *)src_addr;
+    for (uint32_t i = 0; i < length; i++) {
+        dst[i] = src[i];
+    }
 }
 
 void dma_start_transfer(uint32_t src_addr, uint32_t dst_addr, uint32_t length) {
@@ -21,12 +21,14 @@ void dma_start_transfer(uint32_t src_addr, uint32_t dst_addr, uint32_t length) {
     uint32_t dst_is_l1 = dma_is_l1_addr(dst_addr);
 
     if (src_is_l1 == dst_is_l1) {
-        last_dma_legacy = 1;
-        legacy_dma_start_transfer(src_addr, dst_addr, length);
+        last_dma_cpu_copy = 1;
+        if (src_is_l1) {
+            cpu_copy_transfer(src_addr, dst_addr, length);
+        }
         return;
     }
 
-    last_dma_legacy = 0;
+    last_dma_cpu_copy = 0;
     last_dma_dir = src_is_l1 ? IDMA_DIR_OBI2AXI : IDMA_DIR_AXI2OBI;
 
     REG_WRITE(IDMA_CONF(last_dma_dir), 0);
@@ -44,10 +46,7 @@ void dma_start_transfer(uint32_t src_addr, uint32_t dst_addr, uint32_t length) {
 }
 
 void dma_wait_done(void) {
-    if (last_dma_legacy) {
-        while(REG_READ(REG_DMA_DONE) == 0) {
-        }
-        REG_WRITE(REG_DMA_DONE, 0);
+    if (last_dma_cpu_copy) {
         return;
     }
 

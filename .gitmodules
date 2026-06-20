@@ -25,3 +25,12 @@
 [submodule "hw/magia"]
 	path = hw/magia
 	url = https://github.com/pulp-platform/MAGIA.git
+[submodule "hw/obi"]
+	path = hw/obi
+	url = https://github.com/pulp-platform/obi.git
+[submodule "hw/register_interface"]
+	path = hw/register_interface
+	url = https://github.com/pulp-platform/register_interface.git
+[submodule "hw/axi_stream"]
+	path = hw/axi_stream
+	url = https://github.com/pulp-platform/axi_stream.git
