@@ -17,13 +17,59 @@
 
 // 4. MMIO Control Registers (64 KB)
 #define NPU_CTRL_BASE   0x20000000
+#define NPU_IDMA_BASE   (NPU_CTRL_BASE + 0x1000)
 
-// DMA Configuration Registers
+// 5. External L2 / simulation memory window
+#define NPU_L2_BASE     0x80000000
+
+// Legacy DMA Configuration Registers
 #define REG_DMA_START   (NPU_CTRL_BASE + 0x00)
 #define REG_DMA_SRC     (NPU_CTRL_BASE + 0x20)
 #define REG_DMA_DST     (NPU_CTRL_BASE + 0x40)
 #define REG_DMA_LEN     (NPU_CTRL_BASE + 0x60)
 #define REG_DMA_DONE    (NPU_CTRL_BASE + 0x80)
+
+// iDMA-style MMIO register window
+#define IDMA_DIR_AXI2OBI            0u
+#define IDMA_DIR_OBI2AXI            1u
+#define IDMA_DIR_OFFSET             0x200u
+
+#define IDMA_CONF_OFFSET            0x000u
+#define IDMA_STATUS_OFFSET          0x004u
+#define IDMA_NEXT_ID_OFFSET         0x044u
+#define IDMA_DONE_ID_OFFSET         0x084u
+#define IDMA_DST_ADDR_LOW_OFFSET    0x0D0u
+#define IDMA_SRC_ADDR_LOW_OFFSET    0x0D8u
+#define IDMA_LENGTH_LOW_OFFSET      0x0E0u
+#define IDMA_DST_STRIDE_2_OFFSET    0x0E8u
+#define IDMA_SRC_STRIDE_2_OFFSET    0x0F0u
+#define IDMA_REPS_2_OFFSET          0x0F8u
+#define IDMA_DST_STRIDE_3_OFFSET    0x100u
+#define IDMA_SRC_STRIDE_3_OFFSET    0x108u
+#define IDMA_REPS_3_OFFSET          0x110u
+
+#define IDMA_DIR_BASE(dir)          (NPU_IDMA_BASE + ((dir) ? IDMA_DIR_OFFSET : 0u))
+#define IDMA_CONF(dir)              (IDMA_DIR_BASE(dir) + IDMA_CONF_OFFSET)
+#define IDMA_STATUS(dir)            (IDMA_DIR_BASE(dir) + IDMA_STATUS_OFFSET)
+#define IDMA_NEXT_ID(dir)           (IDMA_DIR_BASE(dir) + IDMA_NEXT_ID_OFFSET)
+#define IDMA_DONE_ID(dir)           (IDMA_DIR_BASE(dir) + IDMA_DONE_ID_OFFSET)
+#define IDMA_DST_ADDR_LOW(dir)      (IDMA_DIR_BASE(dir) + IDMA_DST_ADDR_LOW_OFFSET)
+#define IDMA_SRC_ADDR_LOW(dir)      (IDMA_DIR_BASE(dir) + IDMA_SRC_ADDR_LOW_OFFSET)
+#define IDMA_LENGTH_LOW(dir)        (IDMA_DIR_BASE(dir) + IDMA_LENGTH_LOW_OFFSET)
+#define IDMA_DST_STRIDE_2(dir)      (IDMA_DIR_BASE(dir) + IDMA_DST_STRIDE_2_OFFSET)
+#define IDMA_SRC_STRIDE_2(dir)      (IDMA_DIR_BASE(dir) + IDMA_SRC_STRIDE_2_OFFSET)
+#define IDMA_REPS_2(dir)            (IDMA_DIR_BASE(dir) + IDMA_REPS_2_OFFSET)
+#define IDMA_DST_STRIDE_3(dir)      (IDMA_DIR_BASE(dir) + IDMA_DST_STRIDE_3_OFFSET)
+#define IDMA_SRC_STRIDE_3(dir)      (IDMA_DIR_BASE(dir) + IDMA_SRC_STRIDE_3_OFFSET)
+#define IDMA_REPS_3(dir)            (IDMA_DIR_BASE(dir) + IDMA_REPS_3_OFFSET)
+
+// Systolic GEMM32 control registers
+#define REG_SYS_W_PTR   (NPU_CTRL_BASE + 0x100)
+#define REG_SYS_I_PTR   (NPU_CTRL_BASE + 0x104)
+#define REG_SYS_O_PTR   (NPU_CTRL_BASE + 0x108)
+#define REG_SYS_DIM_M   (NPU_CTRL_BASE + 0x10C)
+#define REG_SYS_START   (NPU_CTRL_BASE + 0x110)
+#define REG_SYS_DONE    (NPU_CTRL_BASE + 0x114)
 
 // Register Access Macros
 #define REG_WRITE(addr, val) *((volatile uint32_t*)(addr)) = (val)

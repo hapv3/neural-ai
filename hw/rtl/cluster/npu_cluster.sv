@@ -331,6 +331,24 @@ module npu_cluster (
     logic                      reg_rvalid;
     logic [OBI_DATA_WIDTH-1:0] reg_rdata;
 
+    logic                      ctrl_req;
+    logic                      ctrl_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] ctrl_addr;
+    logic                      ctrl_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] ctrl_be;
+    logic [OBI_DATA_WIDTH-1:0] ctrl_wdata;
+    logic                      ctrl_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] ctrl_rdata;
+
+    logic                      idma_mm_req;
+    logic                      idma_mm_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] idma_mm_addr;
+    logic                      idma_mm_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] idma_mm_be;
+    logic [OBI_DATA_WIDTH-1:0] idma_mm_wdata;
+    logic                      idma_mm_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] idma_mm_rdata;
+
     // System Arbiter (AXI Lite vs Snitch D-Bus)
     logic                      sys_req;
     logic                      sys_gnt;
@@ -489,11 +507,72 @@ module npu_cluster (
     //=========================================================
     // 4. Cluster Control Registers (MMIO)
     //=========================================================
+    obi_demux_1to4 #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .M0_BASE (32'h2000_0000), .M0_MASK (32'hFFFF_F000), // Cluster control
+        .M1_BASE (32'h2000_1000), .M1_MASK (32'hFFFF_F000), // iDMA-style control
+        .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Reserved
+        .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000)  // Reserved
+    ) u_mmio_demux_1to4 (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .slv_req_i   (reg_req),
+        .slv_gnt_o   (reg_gnt),
+        .slv_addr_i  (reg_addr),
+        .slv_we_i    (reg_we),
+        .slv_be_i    (reg_be),
+        .slv_wdata_i (reg_wdata),
+        .slv_rvalid_o(reg_rvalid),
+        .slv_rdata_o (reg_rdata),
+
+        .m0_req_o     (ctrl_req),
+        .m0_gnt_i     (ctrl_gnt),
+        .m0_addr_o    (ctrl_addr),
+        .m0_we_o      (ctrl_we),
+        .m0_be_o      (ctrl_be),
+        .m0_wdata_o   (ctrl_wdata),
+        .m0_rvalid_i  (ctrl_rvalid),
+        .m0_rdata_i   (ctrl_rdata),
+
+        .m1_req_o     (idma_mm_req),
+        .m1_gnt_i     (idma_mm_gnt),
+        .m1_addr_o    (idma_mm_addr),
+        .m1_we_o      (idma_mm_we),
+        .m1_be_o      (idma_mm_be),
+        .m1_wdata_o   (idma_mm_wdata),
+        .m1_rvalid_i  (idma_mm_rvalid),
+        .m1_rdata_i   (idma_mm_rdata),
+
+        .m2_req_o     (),
+        .m2_gnt_i     (1'b1),
+        .m2_addr_o    (),
+        .m2_we_o      (),
+        .m2_be_o      (),
+        .m2_wdata_o   (),
+        .m2_rvalid_i  (1'b1),
+        .m2_rdata_i   ('0),
+
+        .m3_req_o     (),
+        .m3_gnt_i     (1'b1),
+        .m3_addr_o    (),
+        .m3_we_o      (),
+        .m3_be_o      (),
+        .m3_wdata_o   (),
+        .m3_rvalid_i  (1'b1),
+        .m3_rdata_i   ('0)
+    );
+
     logic        cfg_dma_start;
     logic [31:0] cfg_dma_src_addr;
     logic [31:0] cfg_dma_dst_addr;
     logic [31:0] cfg_dma_length;
     logic        cfg_dma_done;
+
+    logic        cfg_idma_start;
+    logic [31:0] cfg_idma_src_addr;
+    logic [31:0] cfg_idma_dst_addr;
+    logic [31:0] cfg_idma_length;
 
     logic        cfg_sys_start;
     logic [31:0] cfg_sys_w_ptr;
@@ -508,14 +587,14 @@ module npu_cluster (
     ) u_ctrl_regs (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
-        .req_i              (reg_req),
-        .gnt_o              (reg_gnt),
-        .addr_i             (reg_addr),
-        .we_i               (reg_we),
-        .be_i               (reg_be),
-        .wdata_i            (reg_wdata),
-        .rvalid_o           (reg_rvalid),
-        .rdata_o            (reg_rdata),
+        .req_i              (ctrl_req),
+        .gnt_o              (ctrl_gnt),
+        .addr_i             (ctrl_addr),
+        .we_i               (ctrl_we),
+        .be_i               (ctrl_be),
+        .wdata_i            (ctrl_wdata),
+        .rvalid_o           (ctrl_rvalid),
+        .rdata_o            (ctrl_rdata),
 
         .cfg_dma_start_o    (cfg_dma_start),
         .cfg_dma_src_addr_o (cfg_dma_src_addr),
@@ -529,6 +608,29 @@ module npu_cluster (
         .cfg_sys_ofm_ptr_o    (cfg_sys_o_ptr),
         .cfg_sys_dim_m_o      (cfg_sys_dim_m),
         .cfg_sys_done_i       (cfg_sys_done)
+    );
+
+    npu_idma_ctrl_mm #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .BASE_ADDR (32'h2000_1000)
+    ) u_idma_ctrl_mm (
+        .clk_i              (clk_i),
+        .rst_ni             (rst_ni),
+        .req_i              (idma_mm_req),
+        .gnt_o              (idma_mm_gnt),
+        .addr_i             (idma_mm_addr),
+        .we_i               (idma_mm_we),
+        .be_i               (idma_mm_be),
+        .wdata_i            (idma_mm_wdata),
+        .rvalid_o           (idma_mm_rvalid),
+        .rdata_o            (idma_mm_rdata),
+
+        .cfg_dma_start_o    (cfg_idma_start),
+        .cfg_dma_src_addr_o (cfg_idma_src_addr),
+        .cfg_dma_dst_addr_o (cfg_idma_dst_addr),
+        .cfg_dma_length_o   (cfg_idma_length),
+        .cfg_dma_done_i     (cfg_dma_done)
     );
 
     //=========================================================
@@ -846,10 +948,10 @@ module npu_cluster (
     ) u_dma_engine (
         .clk_i          (clk_i),
         .rst_ni         (rst_ni),
-        .cfg_src_addr_i (cfg_dma_src_addr),
-        .cfg_dst_addr_i (cfg_dma_dst_addr),
-        .cfg_length_i   (cfg_dma_length),
-        .cfg_start_i    (cfg_dma_start),
+        .cfg_src_addr_i (cfg_idma_start ? cfg_idma_src_addr : cfg_dma_src_addr),
+        .cfg_dst_addr_i (cfg_idma_start ? cfg_idma_dst_addr : cfg_dma_dst_addr),
+        .cfg_length_i   (cfg_idma_start ? cfg_idma_length   : cfg_dma_length),
+        .cfg_start_i    (cfg_dma_start | cfg_idma_start),
         .cfg_done_o     (cfg_dma_done),
 
         .axi_aw_addr_o  (axi_aw_addr_o),

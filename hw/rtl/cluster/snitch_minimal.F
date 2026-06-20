@@ -100,6 +100,7 @@ $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to5.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_narrow_to_wide.sv
 $(REPO_ROOT)/hw/rtl/cluster/axi_lite_to_obi.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_ctrl_regs.sv
+$(REPO_ROOT)/hw/rtl/cluster/npu_idma_ctrl_mm.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/dma/dma_engine.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
