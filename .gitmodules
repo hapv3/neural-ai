@@ -19,3 +19,9 @@
 [submodule "hw/riscv-dbg"]
 	path = hw/riscv-dbg
 	url = https://github.com/pulp-platform/riscv-dbg.git
+[submodule "hw/idma"]
+	path = hw/idma
+	url = https://github.com/pulp-platform/iDMA.git
+[submodule "hw/magia"]
+	path = hw/magia
+	url = https://github.com/pulp-platform/MAGIA.git
