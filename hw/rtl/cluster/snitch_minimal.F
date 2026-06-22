@@ -62,6 +62,7 @@ $(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv
 $(REPO_ROOT)/hw/common_cells/src/spill_register_flushable.sv
 $(REPO_ROOT)/hw/common_cells/src/spill_register.sv
 $(REPO_ROOT)/hw/common_cells/src/stream_fifo.sv
+$(REPO_ROOT)/hw/common_cells/src/passthrough_stream_fifo.sv
 $(REPO_ROOT)/hw/common_cells/src/fall_through_register.sv
 $(REPO_ROOT)/hw/common_cells/src/stream_register.sv
 $(REPO_ROOT)/hw/common_cells/src/id_queue.sv
@@ -108,10 +109,7 @@ $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to5.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_narrow_to_wide.sv
 $(REPO_ROOT)/hw/rtl/cluster/axi_lite_to_obi.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_ctrl_regs.sv
-$(REPO_ROOT)/hw/rtl/cluster/cv32e40x_pkg_stub.sv
 $(REPO_ROOT)/hw/idma/src/idma_pkg.sv
-$(REPO_ROOT)/hw/magia/hw/mesh/magia_pkg.sv
-$(REPO_ROOT)/hw/magia/hw/tile/magia_tile_pkg.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_axil_read.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_axil_write.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_axi_read.sv
@@ -129,14 +127,7 @@ $(REPO_ROOT)/hw/idma/src/backend/idma_obi_read.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_obi_write.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_tilelink_read.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_tilelink_write.sv
-$(REPO_ROOT)/hw/idma/src/midend/idma_nd_midend.sv
-$(REPO_ROOT)/hw/idma/src/frontend/idma_transfer_id_gen.sv
 $(REPO_ROOT)/hw/idma/target/rtl/idma_generated.sv
-$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_arb.sv
-$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_ext.sv
-$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg.sv
-$(REPO_ROOT)/hw/magia/hw/tile/idma_obi_ctrl_decoder.sv
-$(REPO_ROOT)/hw/magia/hw/tile/idma_axi_obi_transfer_ch.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_pulp_idma_ctrl_mm.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
