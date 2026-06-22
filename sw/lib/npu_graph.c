@@ -1,5 +1,5 @@
-#include "hal_dma.h"
 #include "hal_systolic.h"
+#include "idma_mm_utils.h"
 #include "npu_graph.h"
 #include "spatz_ops.h"
 
@@ -14,6 +14,14 @@ static const npu_tensor_t *get_tensor(const npu_graph_t *graph, uint32_t index) 
         return 0;
     }
     return &graph->tensors[index];
+}
+
+static uint32_t npu_graph_dma_copy_wait(uint32_t dst_addr, uint32_t src_addr, uint32_t bytes) {
+    if (!idma_memcpy_blocking(src_addr, dst_addr, bytes)) {
+        return NPU_GRAPH_ERR_DMA;
+    }
+
+    return NPU_GRAPH_OK;
 }
 
 void npu_im2col3x3s1p1_c3_pad32(const int8_t *input_hwc, int8_t *output_row32) {
@@ -55,14 +63,18 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
         switch (layer->op) {
         case NPU_OP_DMA_IN:
             if (!dst) return NPU_GRAPH_ERR_BAD_TENSOR;
-            dma_start_transfer(layer->l2_addr, dst->addr, layer->bytes);
-            dma_wait_done();
+            {
+                uint32_t dma_status = npu_graph_dma_copy_wait(dst->addr, layer->l2_addr, layer->bytes);
+                if (dma_status != NPU_GRAPH_OK) return dma_status;
+            }
             break;
 
         case NPU_OP_DMA_OUT:
             if (!src) return NPU_GRAPH_ERR_BAD_TENSOR;
-            dma_start_transfer(src->addr, layer->l2_addr, layer->bytes);
-            dma_wait_done();
+            {
+                uint32_t dma_status = npu_graph_dma_copy_wait(layer->l2_addr, src->addr, layer->bytes);
+                if (dma_status != NPU_GRAPH_OK) return dma_status;
+            }
             break;
 
         case NPU_OP_IM2COL3X3S1P1_C3_PAD32:

@@ -56,7 +56,8 @@ typedef struct {
 enum {
     NPU_GRAPH_OK = 0,
     NPU_GRAPH_ERR_BAD_OP = 0xBAD10001,
-    NPU_GRAPH_ERR_BAD_TENSOR = 0xBAD10002
+    NPU_GRAPH_ERR_BAD_TENSOR = 0xBAD10002,
+    NPU_GRAPH_ERR_DMA = 0xBAD10003
 };
 
 uint32_t npu_graph_run(const npu_graph_t *graph);

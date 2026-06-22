@@ -73,227 +73,290 @@ module npu_pulp_idma_ctrl_mm #(
 
     localparam int unsigned STRB_WIDTH = DATA_WIDTH / 8;
     localparam int unsigned WORDS_PER_BEAT = DATA_WIDTH / 32;
-    localparam logic [11:0] DIR_OFFSET       = 12'h200;
-    localparam logic [11:0] REG_CONF         = 12'h000;
-    localparam logic [11:0] REG_STATUS_0     = 12'h004;
-    localparam logic [11:0] REG_NEXT_ID_0    = 12'h044;
-    localparam logic [11:0] REG_DONE_ID_0    = 12'h084;
-    localparam logic [11:0] REG_DST_ADDR_LOW = 12'h0D0;
-    localparam logic [11:0] REG_SRC_ADDR_LOW = 12'h0D8;
-    localparam logic [11:0] REG_LENGTH_LOW   = 12'h0E0;
-    localparam logic [11:0] REG_DST_STRIDE_2 = 12'h0E8;
-    localparam logic [11:0] REG_SRC_STRIDE_2 = 12'h0F0;
-    localparam logic [11:0] REG_REPS_2       = 12'h0F8;
-    localparam logic [11:0] REG_DST_STRIDE_3 = 12'h100;
-    localparam logic [11:0] REG_SRC_STRIDE_3 = 12'h108;
-    localparam logic [11:0] REG_REPS_3       = 12'h110;
+    localparam int unsigned NUM_DIMS = 3;
+    localparam logic [11:0] DIR_OFFSET = 12'h200;
+    localparam logic [NUM_DIMS-1:0][31:0] REP_WIDTHS = '{default: 32'd32};
 
-    typedef enum logic {
-        DIR_AXI2OBI = 1'b0,
-        DIR_OBI2AXI = 1'b1
-    } dir_e;
+    typedef struct packed {
+        logic [31:0] addr;
+        logic        write;
+        logic [31:0] wdata;
+        logic [3:0]  wstrb;
+        logic        valid;
+    } reg_req_t;
 
-    logic [1:0][31:0] conf_q;
-    logic [1:0][31:0] src_addr_q;
-    logic [1:0][31:0] dst_addr_q;
-    logic [1:0][31:0] length_q;
-    logic [1:0][31:0] dst_stride_2_q;
-    logic [1:0][31:0] src_stride_2_q;
-    logic [1:0][31:0] reps_2_q;
-    logic [1:0][31:0] dst_stride_3_q;
-    logic [1:0][31:0] src_stride_3_q;
-    logic [1:0][31:0] reps_3_q;
-    logic [1:0][31:0] next_id_q;
-    logic [1:0][31:0] done_id_q;
-    logic [1:0][31:0] active_id_q;
-    logic [1:0]       req_pending_q;
-    logic [31:0]      r_addr_q;
+    typedef struct packed {
+        logic [31:0] rdata;
+        logic        error;
+        logic        ready;
+    } reg_rsp_t;
 
-    logic a2o_req_ready;
-    logic a2o_rsp_valid;
-    logic a2o_rsp_error;
-    logic a2o_rsp_last;
-    logic o2a_req_ready;
-    logic o2a_rsp_valid;
-    logic o2a_rsp_error;
-    logic o2a_rsp_last;
+    typedef struct packed {
+        idma_pkg::protocol_e        src_protocol;
+        idma_pkg::protocol_e        dst_protocol;
+        logic                       axi_id;
+        idma_pkg::axi_options_t     src;
+        idma_pkg::axi_options_t     dst;
+        idma_pkg::backend_options_t beo;
+        logic                       last;
+    } idma_options_t;
+
+    typedef struct packed {
+        logic [31:0]   length;
+        logic [31:0]   src_addr;
+        logic [31:0]   dst_addr;
+        logic          user;
+        idma_options_t opt;
+    } idma_req_t;
+
+    typedef struct packed {
+        axi_pkg::resp_t      cause;
+        idma_pkg::err_type_t err_type;
+        logic [31:0]         burst_addr;
+    } idma_err_payload_t;
+
+    typedef struct packed {
+        logic              last;
+        logic              error;
+        idma_err_payload_t pld;
+    } idma_rsp_t;
+
+    typedef struct packed {
+        logic [31:0] reps;
+        logic [31:0] src_strides;
+        logic [31:0] dst_strides;
+    } idma_d_req_t;
+
+    typedef struct packed {
+        idma_req_t burst_req;
+        idma_d_req_t [NUM_DIMS-2:0] d_req;
+    } idma_nd_req_t;
+
+    reg_req_t a2o_reg_req;
+    reg_rsp_t a2o_reg_rsp;
+    reg_req_t [0:0] a2o_reg_req_arr;
+    reg_rsp_t [0:0] a2o_reg_rsp_arr;
+
+    reg_req_t o2a_reg_req;
+    reg_rsp_t o2a_reg_rsp;
+    reg_req_t [0:0] o2a_reg_req_arr;
+    reg_rsp_t [0:0] o2a_reg_rsp_arr;
+
+    idma_nd_req_t a2o_front_req;
+    logic         a2o_front_valid;
+    logic         a2o_front_ready;
+    idma_nd_req_t a2o_fe_req;
+    logic         a2o_fe_valid;
+    logic         a2o_fe_ready;
+    idma_req_t    a2o_be_req;
+    logic         a2o_be_req_valid;
+    logic         a2o_be_req_ready;
+    idma_rsp_t    a2o_be_rsp;
+    logic         a2o_be_rsp_valid;
+    logic         a2o_be_rsp_ready;
+    logic         a2o_fe_rsp_valid;
+    logic         a2o_me_busy;
+    logic [31:0]  a2o_next_id;
+    logic [31:0]  a2o_done_id;
     idma_pkg::idma_busy_t a2o_busy;
+    idma_pkg::idma_busy_t [0:0] a2o_busy_arr;
+    logic [0:0][31:0] a2o_done_id_arr;
+    logic [0:0]       a2o_me_busy_arr;
+
+    idma_nd_req_t o2a_front_req;
+    logic         o2a_front_valid;
+    logic         o2a_front_ready;
+    idma_nd_req_t o2a_fe_req;
+    logic         o2a_fe_valid;
+    logic         o2a_fe_ready;
+    idma_req_t    o2a_be_req;
+    logic         o2a_be_req_valid;
+    logic         o2a_be_req_ready;
+    idma_rsp_t    o2a_be_rsp;
+    logic         o2a_be_rsp_valid;
+    logic         o2a_be_rsp_ready;
+    logic         o2a_fe_rsp_valid;
+    logic         o2a_me_busy;
+    logic [31:0]  o2a_next_id;
+    logic [31:0]  o2a_done_id;
     idma_pkg::idma_busy_t o2a_busy;
+    idma_pkg::idma_busy_t [0:0] o2a_busy_arr;
+    logic [0:0][31:0] o2a_done_id_arr;
+    logic [0:0]       o2a_me_busy_arr;
 
-    logic a2o_done;
-    logic o2a_done;
-    logic a2o_accept;
-    logic o2a_accept;
-    logic start_req;
-    logic start_dir;
-
-    assign gnt_o = 1'b1;
-    assign a2o_accept = req_pending_q[DIR_AXI2OBI] && a2o_req_ready;
-    assign o2a_accept = req_pending_q[DIR_OBI2AXI] && o2a_req_ready;
-    assign a2o_done = a2o_rsp_valid && a2o_rsp_last;
-    assign o2a_done = o2a_rsp_valid && o2a_rsp_last;
-
-    assign irq_a2o_busy_o  = req_pending_q[DIR_AXI2OBI] || (|a2o_busy);
-    assign irq_a2o_start_o = a2o_accept;
-    assign irq_a2o_done_o  = a2o_done;
-    assign irq_a2o_error_o = a2o_rsp_valid && a2o_rsp_error;
-    assign irq_o2a_busy_o  = req_pending_q[DIR_OBI2AXI] || (|o2a_busy);
-    assign irq_o2a_start_o = o2a_accept;
-    assign irq_o2a_done_o  = o2a_done;
-    assign irq_o2a_error_o = o2a_rsp_valid && o2a_rsp_error;
+    logic [$clog2(WORDS_PER_BEAT)-1:0] mmio_word_idx;
+    logic [31:0]                       mmio_word_addr;
+    logic [31:0]                       mmio_local_addr;
+    logic                              mmio_dir;
+    logic [31:0]                       mmio_rdata_word;
 
     function automatic logic decode_dir(input logic [31:0] exact_addr);
         decode_dir = (exact_addr >= (BASE_ADDR + DIR_OFFSET));
     endfunction
 
-    function automatic logic [11:0] decode_offset(input logic [31:0] exact_addr);
+    function automatic logic [31:0] decode_local_addr(input logic [31:0] exact_addr);
         logic direction;
         begin
             direction = decode_dir(exact_addr);
-            decode_offset = direction
-                ? exact_addr[11:0] - BASE_ADDR[11:0] - DIR_OFFSET
-                : exact_addr[11:0] - BASE_ADDR[11:0];
+            decode_local_addr = direction
+                ? exact_addr - BASE_ADDR - DIR_OFFSET
+                : exact_addr - BASE_ADDR;
         end
     endfunction
 
-    function automatic logic can_start_addr(input logic [31:0] exact_addr);
-        logic direction;
-        begin
-            direction = decode_dir(exact_addr);
-            can_start_addr = (decode_offset(exact_addr) == REG_NEXT_ID_0) &&
-                             !req_pending_q[direction] &&
-                             (length_q[direction] != 32'd0);
+    always_comb begin
+        mmio_word_idx = addr_i[4:2];
+        for (int i = 0; i < WORDS_PER_BEAT; i++) begin
+            if (|be_i[i*4 +: 4]) begin
+                mmio_word_idx = i[$clog2(WORDS_PER_BEAT)-1:0];
+            end
         end
-    endfunction
+        mmio_word_addr = (addr_i & 32'hFFFF_FFE0) + (32'(mmio_word_idx) << 2);
+        mmio_local_addr = decode_local_addr(mmio_word_addr);
+        mmio_dir = decode_dir(mmio_word_addr);
+    end
+
+    always_comb begin
+        a2o_reg_req = '0;
+        a2o_reg_req.addr = mmio_local_addr;
+        a2o_reg_req.write = we_i;
+        a2o_reg_req.wdata = wdata_i[mmio_word_idx*32 +: 32];
+        a2o_reg_req.wstrb = we_i ? be_i[mmio_word_idx*4 +: 4] : 4'hf;
+        a2o_reg_req.valid = req_i && !mmio_dir;
+
+        o2a_reg_req = '0;
+        o2a_reg_req.addr = mmio_local_addr;
+        o2a_reg_req.write = we_i;
+        o2a_reg_req.wdata = wdata_i[mmio_word_idx*32 +: 32];
+        o2a_reg_req.wstrb = we_i ? be_i[mmio_word_idx*4 +: 4] : 4'hf;
+        o2a_reg_req.valid = req_i && mmio_dir;
+
+        a2o_reg_req_arr[0] = a2o_reg_req;
+        o2a_reg_req_arr[0] = o2a_reg_req;
+        a2o_reg_rsp = a2o_reg_rsp_arr[0];
+        o2a_reg_rsp = o2a_reg_rsp_arr[0];
+    end
+
+    assign gnt_o = req_i ? (mmio_dir ? o2a_reg_rsp.ready : a2o_reg_rsp.ready) : 1'b1;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-            conf_q         <= '0;
-            src_addr_q     <= '0;
-            dst_addr_q     <= '0;
-            length_q       <= '0;
-            dst_stride_2_q <= '0;
-            src_stride_2_q <= '0;
-            reps_2_q       <= {32'd1, 32'd1};
-            dst_stride_3_q <= '0;
-            src_stride_3_q <= '0;
-            reps_3_q       <= {32'd1, 32'd1};
-            next_id_q      <= {32'd1, 32'd1};
-            done_id_q      <= '0;
-            active_id_q    <= '0;
-            req_pending_q  <= '0;
-            r_addr_q       <= '0;
-            rvalid_o       <= 1'b0;
+            rvalid_o <= 1'b0;
+            rdata_o <= '0;
         end else begin
-            if (a2o_accept) begin
-                req_pending_q[DIR_AXI2OBI] <= 1'b0;
-                next_id_q[DIR_AXI2OBI] <= next_id_q[DIR_AXI2OBI] + 32'd1;
-            end
-            if (o2a_accept) begin
-                req_pending_q[DIR_OBI2AXI] <= 1'b0;
-                next_id_q[DIR_OBI2AXI] <= next_id_q[DIR_OBI2AXI] + 32'd1;
-            end
-
-            if (a2o_done) begin
-                done_id_q[DIR_AXI2OBI] <= active_id_q[DIR_AXI2OBI];
-            end
-            if (o2a_done) begin
-                done_id_q[DIR_OBI2AXI] <= active_id_q[DIR_OBI2AXI];
-            end
-
-            if (start_req) begin
-                req_pending_q[start_dir] <= 1'b1;
-                active_id_q[start_dir] <= next_id_q[start_dir];
-                done_id_q[start_dir] <= 32'd0;
-            end
-
+            rvalid_o <= req_i && gnt_o;
+            rdata_o <= '0;
             if (req_i && gnt_o) begin
-                if (we_i) begin
-                    for (int i = 0; i < WORDS_PER_BEAT; i++) begin
-                        if (be_i[i*4 +: 4] != 4'b0000) begin
-                            logic [31:0] exact_addr;
-                            logic        direction;
-                            logic [11:0] offset;
-                            logic [31:0] wdata_word;
-
-                            exact_addr = (addr_i & 32'hFFFF_FFE0) + (i * 4);
-                            direction = decode_dir(exact_addr);
-                            offset = decode_offset(exact_addr);
-                            wdata_word = wdata_i[i*32 +: 32];
-
-                            case (offset)
-                                REG_CONF:         conf_q[direction]         <= wdata_word;
-                                REG_DST_ADDR_LOW: dst_addr_q[direction]     <= wdata_word;
-                                REG_SRC_ADDR_LOW: src_addr_q[direction]     <= wdata_word;
-                                REG_LENGTH_LOW:   length_q[direction]       <= wdata_word;
-                                REG_DST_STRIDE_2: dst_stride_2_q[direction] <= wdata_word;
-                                REG_SRC_STRIDE_2: src_stride_2_q[direction] <= wdata_word;
-                                REG_REPS_2:       reps_2_q[direction]       <= wdata_word;
-                                REG_DST_STRIDE_3: dst_stride_3_q[direction] <= wdata_word;
-                                REG_SRC_STRIDE_3: src_stride_3_q[direction] <= wdata_word;
-                                REG_REPS_3:       reps_3_q[direction]       <= wdata_word;
-                                default: ;
-                            endcase
-                        end
-                    end
-                end else begin
-                    r_addr_q <= addr_i & 32'hFFFF_FFE0;
-                end
-                rvalid_o <= 1'b1;
-            end else begin
-                rvalid_o <= 1'b0;
+                rdata_o[mmio_word_idx*32 +: 32] <= mmio_dir ? o2a_reg_rsp.rdata : a2o_reg_rsp.rdata;
             end
         end
     end
 
-    always_comb begin
-        start_req = 1'b0;
-        start_dir = DIR_AXI2OBI;
+    assign a2o_busy_arr[0] = a2o_busy;
+    assign a2o_done_id_arr[0] = a2o_done_id;
+    assign a2o_me_busy_arr[0] = a2o_me_busy;
+    assign o2a_busy_arr[0] = o2a_busy;
+    assign o2a_done_id_arr[0] = o2a_done_id;
+    assign o2a_me_busy_arr[0] = o2a_me_busy;
 
-        if (req_i && gnt_o && !we_i) begin
-            for (int i = 0; i < WORDS_PER_BEAT; i++) begin
-                if (can_start_addr((addr_i & 32'hFFFF_FFE0) + (i * 4))) begin
-                    start_req = 1'b1;
-                    start_dir = decode_dir((addr_i & 32'hFFFF_FFE0) + (i * 4));
-                end
+    assign irq_a2o_busy_o = (|a2o_busy) || a2o_me_busy || a2o_fe_valid || a2o_be_req_valid;
+    assign irq_a2o_start_o = a2o_front_valid && a2o_front_ready;
+    assign irq_a2o_done_o = a2o_fe_rsp_valid;
+    assign irq_a2o_error_o = a2o_fe_rsp_valid && a2o_be_rsp.error;
+    assign irq_o2a_busy_o = (|o2a_busy) || o2a_me_busy || o2a_fe_valid || o2a_be_req_valid;
+    assign irq_o2a_start_o = o2a_front_valid && o2a_front_ready;
+    assign irq_o2a_done_o = o2a_fe_rsp_valid;
+    assign irq_o2a_error_o = o2a_fe_rsp_valid && o2a_be_rsp.error;
+
+    idma_reg32_3d #(
+        .NumRegs        (1),
+        .NumStreams     (1),
+        .IdCounterWidth (32),
+        .reg_req_t      (reg_req_t),
+        .reg_rsp_t      (reg_rsp_t),
+        .dma_req_t      (idma_nd_req_t),
+        .cnt_width_t    (logic [31:0]),
+        .stream_t       (logic)
+    ) i_a2o_frontend (
+        .clk_i          (clk_i),
+        .rst_ni         (rst_ni),
+        .dma_ctrl_req_i (a2o_reg_req_arr),
+        .dma_ctrl_rsp_o (a2o_reg_rsp_arr),
+        .dma_req_o      (a2o_front_req),
+        .req_valid_o    (a2o_front_valid),
+        .req_ready_i    (a2o_front_ready),
+        .next_id_i      (a2o_next_id),
+        .stream_idx_o   (),
+        .done_id_i      (a2o_done_id_arr),
+        .busy_i         (a2o_busy_arr),
+        .midend_busy_i  (a2o_me_busy_arr)
+    );
+
+    idma_transfer_id_gen #(
+        .IdWidth (32)
+    ) i_a2o_id_gen (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .issue_i     (a2o_front_valid && a2o_front_ready),
+        .retire_i    (a2o_fe_rsp_valid),
+        .next_o      (a2o_next_id),
+        .completed_o (a2o_done_id)
+    );
+
+    assign a2o_front_ready = !a2o_fe_valid || a2o_fe_ready;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            a2o_fe_valid <= 1'b0;
+            a2o_fe_req <= '0;
+        end else begin
+            if (a2o_front_valid && a2o_front_ready) begin
+                a2o_fe_valid <= 1'b1;
+                a2o_fe_req <= a2o_front_req;
+            end else if (a2o_fe_valid && a2o_fe_ready) begin
+                a2o_fe_valid <= 1'b0;
             end
         end
     end
 
+    idma_nd_midend #(
+        .NumDim        (NUM_DIMS),
+        .addr_t        (logic [31:0]),
+        .idma_req_t    (idma_req_t),
+        .idma_rsp_t    (idma_rsp_t),
+        .idma_nd_req_t (idma_nd_req_t),
+        .RepWidths     (REP_WIDTHS)
+    ) i_a2o_midend (
+        .clk_i             (clk_i),
+        .rst_ni            (rst_ni),
+        .nd_req_i          (a2o_fe_req),
+        .nd_req_valid_i    (a2o_fe_valid),
+        .nd_req_ready_o    (a2o_fe_ready),
+        .nd_rsp_o          (),
+        .nd_rsp_valid_o    (a2o_fe_rsp_valid),
+        .nd_rsp_ready_i    (1'b1),
+        .burst_req_o       (a2o_be_req),
+        .burst_req_valid_o (a2o_be_req_valid),
+        .burst_req_ready_i (a2o_be_req_ready),
+        .burst_rsp_i       (a2o_be_rsp),
+        .burst_rsp_valid_i (a2o_be_rsp_valid),
+        .burst_rsp_ready_o (a2o_be_rsp_ready),
+        .busy_o            (a2o_me_busy)
+    );
+
+    logic a2o_rsp_error;
+    logic a2o_rsp_last;
+    axi_pkg::resp_t a2o_rsp_cause;
+    idma_pkg::err_type_t a2o_rsp_err_type;
+    logic [31:0] a2o_rsp_burst_addr;
+
     always_comb begin
-        rdata_o = '0;
-        if (rvalid_o) begin
-            for (int i = 0; i < WORDS_PER_BEAT; i++) begin
-                logic [31:0] exact_addr;
-                logic        direction;
-                logic [11:0] offset;
-                logic [31:0] rdata_word;
-
-                exact_addr = (r_addr_q & 32'hFFFF_FFE0) + (i * 4);
-                direction = decode_dir(exact_addr);
-                offset = decode_offset(exact_addr);
-                rdata_word = '0;
-
-                case (offset)
-                    REG_CONF:         rdata_word = conf_q[direction];
-                    REG_STATUS_0:     rdata_word = {31'd0, direction ? irq_o2a_busy_o : irq_a2o_busy_o};
-                    REG_NEXT_ID_0:    rdata_word = next_id_q[direction];
-                    REG_DONE_ID_0:    rdata_word = done_id_q[direction];
-                    REG_DST_ADDR_LOW: rdata_word = dst_addr_q[direction];
-                    REG_SRC_ADDR_LOW: rdata_word = src_addr_q[direction];
-                    REG_LENGTH_LOW:   rdata_word = length_q[direction];
-                    REG_DST_STRIDE_2: rdata_word = dst_stride_2_q[direction];
-                    REG_SRC_STRIDE_2: rdata_word = src_stride_2_q[direction];
-                    REG_REPS_2:       rdata_word = reps_2_q[direction];
-                    REG_DST_STRIDE_3: rdata_word = dst_stride_3_q[direction];
-                    REG_SRC_STRIDE_3: rdata_word = src_stride_3_q[direction];
-                    REG_REPS_3:       rdata_word = reps_3_q[direction];
-                    default:          rdata_word = 32'h0;
-                endcase
-
-                rdata_o[i*32 +: 32] = rdata_word;
-            end
-        end
+        a2o_be_rsp = '0;
+        a2o_be_rsp.last = a2o_rsp_last;
+        a2o_be_rsp.error = a2o_rsp_error;
+        a2o_be_rsp.pld.cause = a2o_rsp_cause;
+        a2o_be_rsp.pld.err_type = a2o_rsp_err_type;
+        a2o_be_rsp.pld.burst_addr = a2o_rsp_burst_addr;
     end
 
     idma_backend_synth_r_axi_w_obi #(
@@ -311,42 +374,42 @@ module npu_pulp_idma_ctrl_mm #(
         .HardwareLegalizer   (1'b1),
         .RejectZeroTransfers (1'b1),
         .ErrorHandling       (1'b0)
-    ) i_l2_to_l1 (
+    ) i_l2_to_l1_backend (
         .clk_i                  (clk_i),
         .rst_ni                 (rst_ni),
         .test_i                 (1'b0),
-        .req_valid_i            (req_pending_q[DIR_AXI2OBI]),
-        .req_ready_o            (a2o_req_ready),
-        .req_length_i           (length_q[DIR_AXI2OBI]),
-        .req_src_addr_i         (src_addr_q[DIR_AXI2OBI]),
-        .req_dst_addr_i         (dst_addr_q[DIR_AXI2OBI]),
-        .req_src_protocol_i     (idma_pkg::AXI),
-        .req_dst_protocol_i     (idma_pkg::OBI),
+        .req_valid_i            (a2o_be_req_valid),
+        .req_ready_o            (a2o_be_req_ready),
+        .req_length_i           (a2o_be_req.length),
+        .req_src_addr_i         (a2o_be_req.src_addr),
+        .req_dst_addr_i         (a2o_be_req.dst_addr),
+        .req_src_protocol_i     (a2o_be_req.opt.src_protocol),
+        .req_dst_protocol_i     (a2o_be_req.opt.dst_protocol),
         .req_axi_id_i           (1'b0),
-        .req_src_burst_i        (axi_pkg::BURST_INCR),
-        .req_src_cache_i        (axi_pkg::CACHE_MODIFIABLE),
-        .req_src_lock_i         (1'b0),
-        .req_src_prot_i         ('0),
-        .req_src_qos_i          ('0),
-        .req_src_region_i       ('0),
-        .req_dst_burst_i        (axi_pkg::BURST_INCR),
-        .req_dst_cache_i        (axi_pkg::CACHE_MODIFIABLE),
-        .req_dst_lock_i         (1'b0),
-        .req_dst_prot_i         ('0),
-        .req_dst_qos_i          ('0),
-        .req_dst_region_i       ('0),
-        .req_decouple_aw_i      (1'b0),
-        .req_decouple_rw_i      (1'b0),
-        .req_src_max_llen_i     (3'd4),
-        .req_dst_max_llen_i     (3'd4),
-        .req_src_reduce_len_i   (1'b0),
-        .req_dst_reduce_len_i   (1'b0),
-        .req_last_i             (1'b1),
-        .rsp_valid_o            (a2o_rsp_valid),
-        .rsp_ready_i            (1'b1),
-        .rsp_cause_o            (),
-        .rsp_err_type_o         (),
-        .rsp_burst_addr_o       (),
+        .req_src_burst_i        (a2o_be_req.opt.src.burst),
+        .req_src_cache_i        (a2o_be_req.opt.src.cache),
+        .req_src_lock_i         (a2o_be_req.opt.src.lock),
+        .req_src_prot_i         (a2o_be_req.opt.src.prot),
+        .req_src_qos_i          (a2o_be_req.opt.src.qos),
+        .req_src_region_i       (a2o_be_req.opt.src.region),
+        .req_dst_burst_i        (a2o_be_req.opt.dst.burst),
+        .req_dst_cache_i        (a2o_be_req.opt.dst.cache),
+        .req_dst_lock_i         (a2o_be_req.opt.dst.lock),
+        .req_dst_prot_i         (a2o_be_req.opt.dst.prot),
+        .req_dst_qos_i          (a2o_be_req.opt.dst.qos),
+        .req_dst_region_i       (a2o_be_req.opt.dst.region),
+        .req_decouple_aw_i      (a2o_be_req.opt.beo.decouple_aw),
+        .req_decouple_rw_i      (a2o_be_req.opt.beo.decouple_rw),
+        .req_src_max_llen_i     (a2o_be_req.opt.beo.src_max_llen),
+        .req_dst_max_llen_i     (a2o_be_req.opt.beo.dst_max_llen),
+        .req_src_reduce_len_i   (a2o_be_req.opt.beo.src_reduce_len),
+        .req_dst_reduce_len_i   (a2o_be_req.opt.beo.dst_reduce_len),
+        .req_last_i             (a2o_be_req.opt.last),
+        .rsp_valid_o            (a2o_be_rsp_valid),
+        .rsp_ready_i            (a2o_be_rsp_ready),
+        .rsp_cause_o            (a2o_rsp_cause),
+        .rsp_err_type_o         (a2o_rsp_err_type),
+        .rsp_burst_addr_o       (a2o_rsp_burst_addr),
         .rsp_error_o            (a2o_rsp_error),
         .rsp_last_o             (a2o_rsp_last),
         .eh_req_valid_i         (1'b0),
@@ -385,6 +448,97 @@ module npu_pulp_idma_ctrl_mm #(
         .idma_busy_o            (a2o_busy)
     );
 
+    idma_reg32_3d #(
+        .NumRegs        (1),
+        .NumStreams     (1),
+        .IdCounterWidth (32),
+        .reg_req_t      (reg_req_t),
+        .reg_rsp_t      (reg_rsp_t),
+        .dma_req_t      (idma_nd_req_t),
+        .cnt_width_t    (logic [31:0]),
+        .stream_t       (logic)
+    ) i_o2a_frontend (
+        .clk_i          (clk_i),
+        .rst_ni         (rst_ni),
+        .dma_ctrl_req_i (o2a_reg_req_arr),
+        .dma_ctrl_rsp_o (o2a_reg_rsp_arr),
+        .dma_req_o      (o2a_front_req),
+        .req_valid_o    (o2a_front_valid),
+        .req_ready_i    (o2a_front_ready),
+        .next_id_i      (o2a_next_id),
+        .stream_idx_o   (),
+        .done_id_i      (o2a_done_id_arr),
+        .busy_i         (o2a_busy_arr),
+        .midend_busy_i  (o2a_me_busy_arr)
+    );
+
+    idma_transfer_id_gen #(
+        .IdWidth (32)
+    ) i_o2a_id_gen (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .issue_i     (o2a_front_valid && o2a_front_ready),
+        .retire_i    (o2a_fe_rsp_valid),
+        .next_o      (o2a_next_id),
+        .completed_o (o2a_done_id)
+    );
+
+    assign o2a_front_ready = !o2a_fe_valid || o2a_fe_ready;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            o2a_fe_valid <= 1'b0;
+            o2a_fe_req <= '0;
+        end else begin
+            if (o2a_front_valid && o2a_front_ready) begin
+                o2a_fe_valid <= 1'b1;
+                o2a_fe_req <= o2a_front_req;
+            end else if (o2a_fe_valid && o2a_fe_ready) begin
+                o2a_fe_valid <= 1'b0;
+            end
+        end
+    end
+
+    idma_nd_midend #(
+        .NumDim        (NUM_DIMS),
+        .addr_t        (logic [31:0]),
+        .idma_req_t    (idma_req_t),
+        .idma_rsp_t    (idma_rsp_t),
+        .idma_nd_req_t (idma_nd_req_t),
+        .RepWidths     (REP_WIDTHS)
+    ) i_o2a_midend (
+        .clk_i             (clk_i),
+        .rst_ni            (rst_ni),
+        .nd_req_i          (o2a_fe_req),
+        .nd_req_valid_i    (o2a_fe_valid),
+        .nd_req_ready_o    (o2a_fe_ready),
+        .nd_rsp_o          (),
+        .nd_rsp_valid_o    (o2a_fe_rsp_valid),
+        .nd_rsp_ready_i    (1'b1),
+        .burst_req_o       (o2a_be_req),
+        .burst_req_valid_o (o2a_be_req_valid),
+        .burst_req_ready_i (o2a_be_req_ready),
+        .burst_rsp_i       (o2a_be_rsp),
+        .burst_rsp_valid_i (o2a_be_rsp_valid),
+        .burst_rsp_ready_o (o2a_be_rsp_ready),
+        .busy_o            (o2a_me_busy)
+    );
+
+    logic o2a_rsp_error;
+    logic o2a_rsp_last;
+    axi_pkg::resp_t o2a_rsp_cause;
+    idma_pkg::err_type_t o2a_rsp_err_type;
+    logic [31:0] o2a_rsp_burst_addr;
+
+    always_comb begin
+        o2a_be_rsp = '0;
+        o2a_be_rsp.last = o2a_rsp_last;
+        o2a_be_rsp.error = o2a_rsp_error;
+        o2a_be_rsp.pld.cause = o2a_rsp_cause;
+        o2a_be_rsp.pld.err_type = o2a_rsp_err_type;
+        o2a_be_rsp.pld.burst_addr = o2a_rsp_burst_addr;
+    end
+
     idma_backend_synth_r_obi_w_axi #(
         .DataWidth           (DATA_WIDTH),
         .AddrWidth           (ADDR_WIDTH),
@@ -400,42 +554,42 @@ module npu_pulp_idma_ctrl_mm #(
         .HardwareLegalizer   (1'b1),
         .RejectZeroTransfers (1'b1),
         .ErrorHandling       (1'b0)
-    ) i_l1_to_l2 (
+    ) i_l1_to_l2_backend (
         .clk_i                 (clk_i),
         .rst_ni                (rst_ni),
         .test_i                (1'b0),
-        .req_valid_i           (req_pending_q[DIR_OBI2AXI]),
-        .req_ready_o           (o2a_req_ready),
-        .req_length_i          (length_q[DIR_OBI2AXI]),
-        .req_src_addr_i        (src_addr_q[DIR_OBI2AXI]),
-        .req_dst_addr_i        (dst_addr_q[DIR_OBI2AXI]),
-        .req_src_protocol_i    (idma_pkg::OBI),
-        .req_dst_protocol_i    (idma_pkg::AXI),
+        .req_valid_i           (o2a_be_req_valid),
+        .req_ready_o           (o2a_be_req_ready),
+        .req_length_i          (o2a_be_req.length),
+        .req_src_addr_i        (o2a_be_req.src_addr),
+        .req_dst_addr_i        (o2a_be_req.dst_addr),
+        .req_src_protocol_i    (o2a_be_req.opt.src_protocol),
+        .req_dst_protocol_i    (o2a_be_req.opt.dst_protocol),
         .req_axi_id_i          (1'b0),
-        .req_src_burst_i       (axi_pkg::BURST_INCR),
-        .req_src_cache_i       (axi_pkg::CACHE_MODIFIABLE),
-        .req_src_lock_i        (1'b0),
-        .req_src_prot_i        ('0),
-        .req_src_qos_i         ('0),
-        .req_src_region_i      ('0),
-        .req_dst_burst_i       (axi_pkg::BURST_INCR),
-        .req_dst_cache_i       (axi_pkg::CACHE_MODIFIABLE),
-        .req_dst_lock_i        (1'b0),
-        .req_dst_prot_i        ('0),
-        .req_dst_qos_i         ('0),
-        .req_dst_region_i      ('0),
-        .req_decouple_aw_i     (1'b0),
-        .req_decouple_rw_i     (1'b0),
-        .req_src_max_llen_i    (3'd4),
-        .req_dst_max_llen_i    (3'd4),
-        .req_src_reduce_len_i  (1'b0),
-        .req_dst_reduce_len_i  (1'b0),
-        .req_last_i            (1'b1),
-        .rsp_valid_o           (o2a_rsp_valid),
-        .rsp_ready_i           (1'b1),
-        .rsp_cause_o           (),
-        .rsp_err_type_o        (),
-        .rsp_burst_addr_o      (),
+        .req_src_burst_i       (o2a_be_req.opt.src.burst),
+        .req_src_cache_i       (o2a_be_req.opt.src.cache),
+        .req_src_lock_i        (o2a_be_req.opt.src.lock),
+        .req_src_prot_i        (o2a_be_req.opt.src.prot),
+        .req_src_qos_i         (o2a_be_req.opt.src.qos),
+        .req_src_region_i      (o2a_be_req.opt.src.region),
+        .req_dst_burst_i       (o2a_be_req.opt.dst.burst),
+        .req_dst_cache_i       (o2a_be_req.opt.dst.cache),
+        .req_dst_lock_i        (o2a_be_req.opt.dst.lock),
+        .req_dst_prot_i        (o2a_be_req.opt.dst.prot),
+        .req_dst_qos_i         (o2a_be_req.opt.dst.qos),
+        .req_dst_region_i      (o2a_be_req.opt.dst.region),
+        .req_decouple_aw_i     (o2a_be_req.opt.beo.decouple_aw),
+        .req_decouple_rw_i     (o2a_be_req.opt.beo.decouple_rw),
+        .req_src_max_llen_i    (o2a_be_req.opt.beo.src_max_llen),
+        .req_dst_max_llen_i    (o2a_be_req.opt.beo.dst_max_llen),
+        .req_src_reduce_len_i  (o2a_be_req.opt.beo.src_reduce_len),
+        .req_dst_reduce_len_i  (o2a_be_req.opt.beo.dst_reduce_len),
+        .req_last_i            (o2a_be_req.opt.last),
+        .rsp_valid_o           (o2a_be_rsp_valid),
+        .rsp_ready_i           (o2a_be_rsp_ready),
+        .rsp_cause_o           (o2a_rsp_cause),
+        .rsp_err_type_o        (o2a_rsp_err_type),
+        .rsp_burst_addr_o      (o2a_rsp_burst_addr),
         .rsp_error_o           (o2a_rsp_error),
         .rsp_last_o            (o2a_rsp_last),
         .eh_req_valid_i        (1'b0),

@@ -3,12 +3,13 @@ OBJCOPY = riscv64-unknown-elf-objcopy
 
 CFLAGS = -march=rv32ima -mabi=ilp32 -O2 -nostartfiles -nodefaultlibs -nostdlib -I../lib -T link.ld
 
-SRCS = main.c ../lib/hal_dma.c start.S
+SRCS = main.c start.S
+HDRS = ../lib/idma_mm_utils.h ../lib/npu_memory_map.h ../lib/npu_types.h
 
 all: boot.bin boot.hex
 
-boot.elf: $(SRCS)
-	$(CC) $(CFLAGS) $^ -o $@
+boot.elf: $(SRCS) $(HDRS)
+	$(CC) $(CFLAGS) $(SRCS) -o $@
 
 boot.bin: boot.elf
 	$(OBJCOPY) -O binary $< $@

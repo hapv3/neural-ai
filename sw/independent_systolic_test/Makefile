@@ -10,11 +10,12 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -O2 -fno-builtin -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
          -I../lib -T link.ld -Wl,--no-relax
 
-SRCS = start.S main.c ../lib/hal_dma.c ../lib/hal_systolic.c ../lib/spatz_rt.c
+SRCS = start.S main.c ../lib/hal_systolic.c ../lib/spatz_rt.c
+HDRS = ../lib/hal_systolic.h ../lib/idma_mm_utils.h ../lib/npu_memory_map.h ../lib/npu_types.h ../lib/spatz_rt.h
 
 all: independent_systolic.bin independent_systolic.hex
 
-independent_systolic.elf: $(SRCS) link.ld
+independent_systolic.elf: $(SRCS) $(HDRS) link.ld
 	$(CC) $(CFLAGS) $(SRCS) -o $@
 
 independent_systolic.bin: independent_systolic.elf

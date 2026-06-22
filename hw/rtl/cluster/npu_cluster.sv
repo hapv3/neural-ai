@@ -1058,7 +1058,12 @@ module npu_cluster (
 
     systolic_controller #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH)
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .ARRAY_DIM(32),
+        .INPUT_ELEM_WIDTH(8),
+        .OFM_ELEM_WIDTH(32),
+        .INPUT_FIFO_DEPTH(4),
+        .OFM_FIFO_DEPTH(64)
     ) u_sys_ctrl (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),

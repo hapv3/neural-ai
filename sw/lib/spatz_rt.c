@@ -1,5 +1,5 @@
 #include "spatz_rt.h"
-#include "hal_dma.h"
+#include "idma_mm_utils.h"
 
 static volatile uint32_t *const sig = (volatile uint32_t *)SPATZ_RT_STATUS_ADDR;
 
@@ -52,9 +52,10 @@ void *spatz_rt_memcpy(void *dst, const void *src, uint32_t num) {
 }
 
 void spatz_rt_dma_1d(uint32_t dst_addr, uint32_t src_addr, uint32_t size) {
-    dma_start_transfer(src_addr, dst_addr, size);
+    if (!idma_memcpy_blocking(src_addr, dst_addr, size)) {
+        spatz_rt_fail_at(0x0DADu, 0, (int32_t)size, 1);
+    }
 }
 
 void spatz_rt_dma_wait_all(void) {
-    dma_wait_done();
 }

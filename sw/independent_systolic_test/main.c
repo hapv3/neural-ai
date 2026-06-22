@@ -38,7 +38,6 @@ int main(void) {
         uint32_t out_bytes = dim_m * 32u * 4u;
 
         spatz_rt_set_phase(3, dim_m);
-        spatz_rt_memset((void *)T_OFM, 0x5A, out_bytes);
         systolic_gemm32(T_WEIGHT, T_IFM, T_OFM, dim_m);
 
         spatz_rt_set_phase(4, dim_m);
