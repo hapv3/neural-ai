@@ -2,6 +2,7 @@ import os
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge
 
 from npu_test_utils import (
     firmware_path,
@@ -21,6 +22,33 @@ L2_OUT = 0x80010000
 SIG_START_WORD = 8
 DIMS = [1, 2, 31, 32, 33, 64, 128, 1024]
 MAX_M = 1024
+
+
+def signal_to_int(signal):
+    value = signal.value
+    if not value.is_resolvable:
+        return None
+    if hasattr(value, "to_unsigned"):
+        return value.to_unsigned()
+    return int(value)
+
+
+async def monitor_ofm_fifo(dut, stats):
+    ctrl = dut.u_npu_cluster.u_sys_ctrl
+    fifo = ctrl.i_ofm_fifo
+
+    while not stats["done"]:
+        await RisingEdge(dut.clk_i)
+        usage = signal_to_int(ctrl.ofm_fifo_usage)
+        write_idx = signal_to_int(fifo.write_pointer_q)
+        read_idx = signal_to_int(fifo.read_pointer_q)
+
+        if usage is not None:
+            stats["max_usage"] = max(stats["max_usage"], usage)
+        if write_idx is not None:
+            stats["max_write_idx"] = max(stats["max_write_idx"], write_idx)
+        if read_idx is not None:
+            stats["max_read_idx"] = max(stats["max_read_idx"], read_idx)
 
 
 def to_u8(value):
@@ -78,8 +106,19 @@ async def test_independent_systolic(dut):
     await write_l2_bytes(dut, L2_IFM, make_ifm_bytes())
     write_dtcm_word(dut, SIG_START_WORD, 1)
 
-    debug = await wait_for_status(dut, expected_pass_count=1 + len(DIMS), timeout_cycles=1500000)
+    fifo_stats = {"done": False, "max_usage": 0, "max_write_idx": 0, "max_read_idx": 0}
+    monitor_task = cocotb.start_soon(monitor_ofm_fifo(dut, fifo_stats))
+    debug = await wait_for_status(dut, expected_pass_count=1 + len(DIMS), timeout_cycles=200000)
+    fifo_stats["done"] = True
+    await RisingEdge(dut.clk_i)
+    monitor_task.cancel()
     dut._log.info(f"systolic suite passed: {debug}")
+    dut._log.info(
+        "ofm fifo high-water: "
+        f"usage={fifo_stats['max_usage']} "
+        f"write_idx={fifo_stats['max_write_idx']} "
+        f"read_idx={fifo_stats['max_read_idx']}"
+    )
 
     offset = 0
     for dim_m in DIMS:

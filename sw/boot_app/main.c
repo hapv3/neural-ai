@@ -1,6 +1,6 @@
 #include "npu_types.h"
 #include "npu_memory_map.h"
-#include "hal_dma.h"
+#include "idma_mm_utils.h"
 
 // For testing purposes, we use Shared Data TCDM
 #define TEST_SRC_ADDR 0x10100000 // TCDM Bank 0
@@ -21,18 +21,17 @@ int main(void) {
         dst_array[i] = 0;
     }
 
-    // 3. Test writing to MMIO Registers via OBI
-    REG_WRITE(REG_DMA_LEN, 0x1234);
-    uint32_t readback = REG_READ(REG_DMA_LEN);
+    // 3. Test writing to iDMA MMIO registers via OBI
+    REG_WRITE(IDMA_LENGTH_LOW(IDMA_DIR_L2_TO_L1), 0x1234);
+    uint32_t readback = REG_READ(IDMA_LENGTH_LOW(IDMA_DIR_L2_TO_L1));
     if (readback != 0x1234) {
         // MMIO write/read failed, halt here
         *((volatile uint32_t*)(NPU_DTCM_BASE)) = 0xBADBAD01;
         while(1);
     }
 
-    // 4. Test DMA Transfer (using HAL)
-    dma_start_transfer(TEST_SRC_ADDR, TEST_DST_ADDR, TEST_LEN);
-    dma_wait_done();
+    // 4. Test local copy through the iDMA-compatible runtime API
+    idma_L1ToL1(TEST_SRC_ADDR, TEST_DST_ADDR, TEST_LEN);
 
     // 5. Verify DMA Transfer Result
     int success = 1;

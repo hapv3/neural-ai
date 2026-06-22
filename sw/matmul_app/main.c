@@ -1,18 +1,4 @@
-typedef unsigned int uint32_t;
-typedef unsigned char uint8_t;
-
-#define REG_DMA_START (*(volatile uint32_t*)0x20000000)
-#define REG_DMA_SRC   (*(volatile uint32_t*)0x20000020)
-#define REG_DMA_DST   (*(volatile uint32_t*)0x20000040)
-#define REG_DMA_LEN   (*(volatile uint32_t*)0x20000060)
-#define REG_DMA_DONE  (*(volatile uint32_t*)0x20000080)
-
-#define REG_SYS_W_PTR (*(volatile uint32_t*)0x20000100)
-#define REG_SYS_I_PTR (*(volatile uint32_t*)0x20000104)
-#define REG_SYS_O_PTR (*(volatile uint32_t*)0x20000108)
-#define REG_SYS_DIM_M (*(volatile uint32_t*)0x2000010C)
-#define REG_SYS_START (*(volatile uint32_t*)0x20000110)
-#define REG_SYS_DONE  (*(volatile uint32_t*)0x20000114)
+#include "idma_mm_utils.h"
 
 #define WEIGHT_PING_ADDR 0x10110000
 #define IFM_PING_ADDR    0x10120000
@@ -23,14 +9,9 @@ typedef unsigned char uint8_t;
 #define EXT_MEM_OFM      0x80002000
 
 void dma_transfer(uint32_t src, uint32_t dst, uint32_t len) {
-    REG_DMA_SRC = src;
-    REG_DMA_DST = dst;
-    REG_DMA_LEN = len;
-    REG_DMA_DONE = 0; // Clear done flag
-    REG_DMA_START = 1;
-
-    while (REG_DMA_DONE == 0) {
-        // Wait
+    if (!idma_memcpy_blocking(src, dst, len)) {
+        while (1) {
+        }
     }
 }
 
@@ -59,15 +40,15 @@ int main() {
         dma_transfer(EXT_MEM_IFM, IFM_PING_ADDR, ifm_len);
 
         // 3. Configure and Start Systolic Array
-        REG_SYS_W_PTR = WEIGHT_PING_ADDR;
-        REG_SYS_I_PTR = IFM_PING_ADDR;
-        REG_SYS_O_PTR = OFM_PING_ADDR;
-        REG_SYS_DIM_M = dim_m;
-        REG_SYS_DONE  = 0;
-        REG_SYS_START = 1;
+        REG_WRITE(REG_SYS_W_PTR, WEIGHT_PING_ADDR);
+        REG_WRITE(REG_SYS_I_PTR, IFM_PING_ADDR);
+        REG_WRITE(REG_SYS_O_PTR, OFM_PING_ADDR);
+        REG_WRITE(REG_SYS_DIM_M, dim_m);
+        REG_WRITE(REG_SYS_DONE, 0);
+        REG_WRITE(REG_SYS_START, 1);
 
         // Wait for computation
-        while (REG_SYS_DONE == 0) {
+        while (REG_READ(REG_SYS_DONE) == 0) {
             // Wait
         }
 

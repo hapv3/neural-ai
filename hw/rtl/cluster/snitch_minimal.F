@@ -127,7 +127,12 @@ $(REPO_ROOT)/hw/idma/src/backend/idma_obi_read.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_obi_write.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_tilelink_read.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_tilelink_write.sv
+$(REPO_ROOT)/hw/idma/src/midend/idma_nd_midend.sv
+$(REPO_ROOT)/hw/idma/src/frontend/idma_transfer_id_gen.sv
 $(REPO_ROOT)/hw/idma/target/rtl/idma_generated.sv
+$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_arb.sv
+$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_ext.sv
+$(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_pulp_idma_ctrl_mm.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
