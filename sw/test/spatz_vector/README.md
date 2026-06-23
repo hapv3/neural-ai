@@ -1,12 +1,27 @@
-# Spatz Vector Firmware Tests
+# Spatz Vector Instruction Tests
 
-Dedicated RVV firmware tests for proving that the Snitch frontend offloads vector
+Dedicated RVV firmware tests prove that the Snitch frontend offloads vector
 instructions to Spatz and that Spatz reaches shared TCDM through the VLSU ports.
+
+## Target
+
+Exercise RVV instruction groups before higher-level operators or graph scheduler
+code depend on them. Each assembly test stores vector results to TCDM and verifies
+the data with scalar golden code.
+
+## Scenarios
+
+| File | Target |
+|------|--------|
+| `tests/basic_mem_arith.S` | `vsetvli`, `vle32/vse32`, add/sub/logic, logical shifts |
+| `tests/memory_width.S` | `vle/vse` for e8, e16, and e32 |
+| `tests/arith_mask.S` | multiply, min/max, arithmetic shift, compare, mask merge |
+| `tests/reduction.S` | e32 `vredsum.vs` reduction |
 
 ## Build
 
 ```sh
-make -C sw/spatz_vector
+make -C sw/test/spatz_vector
 ```
 
 The suite uses the Spatz-local LLVM toolchain by default:
@@ -18,15 +33,7 @@ The suite uses the Spatz-local LLVM toolchain by default:
 The firmware is assembled with `-march=rv32im_zve32x -mabi=ilp32`, so RVV
 instructions are written as mnemonics instead of raw `.word` encodings.
 
-## Current Test
-
-`tests/basic_mem_arith.S` covers the baseline Spatz-vector execution path:
-
-- Vector config: `vsetvli`
-- Unit-stride memory: `vle32.v`, `vse32.v`
-- Integer vector ALU: `vadd.vv`, `vsub.vv`
-- Logical vector ALU: `vand.vv`, `vor.vv`, `vxor.vv`
-- Immediate shifts: `vsll.vi`, `vsrl.vi`
+## Pass/Fail Contract
 
 The firmware verifies every vector store with scalar loads. It writes
 `0xDEADBEEF` to `0x10008000` on success. On failure it writes

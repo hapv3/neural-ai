@@ -40,7 +40,7 @@ I-TCM SRAM
 ```
 
 1. Testbench asserts reset so Snitch cannot fetch unstable instructions.
-2. Host loads `sw/boot_app/boot.bin` or `sw/matmul_app/matmul.bin` through AXI4-Lite.
+2. Host loads `sw/test/boot/boot.bin` or `sw/test/matmul/matmul.bin` through AXI4-Lite.
 3. AXI4-Lite writes are converted into OBI writes.
 4. I-TCM arbiter grants bootloader writes into local I-TCM.
 5. Firmware image is now resident in L1 I-TCM.

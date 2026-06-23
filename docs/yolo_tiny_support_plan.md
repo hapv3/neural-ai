@@ -37,8 +37,8 @@ No performance work yet:No double-buffering, no overlap DMA/compute, no cycle op
 Only correctness, reuse, and operator coverage gates.
 
 Test Plan
-Keep existing regressions passing:make -C sw/spatz_vector
-make -C sw/matmul_app
+Keep existing regressions passing:make -C sw/test/spatz_vector
+make -C sw/test/matmul
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_matmul
 

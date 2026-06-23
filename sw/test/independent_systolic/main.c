@@ -1,6 +1,11 @@
 #include "hal_systolic.h"
 #include "spatz_rt.h"
 
+/*
+ * Scenario: independent systolic GEMM32 regression.
+ * Target: run deterministic INT8xINT8->INT32 GEMM for boundary M sizes and
+ * copy every Mx32 INT32 result back to L2 for full Python golden comparison.
+ */
 #define SIG_START   (*(volatile uint32_t *)0x10008020u)
 
 #define L2_WEIGHT   0x80000000u
@@ -25,6 +30,7 @@ int main(void) {
     }
     SIG_START = 0;
 
+    // Stage fixed 32x32 weights and maximum IFM rows once; each M reuses prefix rows.
     spatz_rt_set_phase(2, 1);
     spatz_rt_dma_1d(T_WEIGHT, L2_WEIGHT, WEIGHT_BYTES);
     spatz_rt_dma_wait_all();
@@ -37,9 +43,11 @@ int main(void) {
         uint32_t dim_m = dims[i];
         uint32_t out_bytes = dim_m * 32u * 4u;
 
+        // Each M stresses a different controller boundary: tiny, tile edge, and long burst.
         spatz_rt_set_phase(3, dim_m);
         systolic_gemm32(T_WEIGHT, T_IFM, T_OFM, dim_m);
 
+        // Preserve all outputs contiguously in L2 so cocotb can compare full tensors.
         spatz_rt_set_phase(4, dim_m);
         spatz_rt_dma_1d(L2_OUT + out_offset, T_OFM, out_bytes);
         spatz_rt_dma_wait_all();

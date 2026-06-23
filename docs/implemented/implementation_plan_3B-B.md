@@ -170,8 +170,8 @@ Changes:
 - Filelist: `snitch_minimal.F` includes Spatz RTL, local merged `riscv_instr_npu.sv`, Spatz reqrsp package, and required CommonCells/TechCells dependencies.
 - Verification: `make -C hw/rtl/cluster clean && env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot` passes.
 - Verification: `env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_matmul` passes 10/10 randomized matmul iterations.
-- Dedicated RVV firmware suite: `sw/spatz_vector` now builds standalone Spatz-vector firmware with the Spatz-local LLVM toolchain (`hw/spatz/install/llvm/bin/clang`) and RVV mnemonics under `-march=rv32im_zve32x -mabi=ilp32`.
-- Dedicated RVV test: `sw/spatz_vector/tests/basic_mem_arith.S` covers `vsetvli`, `vle32.v`, `vse32.v`, `vadd.vv`, `vsub.vv`, `vand.vv`, `vor.vv`, `vxor.vv`, `vsll.vi`, and `vsrl.vi`.
+- Dedicated RVV firmware suite: `sw/test/spatz_vector` now builds standalone Spatz-vector firmware with the Spatz-local LLVM toolchain (`hw/spatz/install/llvm/bin/clang`) and RVV mnemonics under `-march=rv32im_zve32x -mabi=ilp32`.
+- Dedicated RVV test: `sw/test/spatz_vector/tests/basic_mem_arith.S` covers `vsetvli`, `vle32.v`, `vse32.v`, `vadd.vv`, `vsub.vv`, `vand.vv`, `vor.vv`, `vxor.vv`, `vsll.vi`, and `vsrl.vi`.
 - Verification: `test_spatz_vector_basic` checks both firmware signature/debug words and the full output vectors by reading TCDM SRAM banks directly.
 - Verification: `env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic` passes with `pass_count = 7`, output data match, and success signature `0xDEADBEEF`.
 

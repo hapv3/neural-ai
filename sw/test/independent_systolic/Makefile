@@ -1,4 +1,4 @@
-SPATZ_INSTALL ?= ../../hw/spatz/install
+SPATZ_INSTALL ?= ../../../hw/spatz/install
 LLVM_BIN = $(SPATZ_INSTALL)/llvm/bin
 GCC_BIN = $(SPATZ_INSTALL)/riscv-gcc/bin
 
@@ -8,10 +8,10 @@ HEXOBJCOPY = $(GCC_BIN)/riscv32-unknown-elf-objcopy
 
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -O2 -fno-builtin -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
-         -I../lib -T link.ld -Wl,--no-relax
+         -I../../lib -T link.ld -Wl,--no-relax
 
-SRCS = start.S main.c ../lib/hal_systolic.c ../lib/spatz_rt.c
-HDRS = ../lib/hal_systolic.h ../lib/idma_mm_utils.h ../lib/npu_memory_map.h ../lib/npu_types.h ../lib/spatz_rt.h
+SRCS = start.S main.c ../../lib/hal_systolic.c ../../lib/spatz_rt.c
+HDRS = ../../lib/hal_systolic.h ../../lib/idma_mm_utils.h ../../lib/npu_memory_map.h ../../lib/npu_types.h ../../lib/spatz_rt.h
 
 all: independent_systolic.bin independent_systolic.hex
 

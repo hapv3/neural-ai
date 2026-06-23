@@ -94,3 +94,44 @@ Công thức: $y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \times \gamma 
 
 ### Functional Verification
 - Viết testbench RTL cho AFU: Nạp 1 bảng LUT bất kỳ, đưa mảng 1024 bytes vào và kiểm tra kết quả ngõ ra có khớp với mô hình Python hay không.
+
+---
+
+## 4. Tích hợp AFU vào Hệ thống (Integration Guide)
+
+Để lắp ráp khối IP `afu.sv` vào hệ thống NPU thực tế, cần thực hiện các bước cấu hình sau trên Top-level của NPU (như `npu_cluster.sv`):
+
+### 4.1. Kết nối Mạng lưới (Interconnect)
+- **Gắn AFU vào Peripheral/System Interconnect (Cổng OBI Slave):**
+  - Mở thêm 1 port Slave trên Address Decoder/Crossbar để kết nối từ Snitch Core.
+  - Phân bổ dải địa chỉ Memory-Mapped (VD: `0x1004_0000`) để Snitch cấu hình và nạp LUT.
+- **Gắn AFU vào TCDM Interconnect (Cổng OBI Master):**
+  - Tăng tham số `NUM_MASTERS` của TCDM Crossbar lên 1.
+  - Gắn cổng `obi_m_*` của AFU vào port Master mới để AFU tự động đọc/ghi bộ nhớ L1.
+
+### 4.2. Kết nối Tín hiệu Điều khiển
+- **Clock và Reset:** Đồng bộ chung `clk_i` và `rst_ni` với toàn cụm Cluster.
+- **Tín hiệu Ngắt (Interrupt - `done_o`):**
+  - Nối cổng `done_o` vào Interrupt Controller (PLIC/CLINT) hoặc Fast Interrupt của lõi Snitch Core.
+  - Điều này giúp NPU có thể gọi AFU chạy rồi vào chế độ ngủ (WFI), khi AFU tính xong sẽ đánh thức Snitch chạy layer tiếp theo.
+
+### 4.3. Cập nhật Firmware (Software C)
+Bổ sung định nghĩa cấu trúc phần cứng vào SDK của Firmware để điều khiển bằng mã C:
+
+```c
+// Địa chỉ cơ sở AFU (Ví dụ)
+#define AFU_BASE_ADDR 0x10040000
+
+// Cấu trúc thanh ghi AFU
+typedef struct {
+    volatile uint32_t LUT_SRAM[256];  // 0x0000 - 0x03FC
+    uint32_t _reserved[768];          // Đệm cho đủ 0x1000
+    volatile uint32_t START;          // 0x1000
+    volatile uint32_t SRC_PTR;        // 0x1004
+    volatile uint32_t DST_PTR;        // 0x1008
+    volatile uint32_t LENGTH;         // 0x100C
+    volatile uint32_t MODE;           // 0x1010
+} afu_regs_t;
+
+#define AFU_REGS ((afu_regs_t*) AFU_BASE_ADDR)
+```

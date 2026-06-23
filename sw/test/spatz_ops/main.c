@@ -1,6 +1,11 @@
 #include "npu_types.h"
 #include "spatz_ops.h"
 
+/*
+ * Scenario: C-callable Spatz operator library smoke/regression test.
+ * Target: prove scheduler-facing wrappers produce exact data for copy, ReLU,
+ * and INT32->INT8 requant before graph firmware is allowed to depend on them.
+ */
 #define PASS_SIGNATURE 0xDEADBEEFu
 #define FAIL_SIGNATURE 0xBAD20000u
 
@@ -20,6 +25,7 @@
 #define VL 32u
 
 static void fail(uint32_t test_id, uint32_t index, int32_t got, int32_t expected) {
+    // Standard status/debug page lets cocotb report failing op, element, got, expected.
     SIG_FAIL_TEST = test_id;
     SIG_FAIL_INDEX = index;
     SIG_FAIL_GOT = (uint32_t)got;
@@ -39,12 +45,14 @@ int main(void) {
     SIG_STATUS = 0;
     SIG_PASS_COUNT = 0;
 
+    // Test 1: vector copy must preserve signed int8 payload exactly.
     for (uint32_t i = 0; i < VL; i++) {
         SRC_I8[i] = (int8_t)((int32_t)i - 16);
         DST_I8[i] = 0;
     }
 
     spatz_vec_copy_i8((const int8_t *)SRC_I8, (int8_t *)DST_I8, VL);
+    // Test 2: ReLU is in-place and clamps only negative int8 lanes.
     for (uint32_t i = 0; i < VL; i++) {
         if (DST_I8[i] != SRC_I8[i]) {
             fail(1, i, DST_I8[i], SRC_I8[i]);
@@ -52,6 +60,7 @@ int main(void) {
     }
     SIG_PASS_COUNT = SIG_PASS_COUNT + 1;
 
+    // Test 3: requant uses integer multiply, arithmetic shift, and int8 clamp.
     for (uint32_t i = 0; i < VL; i++) {
         RELU_I8[i] = (int8_t)((int32_t)i - 12);
     }

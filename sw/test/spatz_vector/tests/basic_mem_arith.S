@@ -1,4 +1,7 @@
     .option norvc
+    # Scenario: baseline RVV instruction regression.
+    # Target: vsetvli, e32 load/store, add/sub/logic, and immediate shifts.
+    # Each block writes vector output to TCDM, fences, then scalar-checks data.
 
     .equ SIG_BASE,        0x10008000
     .equ SIG_STATUS,      0x10008000
@@ -34,6 +37,7 @@ _start:
     sw zero, 16(s0)
     sw zero, 20(s0)
 
+    # Seed two deterministic e32 input vectors in TCDM.
     li s1, SRC_A
     li s2, SRC_B
     li t0, 0
@@ -48,6 +52,7 @@ _start:
     li t3, VL
     blt t0, t3, 1b
 
+    # Configure VL before the first Spatz vector memory operation.
     li t0, VL
     vsetvli t1, t0, e32, m1, ta, ma
 
@@ -56,6 +61,7 @@ _start:
     li a0, SRC_B
     vle32.v v2, (a0)
 
+    # Exercise one RVV op at a time so fail_test maps directly to an instruction group.
     vadd.vv v3, v1, v2
     li a1, DST_ADD
     vse32.v v3, (a1)

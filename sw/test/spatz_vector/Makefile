@@ -1,4 +1,4 @@
-SPATZ_INSTALL ?= ../../hw/spatz/install
+SPATZ_INSTALL ?= ../../../hw/spatz/install
 LLVM_BIN = $(SPATZ_INSTALL)/llvm/bin
 GCC_BIN = $(SPATZ_INSTALL)/riscv-gcc/bin
 

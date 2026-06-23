@@ -1,126 +1,207 @@
 # NPU Cluster Test Flow
 
-**Scope**: Current verification flows for Phase 3B-A  
-**Baseline**: Matrix Engine integrated into `npu_cluster`
+**Scope**: Current cluster verification after DMA/TCDM and Spatz integration work.  
+**Firmware layout**: all standalone test firmware lives under `sw/test/<name>`.
 
 ---
 
-## 1. Test Pyramid
+## 1. SW Test Layout
 
-| Level | Test | Target |
-|-------|------|--------|
-| Unit | `hw/rtl/systolic/tb/test_systolic.py` | Standalone 32×32 Systolic Array |
-| Cluster boot | `hw/rtl/cluster/tb/tests/test_snitch_boot.py` | I-TCM boot path, Snitch execution, signature write |
-| Cluster compute | `hw/rtl/cluster/tb/tests/test_matmul.py` | Firmware-controlled DMA + Systolic + OFM writeback |
+Historical suffixes `_app` and `_test` were removed from firmware directory
+names. The `sw/test` parent directory is now the semantic marker for regression
+firmware.
+
+| Directory | Binary | Primary RTL test | Target |
+|-----------|--------|------------------|--------|
+| `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, I-TCM load, D-TCM signature, iDMA MMIO smoke |
+| `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
+| `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
+| `sw/test/matmul` | `matmul.bin` | `test_matmul` | Legacy raw systolic register matmul regression |
+| `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
+| `sw/test/spatz_vector` | `basic_mem_arith.bin`, etc. | `test_spatz_vector_basic` | Direct RVV instruction groups |
+
+`sw/lib` remains shared runtime/HAL code, not a test suite.
 
 ---
 
-## 2. Standalone Systolic Flow
+## 2. Common Pass/Fail Contract
+
+Firmware tests publish status at the D-TCM debug page:
+
+| Offset | Meaning |
+|--------|---------|
+| `0x10008000` | status: `0xDEADBEEF` pass or `0xBADxxxxx` fail |
+| `0x10008004` | pass count where implemented |
+| `0x10008008` | failing test id |
+| `0x1000800c` | failing element/index |
+| `0x10008010` | got value |
+| `0x10008014` | expected value |
+| `0x10008018` | phase where implemented |
+| `0x1000801c` | op/sub-op where implemented |
+
+Every new firmware regression should use this page unless the test has an older
+explicit cocotb contract.
+
+---
+
+## 3. Independent Suite Order
+
+Run independent suites before micro-model or graph-level work:
+
+1. **Boot**: proves instruction load/execution and signature path.
+2. **Memory**: proves L2 fixtures, DMA paths, and TCDM decode without compute.
+3. **RVV**: proves Spatz instruction groups before operator wrappers depend on them.
+4. **Operators**: proves reusable C-callable Spatz ops before scheduler use.
+5. **Systolic**: proves HAL GEMM32 tiling and full output correctness.
+6. **Legacy Matmul**: keeps raw register-level systolic regression alive.
+
+Micro-YOLO or graph scheduler tests should only run after these gates are green.
+
+---
+
+## 4. Test Scenarios
+
+### Boot
 
 ```text
-Python test item
-  |
-  +--> Generate weights / IFM
-  +--> Compute Python golden output
-  |
-Driver
-  |
-  +--> Reset DUT
-  +--> Load 32 weight rows
-  +--> Stream IFM rows
-  |
-Monitor
-  |
-  +--> Capture ofm_valid_o
-  |
-Scoreboard
-  |
-  +--> Compare 32 INT32 columns
+cocotb loads sw/test/boot/boot.bin into I-TCM
+  -> Snitch executes firmware
+  -> firmware seeds TCDM source
+  -> firmware checks iDMA-compatible MMIO readback
+  -> firmware copies TCDM source to destination
+  -> cocotb polls D-TCM status
 ```
 
-Pass criteria:
+Pass criteria: status is `0xDEADBEEF`; no timeout.
 
-- Scoreboard captures at least one OFM output.
-- `last_error_count == 0`.
-
----
-
-## 3. Snitch Boot Flow Test
+### Memory
 
 ```text
-test_snitch_boot.py
-  |
-  +--> Assert reset
-  +--> Load boot.bin into I-TCM over AXI4-Lite
-  +--> Release reset
-  +--> Poll signature
-  |
-  +--> PASS when signature == 0xDEADBEEF
+cocotb writes deterministic L2 fixtures
+  -> firmware waits for SIG_START
+  -> L2 -> TCDM 1D, 2D, 3D checked in firmware
+  -> TCDM -> L2 1D, 2D, 3D checked by cocotb
+  -> firmware probes representative low/high addresses for each TCDM bank
 ```
 
-This test validates:
+Pass criteria: firmware pass signature plus exact L2 output bytes for all
+output-side copies.
 
-- Host AXI4-Lite → AXI-to-OBI → I-TCM write path.
-- Snitch instruction fetch from I-TCM.
-- D-Bus/MMIO-visible completion path.
-
----
-
-## 4. Cluster MatMul Flow
+### RVV
 
 ```text
-Testbench
-  |
-  +--> Randomize dim_m in [1, 64]
-  +--> Randomize W[32][32] and IFM[dim_m][32]
-  +--> Compute OFM_golden = IFM × W
-  +--> Write W and IFM to L2 AXI sim memory
-  +--> Write dim_m and start flag to D-TCM
-  |
-Snitch firmware
-  |
-  +--> DMA W:   L2 0x8000_0000 -> L1 I-TCDM 0x1011_0000
-  +--> DMA IFM: L2 0x8000_1000 -> L1 I-TCDM 0x1012_0000
-  +--> Start Systolic Controller
-  +--> Wait for REG_SYS_DONE
-  +--> DMA OFM: L1 O-TCDM 0x1020_0000 -> L2 0x8000_2000
-  +--> Set done flag in D-TCM
-  |
-Testbench
-  |
-  +--> Poll done flag
-  +--> Read OFM from L2
-  +--> Compare every INT32 output against NumPy golden
+firmware assembly test
+  -> configure VL with vsetvli
+  -> run one RVV instruction group
+  -> store vector output to TCDM
+  -> scalar-check every lane
+  -> cocotb optionally reads output buffers
 ```
 
-Pass criteria:
+Covered groups today:
 
-- All randomized iterations complete.
-- Every OFM word matches golden model.
-- No firmware timeout/hang.
+- `basic_mem_arith`: e32 load/store, add/sub/logic, logical shifts.
+- `memory_width`: e8/e16/e32 load-store.
+- `arith_mask`: multiply, min/max, arithmetic shift, compare/merge.
+- `reduction`: e32 sum reduction.
+
+### Operators
+
+```text
+spatz_ops firmware
+  -> initialize deterministic vectors
+  -> call C wrapper
+  -> compare every output lane in firmware
+  -> cocotb reads TCDM output buffers for exact data check
+```
+
+Covered wrappers today:
+
+- `spatz_vec_copy_i8`
+- `spatz_vec_relu_i8`
+- `spatz_requant_i32_to_i8`
+
+### Systolic
+
+```text
+cocotb writes signed INT8 W and IFM to L2
+  -> firmware DMA-copies fixtures into TCDM
+  -> firmware calls systolic_gemm32 for M={1,2,31,32,33,64,128,1024}
+  -> HAL tiles large M safely
+  -> firmware copies all INT32 OFM words back to L2
+  -> cocotb compares full tensors with Python golden
+```
+
+Pass criteria: all `M x 32` INT32 words match golden.
+
+### Legacy Matmul
+
+```text
+cocotb randomizes M <= 128, W, IFM
+  -> firmware stages data through DMA
+  -> firmware drives raw systolic MMIO registers directly
+  -> firmware copies OFM to L2
+  -> cocotb compares every INT32 output word
+```
+
+This test intentionally bypasses HAL tiling to preserve raw-controller coverage.
 
 ---
 
-## 5. Useful Commands
+## 5. Build Gates
 
 ```bash
-env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/systolic
-env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot
-env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_matmul
+make -C sw/test/boot
+make -C sw/test/independent_memory
+make -C sw/test/independent_systolic
+make -C sw/test/spatz_vector
+make -C sw/test/spatz_ops
+make -C sw/test/matmul
 ```
 
-If firmware binaries were cleaned, rebuild them first:
-
-```bash
-make -C sw/boot_app
-make -C sw/matmul_app
-```
+Spatz-related tests use the local toolchain under `hw/spatz/install` by default.
 
 ---
 
-## 6. Current Gaps to Add Later
+## 6. RTL Gates
 
-- Concurrent DMA + Systolic + Vector TCDM arbitration test.
-- L1→L1 DMA stress test with overlapping bank access patterns.
-- Multi-cluster top-level test once Phase 4 starts.
-- End-to-end YOLO layer test after tiling and manager orchestration are available.
+Use the same Verilator/cocotb cluster target and select modules explicitly:
+
+```bash
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_independent_memory
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_operator_library
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_independent_systolic
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_matmul
+```
+
+Optional diagnostic:
+
+```bash
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_systolic_ofm_fifo_highwater
+```
+
+`test_systolic_ofm_fifo_highwater` is a sizing/observability diagnostic, not a
+functional gate.
+
+---
+
+## 7. Acceptance Rule
+
+A change that touches DMA, TCDM interconnect, Spatz integration, or systolic
+controller behavior should at minimum rebuild all `sw/test` firmware and rerun
+the affected RTL gates. If the change is broad or changes shared arbitration,
+rerun the full gate list in this document.
