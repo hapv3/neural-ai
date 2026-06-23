@@ -1,4 +1,7 @@
     .option norvc
+    # Scenario: RVV arithmetic, compare, mask, and merge regression.
+    # Target: signed multiply/min/max/shift-right plus vmslt/vmerge behavior.
+    # Outputs are stored to TCDM and verified by scalar golden code.
 
     .equ SIG_BASE,        0x10008000
     .equ SIG_STATUS,      0x10008000
@@ -35,6 +38,7 @@ _start:
     sw t0, 24(s0)
     sw t0, 28(s0)
 
+    # Build signed fixture vectors that cross zero to expose signed-lane errors.
     li a0, SRC_A
     li a1, SRC_B
     li t0, 0
@@ -60,6 +64,7 @@ _start:
     li a0, SRC_B
     vle32.v v2, (a0)
 
+    # Each operation is isolated and increments pass_count after exact compare.
     vmul.vv v3, v1, v2
     li a0, DST_MUL
     vse32.v v3, (a0)

@@ -1,4 +1,7 @@
     .option norvc
+    # Scenario: RVV reduction regression.
+    # Target: vredsum.vs over e32 lanes after basic memory/vector decode passes.
+    # The scalar check validates the reduced first element against sum(1..16).
 
     .equ SIG_BASE,        0x10008000
     .equ SIG_STATUS,      0x10008000
@@ -26,6 +29,7 @@ _start:
     sw t0, 16(s0)
     sw t0, 20(s0)
 
+    # Seed a small hand-checkable vector so the golden sum is unambiguous.
     li a0, SRC
     li t0, 0
 1:

@@ -2,7 +2,11 @@
 #include "npu_memory_map.h"
 #include "idma_mm_utils.h"
 
-// For testing purposes, we use Shared Data TCDM
+/*
+ * Scenario: minimal boot firmware smoke test.
+ * Target: prove Snitch can execute code, access D-TCM status words, write/read
+ * iDMA-compatible MMIO registers, and run one local TCDM-to-TCDM copy.
+ */
 #define TEST_SRC_ADDR 0x10100000 // TCDM Bank 0
 #define TEST_DST_ADDR 0x10100100 // TCDM Bank 0 offset 0x100
 #define TEST_LEN      64
@@ -11,17 +15,17 @@ volatile uint32_t *src_array = (volatile uint32_t*)TEST_SRC_ADDR;
 volatile uint32_t *dst_array = (volatile uint32_t*)TEST_DST_ADDR;
 
 int main(void) {
-    // 1. Write some test data to the Source Address
+    // Seed a deterministic TCDM fixture that the copy result can compare byte-exactly.
     for (int i = 0; i < TEST_LEN/4; i++) {
         src_array[i] = 0xCAFEBABE + i;
     }
 
-    // 2. Clear Destination Address
+    // Clear destination first so a stale boot image cannot accidentally pass.
     for (int i = 0; i < TEST_LEN/4; i++) {
         dst_array[i] = 0;
     }
 
-    // 3. Test writing to iDMA MMIO registers via OBI
+    // Check OBI/MMIO plumbing before using the DMA helper path.
     REG_WRITE(IDMA_LENGTH_LOW(IDMA_DIR_L2_TO_L1), 0x1234);
     uint32_t readback = REG_READ(IDMA_LENGTH_LOW(IDMA_DIR_L2_TO_L1));
     if (readback != 0x1234) {
@@ -30,10 +34,10 @@ int main(void) {
         while(1);
     }
 
-    // 4. Test local copy through the iDMA-compatible runtime API
+    // Exercise the iDMA-compatible local-copy API on current TCDM backend.
     idma_L1ToL1(TEST_SRC_ADDR, TEST_DST_ADDR, TEST_LEN);
 
-    // 5. Verify DMA Transfer Result
+    // Verify every copied word and leave debug words for cocotb on first mismatch.
     int success = 1;
     for (int i = 0; i < TEST_LEN/4; i++) {
         if (dst_array[i] != src_array[i]) {
@@ -45,7 +49,7 @@ int main(void) {
         }
     }
 
-    // 6. Signal completion to D-TCM (so testbench can backdoor read it)
+    // Publish final signature through D-TCM so cocotb can poll without UART.
     if (success) {
         *((volatile uint32_t*)(NPU_DTCM_BASE)) = 0xDEADBEEF; // Success signature
     } else {

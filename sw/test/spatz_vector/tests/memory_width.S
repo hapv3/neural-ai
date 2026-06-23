@@ -1,4 +1,7 @@
     .option norvc
+    # Scenario: RVV memory width regression.
+    # Target: vsetvli plus vle/vse for e8, e16, and e32 element widths.
+    # Distinct patterns per width catch truncation, sign, and stride mistakes.
 
     .equ SIG_BASE,        0x10008000
     .equ SIG_STATUS,      0x10008000
@@ -39,6 +42,7 @@ _start:
     li t0, 1
     sw t0, 24(s0)
 
+    # e8 path: byte-granular vector load/store with byte scalar verification.
     li a0, SRC8
     li a1, DST8
     li t0, 0
@@ -65,6 +69,7 @@ _start:
     jal ra, verify_e8
     jal ra, mark_pass
 
+    # e16 path: halfword vector load/store and scalar halfword verification.
     li a0, SRC16
     li a1, DST16
     li t0, 0
@@ -91,6 +96,7 @@ _start:
     jal ra, verify_e16
     jal ra, mark_pass
 
+    # e32 path: word vector load/store including negative signed values.
     li a0, SRC32
     li a1, DST32
     li t0, 0
