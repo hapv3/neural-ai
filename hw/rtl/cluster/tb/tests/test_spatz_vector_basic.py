@@ -127,10 +127,10 @@ async def test_spatz_vector_basic(dut):
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
-        "../../../../../sw/spatz_vector/basic_mem_arith.bin",
+        "../../../../../sw/test/spatz_vector/basic_mem_arith.bin",
     )
     assert os.path.exists(fw_path), (
-        "Missing Spatz-vector firmware. Run `make -C sw/spatz_vector` first."
+        "Missing Spatz-vector firmware. Run `make -C sw/test/spatz_vector` first."
     )
 
     await load_firmware_axi(dut, axi_master, fw_path)

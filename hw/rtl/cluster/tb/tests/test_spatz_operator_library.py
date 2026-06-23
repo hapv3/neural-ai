@@ -102,10 +102,10 @@ async def test_spatz_operator_library(dut):
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
-        "../../../../../sw/spatz_ops_test/spatz_ops_test.bin",
+        "../../../../../sw/test/spatz_ops/spatz_ops_test.bin",
     )
     assert os.path.exists(fw_path), (
-        "Missing Spatz operator firmware. Run `make -C sw/spatz_ops_test` first."
+        "Missing Spatz operator firmware. Run `make -C sw/test/spatz_ops` first."
     )
 
     await load_firmware_axi(dut, axi_master, fw_path)

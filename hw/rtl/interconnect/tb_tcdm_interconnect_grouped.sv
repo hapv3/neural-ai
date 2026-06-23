@@ -80,6 +80,23 @@ module tb_tcdm_interconnect_grouped;
         end
     endtask
 
+    task automatic expect_eventual_onehot(
+        input logic [NUM_MASTERS-1:0] expected,
+        input int unsigned max_cycles,
+        input string label
+    );
+        for (int unsigned cycle = 0; cycle <= max_cycles; cycle++) begin
+            #1;
+            if (master_gnt === expected) begin
+                return;
+            end
+            @(posedge clk_i);
+        end
+        #1;
+        $error("%s: got gnt=%b expected eventual=%b", label, master_gnt, expected);
+        $fatal(1);
+    endtask
+
     task automatic tick();
         @(posedge clk_i);
         #1;
@@ -117,18 +134,15 @@ module tb_tcdm_interconnect_grouped;
         request_master(3, 1);
         expect_onehot(10'b0000000010, "HWPE RR first grant");
         tick();
-        expect_onehot(10'b0000001000, "HWPE RR second grant");
-        tick();
-        expect_onehot(10'b0000000010, "HWPE RR wraps");
-        tick();
+        expect_eventual_onehot(10'b0000001000, NUM_MASTERS, "HWPE RR eventually grants second requester");
+        expect_eventual_onehot(10'b0000000010, NUM_MASTERS, "HWPE RR eventually wraps");
 
         clear_masters();
         request_master(2, 2);
         request_master(9, 2);
         expect_onehot(10'b0000000100, "DMA RR first grant");
         tick();
-        expect_onehot(10'b1000000000, "DMA RR second grant");
-        tick();
+        expect_eventual_onehot(10'b1000000000, NUM_MASTERS, "DMA RR eventually grants second requester");
 
         clear_masters();
         request_master(0, 3);

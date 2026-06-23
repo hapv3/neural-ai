@@ -33,7 +33,6 @@ module tcdm_interconnect #(
 
     localparam int unsigned BANK_SEL_BITS = $clog2(NUM_BANKS);
     localparam int unsigned BYTE_SEL_BITS = $clog2(DATA_WIDTH / 8);
-    localparam int unsigned MASTER_SEL_BITS = (NUM_MASTERS > 1) ? $clog2(NUM_MASTERS) : 1;
     localparam logic GROUP_MASKS_CONFIGURED = |(HWPE_MASTER_MASK | DMA_MASTER_MASK | CORE_MASTER_MASK);
     localparam logic [NUM_MASTERS-1:0] HWPE_MASK =
         GROUP_MASKS_CONFIGURED ? HWPE_MASTER_MASK : '0;
@@ -41,8 +40,6 @@ module tcdm_interconnect #(
         GROUP_MASKS_CONFIGURED ? DMA_MASTER_MASK : '0;
     localparam logic [NUM_MASTERS-1:0] CORE_MASK =
         GROUP_MASKS_CONFIGURED ? CORE_MASTER_MASK : '1;
-
-    typedef logic [MASTER_SEL_BITS-1:0] master_sel_t;
 
     // Signals for arbitration
     logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] bank_req_matrix;
@@ -56,52 +53,12 @@ module tcdm_interconnect #(
     logic [NUM_BANKS-1:0] hwpe_req;
     logic [NUM_BANKS-1:0] dma_req;
     logic [NUM_BANKS-1:0] core_req;
-    master_sel_t [NUM_BANKS-1:0] hwpe_rr_q, hwpe_rr_d;
-    master_sel_t [NUM_BANKS-1:0] dma_rr_q, dma_rr_d;
-    master_sel_t [NUM_BANKS-1:0] core_rr_q, core_rr_d;
+    logic [NUM_MASTERS-1:0][0:0] rr_data_i;
+    logic [NUM_BANKS-1:0] hwpe_selected;
+    logic [NUM_BANKS-1:0] dma_selected;
+    logic [NUM_BANKS-1:0] core_selected;
 
-    function automatic logic [NUM_MASTERS-1:0] pick_rr(
-        input logic [NUM_MASTERS-1:0] req,
-        input master_sel_t            rr_ptr
-    );
-        logic [NUM_MASTERS-1:0] grant;
-        logic                   found;
-        int unsigned            idx;
-        begin
-            grant = '0;
-            found = 1'b0;
-            for (int unsigned offset = 0; offset < NUM_MASTERS; offset++) begin
-                idx = int'(rr_ptr) + offset;
-                if (idx >= NUM_MASTERS) begin
-                    idx = idx - NUM_MASTERS;
-                end
-                if (!found && req[idx]) begin
-                    grant[idx] = 1'b1;
-                    found = 1'b1;
-                end
-            end
-            return grant;
-        end
-    endfunction
-
-    function automatic master_sel_t next_rr(
-        input logic [NUM_MASTERS-1:0] grant
-    );
-        master_sel_t next_ptr;
-        begin
-            next_ptr = '0;
-            for (int unsigned m = 0; m < NUM_MASTERS; m++) begin
-                if (grant[m]) begin
-                    if (m == NUM_MASTERS - 1) begin
-                        next_ptr = '0;
-                    end else begin
-                        next_ptr = master_sel_t'(m + 1);
-                    end
-                end
-            end
-            return next_ptr;
-        end
-    endfunction
+    assign rr_data_i = '0;
     
     // 1. Address decoding (Word-interleaved banking)
     for (genvar m = 0; m < NUM_MASTERS; m++) begin : gen_addr_decode
@@ -127,15 +84,75 @@ module tcdm_interconnect #(
         assign dma_req[b]  = |dma_req_matrix[b];
         assign core_req[b] = |core_req_matrix[b];
 
-        assign hwpe_gnt_matrix[b] = pick_rr(hwpe_req_matrix[b], hwpe_rr_q[b]);
-        assign dma_gnt_matrix[b]  = pick_rr(dma_req_matrix[b], dma_rr_q[b]);
-        assign core_gnt_matrix[b] = pick_rr(core_req_matrix[b], core_rr_q[b]);
+        assign hwpe_selected[b] = hwpe_req[b];
+        assign dma_selected[b]  = ~hwpe_req[b] & dma_req[b];
+        assign core_selected[b] = ~hwpe_req[b] & ~dma_req[b] & core_req[b];
+
+        rr_arb_tree #(
+            .NumIn     (NUM_MASTERS),
+            .DataWidth (1),
+            .ExtPrio   (1'b0),
+            .AxiVldRdy (1'b1),
+            .LockIn    (1'b0),
+            .FairArb   (1'b1)
+        ) u_hwpe_rr_arb (
+            .clk_i   (clk_i),
+            .rst_ni  (rst_ni),
+            .flush_i (1'b0),
+            .rr_i    ('0),
+            .req_i   (hwpe_req_matrix[b]),
+            .gnt_o   (hwpe_gnt_matrix[b]),
+            .data_i  (rr_data_i),
+            .req_o   (),
+            .gnt_i   (hwpe_selected[b]),
+            .data_o  (),
+            .idx_o   ()
+        );
+
+        rr_arb_tree #(
+            .NumIn     (NUM_MASTERS),
+            .DataWidth (1),
+            .ExtPrio   (1'b0),
+            .AxiVldRdy (1'b1),
+            .LockIn    (1'b0),
+            .FairArb   (1'b1)
+        ) u_dma_rr_arb (
+            .clk_i   (clk_i),
+            .rst_ni  (rst_ni),
+            .flush_i (1'b0),
+            .rr_i    ('0),
+            .req_i   (dma_req_matrix[b]),
+            .gnt_o   (dma_gnt_matrix[b]),
+            .data_i  (rr_data_i),
+            .req_o   (),
+            .gnt_i   (dma_selected[b]),
+            .data_o  (),
+            .idx_o   ()
+        );
+
+        rr_arb_tree #(
+            .NumIn     (NUM_MASTERS),
+            .DataWidth (1),
+            .ExtPrio   (1'b0),
+            .AxiVldRdy (1'b1),
+            .LockIn    (1'b0),
+            .FairArb   (1'b1)
+        ) u_core_rr_arb (
+            .clk_i   (clk_i),
+            .rst_ni  (rst_ni),
+            .flush_i (1'b0),
+            .rr_i    ('0),
+            .req_i   (core_req_matrix[b]),
+            .gnt_o   (core_gnt_matrix[b]),
+            .data_i  (rr_data_i),
+            .req_o   (),
+            .gnt_i   (core_selected[b]),
+            .data_o  (),
+            .idx_o   ()
+        );
 
         assign bank_gnt_matrix[b] =
-            hwpe_req[b] ? hwpe_gnt_matrix[b] :
-            dma_req[b]  ? dma_gnt_matrix[b]  :
-            core_req[b] ? core_gnt_matrix[b] :
-                          '0;
+            hwpe_gnt_matrix[b] | dma_gnt_matrix[b] | core_gnt_matrix[b];
 
         // Bank outputs
         assign bank_req_o[b] = hwpe_req[b] | dma_req[b] | core_req[b];
@@ -157,34 +174,6 @@ module tcdm_interconnect #(
                     bank_wdata_o[b] = master_wdata_i[m];
                 end
             end
-        end
-    end
-
-    always_comb begin
-        hwpe_rr_d = hwpe_rr_q;
-        dma_rr_d  = dma_rr_q;
-        core_rr_d = core_rr_q;
-
-        for (int unsigned b = 0; b < NUM_BANKS; b++) begin
-            if (hwpe_req[b]) begin
-                hwpe_rr_d[b] = next_rr(hwpe_gnt_matrix[b]);
-            end else if (dma_req[b]) begin
-                dma_rr_d[b] = next_rr(dma_gnt_matrix[b]);
-            end else if (core_req[b]) begin
-                core_rr_d[b] = next_rr(core_gnt_matrix[b]);
-            end
-        end
-    end
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-            hwpe_rr_q <= '0;
-            dma_rr_q  <= '0;
-            core_rr_q <= '0;
-        end else begin
-            hwpe_rr_q <= hwpe_rr_d;
-            dma_rr_q  <= dma_rr_d;
-            core_rr_q <= core_rr_d;
         end
     end
 

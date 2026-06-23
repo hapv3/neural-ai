@@ -224,9 +224,9 @@ async def test_micro_yolo_e2e(dut):
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
-        "../../../../../sw/micro_yolo_app/micro_yolo.bin",
+        "../../../../../sw/test/micro_yolo/micro_yolo.bin",
     )
-    assert os.path.exists(fw_path), "Missing firmware. Run `make -C sw/micro_yolo_app` first."
+    assert os.path.exists(fw_path), "Missing firmware. Run `make -C sw/test/micro_yolo` first."
 
     await assert_reset(dut)
     load_firmware_tcm(dut, fw_path)
