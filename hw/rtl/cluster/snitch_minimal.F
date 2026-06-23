@@ -159,5 +159,6 @@ $(REPO_ROOT)/hw/spatz/hw/ip/spatz/src/spatz_controller.sv
 $(REPO_ROOT)/hw/spatz/hw/ip/spatz/src/spatz.sv
 $(REPO_ROOT)/hw/rtl/cluster/tcdm_to_obi_bridge.sv
 
+$(REPO_ROOT)/hw/rtl/cluster/obi_snitch_if_adapter.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_cluster.sv
 $(REPO_ROOT)/hw/rtl/cluster/tb/tb_npu_cluster.sv

@@ -667,7 +667,10 @@ module npu_cluster (
         .NUM_MASTERS(NUM_MASTERS),
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH)
+        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .HWPE_MASTER_MASK(10'h1FA), // M1, M3-M8: Spatz + Systolic
+        .DMA_MASTER_MASK (10'h204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(10'h001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
