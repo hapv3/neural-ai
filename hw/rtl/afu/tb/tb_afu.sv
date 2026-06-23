@@ -3,53 +3,45 @@
 
 module tb_afu;
 
-    //----------------------------------------------------------------------
-    // Signals
-    //----------------------------------------------------------------------
+    localparam int unsigned ADDR_WIDTH     = 32;
+    localparam int unsigned CFG_DATA_WIDTH = 32;
+    localparam int unsigned MEM_DATA_WIDTH = 256;
+    localparam int unsigned MEM_BYTES      = MEM_DATA_WIDTH / 8;
+    localparam int unsigned LUT_LANES      = 4;
+    localparam int unsigned MEM_SIZE       = 16 * 1024;
+
+    localparam logic [1:0] MODE_8BIT  = 2'd0;
+    localparam logic [1:0] MODE_16BIT = 2'd1;
+    localparam logic [1:0] MODE_32BIT = 2'd2;
+
     logic clk_i;
     logic rst_ni;
 
-    // OBI Slave Port (Configuration)
-    logic        obi_s_req;
-    logic        obi_s_gnt;
-    logic [31:0] obi_s_addr;
-    logic        obi_s_we;
-    logic [3:0]  obi_s_be;
-    logic [31:0] obi_s_wdata;
-    logic        obi_s_rvalid;
-    logic [31:0] obi_s_rdata;
+    logic                          obi_s_req;
+    logic                          obi_s_gnt;
+    logic [ADDR_WIDTH-1:0]         obi_s_addr;
+    logic                          obi_s_we;
+    logic [(CFG_DATA_WIDTH/8)-1:0] obi_s_be;
+    logic [CFG_DATA_WIDTH-1:0]     obi_s_wdata;
+    logic                          obi_s_rvalid;
+    logic [CFG_DATA_WIDTH-1:0]     obi_s_rdata;
 
-    // OBI Master Port (Memory Access)
-    logic        obi_m_req;
-    logic        obi_m_gnt;
-    logic [31:0] obi_m_addr;
-    logic        obi_m_we;
-    logic [3:0]  obi_m_be;
-    logic [31:0] obi_m_wdata;
-    logic        obi_m_rvalid;
-    logic [31:0] obi_m_rdata;
+    logic                          obi_m_req;
+    logic                          obi_m_gnt;
+    logic [ADDR_WIDTH-1:0]         obi_m_addr;
+    logic                          obi_m_we;
+    logic [(MEM_DATA_WIDTH/8)-1:0] obi_m_be;
+    logic [MEM_DATA_WIDTH-1:0]     obi_m_wdata;
+    logic                          obi_m_rvalid;
+    logic [MEM_DATA_WIDTH-1:0]     obi_m_rdata;
 
-    logic        done;
+    logic done;
 
-    //----------------------------------------------------------------------
-    // Clock & Reset
-    //----------------------------------------------------------------------
-    initial begin
-        clk_i = 0;
-        forever #5 clk_i = ~clk_i; // 100MHz clock
-    end
-
-    initial begin
-        rst_ni = 0;
-        #20 rst_ni = 1;
-    end
-
-    //----------------------------------------------------------------------
-    // Device Under Test (DUT)
-    //----------------------------------------------------------------------
     afu #(
-        .ADDR_WIDTH(32),
-        .DATA_WIDTH(32)
+        .ADDR_WIDTH     (ADDR_WIDTH),
+        .CFG_DATA_WIDTH (CFG_DATA_WIDTH),
+        .MEM_DATA_WIDTH (MEM_DATA_WIDTH),
+        .LUT_LANES      (LUT_LANES)
     ) dut (
         .clk_i          (clk_i),
         .rst_ni         (rst_ni),
@@ -72,71 +64,105 @@ module tb_afu;
         .done_o         (done)
     );
 
-    //----------------------------------------------------------------------
-    // Mock TCDM Memory (8 KB)
-    //----------------------------------------------------------------------
-    logic [31:0] tcdm_mem [0:2047];
+    logic [7:0] tcdm_mem [0:MEM_SIZE-1];
+    logic       read_pending_q;
+    logic [31:0] read_addr_q;
+    int unsigned mem_cycle_q;
 
-    // OBI Master to TCDM Model
+    int errors;
+    logic [31:0] lut_data [0:255];
+
+    initial begin
+        clk_i = 1'b0;
+        forever #5 clk_i = ~clk_i;
+    end
+
+    initial begin
+        rst_ni = 1'b0;
+        #40;
+        rst_ni = 1'b1;
+    end
+
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-            obi_m_gnt <= 0;
-            obi_m_rvalid <= 0;
-            obi_m_rdata <= 0;
+            obi_m_gnt      <= 1'b0;
+            obi_m_rvalid   <= 1'b0;
+            obi_m_rdata    <= '0;
+            read_pending_q <= 1'b0;
+            read_addr_q    <= '0;
+            mem_cycle_q    <= '0;
         end else begin
-            obi_m_gnt <= 0;
-            obi_m_rvalid <= 0;
-            
-            if (obi_m_req) begin
-                obi_m_gnt <= 1; // Always grant immediately for testing
-                
+            int unsigned base;
+
+            mem_cycle_q  <= mem_cycle_q + 1;
+            obi_m_gnt    <= 1'b0;
+            obi_m_rvalid <= 1'b0;
+            obi_m_rdata  <= '0;
+
+            if (read_pending_q) begin
+                base = read_addr_q % MEM_SIZE;
+                for (int b = 0; b < MEM_BYTES; b++) begin
+                    obi_m_rdata[b*8 +: 8] <= tcdm_mem[(base + b) % MEM_SIZE];
+                end
+                obi_m_rvalid   <= 1'b1;
+                read_pending_q <= 1'b0;
+            end
+
+            if (obi_m_req && !obi_m_gnt && ((mem_cycle_q % 5) != 0)) begin
+                base      = obi_m_addr % MEM_SIZE;
+                obi_m_gnt <= 1'b1;
                 if (obi_m_we) begin
-                    // Write
-                    int word_idx = obi_m_addr[12:2];
-                    if (obi_m_be[0]) tcdm_mem[word_idx][7:0]   <= obi_m_wdata[7:0];
-                    if (obi_m_be[1]) tcdm_mem[word_idx][15:8]  <= obi_m_wdata[15:8];
-                    if (obi_m_be[2]) tcdm_mem[word_idx][23:16] <= obi_m_wdata[23:16];
-                    if (obi_m_be[3]) tcdm_mem[word_idx][31:24] <= obi_m_wdata[31:24];
+                    for (int b = 0; b < MEM_BYTES; b++) begin
+                        if (obi_m_be[b]) begin
+                            tcdm_mem[(base + b) % MEM_SIZE] <= obi_m_wdata[b*8 +: 8];
+                        end
+                    end
                 end else begin
-                    // Read
-                    obi_m_rvalid <= 1;
-                    obi_m_rdata <= tcdm_mem[obi_m_addr[12:2]];
+                    read_pending_q <= 1'b1;
+                    read_addr_q    <= obi_m_addr;
                 end
             end
         end
     end
 
-    //----------------------------------------------------------------------
-    // Mock Snitch Driver Tasks
-    //----------------------------------------------------------------------
     task automatic write_obi(input logic [31:0] addr, input logic [31:0] data);
         @(posedge clk_i);
-        obi_s_req   = 1;
-        obi_s_we    = 1;
+        obi_s_req   = 1'b1;
+        obi_s_we    = 1'b1;
         obi_s_addr  = addr;
         obi_s_wdata = data;
-        obi_s_be    = 4'hF;
-        wait(obi_s_gnt);
-        @(posedge clk_i);
-        obi_s_req = 0;
+        obi_s_be    = 4'hf;
+        do begin
+            @(posedge clk_i);
+        end while (!obi_s_gnt);
+        obi_s_req   = 1'b0;
+        obi_s_we    = 1'b0;
+        obi_s_addr  = '0;
+        obi_s_wdata = '0;
+        obi_s_be    = '0;
     endtask
 
     task automatic read_obi(input logic [31:0] addr, output logic [31:0] data);
         @(posedge clk_i);
-        obi_s_req  = 1;
-        obi_s_we   = 0;
+        obi_s_req  = 1'b1;
+        obi_s_we   = 1'b0;
         obi_s_addr = addr;
-        obi_s_be   = 4'hF;
-        wait(obi_s_gnt);
-        @(posedge clk_i);
-        obi_s_req = 0;
-        wait(obi_s_rvalid);
+        obi_s_be   = 4'hf;
+        do begin
+            @(posedge clk_i);
+        end while (!obi_s_gnt);
+        obi_s_req  = 1'b0;
+        obi_s_addr = '0;
+        obi_s_be   = '0;
+        while (!obi_s_rvalid) begin
+            @(posedge clk_i);
+        end
         data = obi_s_rdata;
     endtask
 
-    task automatic load_lut(input logic [31:0] lut_array [0:255]);
+    task automatic load_lut();
         for (int i = 0; i < 256; i++) begin
-            write_obi(i * 4, lut_array[i]);
+            write_obi(i * 4, lut_data[i]);
         end
     endtask
 
@@ -144,199 +170,160 @@ module tb_afu;
         input logic [31:0] src_ptr,
         input logic [31:0] dst_ptr,
         input logic [31:0] length,
-        input logic [1:0] mode
+        input logic [1:0]  mode
     );
         write_obi(32'h1004, src_ptr);
         write_obi(32'h1008, dst_ptr);
-        write_obi(32'h100C, length);
+        write_obi(32'h100c, length);
         write_obi(32'h1010, {30'd0, mode});
-        write_obi(32'h1000, 32'd1); // Start
+        write_obi(32'h1000, 32'd1);
     endtask
 
-    task automatic wait_done();
+    task automatic wait_done(input string name);
         logic [31:0] status;
-        do begin
+        for (int poll = 0; poll < 20000; poll++) begin
             read_obi(32'h1000, status);
-        end while (status[0] == 0);
+            if (status[2]) begin
+                $fatal(1, "[AFU TB] %s reported error status 0x%08x", name, status);
+            end
+            if (status[0]) begin
+                return;
+            end
+        end
+        $fatal(1, "[AFU TB] %s timed out waiting for done", name);
     endtask
 
-    // Helper to read/write bytes directly to memory array for verification
-    function void write_tcdm_byte(int byte_addr, logic [7:0] val);
-        int word_idx = byte_addr / 4;
-        int byte_offset = byte_addr % 4;
-        case (byte_offset)
-            0: tcdm_mem[word_idx][7:0]   = val;
-            1: tcdm_mem[word_idx][15:8]  = val;
-            2: tcdm_mem[word_idx][23:16] = val;
-            3: tcdm_mem[word_idx][31:24] = val;
+    function automatic logic [7:0] input_pattern(input int index, input int pattern_id);
+        unique case (pattern_id)
+            0: input_pattern = 8'(index & 32'hff);
+            1: input_pattern = 8'(((index * 37) + 11) & 32'hff);
+            2: input_pattern = 8'(((index * 19) + 32'ha5) & 32'hff);
+            default: input_pattern = 8'(((index * 53) + 7) & 32'hff);
         endcase
     endfunction
 
-    function logic [7:0] read_tcdm_byte(int byte_addr);
-        int word_idx = byte_addr / 4;
-        int byte_offset = byte_addr % 4;
-        case (byte_offset)
-            0: return tcdm_mem[word_idx][7:0];
-            1: return tcdm_mem[word_idx][15:8];
-            2: return tcdm_mem[word_idx][23:16];
-            3: return tcdm_mem[word_idx][31:24];
-        endcase
+    function automatic logic [15:0] read_tcdm_half(input int byte_addr);
+        read_tcdm_half = {tcdm_mem[(byte_addr + 1) % MEM_SIZE], tcdm_mem[byte_addr % MEM_SIZE]};
     endfunction
 
-    function logic [15:0] read_tcdm_half(int byte_addr);
-        logic [7:0] b0 = read_tcdm_byte(byte_addr);
-        logic [7:0] b1 = read_tcdm_byte(byte_addr+1);
-        return {b1, b0};
+    function automatic logic [31:0] read_tcdm_word(input int byte_addr);
+        read_tcdm_word = {
+            tcdm_mem[(byte_addr + 3) % MEM_SIZE],
+            tcdm_mem[(byte_addr + 2) % MEM_SIZE],
+            tcdm_mem[(byte_addr + 1) % MEM_SIZE],
+            tcdm_mem[byte_addr % MEM_SIZE]
+        };
     endfunction
 
-    function logic [31:0] read_tcdm_word(int byte_addr);
-        logic [15:0] h0 = read_tcdm_half(byte_addr);
-        logic [15:0] h1 = read_tcdm_half(byte_addr+2);
-        return {h1, h0};
-    endfunction
+    task automatic clear_tcdm(input logic [7:0] value);
+        for (int i = 0; i < MEM_SIZE; i++) begin
+            tcdm_mem[i] = value;
+        end
+    endtask
 
-    //----------------------------------------------------------------------
-    // Test Sequences
-    //----------------------------------------------------------------------
-    int errors = 0;
-    logic [31:0] lut_data [0:255];
-    int test_len = 256;
-    int src_base = 'h100;
-    int dst_base = 'h400;
+    task automatic fill_lut(input logic [1:0] mode, input int pattern_id);
+        for (int i = 0; i < 256; i++) begin
+            unique case (mode)
+                MODE_8BIT: begin
+                    lut_data[i] = ((i * 7) + pattern_id + 32'h5a) & 32'h0000_00ff;
+                end
+                MODE_16BIT: begin
+                    lut_data[i] = ((i * 257) + 32'h1234 + pattern_id) & 32'h0000_ffff;
+                end
+                default: begin
+                    lut_data[i] = (i * 32'h0101_0101) ^ (32'hdead_beef + pattern_id);
+                end
+            endcase
+        end
+    endtask
 
-    // Mathematical approximations for tests
-    real e = 2.718281828459;
+    task automatic check_case(
+        input string       name,
+        input logic [1:0]  mode,
+        input int          src_base,
+        input int          dst_base,
+        input int          length,
+        input int          pattern_id
+    );
+        int output_bytes;
 
-    function real sigmoid(real x);
-        return 1.0 / (1.0 + e**(-x));
-    endfunction
+        $display("[AFU TB] %s: mode=%0d src=0x%0h dst=0x%0h len=%0d",
+                 name, mode, src_base, dst_base, length);
+        $fflush();
+
+        fill_lut(mode, pattern_id);
+        load_lut();
+
+        for (int i = 0; i < length; i++) begin
+            tcdm_mem[(src_base + i) % MEM_SIZE] = input_pattern(i, pattern_id);
+        end
+
+        output_bytes = (mode == MODE_8BIT) ? 1 : ((mode == MODE_16BIT) ? 2 : 4);
+        for (int i = 0; i < (length * output_bytes + 64); i++) begin
+            tcdm_mem[(dst_base + i - 16 + MEM_SIZE) % MEM_SIZE] = 8'ha5;
+        end
+
+        start_afu(src_base, dst_base, length, mode);
+        wait_done(name);
+
+        for (int i = 0; i < length; i++) begin
+            logic [7:0]  input_value;
+            logic [31:0] expected;
+            logic [31:0] actual;
+            int          out_addr;
+
+            input_value = input_pattern(i, pattern_id);
+            expected    = lut_data[input_value];
+            out_addr    = dst_base + i * output_bytes;
+
+            unique case (mode)
+                MODE_8BIT:  actual = {24'd0, tcdm_mem[out_addr % MEM_SIZE]};
+                MODE_16BIT: actual = {16'd0, read_tcdm_half(out_addr)};
+                default:    actual = read_tcdm_word(out_addr);
+            endcase
+
+            if (actual !== expected) begin
+                $display("[FAIL] %s idx=%0d input=%0h exp=%08h act=%08h",
+                         name, i, input_value, expected, actual);
+                errors++;
+            end
+        end
+
+        if (errors == 0) begin
+            $display("[PASS] %s", name);
+        end
+    endtask
 
     initial begin
-        // Initialize
-        obi_s_req = 0;
-        obi_s_we = 0;
-        obi_s_addr = 0;
-        obi_s_wdata = 0;
-        obi_s_be = 0;
-        for (int i=0; i<2048; i++) tcdm_mem[i] = 0;
+        errors      = 0;
+        obi_s_req   = 1'b0;
+        obi_s_we    = 1'b0;
+        obi_s_addr  = '0;
+        obi_s_wdata = '0;
+        obi_s_be    = '0;
+        clear_tcdm(8'h00);
 
-        wait(rst_ni);
-        #100;
-        $display("========================================");
-        $display("[AFU TB] Starting Autonomous Tests...");
-
-        //--------------------------------------------------
-        // Test 1: SiLU (8-bit)
-        //--------------------------------------------------
-        $display("[AFU TB] Test 1: SiLU (8-bit mode)");
-        for (int i=0; i<256; i++) begin
-            real x = real'(i - 128) / 16.0; // Assume Q4.4 format
-            real y = x * sigmoid(x);
-            int y_quant = $rtoi(y * 16.0); // Back to Q4.4
-            if (y_quant > 127) y_quant = 127;
-            if (y_quant < -128) y_quant = -128;
-            lut_data[i] = {24'd0, 8'(y_quant)}; // Only lowest byte matters for 8-bit mode
-        end
-        load_lut(lut_data);
-
-        for (int i=0; i<test_len; i++) begin
-            write_tcdm_byte(src_base + i, 8'(i));
-        end
-
-        start_afu(src_base, dst_base, test_len, 2'd0);
-        wait_done();
-
-        for (int i=0; i<test_len; i++) begin
-            logic [7:0] expected = lut_data[i][7:0];
-            logic [7:0] actual = read_tcdm_byte(dst_base + i);
-            if (expected !== actual) begin
-                $display("[FAIL] SiLU idx=%d, exp=%h, act=%h", i, expected, actual);
-                errors++;
-            end
-        end
-        if (errors==0) $display("[PASS] SiLU 8-bit");
-
-        //--------------------------------------------------
-        // Test 2: Sigmoid (8-bit)
-        //--------------------------------------------------
-        $display("[AFU TB] Test 2: Sigmoid (8-bit mode)");
-        for (int i=0; i<256; i++) begin
-            real x = real'(i - 128) / 16.0;
-            real y = sigmoid(x);
-            int y_quant = $rtoi(y * 255.0); // Assume Output is Q0.8 Unsigned
-            if (y_quant > 255) y_quant = 255;
-            if (y_quant < 0) y_quant = 0;
-            lut_data[i] = {24'd0, 8'(y_quant)};
-        end
-        load_lut(lut_data);
-
-        start_afu(src_base, dst_base, test_len, 2'd0);
-        wait_done();
-
-        for (int i=0; i<test_len; i++) begin
-            logic [7:0] expected = lut_data[i][7:0];
-            logic [7:0] actual = read_tcdm_byte(dst_base + i);
-            if (expected !== actual) begin
-                $display("[FAIL] Sigmoid idx=%d, exp=%h, act=%h", i, expected, actual);
-                errors++;
-            end
-        end
-        if (errors==0) $display("[PASS] Sigmoid 8-bit");
-
-        //--------------------------------------------------
-        // Test 3: Softmax Exp (16-bit)
-        //--------------------------------------------------
-        $display("[AFU TB] Test 3: Softmax Exp (16-bit mode)");
-        for (int i=0; i<256; i++) begin
-            real x = real'(i - 255) / 16.0; // Softmax usually subtracts max, so input is <= 0
-            real y = e**(x);
-            int y_quant = $rtoi(y * 32767.0); // Q1.15
-            lut_data[i] = {16'd0, 16'(y_quant)};
-        end
-        load_lut(lut_data);
-
-        start_afu(src_base, dst_base, test_len, 2'd1);
-        wait_done();
-
-        for (int i=0; i<test_len; i++) begin
-            logic [15:0] expected = lut_data[i][15:0];
-            logic [15:0] actual = read_tcdm_half(dst_base + i*2);
-            if (expected !== actual) begin
-                $display("[FAIL] Exp idx=%d, exp=%h, act=%h", i, expected, actual);
-                errors++;
-            end
-        end
-        if (errors==0) $display("[PASS] Softmax Exp 16-bit");
-
-        //--------------------------------------------------
-        // Test 4: Variance x^2 (32-bit)
-        //--------------------------------------------------
-        $display("[AFU TB] Test 4: Variance x^2 (32-bit mode)");
-        for (int i=0; i<256; i++) begin
-            int val = (i < 128) ? i : (i - 256);
-            int y_val = val * val; // max is 128*128 = 16384, easily fits in 32-bit without overflow
-            lut_data[i] = 32'(y_val);
-        end
-        load_lut(lut_data);
-
-        start_afu(src_base, dst_base, test_len, 2'd2);
-        wait_done();
-
-        for (int i=0; i<test_len; i++) begin
-            logic [31:0] expected = lut_data[i];
-            logic [31:0] actual = read_tcdm_word(dst_base + i*4);
-            if (expected !== actual) begin
-                $display("[FAIL] Variance idx=%d, exp=%h, act=%h", i, expected, actual);
-                errors++;
-            end
-        end
-        if (errors==0) $display("[PASS] Variance x^2 32-bit");
+        wait (rst_ni);
+        repeat (5) @(posedge clk_i);
 
         $display("========================================");
-        if (errors == 0) $display("[AFU TB] ALL TESTS PASSED SUCCESSFULLY");
-        else             $display("[AFU TB] COMPLETED WITH %d ERRORS", errors);
+        $display("[AFU TB] Starting 256-bit beat-engine tests");
+        $fflush();
+
+        check_case("zero_length", MODE_8BIT,  'h100, 'h400, 0,   0);
+        check_case("mode8_aligned_257",  MODE_8BIT,  'h100, 'h400, 257, 1);
+        check_case("mode16_aligned_129", MODE_16BIT, 'h100, 'h500, 129, 2);
+        check_case("mode32_aligned_67",  MODE_32BIT, 'h200, 'h600, 67,  3);
+
         $display("========================================");
-        
+        if (errors == 0) begin
+            $display("[AFU TB] ALL TESTS PASSED SUCCESSFULLY");
+        end else begin
+            $display("[AFU TB] COMPLETED WITH %0d ERRORS", errors);
+            $fatal(1, "[AFU TB] failures detected");
+        end
+        $display("========================================");
+
         $finish;
     end
 
