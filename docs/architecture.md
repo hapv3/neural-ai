@@ -98,19 +98,15 @@ To achieve high-performance matrix and vector operations, the architecture integ
 +------------------------------------------------------------------------------------------------+
 |                                    Systolic Array (32x32)                                      |
 |                                                                                                |
-|                                       [Weights (W) loaded sequentially downwards]              |
+|   OBI I-TCDM Mux ---> [Weight FIFO] ---> [Weights (W) loaded sequentially downwards]           |
 |                                            |     |     |           |                           |
 |  +-----------------+                       v     v     v           v                           |
-|  |                 |    IFM_Row[0]      +-----+-----+-----+     +-----+                        |
-|  | Input Skewing   |------------------->|PE0,0|PE0,1|PE0,2| ... |P0,31| (Delay 0 for IFM)      |
-|  | (Triangle       |                    +-----+-----+-----+     +-----+                        |
-|  |  Delay Regs)    |                       |     |     |           |                           |
-|  |                 |    IFM_Row[1] (d=1)+-----+-----+-----+     +-----+                        |
-|  |   IFM           |------------------->|PE1,0|PE1,1|PE1,2| ... |P1,31|                        |
-|  |  ------>        |                    +-----+-----+-----+     +-----+                        |
-|  |                 |                       |     |     |           |                           |
-|  |                 |    IFM_Row[2] (d=2)+-----+-----+-----+     +-----+                        |
-|  |                 |------------------->|PE2,0|PE2,1|PE2,2| ... |P2,31|                        |
+|  | [IFM FIFO]      |    IFM_Row[0]      +-----+-----+-----+     +-----+                        |
+|  |     |           |------------------->|PE0,0|PE0,1|PE0,2| ... |P0,31| (Delay 0 for IFM)      |
+|  |     v           |                    +-----+-----+-----+     +-----+                        |
+|  | Input Skewing   |                       |     |     |           |                           |
+|  | (Triangle       |    IFM_Row[1] (d=1)+-----+-----+-----+     +-----+                        |
+|  |  Delay Regs)    |------------------->|PE1,0|PE1,1|PE1,2| ... |P1,31|                        |
 |  |                 |                    +-----+-----+-----+     +-----+                        |
 |  |                 |                       |     |     |           |                           |
 |  |                 |                      ...   ...   ...  ...    ...                          |
@@ -124,8 +120,17 @@ To achieve high-performance matrix and vector operations, the architecture integ
 |  |                                  Output Deskewing (Reverse Triangle)                     |  |
 |  |                                 (Delay 31) (Delay 30)      (Delay 0)                     |  |
 |  +------------------------------------------------------------------------------------------+  |
-|                                            |     |     |           |                           |
-|                                            v     v     v           v                           |
+|                                            |                                                   |
+|                                            v                                                   |
+|                                       [OFM FIFO] ---> OBI O-TCDM Demux                         |
+|                                                                                                |
++------------------------------------------------------------------------------------------------+
+```
+
+### 3.1 Cấu trúc Data FIFOs
+Mạch điều khiển Systolic Array (`systolic_controller.sv`) sử dụng kiến trúc bất đồng bộ một phần (Decoupled I/O) thông qua các hàng đợi FIFO:
+- **IFM & Weight FIFOs (Input):** Nạp dữ liệu song song từ giao tiếp OBI I-TCDM. Chức năng chính là che giấu độ trễ (latency hiding) của mạng Interconnect, đảm bảo dữ liệu đưa vào Input Skewing luôn có sẵn mà không làm đình trệ pipeline tính toán bên trong mảng PE.
+- **OFM FIFO (Output):** Các giá trị PSum sau khi đi qua Output Deskewing sẽ được đẩy vào OFM FIFO trước khi ghi ngược ra O-TCDM. Bộ đệm này sử dụng cơ chế Backpressure (`almost_full`) để cho phép Hệ thống Writeback có thể chủ động stall (khi băng thông TCDM nghẽn) mà không làm mất dữ liệu đầu ra của Array.
 ## 4. Data TCDM SRAM Micro-Architecture (Detailed)
 
 > **Lưu ý Kiến trúc (Architecture Update):**

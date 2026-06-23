@@ -4,7 +4,10 @@ module tcdm_interconnect #(
     parameter int unsigned NUM_MASTERS = 4,
     parameter int unsigned NUM_BANKS   = 8,
     parameter int unsigned ADDR_WIDTH  = 32,
-    parameter int unsigned DATA_WIDTH  = 256
+    parameter int unsigned DATA_WIDTH  = 256,
+    parameter logic [NUM_MASTERS-1:0] HWPE_MASTER_MASK = '0,
+    parameter logic [NUM_MASTERS-1:0] DMA_MASTER_MASK  = '0,
+    parameter logic [NUM_MASTERS-1:0] CORE_MASTER_MASK = '0
 )(
     input  logic                                        clk_i,
     input  logic                                        rst_ni,
@@ -30,10 +33,75 @@ module tcdm_interconnect #(
 
     localparam int unsigned BANK_SEL_BITS = $clog2(NUM_BANKS);
     localparam int unsigned BYTE_SEL_BITS = $clog2(DATA_WIDTH / 8);
+    localparam int unsigned MASTER_SEL_BITS = (NUM_MASTERS > 1) ? $clog2(NUM_MASTERS) : 1;
+    localparam logic GROUP_MASKS_CONFIGURED = |(HWPE_MASTER_MASK | DMA_MASTER_MASK | CORE_MASTER_MASK);
+    localparam logic [NUM_MASTERS-1:0] HWPE_MASK =
+        GROUP_MASKS_CONFIGURED ? HWPE_MASTER_MASK : '0;
+    localparam logic [NUM_MASTERS-1:0] DMA_MASK =
+        GROUP_MASKS_CONFIGURED ? DMA_MASTER_MASK : '0;
+    localparam logic [NUM_MASTERS-1:0] CORE_MASK =
+        GROUP_MASKS_CONFIGURED ? CORE_MASTER_MASK : '1;
+
+    typedef logic [MASTER_SEL_BITS-1:0] master_sel_t;
 
     // Signals for arbitration
     logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] bank_req_matrix;
     logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] bank_gnt_matrix;
+    logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] hwpe_req_matrix;
+    logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] dma_req_matrix;
+    logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] core_req_matrix;
+    logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] hwpe_gnt_matrix;
+    logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] dma_gnt_matrix;
+    logic [NUM_BANKS-1:0][NUM_MASTERS-1:0] core_gnt_matrix;
+    logic [NUM_BANKS-1:0] hwpe_req;
+    logic [NUM_BANKS-1:0] dma_req;
+    logic [NUM_BANKS-1:0] core_req;
+    master_sel_t [NUM_BANKS-1:0] hwpe_rr_q, hwpe_rr_d;
+    master_sel_t [NUM_BANKS-1:0] dma_rr_q, dma_rr_d;
+    master_sel_t [NUM_BANKS-1:0] core_rr_q, core_rr_d;
+
+    function automatic logic [NUM_MASTERS-1:0] pick_rr(
+        input logic [NUM_MASTERS-1:0] req,
+        input master_sel_t            rr_ptr
+    );
+        logic [NUM_MASTERS-1:0] grant;
+        logic                   found;
+        int unsigned            idx;
+        begin
+            grant = '0;
+            found = 1'b0;
+            for (int unsigned offset = 0; offset < NUM_MASTERS; offset++) begin
+                idx = int'(rr_ptr) + offset;
+                if (idx >= NUM_MASTERS) begin
+                    idx = idx - NUM_MASTERS;
+                end
+                if (!found && req[idx]) begin
+                    grant[idx] = 1'b1;
+                    found = 1'b1;
+                end
+            end
+            return grant;
+        end
+    endfunction
+
+    function automatic master_sel_t next_rr(
+        input logic [NUM_MASTERS-1:0] grant
+    );
+        master_sel_t next_ptr;
+        begin
+            next_ptr = '0;
+            for (int unsigned m = 0; m < NUM_MASTERS; m++) begin
+                if (grant[m]) begin
+                    if (m == NUM_MASTERS - 1) begin
+                        next_ptr = '0;
+                    end else begin
+                        next_ptr = master_sel_t'(m + 1);
+                    end
+                end
+            end
+            return next_ptr;
+        end
+    endfunction
     
     // 1. Address decoding (Word-interleaved banking)
     for (genvar m = 0; m < NUM_MASTERS; m++) begin : gen_addr_decode
@@ -45,22 +113,32 @@ module tcdm_interconnect #(
         end
     end
 
-    // 2. Simple fixed-priority arbitration per bank (Master 0 has highest priority)
-    // In production, this can be replaced by `rr_arb_tree` from PULP common_cells
+    // 2. Grouped arbitration per bank.
+    //    - First stage: round-robin inside each traffic class.
+    //    - Final stage: strict priority HWPE > DMA > CORE.
     for (genvar b = 0; b < NUM_BANKS; b++) begin : gen_bank_arb
-        logic [NUM_MASTERS-1:0] higher_pri_reqs;
-        
-        assign higher_pri_reqs[0] = 1'b0;
-        for (genvar m = 1; m < NUM_MASTERS; m++) begin : gen_pri
-            assign higher_pri_reqs[m] = higher_pri_reqs[m-1] | bank_req_matrix[b][m-1];
+        for (genvar m = 0; m < NUM_MASTERS; m++) begin : gen_group_req
+            assign hwpe_req_matrix[b][m] = bank_req_matrix[b][m] & HWPE_MASK[m];
+            assign dma_req_matrix[b][m]  = bank_req_matrix[b][m] & DMA_MASK[m];
+            assign core_req_matrix[b][m] = bank_req_matrix[b][m] & CORE_MASK[m];
         end
 
-        for (genvar m = 0; m < NUM_MASTERS; m++) begin : gen_gnt
-            assign bank_gnt_matrix[b][m] = bank_req_matrix[b][m] & ~higher_pri_reqs[m];
-        end
+        assign hwpe_req[b] = |hwpe_req_matrix[b];
+        assign dma_req[b]  = |dma_req_matrix[b];
+        assign core_req[b] = |core_req_matrix[b];
+
+        assign hwpe_gnt_matrix[b] = pick_rr(hwpe_req_matrix[b], hwpe_rr_q[b]);
+        assign dma_gnt_matrix[b]  = pick_rr(dma_req_matrix[b], dma_rr_q[b]);
+        assign core_gnt_matrix[b] = pick_rr(core_req_matrix[b], core_rr_q[b]);
+
+        assign bank_gnt_matrix[b] =
+            hwpe_req[b] ? hwpe_gnt_matrix[b] :
+            dma_req[b]  ? dma_gnt_matrix[b]  :
+            core_req[b] ? core_gnt_matrix[b] :
+                          '0;
 
         // Bank outputs
-        assign bank_req_o[b] = |bank_req_matrix[b];
+        assign bank_req_o[b] = hwpe_req[b] | dma_req[b] | core_req[b];
 
         logic [NUM_MASTERS-1:0] grant_oh;
         assign grant_oh = bank_gnt_matrix[b];
@@ -79,6 +157,34 @@ module tcdm_interconnect #(
                     bank_wdata_o[b] = master_wdata_i[m];
                 end
             end
+        end
+    end
+
+    always_comb begin
+        hwpe_rr_d = hwpe_rr_q;
+        dma_rr_d  = dma_rr_q;
+        core_rr_d = core_rr_q;
+
+        for (int unsigned b = 0; b < NUM_BANKS; b++) begin
+            if (hwpe_req[b]) begin
+                hwpe_rr_d[b] = next_rr(hwpe_gnt_matrix[b]);
+            end else if (dma_req[b]) begin
+                dma_rr_d[b] = next_rr(dma_gnt_matrix[b]);
+            end else if (core_req[b]) begin
+                core_rr_d[b] = next_rr(core_gnt_matrix[b]);
+            end
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            hwpe_rr_q <= '0;
+            dma_rr_q  <= '0;
+            core_rr_q <= '0;
+        end else begin
+            hwpe_rr_q <= hwpe_rr_d;
+            dma_rr_q  <= dma_rr_d;
+            core_rr_q <= core_rr_d;
         end
     end
 
