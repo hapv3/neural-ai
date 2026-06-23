@@ -67,7 +67,7 @@ async def test_snitch_boot(dut):
     dut._log.info("STARTING TEST"); await reset_dut(dut)
     
     # Load firmware using AXI while core might be executing garbage
-    fw_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/boot_app/boot.bin")
+    fw_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/test/boot/boot.bin")
     await load_firmware_axi(dut, axi_master, fw_path, 0x10000000)
 
     # Initialize AXI Sim Mem with test data so the DMA has data to read

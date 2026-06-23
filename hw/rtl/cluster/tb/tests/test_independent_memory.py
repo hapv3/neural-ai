@@ -113,8 +113,8 @@ async def test_independent_memory(dut):
     cocotb.start_soon(clock.start())
 
     await hold_reset(dut)
-    fw_path = firmware_path(__file__, "sw/independent_memory_test/independent_memory.bin")
-    assert os.path.exists(fw_path), "Run `make -C sw/independent_memory_test` first."
+    fw_path = firmware_path(__file__, "sw/test/independent_memory/independent_memory.bin")
+    assert os.path.exists(fw_path), "Run `make -C sw/test/independent_memory` first."
     load_firmware_tcm_backdoor(dut, fw_path)
     await release_reset(dut)
 

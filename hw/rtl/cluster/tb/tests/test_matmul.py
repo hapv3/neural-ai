@@ -79,7 +79,7 @@ async def test_matmul(dut):
     dut._log.info("STARTING RANDOMIZED MATMUL TEST")
     await reset_dut(dut)
     
-    fw_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/matmul_app/matmul.bin")
+    fw_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/test/matmul/matmul.bin")
     await load_firmware_axi(dut, axi_master, fw_path, 0x10000000)
 
     dut._log.info("Resetting NPU to start firmware execution...")
