@@ -7,7 +7,7 @@ OBJCOPY = $(LLVM_BIN)/llvm-objcopy
 HEXOBJCOPY = $(GCC_BIN)/riscv32-unknown-elf-objcopy
 
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
-         -O2 -fno-builtin -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
+         -O2 -fno-builtin -fno-jump-tables -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
          -I../../lib -T link.ld -Wl,--no-relax
 
 SRCS = start.S main.c ../../lib/hal_systolic.c ../../lib/spatz_rt.c

@@ -10,6 +10,7 @@
     .equ SIG_FAIL_INDEX,  0x1000800c
     .equ SIG_FAIL_GOT,    0x10008010
     .equ SIG_FAIL_EXP,    0x10008014
+    .equ IRQ_HOST_NOTIFY, 0x20002018
 
     .equ SRC_A,           0x10100000
     .equ SRC_B,           0x10100100
@@ -128,6 +129,8 @@ _start:
     li t0, 0xdeadbeef
     li t1, SIG_STATUS
     sw t0, 0(t1)
+    li t1, IRQ_HOST_NOTIFY
+    sw t0, 0(t1)
 done:
     j done
 
@@ -243,6 +246,8 @@ fail:
     li t3, SIG_STATUS
     li t4, 0xbad00000
     or t4, t4, a1
+    sw t4, 0(t3)
+    li t3, IRQ_HOST_NOTIFY
     sw t4, 0(t3)
 1:
     j 1b

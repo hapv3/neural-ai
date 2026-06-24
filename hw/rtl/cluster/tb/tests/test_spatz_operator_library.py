@@ -1,74 +1,21 @@
-import os
-
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, Timer
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
+from npu_test_utils import (
+    firmware_path,
+    load_firmware_axi,
+    read_tcdm_byte,
+    release_fetch,
+    reset_dut,
+    wait_for_host_irq,
+)
 
-PASS_SIGNATURE = 0xDEADBEEF
-FAIL_SIGNATURE_MASK = 0xFFF00000
-FAIL_SIGNATURE_PREFIX = 0xBAD00000
-EXPECTED_PASS_COUNT = 3
-ITCM_BASE = 0x10000000
-DTCM_BASE = 0x10008000
-TCM_SIZE_BYTES = 32 * 1024
-TCDM_NUM_BANKS = 16
-TCDM_BANK_WORDS = 1024
-TCDM_WORD_BYTES = 32
-SRC_I8 = 0x10100000
+
 DST_I8 = 0x10100100
 RELU_I8 = 0x10100200
 DST_REQUANT = 0x10100500
 VL = 32
-
-
-async def reset_dut(dut):
-    dut.rst_ni.value = 0
-    dut.backdoor_we_i.value = 0
-    await Timer(20, unit="ns")
-    dut.rst_ni.value = 1
-    await Timer(20, unit="ns")
-
-
-async def load_firmware_axi(dut, axi_master, filename, base_addr=0x10000000):
-    with open(filename, "rb") as firmware_file:
-        firmware = firmware_file.read()
-
-    if len(firmware) % 4 != 0:
-        firmware += b"\x00" * (4 - (len(firmware) % 4))
-
-    for offset in range(0, len(firmware), 4):
-        addr = base_addr + offset
-        word = firmware[offset : offset + 4]
-        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
-            await axi_master.write(addr, word)
-        elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
-            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // 4].value = int.from_bytes(word, "little")
-        else:
-            raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
-
-
-def read_dtcm_word(dut, word_index):
-    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
-
-    if not val_32.is_resolvable:
-        return 0
-
-    return val_32.to_unsigned() & 0xFFFFFFFF
-
-
-def read_tcdm_byte(dut, addr):
-    bank_idx = (addr >> 5) % TCDM_NUM_BANKS
-    word_index = ((addr >> 5) // TCDM_NUM_BANKS) & (TCDM_BANK_WORDS - 1)
-    bit_offset = (addr % TCDM_WORD_BYTES) * 8
-    bank_mem = dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem
-    val_256 = bank_mem[word_index].value
-
-    if not val_256.is_resolvable:
-        return 0
-
-    return (val_256.to_unsigned() >> bit_offset) & 0xFF
 
 
 def as_i8(value):
@@ -107,38 +54,11 @@ async def test_spatz_operator_library(dut):
     )
 
     await reset_dut(dut)
-
-    fw_path = os.path.join(
-        os.path.dirname(__file__),
-        "../../../../../sw/test/spatz_ops/spatz_ops_test.bin",
+    await load_firmware_axi(
+        axi_master,
+        firmware_path(__file__, "sw/test/spatz_ops/spatz_ops_test.bin"),
     )
-    assert os.path.exists(fw_path), (
-        "Missing Spatz operator firmware. Run `make -C sw/test/spatz_ops` first."
-    )
+    await release_fetch(dut)
 
-    await load_firmware_axi(dut, axi_master, fw_path)
-    await reset_dut(dut)
-
-    for _ in range(30000):
-        status = read_dtcm_word(dut, 0)
-        if status == PASS_SIGNATURE:
-            pass_count = read_dtcm_word(dut, 1)
-            assert pass_count == EXPECTED_PASS_COUNT
-            check_tcdm_outputs(dut)
-            return
-
-        if (status & FAIL_SIGNATURE_MASK) == FAIL_SIGNATURE_PREFIX:
-            debug = {
-                "status": status,
-                "fail_test": read_dtcm_word(dut, 2),
-                "fail_index": read_dtcm_word(dut, 3),
-                "got": read_dtcm_word(dut, 4),
-                "expected": read_dtcm_word(dut, 5),
-            }
-            raise AssertionError(f"Spatz operator firmware failed: {debug}")
-
-        await RisingEdge(dut.clk_i)
-
-    raise AssertionError(
-        f"Timeout waiting for Spatz operator firmware, status=0x{read_dtcm_word(dut, 0):08x}"
-    )
+    await wait_for_host_irq(dut, timeout_cycles=30000)
+    check_tcdm_outputs(dut)

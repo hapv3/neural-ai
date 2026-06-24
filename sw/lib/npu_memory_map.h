@@ -18,6 +18,7 @@
 // 4. MMIO Control Registers (64 KB)
 #define NPU_CTRL_BASE   0x20000000
 #define NPU_IDMA_BASE   (NPU_CTRL_BASE + 0x1000)
+#define NPU_IRQ_BASE    (NPU_CTRL_BASE + 0x2000)
 
 // 5. External L2 / simulation memory window
 #define NPU_L2_BASE     0x80000000
@@ -71,6 +72,22 @@
 #define REG_SYS_DIM_M   (NPU_CTRL_BASE + 0x10C)
 #define REG_SYS_START   (NPU_CTRL_BASE + 0x110)
 #define REG_SYS_DONE    (NPU_CTRL_BASE + 0x114)
+
+// Interrupt controller registers
+#define NPU_IRQ_INT_ENABLE    (NPU_IRQ_BASE + 0x00)
+#define NPU_IRQ_INT_PENDING   (NPU_IRQ_BASE + 0x04)
+#define NPU_IRQ_INT_CLEAR     (NPU_IRQ_BASE + 0x08)
+#define NPU_IRQ_EXT_ENABLE    (NPU_IRQ_BASE + 0x0C)
+#define NPU_IRQ_EXT_PENDING   (NPU_IRQ_BASE + 0x10)
+#define NPU_IRQ_EXT_CLEAR     (NPU_IRQ_BASE + 0x14)
+#define NPU_IRQ_HOST_NOTIFY   (NPU_IRQ_BASE + 0x18)
+#define NPU_IRQ_HOST_STATUS   (NPU_IRQ_BASE + 0x1C)
+
+#define NPU_IRQ_SRC_DMA       0x00000001u
+#define NPU_IRQ_SRC_SYSTOLIC  0x00000002u
+#define NPU_IRQ_SRC_AFU       0x00000004u
+#define NPU_IRQ_SRC_SPATZ     0x00000008u
+#define NPU_IRQ_HOST_DONE     0x00000001u
 
 // Register Access Macros
 #define REG_WRITE(addr, val) *((volatile uint32_t*)(addr)) = (val)

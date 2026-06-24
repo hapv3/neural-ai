@@ -3,17 +3,17 @@ import os
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, Timer
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
+from npu_test_utils import (
+    load_firmware_axi,
+    read_l2_bytes,
+    release_fetch,
+    reset_dut,
+    wait_for_host_irq,
+    write_l2_bytes,
+)
 
-PASS_SIGNATURE = 0xDEADBEEF
-FAIL_SIGNATURE_MASK = 0xFFF00000
-FAIL_SIGNATURE_PREFIX = 0xBAD00000
-
-ITCM_BASE = 0x10000000
-DTCM_BASE = 0x10008000
-TCM_SIZE_BYTES = 32 * 1024
-TCM_WORD_BYTES = 4
 
 L2_INPUT = 0x80000000
 L2_WEIGHT0 = 0x80002000
@@ -23,91 +23,6 @@ L2_OUTPUT = 0x80010000
 INPUT_BYTES = 32 * 32 * 3
 WEIGHT_BYTES = 32 * 32
 OUTPUT_BYTES = 32 * 32 * 32
-SIG_START_WORD = 5
-
-
-async def assert_reset(dut):
-    dut.rst_ni.value = 0
-    dut.backdoor_we_i.value = 0
-    await Timer(20, unit="ns")
-
-
-async def release_reset(dut):
-    dut.rst_ni.value = 1
-    await Timer(20, unit="ns")
-
-
-def load_firmware_tcm(dut, filename, base_addr=ITCM_BASE):
-    with open(filename, "rb") as firmware_file:
-        firmware = firmware_file.read()
-
-    if len(firmware) % TCM_WORD_BYTES != 0:
-        firmware += b"\x00" * (TCM_WORD_BYTES - (len(firmware) % TCM_WORD_BYTES))
-
-    for offset in range(0, len(firmware), TCM_WORD_BYTES):
-        addr = base_addr + offset
-        word = int.from_bytes(firmware[offset : offset + TCM_WORD_BYTES], "little")
-
-        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
-            word_index = (addr - ITCM_BASE) // TCM_WORD_BYTES
-            dut.u_npu_cluster.u_sram_i_tcm.mem[word_index].value = word
-        elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
-            word_index = (addr - DTCM_BASE) // TCM_WORD_BYTES
-            dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value = word
-        else:
-            raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
-
-
-async def write_axi_sim_bytes(dut, base_addr, data):
-    dut.backdoor_we_i.value = 0
-    await ClockCycles(dut.clk_i, 1)
-
-    for offset, byte_val in enumerate(data):
-        dut.backdoor_we_i.value = 1
-        dut.backdoor_addr_i.value = base_addr + offset
-        dut.backdoor_data_i.value = byte_val & 0xFF
-        await ClockCycles(dut.clk_i, 1)
-
-    dut.backdoor_we_i.value = 0
-    await ClockCycles(dut.clk_i, 1)
-
-
-async def read_axi_sim_bytes(dut, base_addr, length):
-    data = []
-    dut.backdoor_we_i.value = 0
-    await ClockCycles(dut.clk_i, 1)
-
-    for offset in range(length):
-        dut.backdoor_addr_i.value = base_addr + offset
-        await Timer(1, unit="ps")
-        data.append(dut.backdoor_rdata_o.value.integer & 0xFF)
-        if (offset & 0x1F) == 0x1F:
-            await ClockCycles(dut.clk_i, 1)
-
-    return data
-
-
-def read_dtcm_word(dut, word_index):
-    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
-
-    if not val_32.is_resolvable:
-        return 0
-
-    return val_32.to_unsigned() & 0xFFFFFFFF
-
-
-def write_dtcm_word(dut, word_index, value):
-    dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value = value & 0xFFFFFFFF
-
-
-def read_micro_debug(dut):
-    return {
-        "status": read_dtcm_word(dut, 0),
-        "layer": read_dtcm_word(dut, 1),
-        "code": read_dtcm_word(dut, 2),
-        "op": read_dtcm_word(dut, 3),
-        "event": read_dtcm_word(dut, 4),
-    }
 
 
 def safe_int(handle):
@@ -211,6 +126,13 @@ async def test_micro_yolo_e2e(dut):
     clock = Clock(dut.clk_i, 1, unit="ns")
     cocotb.start_soon(clock.start())
 
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+
     input_hwc, weight0, weight1 = deterministic_fixture()
     expected = golden_micro_yolo(input_hwc, weight0, weight1)
 
@@ -220,42 +142,18 @@ async def test_micro_yolo_e2e(dut):
     )
     assert os.path.exists(fw_path), "Missing firmware. Run `make -C sw/test/micro_yolo` first."
 
-    await assert_reset(dut)
-    load_firmware_tcm(dut, fw_path)
-    await release_reset(dut)
-    await write_axi_sim_bytes(dut, L2_INPUT, [to_u8(value) for value in input_hwc])
-    await write_axi_sim_bytes(dut, L2_WEIGHT0, [to_u8(value) for value in weight0])
-    await write_axi_sim_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
-    write_dtcm_word(dut, SIG_START_WORD, 1)
-    await ClockCycles(dut.clk_i, 1)
+    await reset_dut(dut)
+    await write_l2_bytes(dut, L2_INPUT, [to_u8(value) for value in input_hwc])
+    await write_l2_bytes(dut, L2_WEIGHT0, [to_u8(value) for value in weight0])
+    await write_l2_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
+    await load_firmware_axi(axi_master, fw_path)
+    await release_fetch(dut)
 
-    last_debug = None
-    for poll_idx in range(100000):
-        status = read_dtcm_word(dut, 0)
-        if status == PASS_SIGNATURE:
-            got = await read_axi_sim_bytes(dut, L2_OUTPUT, OUTPUT_BYTES)
-            for idx, (got_byte, exp_byte) in enumerate(zip(got, expected)):
-                assert got_byte == exp_byte, (
-                    f"micro-YOLO output mismatch idx={idx}: "
-                    f"got={to_i8(got_byte)} expected={to_i8(exp_byte)}"
-                )
-            return
+    await wait_for_host_irq(dut, timeout_cycles=100000)
 
-        if (status & FAIL_SIGNATURE_MASK) == FAIL_SIGNATURE_PREFIX:
-            raise AssertionError(f"micro-YOLO firmware failed: {read_micro_debug(dut)}")
-
-        if poll_idx % 1000 == 0:
-            debug = read_micro_debug(dut)
-            dut._log.info(f"micro-YOLO progress: {debug}")
-            last_debug = debug
-
-        debug = last_debug if last_debug is not None else read_micro_debug(dut)
-        if poll_idx > 7000 and debug["layer"] == 4 and debug["event"] == 1:
-            raise AssertionError(
-                f"micro-YOLO systolic Conv0 watchdog: graph={debug} "
-                f"systolic={read_systolic_debug(dut)}"
-            )
-
-        await ClockCycles(dut.clk_i, 100)
-
-    raise AssertionError(f"Timeout waiting for micro-YOLO firmware: {read_micro_debug(dut)}")
+    got = await read_l2_bytes(dut, L2_OUTPUT, OUTPUT_BYTES)
+    for idx, (got_byte, exp_byte) in enumerate(zip(got, expected)):
+        assert got_byte == exp_byte, (
+            f"micro-YOLO output mismatch idx={idx}: "
+            f"got={to_i8(got_byte)} expected={to_i8(exp_byte)}"
+        )

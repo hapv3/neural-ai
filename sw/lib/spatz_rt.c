@@ -7,6 +7,8 @@ void spatz_rt_init(void) {
     for (uint32_t i = 0; i < 8; i++) {
         sig[i] = 0;
     }
+    REG_WRITE(NPU_IRQ_EXT_ENABLE, NPU_IRQ_HOST_DONE);
+    REG_WRITE(NPU_IRQ_EXT_CLEAR, NPU_IRQ_HOST_DONE);
 }
 
 void spatz_rt_set_phase(uint32_t phase, uint32_t op) {
@@ -20,6 +22,7 @@ void spatz_rt_pass_step(void) {
 
 void spatz_rt_pass(void) {
     sig[SPATZ_RT_SIG_STATUS] = SPATZ_RT_PASS_SIGNATURE;
+    REG_WRITE(NPU_IRQ_HOST_NOTIFY, SPATZ_RT_PASS_SIGNATURE);
     while (1) {
     }
 }
@@ -30,6 +33,7 @@ void spatz_rt_fail_at(uint32_t test_id, uint32_t index, int32_t got, int32_t exp
     sig[SPATZ_RT_SIG_GOT] = (uint32_t)got;
     sig[SPATZ_RT_SIG_EXPECTED] = (uint32_t)expected;
     sig[SPATZ_RT_SIG_STATUS] = SPATZ_RT_FAIL_PREFIX | (test_id & 0xFFFFu);
+    REG_WRITE(NPU_IRQ_HOST_NOTIFY, SPATZ_RT_FAIL_PREFIX | (test_id & 0xFFFFu));
     while (1) {
     }
 }

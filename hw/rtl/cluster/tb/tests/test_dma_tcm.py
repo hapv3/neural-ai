@@ -2,17 +2,15 @@ import os
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
     firmware_path,
-    hold_reset,
-    load_firmware_tcm_backdoor,
-    read_dtcm_word,
+    load_firmware_axi,
     read_l2_bytes,
-    release_reset,
-    wait_for_status,
-    write_dtcm_word,
+    release_fetch,
+    reset_dut,
+    wait_for_host_irq,
     write_l2_bytes,
 )
 from test_independent_memory import (
@@ -31,7 +29,6 @@ from test_independent_memory import (
     L2_SRC,
     L2_SRC_2D,
     L2_SRC_3D,
-    SIG_START_WORD,
     l2_2d_pattern,
     l2_3d_pattern,
     l2_pattern,
@@ -52,18 +49,12 @@ async def test_dma_tcm_path(dut):
     """
     clock = Clock(dut.clk_i, 1, unit="ns")
     cocotb.start_soon(clock.start())
+    axi_master = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axi"), dut.clk_i, dut.rst_ni, reset_active_level=False)
 
-    await hold_reset(dut)
     fw_path = firmware_path(__file__, "sw/test/independent_memory/independent_memory.bin")
     assert os.path.exists(fw_path), "Run `make -C sw/test/independent_memory` first."
-    load_firmware_tcm_backdoor(dut, fw_path)
-    await release_reset(dut)
-
-    for _ in range(100):
-        if read_dtcm_word(dut, 6) == 1:
-            break
-        await ClockCycles(dut.clk_i, 1)
-    assert read_dtcm_word(dut, 6) == 1, "firmware did not reach boot/start gate"
+    await reset_dut(dut)
+    await load_firmware_axi(axi_master, fw_path)
 
     await write_l2_bytes(dut, L2_SRC, [l2_pattern(i) for i in range(DMA_BYTES)])
     l2_2d_fixture_len = (DMA_2D_REPS - 1) * DMA_2D_L2_STRIDE + DMA_2D_LEN
@@ -76,10 +67,10 @@ async def test_dma_tcm_path(dut):
     await write_l2_bytes(dut, L2_SRC_3D, [l2_3d_pattern(i) for i in range(l2_3d_fixture_len)])
     await write_l2_bytes(dut, L2_DST_2D, [0x5A] * len(make_expected_2d_output()))
     await write_l2_bytes(dut, L2_DST_3D, [0x6B] * len(make_expected_3d_output()))
-    write_dtcm_word(dut, SIG_START_WORD, 1)
+    await release_fetch(dut)
 
-    debug = await wait_for_status(dut, expected_pass_count=7, timeout_cycles=100000)
-    dut._log.info(f"dma/tcm smoke passed: {debug}")
+    await wait_for_host_irq(dut, timeout_cycles=100000)
+    dut._log.info("dma/tcm smoke completed through host irq")
 
     got = await read_l2_bytes(dut, L2_DST, DMA_BYTES)
     expected = [tcdm_dst_pattern(i) for i in range(DMA_BYTES)]

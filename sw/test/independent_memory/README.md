@@ -8,7 +8,7 @@ Spatz compute blocks. This is the baseline suite for DMA/TCDM refactors.
 ## Scenario
 
 1. Cocotb writes deterministic L2 fixtures after reset.
-2. Firmware waits for `SIG_START` at `0x10008020`.
+2. Cocotb loads firmware into I-TCM and releases `fetch_enable_i`.
 3. `L2 -> TCDM` 1D transfer is verified inside firmware.
 4. `TCDM -> L2` 1D transfer is verified by cocotb in external memory.
 5. Firmware probes low/high representatives for all 16 TCDM banks.
@@ -19,7 +19,7 @@ Spatz compute blocks. This is the baseline suite for DMA/TCDM refactors.
 
 - Source and destination strides intentionally differ in 2D/3D cases.
 - Output-side copies are checked by cocotb to avoid firmware self-aliasing.
-- The debug page records phase/op so failures identify the broken transfer mode.
+- Firmware reports completion through `NPU_IRQ_HOST_NOTIFY`; local phase/op words are firmware-private diagnostics.
 
 ## Command
 
