@@ -2,6 +2,7 @@
 
 module npu_pulp_idma_ctrl_mm #(
     parameter int unsigned ADDR_WIDTH = 32,
+    parameter int unsigned CFG_DATA_WIDTH = 32,
     parameter int unsigned DATA_WIDTH = 256,
     parameter logic [ADDR_WIDTH-1:0] BASE_ADDR = 32'h2000_1000
 )(
@@ -12,10 +13,10 @@ module npu_pulp_idma_ctrl_mm #(
     output logic                      gnt_o,
     input  logic [ADDR_WIDTH-1:0]     addr_i,
     input  logic                      we_i,
-    input  logic [(DATA_WIDTH/8)-1:0] be_i,
-    input  logic [DATA_WIDTH-1:0]     wdata_i,
+    input  logic [(CFG_DATA_WIDTH/8)-1:0] be_i,
+    input  logic [CFG_DATA_WIDTH-1:0]     wdata_i,
     output logic                      rvalid_o,
-    output logic [DATA_WIDTH-1:0]     rdata_o,
+    output logic [CFG_DATA_WIDTH-1:0]     rdata_o,
 
     output logic [31:0]               axi_aw_addr_o,
     output logic [7:0]                axi_aw_len_o,
@@ -72,7 +73,6 @@ module npu_pulp_idma_ctrl_mm #(
 );
 
     localparam int unsigned STRB_WIDTH = DATA_WIDTH / 8;
-    localparam int unsigned WORDS_PER_BEAT = DATA_WIDTH / 32;
     localparam int unsigned NUM_DIMS = 3;
     localparam logic [11:0] DIR_OFFSET = 12'h200;
     localparam logic [NUM_DIMS-1:0][31:0] REP_WIDTHS = '{default: 32'd32};
@@ -184,7 +184,6 @@ module npu_pulp_idma_ctrl_mm #(
     logic [0:0][31:0] o2a_done_id_arr;
     logic [0:0]       o2a_me_busy_arr;
 
-    logic [$clog2(WORDS_PER_BEAT)-1:0] mmio_word_idx;
     logic [31:0]                       mmio_word_addr;
     logic [31:0]                       mmio_local_addr;
     logic                              mmio_dir;
@@ -205,13 +204,7 @@ module npu_pulp_idma_ctrl_mm #(
     endfunction
 
     always_comb begin
-        mmio_word_idx = addr_i[4:2];
-        for (int i = 0; i < WORDS_PER_BEAT; i++) begin
-            if (|be_i[i*4 +: 4]) begin
-                mmio_word_idx = i[$clog2(WORDS_PER_BEAT)-1:0];
-            end
-        end
-        mmio_word_addr = (addr_i & 32'hFFFF_FFE0) + (32'(mmio_word_idx) << 2);
+        mmio_word_addr = addr_i & 32'hFFFF_FFFC;
         mmio_local_addr = decode_local_addr(mmio_word_addr);
         mmio_dir = decode_dir(mmio_word_addr);
     end
@@ -220,15 +213,15 @@ module npu_pulp_idma_ctrl_mm #(
         a2o_reg_req = '0;
         a2o_reg_req.addr = mmio_local_addr;
         a2o_reg_req.write = we_i;
-        a2o_reg_req.wdata = wdata_i[mmio_word_idx*32 +: 32];
-        a2o_reg_req.wstrb = we_i ? be_i[mmio_word_idx*4 +: 4] : 4'hf;
+        a2o_reg_req.wdata = wdata_i[31:0];
+        a2o_reg_req.wstrb = we_i ? be_i[3:0] : 4'hf;
         a2o_reg_req.valid = req_i && !mmio_dir;
 
         o2a_reg_req = '0;
         o2a_reg_req.addr = mmio_local_addr;
         o2a_reg_req.write = we_i;
-        o2a_reg_req.wdata = wdata_i[mmio_word_idx*32 +: 32];
-        o2a_reg_req.wstrb = we_i ? be_i[mmio_word_idx*4 +: 4] : 4'hf;
+        o2a_reg_req.wdata = wdata_i[31:0];
+        o2a_reg_req.wstrb = we_i ? be_i[3:0] : 4'hf;
         o2a_reg_req.valid = req_i && mmio_dir;
 
         a2o_reg_req_arr[0] = a2o_reg_req;
@@ -247,7 +240,7 @@ module npu_pulp_idma_ctrl_mm #(
             rvalid_o <= req_i && gnt_o;
             rdata_o <= '0;
             if (req_i && gnt_o) begin
-                rdata_o[mmio_word_idx*32 +: 32] <= mmio_dir ? o2a_reg_rsp.rdata : a2o_reg_rsp.rdata;
+                rdata_o[31:0] <= mmio_dir ? o2a_reg_rsp.rdata : a2o_reg_rsp.rdata;
             end
         end
     end

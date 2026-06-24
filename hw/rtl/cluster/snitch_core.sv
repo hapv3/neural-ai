@@ -250,8 +250,13 @@ module snitch_core #(
         .obi_rdata_i        (obi_i_rdata_i)
     );
 
-    // Combinationally select the correct 32-bit instruction from the 256-bit line
-    assign inst_data        = adapter_rsp_data >> (inst_addr[$clog2(I_DATA_WIDTH/8)-1:2] * 32);
+    generate
+        if (I_DATA_WIDTH == 32) begin : gen_inst_word_32
+            assign inst_data = adapter_rsp_data[31:0];
+        end else begin : gen_inst_word_wide
+            assign inst_data = adapter_rsp_data >> (inst_addr[$clog2(I_DATA_WIDTH/8)-1:2] * 32);
+        end
+    endgenerate
 
     assign obi_i_we_o       = 1'b0;
     assign obi_i_be_o       = '1;

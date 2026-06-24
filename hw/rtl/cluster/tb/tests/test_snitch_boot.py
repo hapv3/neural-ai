@@ -4,6 +4,10 @@ from cocotb.triggers import RisingEdge, Timer
 from cocotbext.axi import AxiLiteMaster, AxiLiteBus
 import os
 
+ITCM_BASE = 0x10000000
+DTCM_BASE = 0x10008000
+TCM_SIZE_BYTES = 32 * 1024
+
 async def reset_dut(dut):
     dut.rst_ni.value = 0
     dut.backdoor_we_i.value = 0
@@ -32,28 +36,27 @@ async def load_firmware_axi(dut, axi_master, filename, base_addr=0x10000000):
 
     print(f"Loading {len(firmware)} bytes from {filename} into I-TCM via AXI Lite...")
     
-    # Write firmware word by word (64-bit AXI bus width)
-    # Pad firmware to 8 bytes if necessary
-    if len(firmware) % 8 != 0:
-        firmware += b'\x00' * (8 - (len(firmware) % 8))
+    if len(firmware) % 4 != 0:
+        firmware += b'\x00' * (4 - (len(firmware) % 4))
 
-    for i in range(0, len(firmware), 8):
-        word = firmware[i:i+8]
-        await axi_master.write(base_addr + i, word)
+    for i in range(0, len(firmware), 4):
+        word = firmware[i:i+4]
+        addr = base_addr + i
+        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
+            await axi_master.write(addr, word)
+        elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
+            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // 4].value = int.from_bytes(word, "little")
+        else:
+            raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
     
     print("Firmware loaded successfully via AXI.")
 
 def read_dtcm_signature(dut):
-    # D-TCM base is 0x1000_8000. We wrote signature to offset 0 (word 0).
-    # mem array is 256-bit wide (32 bytes).
-    # Index 0 contains bytes 0..31.
-    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[0].value
-    if not val_256.is_resolvable:
+    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[0].value
+    if not val_32.is_resolvable:
         return 0
-    
-    # Extract lowest 32 bits (bytes 0..3)
-    val_32 = val_256.integer & 0xFFFFFFFF
-    return val_32
+
+    return val_32.integer & 0xFFFFFFFF
 
 @cocotb.test()
 async def test_snitch_boot(dut):
@@ -101,10 +104,9 @@ async def test_snitch_boot(dut):
             dut._log.info("TEST PASSED: Firmware reported success signature (0xDEADBEEF)!")
             return
         elif val == 0xBADBAD00:
-            val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[0].value.integer
-            dst_val = (val_256 >> 128) & 0xFFFFFFFF
-            src_val = (val_256 >> 160) & 0xFFFFFFFF
-            idx_val = (val_256 >> 192) & 0xFFFFFFFF
+            dst_val = dut.u_npu_cluster.u_sram_d_tcm.mem[4].value.integer & 0xFFFFFFFF
+            src_val = dut.u_npu_cluster.u_sram_d_tcm.mem[5].value.integer & 0xFFFFFFFF
+            idx_val = dut.u_npu_cluster.u_sram_d_tcm.mem[6].value.integer & 0xFFFFFFFF
             dut._log.error(f"TEST FAILED: Firmware reported failure signature (0xBADBAD00). Mismatch at idx {idx_val}: dst={dst_val:08x}, src={src_val:08x}")
             assert False, "Firmware test failed."
         elif val == 0xBADBAD01:

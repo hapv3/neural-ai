@@ -7,6 +7,10 @@ import random
 import struct
 import numpy as np
 
+ITCM_BASE = 0x10000000
+DTCM_BASE = 0x10008000
+TCM_SIZE_BYTES = 32 * 1024
+
 async def reset_dut(dut):
     dut.rst_ni.value = 0
     dut.backdoor_we_i.value = 0
@@ -54,18 +58,35 @@ async def read_axi_sim_mem(dut, base_addr, num_words):
         
     return words
 
+def write_dtcm_word(dut, byte_offset, value):
+    word_index = byte_offset // 4
+    dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value = value & 0xFFFFFFFF
+
+def read_dtcm_word(dut, byte_offset):
+    word_index = byte_offset // 4
+    value = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
+    if not value.is_resolvable:
+        return 0
+    return value.to_unsigned() & 0xFFFFFFFF
+
 async def load_firmware_axi(dut, axi_master, filename, base_addr=0x10000000):
     with open(filename, "rb") as f:
         firmware = f.read()
 
     print(f"Loading {len(firmware)} bytes from {filename} into I-TCM via AXI Lite...")
     
-    if len(firmware) % 8 != 0:
-        firmware += b'\x00' * (8 - (len(firmware) % 8))
+    if len(firmware) % 4 != 0:
+        firmware += b'\x00' * (4 - (len(firmware) % 4))
 
-    for i in range(0, len(firmware), 8):
-        word = firmware[i:i+8]
-        await axi_master.write(base_addr + i, word)
+    for i in range(0, len(firmware), 4):
+        word = firmware[i:i+4]
+        addr = base_addr + i
+        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
+            await axi_master.write(addr, word)
+        elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
+            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // 4].value = int.from_bytes(word, "little")
+        else:
+            raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
     
     print("Firmware loaded successfully via AXI.")
 
@@ -91,8 +112,10 @@ async def test_matmul(dut):
         
         dut._log.info(f"--- TEST ITERATION {test_idx+1}/10: dim_m = {dim_m} ---")
         
-        # Clear done_flag via AXI before starting
-        await axi_master.write(0x10008008, struct.pack("<I", 0))
+        # Control/status lives in private D-TCM. The external AXI-Lite boot path
+        # intentionally reaches I-TCM only; tests use backdoor D-TCM access for
+        # preloading knobs and reading firmware status.
+        write_dtcm_word(dut, 0x08, 0)
 
         # We need a 32x32 weight matrix (K=32, N=32). Values 0-5 to avoid overflow
         W = np.random.randint(0, 6, size=(32, 32), dtype=np.int32)
@@ -118,18 +141,17 @@ async def test_matmul(dut):
             word = (IFM_flat[i+3] << 24) | (IFM_flat[i+2] << 16) | (IFM_flat[i+1] << 8) | IFM_flat[i]
             ifm_data.append(int(word))
 
-        await axi_master.write(0x10008000, struct.pack("<I", dim_m))
+        write_dtcm_word(dut, 0x00, dim_m)
         await write_axi_sim_mem(dut, 0x80000000, weights_data)
         await write_axi_sim_mem(dut, 0x80001000, ifm_data)
 
         # Trigger start_flag
-        await axi_master.write(0x10008004, struct.pack("<I", 1))
+        write_dtcm_word(dut, 0x04, 1)
 
         # Wait for done_flag to be set by hardware
         dut._log.info("Waiting for done_flag from firmware...")
         while True:
-            done_resp = await axi_master.read(0x10008008, 4)
-            done_val = struct.unpack("<I", done_resp.data)[0]
+            done_val = read_dtcm_word(dut, 0x08)
             if done_val == 1:
                 break
             await Timer(100, units="ns")

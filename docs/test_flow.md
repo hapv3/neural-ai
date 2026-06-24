@@ -15,6 +15,7 @@ firmware.
 |-----------|--------|------------------|--------|
 | `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, I-TCM load, D-TCM signature, iDMA MMIO smoke |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
+| `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
 | `sw/test/matmul` | `matmul.bin` | `test_matmul` | Legacy raw systolic register matmul regression |
 | `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
@@ -41,6 +42,9 @@ Firmware tests publish status at the D-TCM debug page:
 
 Every new firmware regression should use this page unless the test has an older
 explicit cocotb contract.
+
+The host AXI-Lite boot path now reaches I-TCM only. Cocotb reads/writes D-TCM
+status/control words through the testbench backdoor, not through AXI-Lite.
 
 ---
 
@@ -69,7 +73,7 @@ cocotb loads sw/test/boot/boot.bin into I-TCM
   -> firmware seeds TCDM source
   -> firmware checks iDMA-compatible MMIO readback
   -> firmware copies TCDM source to destination
-  -> cocotb polls D-TCM status
+  -> cocotb polls D-TCM status through backdoor
 ```
 
 Pass criteria: status is `0xDEADBEEF`; no timeout.

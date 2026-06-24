@@ -5,12 +5,17 @@ package npu_cluster_pkg;
     //---------------------------------------------------------
     localparam int unsigned AXI_ADDR_WIDTH = 64;
     localparam int unsigned AXI_DATA_WIDTH = 256; // 32 Bytes
+    localparam int unsigned AXI_HOST_DATA_WIDTH = 32; // Host AXI-Lite boot port
     localparam int unsigned AXI_USER_WIDTH = 1;
     localparam int unsigned AXI_ID_WIDTH   = 8;
 
     localparam int unsigned OBI_ADDR_WIDTH = 32;
     localparam int unsigned OBI_DATA_WIDTH = 256;
     localparam int unsigned OBI_STRB_WIDTH = OBI_DATA_WIDTH / 8;
+    localparam int unsigned ITCM_DATA_WIDTH = 32;
+    localparam int unsigned SNITCH_D_DATA_WIDTH = 32;
+    localparam int unsigned DTCM_DATA_WIDTH = 32;
+    localparam int unsigned MMIO_DATA_WIDTH = 32;
 
     //---------------------------------------------------------
     // TCDM Configuration (512KB Total)
