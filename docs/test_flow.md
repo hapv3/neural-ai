@@ -13,11 +13,11 @@ firmware.
 
 | Directory | Binary | Primary RTL test | Target |
 |-----------|--------|------------------|--------|
-| `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, I-TCM load, D-TCM signature, iDMA MMIO smoke |
+| `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, AXI I-TCM load, host IRQ completion, iDMA MMIO smoke |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
-| `sw/test/matmul` | `matmul.bin` | `test_matmul` | Legacy raw systolic register matmul regression |
+| `sw/test/matmul` | `matmul.bin` | `test_matmul` | Raw systolic register matmul regression |
 | `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
 | `sw/test/spatz_vector` | `basic_mem_arith.bin`, etc. | `test_spatz_vector_basic` | Direct RVV instruction groups |
 
@@ -27,24 +27,23 @@ firmware.
 
 ## 2. Common Pass/Fail Contract
 
-Firmware tests publish status at the D-TCM debug page:
+Firmware tests report completion through the interrupt controller:
 
-| Offset | Meaning |
-|--------|---------|
-| `0x10008000` | status: `0xDEADBEEF` pass or `0xBADxxxxx` fail |
-| `0x10008004` | pass count where implemented |
-| `0x10008008` | failing test id |
-| `0x1000800c` | failing element/index |
-| `0x10008010` | got value |
-| `0x10008014` | expected value |
-| `0x10008018` | phase where implemented |
-| `0x1000801c` | op/sub-op where implemented |
+| Register | Meaning |
+|----------|---------|
+| `NPU_IRQ_HOST_NOTIFY` / `0x2000_2018` | Firmware writes `0xDEADBEEF` pass or `0xBADxxxxx` fail |
+| `NPU_IRQ_HOST_STATUS` / `0x2000_201c` | Internal MMIO status latch for future host-control path |
+| `irq_o` | External host interrupt asserted after `HOST_NOTIFY` |
 
-Every new firmware regression should use this page unless the test has an older
-explicit cocotb contract.
+Every new firmware regression should use this IRQ/status path. D-TCM remains
+private Snitch memory for stack, `.data`, `.bss`, and optional firmware-local
+debug words; cocotb must not use D-TCM backdoor writes as a start mailbox or
+preload mechanism for active gates.
 
-The host AXI-Lite boot path now reaches I-TCM only. Cocotb reads/writes D-TCM
-status/control words through the testbench backdoor, not through AXI-Lite.
+The host AXI-Lite boot path reaches I-TCM only. Cocotb holds Snitch with
+`fetch_enable_i=0`, loads the binary through AXI, then releases fetch. Cocotb
+does not read IRQ MMIO through AXI in the current topology; exact L2/TCDM output
+checks are the pass/fail oracle after `irq_o` asserts.
 
 ---
 
@@ -69,20 +68,22 @@ Micro-YOLO or graph scheduler tests should only run after these gates are green.
 
 ```text
 cocotb loads sw/test/boot/boot.bin into I-TCM
+  -> cocotb releases fetch_enable_i
   -> Snitch executes firmware
   -> firmware seeds TCDM source
   -> firmware checks iDMA-compatible MMIO readback
   -> firmware copies TCDM source to destination
-  -> cocotb polls D-TCM status through backdoor
+  -> firmware writes NPU_IRQ_HOST_NOTIFY
+  -> cocotb waits irq_o
 ```
 
-Pass criteria: status is `0xDEADBEEF`; no timeout.
+Pass criteria: `irq_o` asserts; no timeout.
 
 ### Memory
 
 ```text
 cocotb writes deterministic L2 fixtures
-  -> firmware waits for SIG_START
+  -> cocotb loads firmware into I-TCM and releases fetch
   -> L2 -> TCDM 1D, 2D, 3D checked in firmware
   -> TCDM -> L2 1D, 2D, 3D checked by cocotb
   -> firmware probes representative low/high addresses for each TCDM bank
@@ -99,7 +100,8 @@ firmware assembly test
   -> run one RVV instruction group
   -> store vector output to TCDM
   -> scalar-check every lane
-  -> cocotb optionally reads output buffers
+  -> firmware writes NPU_IRQ_HOST_NOTIFY
+  -> cocotb reads TCDM output buffers
 ```
 
 Covered groups today:
@@ -116,6 +118,7 @@ spatz_ops firmware
   -> initialize deterministic vectors
   -> call C wrapper
   -> compare every output lane in firmware
+  -> firmware writes NPU_IRQ_HOST_NOTIFY
   -> cocotb reads TCDM output buffers for exact data check
 ```
 
@@ -129,6 +132,7 @@ Covered wrappers today:
 
 ```text
 cocotb writes signed INT8 W and IFM to L2
+  -> cocotb loads firmware into I-TCM and releases fetch
   -> firmware DMA-copies fixtures into TCDM
   -> firmware calls systolic_gemm32 for M={1,2,31,32,33,64,128,1024}
   -> HAL tiles large M safely
@@ -138,17 +142,19 @@ cocotb writes signed INT8 W and IFM to L2
 
 Pass criteria: all `M x 32` INT32 words match golden.
 
-### Legacy Matmul
+### Matmul
 
 ```text
-cocotb randomizes M <= 128, W, IFM
+cocotb prepares deterministic M=64 W and IFM
   -> firmware stages data through DMA
   -> firmware drives raw systolic MMIO registers directly
   -> firmware copies OFM to L2
+  -> firmware writes NPU_IRQ_HOST_NOTIFY
   -> cocotb compares every INT32 output word
 ```
 
 This test intentionally bypasses HAL tiling to preserve raw-controller coverage.
+Boundary M coverage lives in `test_independent_systolic`.
 
 ---
 

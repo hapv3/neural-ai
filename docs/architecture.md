@@ -43,31 +43,31 @@ To achieve high-performance matrix and vector operations, the architecture integ
 |  +---------+----------+                                                                            |
 |            | AXI-to-OBI                                                                            |
 |            v                                                                                       |
-|  +-----------------------------+        +----------------------+                                    |
-|  | u_itcm_arbiter              |<-------| Snitch Core          |                                    |
-|  | I-TCM Arbiter               |        | RV32IMAC             |                                    |
-|  | host boot vs I-fetch        |        +----------+-----------+                                    |
-|  +-------------+---------------+                   |                                                |
-|                |                                   | Snitch D-Bus                                   |
-|                v                                   v                                                |
-|  +-----------------------------+        +----------------------+                                    |
-|  | I-TCM (32 KB)               |        | D-side OBI Demux     |                                    |
-|  | firmware only               |        | D-TCM / TCDM / MMIO  |                                    |
+|  +-----------------------------+        +----------------------+                                   |
+|  | u_itcm_arbiter              |<-------| Snitch Core          |                                   |
+|  | I-TCM Arbiter               |        | RV32IMAC             |                                   |
+|  | host boot vs I-fetch        |        +----------+-----------+                                   |
+|  +-------------+---------------+                   |                                               |
+|                |                                   | Snitch D-Bus                                  |
+|                v                                   v                                               |
+|  +-----------------------------+        +----------------------+                                   |
+|  | I-TCM (32 KB)               |        | D-side OBI Demux     |                                   |
+|  | firmware only               |        | D-TCM / TCDM / MMIO  |                                   |
 |  +-----------------------------+        +----+-----+------+---+                                    |
-|                                             |     |      |                                        |
+|                                             |     |      |                                         |
 |                                             |     |      +------> +----------------------+         |
 |                                             |     |               | MMIO/CSR             |         |
 |                                             |     |               | cluster/idma/afu/... |         |
 |                                             |     |               +----------------------+         |
 |                                             |     +------ Shared TCDM window access ------+        |
 |                                             |                                             |        |
-|                                             v                                                        |
-|                                      +------------------+                                           |
-|                                      | Snitch D-TCM     |                                           |
-|                                      | private 32 KB    |                                           |
-|                                      | TB backdoor dbg  |                                           |
-|                                      +------------------+                                           |
-|                                                                                              v      |
+|                                             v                                             |        |
+|                                      +------------------+                                 |        |
+|                                      | Snitch D-TCM     |                                 |        |
+|                                      | private 32 KB    |                                 |        |
+|                                      | TB backdoor dbg  |                                 |        |
+|                                      +------------------+                                 |        |
+|                                                                                           v        |
 |  +----------------------------------------------------------------------------------------------+  |
 |  |                          Shared Data TCDM Interconnect (256-bit)                             |  |
 |  +-------+--------------------+---------------------+-----------------------+-------------------+  |
@@ -237,7 +237,7 @@ Detailed walkthrough: [Boot Flow](boot_flow.md).
    → u_itcm_arbiter
    → I-TCM SRAM
    
-2. Host de-assert rst_ni
+2. Host de-assert reset and then asserts `fetch_enable_i`
 
 3. Snitch core reset → PC = 0x1000_0000 (BootAddr)
 
@@ -251,8 +251,8 @@ Detailed walkthrough: [Boot Flow](boot_flow.md).
    - (Phase 3B-A) Dispatch lệnh tới Systolic Array
    - (Phase 3B-B) Dispatch lệnh RVV tới Spatz
 
-6. Firmware ghi status/debug words vào private D-TCM debug page
-   → Verification đọc D-TCM debug page bằng testbench backdoor; AXI-Lite host path không cần đọc D-TCM
+6. Firmware ghi completion status vào `NPU_IRQ_HOST_NOTIFY`
+   → `npu_interrupt_ctrl` latch `HOST_STATUS` nội bộ và assert `irq_o` cho host/testbench
 ```
 
 ---
@@ -266,8 +266,8 @@ Detailed walkthrough: [Test Flow](test_flow.md).
 | Test | Flow | Pass criteria |
 |------|------|---------------|
 | `test_systolic.py` | Direct standalone Systolic Array stimulus | Scoreboard captures OFM and all 32 columns match golden model |
-| `test_snitch_boot.py` | Host loads `boot.bin` into I-TCM and releases Snitch | Firmware writes signature `0xDEADBEEF` |
-| `test_matmul.py` | Host prepares random tensors in L2, firmware runs DMA + Systolic + writeback | 10 randomized MatMul iterations match NumPy golden |
+| `test_snitch_boot.py` | Host loads `boot.bin` into I-TCM and releases Snitch fetch | `irq_o` asserts |
+| `test_matmul.py` | Host prepares M=64 tensors in L2, firmware runs DMA + Systolic + writeback | Host IRQ plus full OFM match against NumPy golden |
 
 ### Cluster MatMul Test Flow
 
@@ -279,15 +279,16 @@ Testbench L2 buffers
 
 Host AXI-Lite loads matmul firmware into I-TCM
 Testbench prepares L2 fixture buffers
+Testbench releases fetch_enable_i
 Snitch firmware:
   1. DMA weights L2→I-TCDM
   2. DMA IFM L2→I-TCDM
   3. Start Systolic Controller
   4. Wait SYS_DONE
   5. DMA OFM O-TCDM→L2
-  6. Write pass/fail status into private D-TCM debug page
+  6. Write pass/fail status into NPU_IRQ_HOST_NOTIFY
 Testbench reads L2 OFM and compares against NumPy golden
-Testbench reads D-TCM debug page through backdoor if failure details are needed
+Testbench waits `irq_o`; current host AXI path remains I-TCM-only
 ```
 
 ---
@@ -338,11 +339,11 @@ Mục tiêu ban đầu của top-level là **2.5 MB SRAM on-chip**. Tuy nhiên, 
 ## 11. Hardware Verification Plan
 
 ### Unit Testing (Block-Level)
-- **Snitch Boot TB** (`test_snitch_boot`): Nạp firmware qua AXI4-Lite vào I-TCM, release reset, xác nhận Snitch viết signature `0xDEADBEEF` vào private D-TCM debug page. *(Passed)*
+- **Snitch Boot TB** (`test_snitch_boot`): Nạp firmware qua AXI4-Lite vào I-TCM, release fetch, xác nhận host IRQ. *(Passed)*
 - **I-TCM Arbiter TB**: Kiểm tra ưu tiên AXI vs Snitch, không có collision. *(Passed)*
 - **D-side OBI Demux TB**: Kiểm tra address decoding chính xác (D-TCM / Data TCDM / MMIO / error sink). *(Passed)*
 - **Matrix Engine TB** *(Phase 3B-A)*: Verify 32×32 Systolic Array vs Python golden model. *(Passed)*
-- **Cluster MatMul TB** *(Phase 3B-A)*: Snitch firmware trigger DMA, Systolic Array compute, OFM writeback; 10 randomized MatMul iterations. *(Passed)*
+- **Cluster MatMul TB** *(Phase 3B-A)*: Snitch firmware trigger DMA, Systolic Array compute, OFM writeback; M=64 raw-register regression. *(Passed)*
 - **Spatz Vector TB** *(Phase 3B-B)*: Test RVV instructions.
 
 ### Cluster-Level Verification

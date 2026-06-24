@@ -15,6 +15,7 @@ module snitch_core #(
     input  logic rst_ni,
     
     input  logic [31:0] hart_id_i,
+    input  snitch_pkg::interrupts_t irq_i,
 
     // Instruction Fetch OBI Master (I-TCM)
     output logic                      obi_i_req_o,
@@ -199,7 +200,7 @@ module snitch_core #(
         .clk_i                  (clk_i),
         .rst_i                  (~rst_ni),
         .hart_id_i              (hart_id_i),
-        .irq_i                  ('0),
+        .irq_i                  (irq_i),
         .flush_i_valid_o        (),
         .flush_i_ready_i        (1'b1),
         .inst_addr_o            (inst_addr),

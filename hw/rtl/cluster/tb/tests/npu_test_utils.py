@@ -8,10 +8,7 @@ FAIL_SIGNATURE_MASK = 0xFFF00000
 FAIL_SIGNATURE_PREFIX = 0xBAD00000
 
 ITCM_BASE = 0x10000000
-DTCM_BASE = 0x10008000
 TCM_SIZE_BYTES = 32 * 1024
-ITCM_WORD_BYTES = 4
-DTCM_WORD_BYTES = 4
 
 TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
@@ -20,6 +17,8 @@ TCDM_WORD_BYTES = 32
 
 async def reset_dut(dut):
     dut.rst_ni.value = 0
+    if hasattr(dut, "fetch_enable_i"):
+        dut.fetch_enable_i.value = 0
     dut.backdoor_we_i.value = 0
     await Timer(20, unit="ns")
     dut.rst_ni.value = 1
@@ -28,6 +27,8 @@ async def reset_dut(dut):
 
 async def hold_reset(dut):
     dut.rst_ni.value = 0
+    if hasattr(dut, "fetch_enable_i"):
+        dut.fetch_enable_i.value = 0
     dut.backdoor_we_i.value = 0
     await Timer(20, unit="ns")
 
@@ -45,66 +46,23 @@ async def load_firmware_axi(axi_master, filename, base_addr=ITCM_BASE, width=4):
         firmware += b"\x00" * (width - (len(firmware) % width))
 
     for offset in range(0, len(firmware), width):
+        addr = base_addr + offset
+        if not (ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES):
+            raise AssertionError(f"AXI boot image exceeds I-TCM at 0x{addr:08x}")
         await axi_master.write(base_addr + offset, firmware[offset : offset + width])
 
-
-def load_firmware_tcm_backdoor(dut, filename, base_addr=ITCM_BASE):
-    with open(filename, "rb") as firmware_file:
-        firmware = firmware_file.read()
-
-    firmware_word_bytes = ITCM_WORD_BYTES
-
-    if len(firmware) % firmware_word_bytes != 0:
-        firmware += b"\x00" * (firmware_word_bytes - (len(firmware) % firmware_word_bytes))
-
-    for offset in range(0, len(firmware), firmware_word_bytes):
-        addr = base_addr + offset
-        word = int.from_bytes(firmware[offset : offset + firmware_word_bytes], "little")
-        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
-            dut.u_npu_cluster.u_sram_i_tcm.mem[(addr - ITCM_BASE) // ITCM_WORD_BYTES].value = word
-        elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
-            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // DTCM_WORD_BYTES].value = word
-        else:
-            raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
+async def release_fetch(dut):
+    dut.fetch_enable_i.value = 1
+    await Timer(1, unit="ns")
 
 
-def read_dtcm_word(dut, word_index):
-    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
-    if not val_32.is_resolvable:
-        return 0
-    return val_32.to_unsigned() & 0xFFFFFFFF
-
-
-def write_dtcm_word(dut, word_index, value):
-    dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value = value & 0xFFFFFFFF
-
-
-def read_status_debug(dut):
-    return {
-        "status": read_dtcm_word(dut, 0),
-        "pass_count": read_dtcm_word(dut, 1),
-        "fail_test": read_dtcm_word(dut, 2),
-        "fail_index": read_dtcm_word(dut, 3),
-        "got": read_dtcm_word(dut, 4),
-        "expected": read_dtcm_word(dut, 5),
-        "phase": read_dtcm_word(dut, 6),
-        "op": read_dtcm_word(dut, 7),
-    }
-
-
-async def wait_for_status(dut, expected_pass_count=None, timeout_cycles=50000):
+async def wait_for_host_irq(dut, timeout_cycles=50000):
     for _ in range(timeout_cycles):
-        status = read_dtcm_word(dut, 0)
-        if status == PASS_SIGNATURE:
-            debug = read_status_debug(dut)
-            if expected_pass_count is not None:
-                assert debug["pass_count"] == expected_pass_count, debug
-            return debug
-        if (status & FAIL_SIGNATURE_MASK) == FAIL_SIGNATURE_PREFIX:
-            raise AssertionError(f"firmware failed: {read_status_debug(dut)}")
+        irq_value = dut.irq_o.value
+        if irq_value.is_resolvable and int(irq_value) == 1:
+            return
         await RisingEdge(dut.clk_i)
-    raise AssertionError(f"timeout waiting for firmware: {read_status_debug(dut)}")
-
+    raise AssertionError("timeout waiting for host irq")
 
 async def write_l2_bytes(dut, base_addr, data):
     dut.backdoor_we_i.value = 0

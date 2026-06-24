@@ -6,7 +6,7 @@ Validate the minimum boot path needed before deeper subsystem tests run:
 
 - Host loads `boot.bin` into I-TCM.
 - Snitch fetches and executes from I-TCM.
-- Firmware writes D-TCM status words visible to cocotb.
+- Firmware notifies cocotb through `irq_o`.
 - Snitch accesses iDMA-compatible MMIO registers.
 - TCDM-to-TCDM local copy works through the current iDMA runtime API.
 
@@ -17,7 +17,7 @@ Validate the minimum boot path needed before deeper subsystem tests run:
 3. Write and read back `IDMA_LENGTH_LOW` as an MMIO smoke test.
 4. Run `idma_L1ToL1()` for a 64-byte local copy.
 5. Compare every copied word.
-6. Publish `0xDEADBEEF` on success or `0xBADBADxx` with debug words on failure.
+6. Publish `0xDEADBEEF` through `NPU_IRQ_HOST_NOTIFY` on success or `0xBADBADxx` on failure.
 
 ## Command
 

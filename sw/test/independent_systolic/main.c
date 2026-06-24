@@ -6,8 +6,6 @@
  * Target: run deterministic INT8xINT8->INT32 GEMM for boundary M sizes and
  * copy every Mx32 INT32 result back to L2 for full Python golden comparison.
  */
-#define SIG_START   (*(volatile uint32_t *)0x10008020u)
-
 #define L2_WEIGHT   0x80000000u
 #define L2_IFM      0x80001000u
 #define L2_OUT      0x80010000u
@@ -20,15 +18,22 @@
 #define MAX_M        1024u
 #define IFM_BYTES    (MAX_M * 32u)
 
-static const uint32_t dims[] = {1u, 2u, 31u, 32u, 33u, 64u, 128u, 1024u};
+#define NUM_DIMS 8u
+
+static uint32_t dim_at(uint32_t index) {
+    if (index == 0u) return 1u;
+    if (index == 1u) return 2u;
+    if (index == 2u) return 31u;
+    if (index == 3u) return 32u;
+    if (index == 4u) return 33u;
+    if (index == 5u) return 64u;
+    if (index == 6u) return 128u;
+    return 1024u;
+}
 
 int main(void) {
     spatz_rt_init();
     spatz_rt_set_phase(1, 0);
-
-    while (SIG_START == 0) {
-    }
-    SIG_START = 0;
 
     // Stage fixed 32x32 weights and maximum IFM rows once; each M reuses prefix rows.
     spatz_rt_set_phase(2, 1);
@@ -39,8 +44,8 @@ int main(void) {
     spatz_rt_pass_step();
 
     uint32_t out_offset = 0;
-    for (uint32_t i = 0; i < sizeof(dims) / sizeof(dims[0]); i++) {
-        uint32_t dim_m = dims[i];
+    for (uint32_t i = 0; i < NUM_DIMS; i++) {
+        uint32_t dim_m = dim_at(i);
         uint32_t out_bytes = dim_m * 32u * 4u;
 
         // Each M stresses a different controller boundary: tiny, tile edge, and long burst.

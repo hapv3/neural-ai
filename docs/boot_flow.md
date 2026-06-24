@@ -9,7 +9,7 @@
 
 | Actor | Role |
 |-------|------|
-| Host / testbench | Owns reset, writes firmware into I-TCM, observes completion |
+| Host / testbench | Owns reset/fetch-enable, writes firmware into I-TCM, observes completion IRQ |
 | AXI4-Lite slave | Converts host writes into OBI requests |
 | I-TCM arbiter | Arbitrates host boot writes vs. Snitch instruction fetch |
 | I-TCM SRAM | Holds firmware at `0x1000_0000` |
@@ -21,7 +21,7 @@
 ## 2. Reset and Firmware Load
 
 ```text
-Host keeps rst_ni low
+Host keeps fetch_enable_i low
   |
   v
 Host writes firmware bytes to 0x1000_0000+
@@ -39,7 +39,7 @@ I-TCM Arbiter
 I-TCM SRAM
 ```
 
-1. Testbench asserts reset so Snitch cannot fetch unstable instructions.
+1. Testbench holds `fetch_enable_i=0` so Snitch cannot fetch before firmware load.
 2. Host loads `sw/test/boot/boot.bin` or `sw/test/matmul/matmul.bin` through AXI4-Lite.
 3. AXI4-Lite writes are converted into OBI writes.
 4. I-TCM arbiter grants bootloader writes into local I-TCM.
@@ -50,7 +50,7 @@ I-TCM SRAM
 ## 3. Snitch Release
 
 ```text
-Host de-asserts rst_ni
+Host asserts fetch_enable_i
   |
   v
 Snitch reset PC = 0x1000_0000
@@ -72,18 +72,17 @@ For the boot smoke test:
 
 1. Initialize stack/private data in D-TCM.
 2. Optionally exercise DMA path.
-3. Write success signature `0xDEADBEEF` to the test-observed location.
+3. Write success signature `0xDEADBEEF` to `NPU_IRQ_HOST_NOTIFY`.
 
 For the Matrix Engine test:
 
-1. Poll D-TCM start flag from testbench.
-2. Read `dim_m` from D-TCM.
-3. Program DMA CSRs to load weights from L2 to I-TCDM.
-4. Program DMA CSRs to load IFM from L2 to I-TCDM.
-5. Program Systolic Controller CSRs.
-6. Wait for `REG_SYS_DONE`.
-7. Program DMA CSRs to copy OFM from O-TCDM back to L2.
-8. Set D-TCM done flag for the testbench.
+1. Start immediately after fetch release.
+2. Program DMA CSRs to load weights from L2 to I-TCDM.
+3. Program DMA CSRs to load IFM from L2 to I-TCDM.
+4. Program Systolic Controller CSRs.
+5. Wait for `REG_SYS_DONE`.
+6. Program DMA CSRs to copy OFM from O-TCDM back to L2.
+7. Write `0xDEADBEEF` to `NPU_IRQ_HOST_NOTIFY`.
 
 ---
 
@@ -91,11 +90,11 @@ For the Matrix Engine test:
 
 | Test | Success signal |
 |------|----------------|
-| `test_snitch_boot.py` | Signature value equals `0xDEADBEEF` |
-| `test_matmul.py` | Done flag in D-TCM becomes `1`, then OFM matches golden data |
+| `test_snitch_boot.py` | `irq_o` asserts |
+| `test_matmul.py` | `irq_o` asserts, then OFM matches golden data |
 
 ---
 
 ## 6. Known Log Noise
 
-During reset or before firmware load, Snitch can print illegal-instruction messages because I-TCM contains zeros. These messages are expected in current simulation as long as the final pass criteria are met.
+`fetch_enable_i` prevents Snitch from fetching before the AXI boot image is resident in I-TCM, so illegal-instruction noise during firmware load should not be part of normal tests.

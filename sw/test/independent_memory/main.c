@@ -6,8 +6,6 @@
  * Target: verify boot-controlled L2 fixtures, 1D/2D/3D iDMA-compatible
  * transfers in both directions, and representative TCDM bank/boundary aliases.
  */
-#define SIG_START      (*(volatile uint32_t *)0x10008020u)
-
 #define L2_SRC         0x80000000u
 #define L2_DST         0x80001000u
 #define L2_SRC_2D      0x80002000u
@@ -220,10 +218,6 @@ static void verify_bank_addresses(void) {
 int main(void) {
     spatz_rt_init();
     spatz_rt_set_phase(1, 0);
-
-    while (SIG_START == 0) {
-    }
-    SIG_START = 0;
 
     // Phase 2: L2 fixture -> TCDM 1D copy, verified locally by firmware.
     spatz_rt_set_phase(2, 1);

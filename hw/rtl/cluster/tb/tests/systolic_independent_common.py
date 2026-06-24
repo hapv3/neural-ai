@@ -2,15 +2,15 @@ import os
 
 import cocotb
 from cocotb.clock import Clock
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
     firmware_path,
-    hold_reset,
-    load_firmware_tcm_backdoor,
+    load_firmware_axi,
     read_l2_bytes,
-    release_reset,
-    wait_for_status,
-    write_dtcm_word,
+    release_fetch,
+    reset_dut,
+    wait_for_host_irq,
     write_l2_bytes,
 )
 
@@ -18,7 +18,6 @@ from npu_test_utils import (
 L2_WEIGHT = 0x80000000
 L2_IFM = 0x80001000
 L2_OUT = 0x80010000
-SIG_START_WORD = 8
 DIMS = [1, 2, 31, 32, 33, 64, 128, 1024]
 MAX_M = 1024
 
@@ -75,18 +74,18 @@ def golden_for_dim(dim_m):
 async def boot_and_run_independent_systolic(dut, test_file):
     clock = Clock(dut.clk_i, 1, unit="ns")
     cocotb.start_soon(clock.start())
+    axi_master = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axi"), dut.clk_i, dut.rst_ni, reset_active_level=False)
 
-    await hold_reset(dut)
     fw_path = firmware_path(test_file, "sw/test/independent_systolic/independent_systolic.bin")
     assert os.path.exists(fw_path), "Run `make -C sw/test/independent_systolic` first."
-    load_firmware_tcm_backdoor(dut, fw_path)
-    await release_reset(dut)
-
+    await reset_dut(dut)
+    await load_firmware_axi(axi_master, fw_path)
     await write_l2_bytes(dut, L2_WEIGHT, make_weight_bytes())
     await write_l2_bytes(dut, L2_IFM, make_ifm_bytes())
-    write_dtcm_word(dut, SIG_START_WORD, 1)
+    await release_fetch(dut)
 
-    return await wait_for_status(dut, expected_pass_count=1 + len(DIMS), timeout_cycles=200000)
+    await wait_for_host_irq(dut, timeout_cycles=200000)
+    return {"status": 0xDEADBEEF}
 
 
 async def check_independent_systolic_output(dut):

@@ -5,6 +5,7 @@ import npu_cluster_pkg::*;
 module npu_cluster (
     input  logic clk_i,       // 1 GHz NPU Core Clock
     input  logic rst_ni,      // NPU Core Reset
+    input  logic fetch_enable_i,
 
     //---------------------------------------------------------
     // AXI4 Master Interface (To External Memory via DMA)
@@ -175,6 +176,7 @@ module npu_cluster (
     logic [2:0]  fpu_rnd_mode;
     logic        fpu_fmt_mode;
     logic [4:0]  fpu_status;
+    snitch_pkg::interrupts_t snitch_irq;
 
     snitch_core #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -183,8 +185,9 @@ module npu_cluster (
         .BOOT_ADDR (32'h1000_0000) // I-TCM Base Addr
     ) u_snitch_core (
         .clk_i            (clk_i),
-        .rst_ni           (rst_ni),
+        .rst_ni           (rst_ni & fetch_enable_i),
         .hart_id_i        (32'd0),
+        .irq_i            (snitch_irq),
 
         .obi_i_req_o      (snitch_i_req),
         .obi_i_gnt_i      (snitch_i_gnt),
@@ -351,6 +354,15 @@ module npu_cluster (
     logic                      idma_mm_rvalid;
     logic [MMIO_DATA_WIDTH-1:0] idma_mm_rdata;
 
+    logic                      irq_ctrl_req;
+    logic                      irq_ctrl_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] irq_ctrl_addr;
+    logic                      irq_ctrl_we;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] irq_ctrl_be;
+    logic [MMIO_DATA_WIDTH-1:0] irq_ctrl_wdata;
+    logic                      irq_ctrl_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] irq_ctrl_rdata;
+
     obi_demux_1to4 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(SNITCH_D_DATA_WIDTH),
@@ -458,7 +470,7 @@ module npu_cluster (
         .DATA_WIDTH(MMIO_DATA_WIDTH),
         .M0_BASE (32'h2000_0000), .M0_MASK (32'hFFFF_F000), // Cluster control
         .M1_BASE (32'h2000_1000), .M1_MASK (32'hFFFF_F000), // iDMA-style control
-        .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Reserved
+        .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Interrupt controller
         .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000)  // Reserved
     ) u_mmio_demux_1to4 (
         .clk_i       (clk_i),
@@ -490,14 +502,14 @@ module npu_cluster (
         .m1_rvalid_i  (idma_mm_rvalid),
         .m1_rdata_i   (idma_mm_rdata),
 
-        .m2_req_o     (),
-        .m2_gnt_i     (1'b1),
-        .m2_addr_o    (),
-        .m2_we_o      (),
-        .m2_be_o      (),
-        .m2_wdata_o   (),
-        .m2_rvalid_i  (1'b1),
-        .m2_rdata_i   ('0),
+        .m2_req_o     (irq_ctrl_req),
+        .m2_gnt_i     (irq_ctrl_gnt),
+        .m2_addr_o    (irq_ctrl_addr),
+        .m2_we_o      (irq_ctrl_we),
+        .m2_be_o      (irq_ctrl_be),
+        .m2_wdata_o   (irq_ctrl_wdata),
+        .m2_rvalid_i  (irq_ctrl_rvalid),
+        .m2_rdata_i   (irq_ctrl_rdata),
 
         .m3_req_o     (),
         .m3_gnt_i     (1'b1),
@@ -549,6 +561,28 @@ module npu_cluster (
         .cfg_sys_ofm_ptr_o    (cfg_sys_o_ptr),
         .cfg_sys_dim_m_o      (cfg_sys_dim_m),
         .cfg_sys_done_i       (cfg_sys_done)
+    );
+
+    npu_interrupt_ctrl #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(MMIO_DATA_WIDTH)
+    ) u_interrupt_ctrl (
+        .clk_i         (clk_i),
+        .rst_ni        (rst_ni),
+        .req_i         (irq_ctrl_req),
+        .gnt_o         (irq_ctrl_gnt),
+        .addr_i        (irq_ctrl_addr),
+        .we_i          (irq_ctrl_we),
+        .be_i          (irq_ctrl_be),
+        .wdata_i       (irq_ctrl_wdata),
+        .rvalid_o      (irq_ctrl_rvalid),
+        .rdata_o       (irq_ctrl_rdata),
+        .dma_done_i    (cfg_dma_done),
+        .sys_done_i    (cfg_sys_done),
+        .afu_done_i    (1'b0),
+        .spatz_done_i  (acc_pvalid),
+        .snitch_irq_o  (snitch_irq),
+        .host_irq_o    (irq_o)
     );
 
     //=========================================================

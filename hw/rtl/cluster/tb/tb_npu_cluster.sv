@@ -5,6 +5,7 @@
 module tb_npu_cluster (
     input  logic        clk_i,       // 1 GHz NPU Clock
     input  logic        rst_ni,      // NPU Reset
+    input  logic        fetch_enable_i,
     
     // AXI Slave Interface
     input  logic [31:0] s_axi_awaddr,
@@ -31,7 +32,8 @@ module tb_npu_cluster (
     input  logic        backdoor_we_i,
     input  logic [31:0] backdoor_addr_i,
     input  logic [7:0]  backdoor_data_i,
-    output logic [7:0]  backdoor_rdata_o
+    output logic [7:0]  backdoor_rdata_o,
+    output logic        irq_o
 );
 
     // AXI Bus between NPU Cluster DMA and axi_sim_mem
@@ -56,6 +58,7 @@ module tb_npu_cluster (
     npu_cluster u_npu_cluster (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
+        .fetch_enable_i   (fetch_enable_i),
 
         // AXI Master (DMA)
         .axi_aw_addr_o    (axi_req.aw.addr),
@@ -116,7 +119,7 @@ module tb_npu_cluster (
         .s_axi_r_ready_i  (s_axi_rready),
 
         // Interrupts
-        .irq_o            ()
+        .irq_o            (irq_o)
     );
 
     // Tie off unused AXI struct fields from DMA Engine

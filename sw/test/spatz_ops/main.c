@@ -1,4 +1,5 @@
 #include "npu_types.h"
+#include "npu_memory_map.h"
 #include "spatz_ops.h"
 
 /*
@@ -31,6 +32,7 @@ static void fail(uint32_t test_id, uint32_t index, int32_t got, int32_t expected
     SIG_FAIL_GOT = (uint32_t)got;
     SIG_FAIL_EXP = (uint32_t)expected;
     SIG_STATUS = FAIL_SIGNATURE | test_id;
+    REG_WRITE(NPU_IRQ_HOST_NOTIFY, FAIL_SIGNATURE | test_id);
     while (1) {
     }
 }
@@ -90,6 +92,7 @@ int main(void) {
     SIG_PASS_COUNT = SIG_PASS_COUNT + 1;
 
     SIG_STATUS = PASS_SIGNATURE;
+    REG_WRITE(NPU_IRQ_HOST_NOTIFY, PASS_SIGNATURE);
     while (1) {
     }
 }
