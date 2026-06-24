@@ -13,7 +13,7 @@ FAIL_SIGNATURE_PREFIX = 0xBAD00000
 ITCM_BASE = 0x10000000
 DTCM_BASE = 0x10008000
 TCM_SIZE_BYTES = 32 * 1024
-TCM_WORD_BYTES = 32
+TCM_WORD_BYTES = 4
 
 L2_INPUT = 0x80000000
 L2_WEIGHT0 = 0x80002000
@@ -88,24 +88,16 @@ async def read_axi_sim_bytes(dut, base_addr, length):
 
 
 def read_dtcm_word(dut, word_index):
-    mem_index = word_index // 8
-    bit_offset = (word_index % 8) * 32
-    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value
+    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
 
-    if not val_256.is_resolvable:
+    if not val_32.is_resolvable:
         return 0
 
-    return (val_256.to_unsigned() >> bit_offset) & 0xFFFFFFFF
+    return val_32.to_unsigned() & 0xFFFFFFFF
 
 
 def write_dtcm_word(dut, word_index, value):
-    mem_index = word_index // 8
-    bit_offset = (word_index % 8) * 32
-    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value
-    current = val_256.to_unsigned() if val_256.is_resolvable else 0
-    current &= ~(0xFFFFFFFF << bit_offset)
-    current |= (value & 0xFFFFFFFF) << bit_offset
-    dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value = current
+    dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value = value & 0xFFFFFFFF
 
 
 def read_micro_debug(dut):

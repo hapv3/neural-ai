@@ -142,12 +142,17 @@ module axi_lite_to_obi #(
                 if (is_write_q) begin
                     obi_we_o    = 1'b1;
                     obi_addr_o  = aw_addr_q;
-                    // AXI w_strb is already aligned to AXI_DATA_WIDTH.
-                    // We only shift by the offset of the AXI_DATA_WIDTH word within the OBI_DATA_WIDTH line.
-                    obi_be_o    = {{(OBI_DATA_WIDTH/8 - AXI_DATA_WIDTH/8){1'b0}}, w_strb_q} << ((aw_addr_q[4:0] / (AXI_DATA_WIDTH/8)) * (AXI_DATA_WIDTH/8));
-                    
-                    // Replicate the AXI data to fill the OBI data width
-                    obi_wdata_o = {(OBI_DATA_WIDTH/AXI_DATA_WIDTH){w_data_q}};
+                    if (OBI_DATA_WIDTH == AXI_DATA_WIDTH) begin
+                        obi_be_o    = w_strb_q;
+                        obi_wdata_o = w_data_q;
+                    end else begin
+                        // AXI w_strb is already aligned to AXI_DATA_WIDTH.
+                        // We only shift by the offset of the AXI_DATA_WIDTH word within the OBI_DATA_WIDTH line.
+                        obi_be_o    = {{(OBI_DATA_WIDTH/8 - AXI_DATA_WIDTH/8){1'b0}}, w_strb_q} << ((aw_addr_q[4:0] / (AXI_DATA_WIDTH/8)) * (AXI_DATA_WIDTH/8));
+
+                        // Replicate the AXI data to fill the OBI data width
+                        obi_wdata_o = {(OBI_DATA_WIDTH/AXI_DATA_WIDTH){w_data_q}};
+                    end
                 end else begin
                     obi_we_o    = 1'b0;
                     obi_addr_o  = ar_addr_q;
@@ -170,7 +175,11 @@ module axi_lite_to_obi #(
                         end
                     end else begin
                         s_axi_r_valid_o = 1'b1;
-                        r_data_d        = obi_rdata_i >> ((ar_addr_q[4:0] / (AXI_DATA_WIDTH/8)) * AXI_DATA_WIDTH);
+                        if (OBI_DATA_WIDTH == AXI_DATA_WIDTH) begin
+                            r_data_d = obi_rdata_i[AXI_DATA_WIDTH-1:0];
+                        end else begin
+                            r_data_d = obi_rdata_i >> ((ar_addr_q[4:0] / (AXI_DATA_WIDTH/8)) * AXI_DATA_WIDTH);
+                        end
                         s_axi_r_data_o  = r_data_d;
                         if (s_axi_r_ready_i) begin
                             state_d = IDLE;

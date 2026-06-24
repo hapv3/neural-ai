@@ -10,7 +10,8 @@ FAIL_SIGNATURE_PREFIX = 0xBAD00000
 ITCM_BASE = 0x10000000
 DTCM_BASE = 0x10008000
 TCM_SIZE_BYTES = 32 * 1024
-TCM_WORD_BYTES = 32
+ITCM_WORD_BYTES = 4
+DTCM_WORD_BYTES = 4
 
 TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
@@ -36,7 +37,7 @@ async def release_reset(dut):
     await Timer(20, unit="ns")
 
 
-async def load_firmware_axi(axi_master, filename, base_addr=ITCM_BASE, width=8):
+async def load_firmware_axi(axi_master, filename, base_addr=ITCM_BASE, width=4):
     with open(filename, "rb") as firmware_file:
         firmware = firmware_file.read()
 
@@ -51,37 +52,31 @@ def load_firmware_tcm_backdoor(dut, filename, base_addr=ITCM_BASE):
     with open(filename, "rb") as firmware_file:
         firmware = firmware_file.read()
 
-    if len(firmware) % TCM_WORD_BYTES != 0:
-        firmware += b"\x00" * (TCM_WORD_BYTES - (len(firmware) % TCM_WORD_BYTES))
+    firmware_word_bytes = ITCM_WORD_BYTES
 
-    for offset in range(0, len(firmware), TCM_WORD_BYTES):
+    if len(firmware) % firmware_word_bytes != 0:
+        firmware += b"\x00" * (firmware_word_bytes - (len(firmware) % firmware_word_bytes))
+
+    for offset in range(0, len(firmware), firmware_word_bytes):
         addr = base_addr + offset
-        word = int.from_bytes(firmware[offset : offset + TCM_WORD_BYTES], "little")
+        word = int.from_bytes(firmware[offset : offset + firmware_word_bytes], "little")
         if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
-            dut.u_npu_cluster.u_sram_i_tcm.mem[(addr - ITCM_BASE) // TCM_WORD_BYTES].value = word
+            dut.u_npu_cluster.u_sram_i_tcm.mem[(addr - ITCM_BASE) // ITCM_WORD_BYTES].value = word
         elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
-            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // TCM_WORD_BYTES].value = word
+            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // DTCM_WORD_BYTES].value = word
         else:
             raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
 
 
 def read_dtcm_word(dut, word_index):
-    mem_index = word_index // 8
-    bit_offset = (word_index % 8) * 32
-    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value
-    if not val_256.is_resolvable:
+    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
+    if not val_32.is_resolvable:
         return 0
-    return (val_256.to_unsigned() >> bit_offset) & 0xFFFFFFFF
+    return val_32.to_unsigned() & 0xFFFFFFFF
 
 
 def write_dtcm_word(dut, word_index, value):
-    mem_index = word_index // 8
-    bit_offset = (word_index % 8) * 32
-    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value
-    current = val_256.to_unsigned() if val_256.is_resolvable else 0
-    current &= ~(0xFFFFFFFF << bit_offset)
-    current |= (value & 0xFFFFFFFF) << bit_offset
-    dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value = current
+    dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value = value & 0xFFFFFFFF
 
 
 def read_status_debug(dut):

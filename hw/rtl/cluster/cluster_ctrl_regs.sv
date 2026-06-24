@@ -34,6 +34,7 @@ module cluster_ctrl_regs #(
 );
 
     // Register Offsets
+    localparam int unsigned DATA_BYTES = DATA_WIDTH / 8;
     localparam logic [ADDR_WIDTH-1:0] REG_DMA_START = 32'h0000;
     localparam logic [ADDR_WIDTH-1:0] REG_DMA_SRC   = 32'h0020;
     localparam logic [ADDR_WIDTH-1:0] REG_DMA_DST   = 32'h0040;
@@ -98,14 +99,12 @@ module cluster_ctrl_regs #(
             // Handle OBI Request
             if (req_i && gnt_o) begin
                 if (we_i) begin
-                    // OBI D-Bus is 256-bit. `addr_i` is 32-byte aligned.
-                    // Check each 32-bit lane.
                     for (int i = 0; i < DATA_WIDTH/32; i++) begin
                         if (be_i[i*4 +: 4] != 4'b0000) begin
                             logic [31:0] exact_addr;
                             logic [31:0] wdata_word;
                             
-                            exact_addr = (addr_i & 32'hFFFF_FFE0) + (i * 4);
+                            exact_addr = (addr_i & ~(32'(DATA_BYTES - 1))) + (i * 4);
                             wdata_word = wdata_i[i*32 +: 32];
                             
                             
@@ -130,7 +129,7 @@ module cluster_ctrl_regs #(
                     end
                 end else begin
                     // Capture read request
-                    r_addr_q <= addr_i & 32'hFFFF_FFE0; // ALIGN
+                    r_addr_q <= addr_i & ~(32'(DATA_BYTES - 1));
                 end
                 rvalid_o <= 1'b1; // OBI requires rvalid for both reads and writes
             end else begin

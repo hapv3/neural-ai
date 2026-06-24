@@ -49,8 +49,8 @@ module npu_cluster (
     input  logic                            s_axi_aw_valid_i,
     output logic                            s_axi_aw_ready_o,
 
-    input  logic [AXI_DATA_WIDTH-1:0]       s_axi_w_data_i,
-    input  logic [(AXI_DATA_WIDTH/8)-1:0]   s_axi_w_strb_i,
+    input  logic [AXI_HOST_DATA_WIDTH-1:0]       s_axi_w_data_i,
+    input  logic [(AXI_HOST_DATA_WIDTH/8)-1:0]   s_axi_w_strb_i,
     input  logic                            s_axi_w_last_i,
     input  logic                            s_axi_w_valid_i,
     output logic                            s_axi_w_ready_o,
@@ -66,7 +66,7 @@ module npu_cluster (
     input  logic                            s_axi_ar_valid_i,
     output logic                            s_axi_ar_ready_o,
 
-    output logic [AXI_DATA_WIDTH-1:0]       s_axi_r_data_o,
+    output logic [AXI_HOST_DATA_WIDTH-1:0]       s_axi_r_data_o,
     output logic [1:0]                      s_axi_r_resp_o,
     output logic                            s_axi_r_last_o,
     output logic                            s_axi_r_valid_o,
@@ -85,16 +85,16 @@ module npu_cluster (
     logic                      s_axi_obi_gnt;
     logic [OBI_ADDR_WIDTH-1:0] s_axi_obi_addr;
     logic                      s_axi_obi_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] s_axi_obi_be;
-    logic [OBI_DATA_WIDTH-1:0] s_axi_obi_wdata;
+    logic [(ITCM_DATA_WIDTH/8)-1:0] s_axi_obi_be;
+    logic [ITCM_DATA_WIDTH-1:0] s_axi_obi_wdata;
     logic                      s_axi_obi_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] s_axi_obi_rdata;
+    logic [ITCM_DATA_WIDTH-1:0] s_axi_obi_rdata;
 
     axi_lite_to_obi #(
         .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
-        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
+        .AXI_DATA_WIDTH(AXI_HOST_DATA_WIDTH),
         .OBI_ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .OBI_DATA_WIDTH(OBI_DATA_WIDTH)
+        .OBI_DATA_WIDTH(ITCM_DATA_WIDTH)
     ) u_axi_to_obi (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -135,34 +135,26 @@ module npu_cluster (
     logic                      snitch_i_gnt;
     logic [OBI_ADDR_WIDTH-1:0] snitch_i_addr;
     logic                      snitch_i_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] snitch_i_be;
-    logic [OBI_DATA_WIDTH-1:0] snitch_i_wdata;
+    logic [(ITCM_DATA_WIDTH/8)-1:0] snitch_i_be;
+    logic [ITCM_DATA_WIDTH-1:0] snitch_i_wdata;
     logic                      snitch_i_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] snitch_i_rdata;
+    logic [ITCM_DATA_WIDTH-1:0] snitch_i_rdata;
 
     logic                      snitch_d_req;
     logic                      snitch_d_gnt;
     logic [OBI_ADDR_WIDTH-1:0] snitch_d_addr;
     logic                      snitch_d_we;
-    logic [(64/8)-1:0]         snitch_d_be;
-    logic [64-1:0]             snitch_d_wdata;
+    logic [(SNITCH_D_DATA_WIDTH/8)-1:0] snitch_d_be;
+    logic [SNITCH_D_DATA_WIDTH-1:0]     snitch_d_wdata;
     logic                      snitch_d_rvalid;
-    logic [64-1:0]             snitch_d_rdata;
-
-    // Wide signals for D-Bus
-    logic                      snitch_d_wide_req;
-    logic                      snitch_d_wide_gnt;
-    logic [OBI_ADDR_WIDTH-1:0] snitch_d_wide_addr;
-    logic                      snitch_d_wide_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] snitch_d_wide_be;
-    logic [OBI_DATA_WIDTH-1:0] snitch_d_wide_wdata;
-    logic                      snitch_d_wide_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] snitch_d_wide_rdata;
+    logic [SNITCH_D_DATA_WIDTH-1:0]     snitch_d_rdata;
 
     // Accelerator interface wires (Snitch ↔ Spatz)
     logic        acc_qvalid;
     logic        acc_qready;
     logic [31:0] acc_qdata_op;
+    logic [SNITCH_D_DATA_WIDTH-1:0] acc_qdata_arga_core;
+    logic [SNITCH_D_DATA_WIDTH-1:0] acc_qdata_argb_core;
     logic [63:0] acc_qdata_arga;
     logic [63:0] acc_qdata_argb;
     logic [31:0] acc_qdata_argc;
@@ -177,6 +169,7 @@ module npu_cluster (
     logic        acc_pvalid;
     logic        acc_pready;
     logic [4:0]  acc_pid;
+    logic [SNITCH_D_DATA_WIDTH-1:0] acc_pdata_core;
     logic [63:0] acc_pdata;
     logic        acc_perror;
     logic [2:0]  fpu_rnd_mode;
@@ -185,8 +178,8 @@ module npu_cluster (
 
     snitch_core #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .I_DATA_WIDTH(OBI_DATA_WIDTH),
-        .D_DATA_WIDTH(64),
+        .I_DATA_WIDTH(ITCM_DATA_WIDTH),
+        .D_DATA_WIDTH(SNITCH_D_DATA_WIDTH),
         .BOOT_ADDR (32'h1000_0000) // I-TCM Base Addr
     ) u_snitch_core (
         .clk_i            (clk_i),
@@ -215,8 +208,8 @@ module npu_cluster (
         .acc_qvalid_o     (acc_qvalid),
         .acc_qready_i     (acc_qready),
         .acc_qdata_op_o   (acc_qdata_op),
-        .acc_qdata_arga_o (acc_qdata_arga),
-        .acc_qdata_argb_o (acc_qdata_argb),
+        .acc_qdata_arga_o (acc_qdata_arga_core),
+        .acc_qdata_argb_o (acc_qdata_argb_core),
         .acc_qdata_argc_o (acc_qdata_argc),
         .acc_qid_o        (acc_qid),
         .acc_qaccept_i    (acc_qaccept),
@@ -230,7 +223,7 @@ module npu_cluster (
         .acc_pvalid_i     (acc_pvalid),
         .acc_pready_o     (acc_pready),
         .acc_pid_i        (acc_pid),
-        .acc_pdata_i      (acc_pdata),
+        .acc_pdata_i      (acc_pdata_core),
         .acc_perror_i     (acc_perror),
         // FPU side-channel
         .fpu_rnd_mode_o   (fpu_rnd_mode),
@@ -243,26 +236,26 @@ module npu_cluster (
     logic                      itcm_gnt;
     logic [OBI_ADDR_WIDTH-1:0] itcm_addr;
     logic                      itcm_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] itcm_be;
-    logic [OBI_DATA_WIDTH-1:0] itcm_wdata;
+    logic [(ITCM_DATA_WIDTH/8)-1:0] itcm_be;
+    logic [ITCM_DATA_WIDTH-1:0] itcm_wdata;
     logic                      itcm_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] itcm_rdata;
+    logic [ITCM_DATA_WIDTH-1:0] itcm_rdata;
 
     obi_arbiter_2to1 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH)
+        .DATA_WIDTH(ITCM_DATA_WIDTH)
     ) u_itcm_arbiter (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
         
-        .m0_req_i    (sys_m0_req),
-        .m0_gnt_o    (sys_m0_gnt),
-        .m0_addr_i   (sys_m0_addr),
-        .m0_we_i     (sys_m0_we),
-        .m0_be_i     (sys_m0_be),
-        .m0_wdata_i  (sys_m0_wdata),
-        .m0_rvalid_o (sys_m0_rvalid),
-        .m0_rdata_o  (sys_m0_rdata),
+        .m0_req_i    (s_axi_obi_req),
+        .m0_gnt_o    (s_axi_obi_gnt),
+        .m0_addr_i   (s_axi_obi_addr),
+        .m0_we_i     (s_axi_obi_we),
+        .m0_be_i     (s_axi_obi_be),
+        .m0_wdata_i  (s_axi_obi_wdata),
+        .m0_rvalid_o (s_axi_obi_rvalid),
+        .m0_rdata_o  (s_axi_obi_rdata),
         
         .m1_req_i    (snitch_i_req),
         .m1_gnt_o    (snitch_i_gnt),
@@ -285,14 +278,14 @@ module npu_cluster (
 
     // I-TCM SRAM Bank (32 KB)
     cluster_sram_bank #(
-        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .DATA_WIDTH(ITCM_DATA_WIDTH),
         .SIZE_BYTES(32768)
     ) u_sram_i_tcm (
         .clk_i   (clk_i),
         .rst_ni  (rst_ni),
         .req_i   (itcm_req),
         .we_i    (itcm_we),
-        .addr_i  ((itcm_addr & 32'h0000_7FFF) >> 5), // Bank offset for 256-bit width
+        .addr_i  ((itcm_addr & 32'h0000_7FFF) >> 2),
         .wdata_i (itcm_wdata),
         .be_i    (itcm_be),
         .gnt_o   (itcm_gnt),
@@ -308,195 +301,148 @@ module npu_cluster (
     logic                      dtcm_gnt;
     logic [OBI_ADDR_WIDTH-1:0] dtcm_addr;
     logic                      dtcm_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] dtcm_be;
-    logic [OBI_DATA_WIDTH-1:0] dtcm_wdata;
+    logic [(DTCM_DATA_WIDTH/8)-1:0] dtcm_be;
+    logic [DTCM_DATA_WIDTH-1:0] dtcm_wdata;
     logic                      dtcm_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] dtcm_rdata;
+    logic [DTCM_DATA_WIDTH-1:0] dtcm_rdata;
 
     logic                      ddata_req;
     logic                      ddata_gnt;
     logic [OBI_ADDR_WIDTH-1:0] ddata_addr;
     logic                      ddata_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] ddata_be;
-    logic [OBI_DATA_WIDTH-1:0] ddata_wdata;
+    logic [(SNITCH_D_DATA_WIDTH/8)-1:0] ddata_be;
+    logic [SNITCH_D_DATA_WIDTH-1:0] ddata_wdata;
     logic                      ddata_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] ddata_rdata;
+    logic [SNITCH_D_DATA_WIDTH-1:0] ddata_rdata;
+
+    logic                      ddata_wide_req;
+    logic                      ddata_wide_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] ddata_wide_addr;
+    logic                      ddata_wide_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] ddata_wide_be;
+    logic [OBI_DATA_WIDTH-1:0] ddata_wide_wdata;
+    logic                      ddata_wide_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] ddata_wide_rdata;
 
     logic                      reg_req;
     logic                      reg_gnt;
     logic [OBI_ADDR_WIDTH-1:0] reg_addr;
     logic                      reg_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] reg_be;
-    logic [OBI_DATA_WIDTH-1:0] reg_wdata;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] reg_be;
+    logic [MMIO_DATA_WIDTH-1:0] reg_wdata;
     logic                      reg_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] reg_rdata;
+    logic [MMIO_DATA_WIDTH-1:0] reg_rdata;
 
     logic                      ctrl_req;
     logic                      ctrl_gnt;
     logic [OBI_ADDR_WIDTH-1:0] ctrl_addr;
     logic                      ctrl_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] ctrl_be;
-    logic [OBI_DATA_WIDTH-1:0] ctrl_wdata;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] ctrl_be;
+    logic [MMIO_DATA_WIDTH-1:0] ctrl_wdata;
     logic                      ctrl_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] ctrl_rdata;
+    logic [MMIO_DATA_WIDTH-1:0] ctrl_rdata;
 
     logic                      idma_mm_req;
     logic                      idma_mm_gnt;
     logic [OBI_ADDR_WIDTH-1:0] idma_mm_addr;
     logic                      idma_mm_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] idma_mm_be;
-    logic [OBI_DATA_WIDTH-1:0] idma_mm_wdata;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] idma_mm_be;
+    logic [MMIO_DATA_WIDTH-1:0] idma_mm_wdata;
     logic                      idma_mm_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] idma_mm_rdata;
-
-    // System Arbiter (AXI Lite vs Snitch D-Bus)
-    logic                      sys_req;
-    logic                      sys_gnt;
-    logic [OBI_ADDR_WIDTH-1:0] sys_addr;
-    logic                      sys_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] sys_be;
-    logic [OBI_DATA_WIDTH-1:0] sys_wdata;
-    logic                      sys_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] sys_rdata;
-
-    obi_arbiter_2to1 #(
-        .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH)
-    ) u_sys_arbiter (
-        .clk_i       (clk_i),
-        .rst_ni      (rst_ni),
-        
-        .m0_req_i    (s_axi_obi_req),
-        .m0_gnt_o    (s_axi_obi_gnt),
-        .m0_addr_i   (s_axi_obi_addr),
-        .m0_we_i     (s_axi_obi_we),
-        .m0_be_i     (s_axi_obi_be),
-        .m0_wdata_i  (s_axi_obi_wdata),
-        .m0_rvalid_o (s_axi_obi_rvalid),
-        .m0_rdata_o  (s_axi_obi_rdata),
-        
-        .m1_req_i    (snitch_d_wide_req),
-        .m1_gnt_o    (snitch_d_wide_gnt),
-        .m1_addr_i   (snitch_d_wide_addr),
-        .m1_we_i     (snitch_d_wide_we),
-        .m1_be_i     (snitch_d_wide_be),
-        .m1_wdata_i  (snitch_d_wide_wdata),
-        .m1_rvalid_o (snitch_d_wide_rvalid),
-        .m1_rdata_o  (snitch_d_wide_rdata),
-        
-        .slv_req_o   (sys_req),
-        .slv_gnt_i   (sys_gnt),
-        .slv_addr_o  (sys_addr),
-        .slv_we_o    (sys_we),
-        .slv_be_o    (sys_be),
-        .slv_wdata_o (sys_wdata),
-        .slv_rvalid_i(sys_rvalid),
-        .slv_rdata_i (sys_rdata)
-    );
-
-    // System Demux 1-to-4
-    logic                      sys_m0_req;
-    logic                      sys_m0_gnt;
-    logic [OBI_ADDR_WIDTH-1:0] sys_m0_addr;
-    logic                      sys_m0_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] sys_m0_be;
-    logic [OBI_DATA_WIDTH-1:0] sys_m0_wdata;
-    logic                      sys_m0_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] sys_m0_rdata;
-
-    // Narrow-to-Wide Adapter for Snitch D-Bus
-    obi_narrow_to_wide #(
-        .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .M_DATA_WIDTH(64),
-        .S_DATA_WIDTH(OBI_DATA_WIDTH)
-    ) u_d_narrow_to_wide (
-        .clk_i       (clk_i),
-        .rst_ni      (rst_ni),
-        .mst_req_i   (snitch_d_req),
-        .mst_gnt_o   (snitch_d_gnt),
-        .mst_addr_i  (snitch_d_addr),
-        .mst_we_i    (snitch_d_we),
-        .mst_be_i    (snitch_d_be),
-        .mst_wdata_i (snitch_d_wdata),
-        .mst_rvalid_o(snitch_d_rvalid),
-        .mst_rdata_o (snitch_d_rdata),
-        
-        .slv_req_o   (snitch_d_wide_req),
-        .slv_gnt_i   (snitch_d_wide_gnt),
-        .slv_addr_o  (snitch_d_wide_addr),
-        .slv_we_o    (snitch_d_wide_we),
-        .slv_be_o    (snitch_d_wide_be),
-        .slv_wdata_o (snitch_d_wide_wdata),
-        .slv_rvalid_i(snitch_d_wide_rvalid),
-        .slv_rdata_i (snitch_d_wide_rdata)
-    );
+    logic [MMIO_DATA_WIDTH-1:0] idma_mm_rdata;
 
     obi_demux_1to4 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH),
-        .M0_BASE (32'h1000_0000), .M0_MASK (32'hFFFF_8000), // I-TCM
-        .M1_BASE (32'h1000_8000), .M1_MASK (32'hFFFF_8000), // D-TCM
-        .M2_BASE (32'h1010_0000), .M2_MASK (32'hFFF0_0000), // Shared Data
-        .M3_BASE (32'h2000_0000), .M3_MASK (32'hFFFF_0000)  // MMIO
-    ) u_sys_demux_1to4 (
+        .DATA_WIDTH(SNITCH_D_DATA_WIDTH),
+        .M0_BASE (32'h1000_8000), .M0_MASK (32'hFFFF_8000), // D-TCM
+        .M1_BASE (32'h1010_0000), .M1_MASK (32'hFFF0_0000), // Shared Data
+        .M2_BASE (32'h2000_0000), .M2_MASK (32'hFFFF_0000), // MMIO
+        .M3_BASE (32'hFFFF_0000), .M3_MASK (32'hFFFF_0000)  // Unused/error sink
+    ) u_dside_demux_1to4 (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
-        .slv_req_i   (sys_req),
-        .slv_gnt_o   (sys_gnt),
-        .slv_addr_i  (sys_addr),
-        .slv_we_i    (sys_we),
-        .slv_be_i    (sys_be),
-        .slv_wdata_i (sys_wdata),
-        .slv_rvalid_o(sys_rvalid),
-        .slv_rdata_o (sys_rdata),
+        .slv_req_i   (snitch_d_req),
+        .slv_gnt_o   (snitch_d_gnt),
+        .slv_addr_i  (snitch_d_addr),
+        .slv_we_i    (snitch_d_we),
+        .slv_be_i    (snitch_d_be),
+        .slv_wdata_i (snitch_d_wdata),
+        .slv_rvalid_o(snitch_d_rvalid),
+        .slv_rdata_o (snitch_d_rdata),
 
-        .m0_req_o     (sys_m0_req),
-        .m0_gnt_i     (sys_m0_gnt),
-        .m0_addr_o    (sys_m0_addr),
-        .m0_we_o      (sys_m0_we),
-        .m0_be_o      (sys_m0_be),
-        .m0_wdata_o   (sys_m0_wdata),
-        .m0_rvalid_i  (sys_m0_rvalid),
-        .m0_rdata_i   (sys_m0_rdata),
+        .m0_req_o     (dtcm_req),
+        .m0_gnt_i     (dtcm_gnt),
+        .m0_addr_o    (dtcm_addr),
+        .m0_we_o      (dtcm_we),
+        .m0_be_o      (dtcm_be),
+        .m0_wdata_o   (dtcm_wdata),
+        .m0_rvalid_i  (dtcm_rvalid),
+        .m0_rdata_i   (dtcm_rdata),
 
-        .m1_req_o     (dtcm_req),
-        .m1_gnt_i     (dtcm_gnt),
-        .m1_addr_o    (dtcm_addr),
-        .m1_we_o      (dtcm_we),
-        .m1_be_o      (dtcm_be),
-        .m1_wdata_o   (dtcm_wdata),
-        .m1_rvalid_i  (dtcm_rvalid),
-        .m1_rdata_i   (dtcm_rdata),
+        .m1_req_o     (ddata_req),
+        .m1_gnt_i     (ddata_gnt),
+        .m1_addr_o    (ddata_addr),
+        .m1_we_o      (ddata_we),
+        .m1_be_o      (ddata_be),
+        .m1_wdata_o   (ddata_wdata),
+        .m1_rvalid_i  (ddata_rvalid),
+        .m1_rdata_i   (ddata_rdata),
 
-        .m2_req_o     (ddata_req),
-        .m2_gnt_i     (ddata_gnt),
-        .m2_addr_o    (ddata_addr),
-        .m2_we_o      (ddata_we),
-        .m2_be_o      (ddata_be),
-        .m2_wdata_o   (ddata_wdata),
-        .m2_rvalid_i  (ddata_rvalid),
-        .m2_rdata_i   (ddata_rdata),
+        .m2_req_o     (reg_req),
+        .m2_gnt_i     (reg_gnt),
+        .m2_addr_o    (reg_addr),
+        .m2_we_o      (reg_we),
+        .m2_be_o      (reg_be),
+        .m2_wdata_o   (reg_wdata),
+        .m2_rvalid_i  (reg_rvalid),
+        .m2_rdata_i   (reg_rdata),
 
-        .m3_req_o     (reg_req),
-        .m3_gnt_i     (reg_gnt),
-        .m3_addr_o    (reg_addr),
-        .m3_we_o      (reg_we),
-        .m3_be_o      (reg_be),
-        .m3_wdata_o   (reg_wdata),
-        .m3_rvalid_i  (reg_rvalid),
-        .m3_rdata_i   (reg_rdata)
+        .m3_req_o     (),
+        .m3_gnt_i     (1'b1),
+        .m3_addr_o    (),
+        .m3_we_o      (),
+        .m3_be_o      (),
+        .m3_wdata_o   (),
+        .m3_rvalid_i  (1'b1),
+        .m3_rdata_i   ('0)
+    );
+
+    obi_narrow_to_wide #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .M_DATA_WIDTH(SNITCH_D_DATA_WIDTH),
+        .S_DATA_WIDTH(OBI_DATA_WIDTH)
+    ) u_ddata_narrow_to_wide (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .mst_req_i   (ddata_req),
+        .mst_gnt_o   (ddata_gnt),
+        .mst_addr_i  (ddata_addr),
+        .mst_we_i    (ddata_we),
+        .mst_be_i    (ddata_be),
+        .mst_wdata_i (ddata_wdata),
+        .mst_rvalid_o(ddata_rvalid),
+        .mst_rdata_o (ddata_rdata),
+
+        .slv_req_o   (ddata_wide_req),
+        .slv_gnt_i   (ddata_wide_gnt),
+        .slv_addr_o  (ddata_wide_addr),
+        .slv_we_o    (ddata_wide_we),
+        .slv_be_o    (ddata_wide_be),
+        .slv_wdata_o (ddata_wide_wdata),
+        .slv_rvalid_i(ddata_wide_rvalid),
+        .slv_rdata_i (ddata_wide_rdata)
     );
 
     // D-TCM SRAM Bank (32 KB — matches link.ld)
     cluster_sram_bank #(
-        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .DATA_WIDTH(DTCM_DATA_WIDTH),
         .SIZE_BYTES(32768)
     ) u_sram_d_tcm (
         .clk_i   (clk_i),
         .rst_ni  (rst_ni),
         .req_i   (dtcm_req),
         .we_i    (dtcm_we),
-        .addr_i  ((dtcm_addr - 32'h1000_8000) >> 5),
+        .addr_i  ((dtcm_addr - 32'h1000_8000) >> 2),
         .wdata_i (dtcm_wdata),
         .be_i    (dtcm_be),
         .gnt_o   (dtcm_gnt),
@@ -509,7 +455,7 @@ module npu_cluster (
     //=========================================================
     obi_demux_1to4 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH),
+        .DATA_WIDTH(MMIO_DATA_WIDTH),
         .M0_BASE (32'h2000_0000), .M0_MASK (32'hFFFF_F000), // Cluster control
         .M1_BASE (32'h2000_1000), .M1_MASK (32'hFFFF_F000), // iDMA-style control
         .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Reserved
@@ -578,7 +524,7 @@ module npu_cluster (
 
     cluster_ctrl_regs #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(OBI_DATA_WIDTH)
+        .DATA_WIDTH(MMIO_DATA_WIDTH)
     ) u_ctrl_regs (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
@@ -710,15 +656,15 @@ module npu_cluster (
     end
 
     // Master 0: Snitch D-Bus
-    assign master_req[0].req   = ddata_req;
-    assign master_req[0].we    = ddata_we;
-    assign master_req[0].be    = ddata_be;
-    assign master_req[0].addr  = ddata_addr;
-    assign master_req[0].wdata = ddata_wdata;
+    assign master_req[0].req   = ddata_wide_req;
+    assign master_req[0].we    = ddata_wide_we;
+    assign master_req[0].be    = ddata_wide_be;
+    assign master_req[0].addr  = ddata_wide_addr;
+    assign master_req[0].wdata = ddata_wide_wdata;
     
-    assign ddata_gnt    = master_rsp[0].gnt;
-    assign ddata_rvalid = master_rsp[0].rvalid;
-    assign ddata_rdata  = master_rsp[0].rdata;
+    assign ddata_wide_gnt    = master_rsp[0].gnt;
+    assign ddata_wide_rvalid = master_rsp[0].rvalid;
+    assign ddata_wide_rdata  = master_rsp[0].rdata;
 
     //=========================================================
     // 6a. Spatz Vector Engine + TCDM-to-OBI Bridge (Master 1)
@@ -757,6 +703,10 @@ module npu_cluster (
 
     // Reconstruct full reqrsp structs for Spatz issue interface
     spatz_issue_req_t spatz_issue_req;
+    assign acc_qdata_arga = {{(64-SNITCH_D_DATA_WIDTH){1'b0}}, acc_qdata_arga_core};
+    assign acc_qdata_argb = {{(64-SNITCH_D_DATA_WIDTH){1'b0}}, acc_qdata_argb_core};
+    assign acc_pdata_core = acc_pdata[SNITCH_D_DATA_WIDTH-1:0];
+
     assign spatz_issue_req.addr       = snitch_pkg::SPATZ;
     assign spatz_issue_req.data_op    = acc_qdata_op;
     assign spatz_issue_req.data_arga  = acc_qdata_arga;
@@ -939,6 +889,7 @@ module npu_cluster (
 
     npu_pulp_idma_ctrl_mm #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .CFG_DATA_WIDTH(MMIO_DATA_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
         .BASE_ADDR (32'h2000_1000)
     ) u_idma_ctrl_mm (

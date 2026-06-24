@@ -16,6 +16,9 @@ PASS_SIGNATURE = 0xDEADBEEF
 FAIL_SIGNATURE_MASK = 0xFFF00000
 FAIL_SIGNATURE_PREFIX = 0xBAD00000
 EXPECTED_PASS_COUNT = 7
+ITCM_BASE = 0x10000000
+DTCM_BASE = 0x10008000
+TCM_SIZE_BYTES = 32 * 1024
 TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
 TCDM_WORD_BYTES = 32
@@ -43,22 +46,27 @@ async def load_firmware_axi(dut, axi_master, filename, base_addr=0x10000000):
 
     dut._log.info(f"Loading {len(firmware)} bytes from {filename} into I-TCM")
 
-    if len(firmware) % 8 != 0:
-        firmware += b"\x00" * (8 - (len(firmware) % 8))
+    if len(firmware) % 4 != 0:
+        firmware += b"\x00" * (4 - (len(firmware) % 4))
 
-    for offset in range(0, len(firmware), 8):
-        await axi_master.write(base_addr + offset, firmware[offset : offset + 8])
+    for offset in range(0, len(firmware), 4):
+        addr = base_addr + offset
+        word = firmware[offset : offset + 4]
+        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
+            await axi_master.write(addr, word)
+        elif DTCM_BASE <= addr < DTCM_BASE + TCM_SIZE_BYTES:
+            dut.u_npu_cluster.u_sram_d_tcm.mem[(addr - DTCM_BASE) // 4].value = int.from_bytes(word, "little")
+        else:
+            raise AssertionError(f"Firmware byte outside I/D-TCM range at 0x{addr:08x}")
 
 
 def read_dtcm_word(dut, word_index):
-    mem_index = word_index // 8
-    bit_offset = (word_index % 8) * 32
-    val_256 = dut.u_npu_cluster.u_sram_d_tcm.mem[mem_index].value
+    val_32 = dut.u_npu_cluster.u_sram_d_tcm.mem[word_index].value
 
-    if not val_256.is_resolvable:
+    if not val_32.is_resolvable:
         return 0
 
-    return (val_256.to_unsigned() >> bit_offset) & 0xFFFFFFFF
+    return val_32.to_unsigned() & 0xFFFFFFFF
 
 
 def read_spatz_debug(dut):
