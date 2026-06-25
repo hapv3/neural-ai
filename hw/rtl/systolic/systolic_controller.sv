@@ -116,8 +116,13 @@ module systolic_controller #(
     logic          ofm_fifo_almost_full;
 
     logic          fifo_flush;
+    logic          requant_in_valid;
+    logic          requant_in_ready;
+    logic          requant_out_valid;
+    logic          requant_out_ready;
     logic [255:0]  requant_packed_data;
     logic          requant_invalid;
+    logic          requant_config_invalid;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -126,9 +131,22 @@ module systolic_controller #(
     assign ofm_fifo_data    = ofm_data_i;
     assign ofm_fifo_almost_full = ofm_fifo_full || (ofm_fifo_usage >= OFM_FIFO_STOP_LEVEL);
 
+    always_comb begin
+        requant_config_invalid = ($signed(cfg_requant_clamp_min_i) > $signed(cfg_requant_clamp_max_i));
+        for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
+            if (cfg_requant_shift_i[ch] > 8'd31) begin
+                requant_config_invalid = 1'b1;
+            end
+        end
+    end
+
     requant_pipeline #(
         .ARRAY_DIM(ARRAY_DIM)
     ) i_requant_pipeline (
+        .clk_i         (clk_i),
+        .rst_ni        (rst_ni),
+        .in_valid_i    (requant_in_valid),
+        .in_ready_o    (requant_in_ready),
         .acc_i         (ofm_fifo_out),
         .bias_i        (cfg_requant_bias_i),
         .multiplier_i  (cfg_requant_multiplier_i),
@@ -136,6 +154,8 @@ module systolic_controller #(
         .zero_point_i  (cfg_requant_zero_point_i),
         .clamp_min_i   (cfg_requant_clamp_min_i),
         .clamp_max_i   (cfg_requant_clamp_max_i),
+        .out_valid_o   (requant_out_valid),
+        .out_ready_i   (requant_out_ready),
         .packed_o      (requant_packed_data),
         .invalid_o     (requant_invalid)
     );
@@ -231,6 +251,8 @@ module systolic_controller #(
         ifm_fifo_push    = 1'b0;
         ifm_fifo_pop     = 1'b0;
         ofm_fifo_pop     = 1'b0;
+        requant_in_valid = 1'b0;
+        requant_out_ready = 1'b0;
         ofm_fifo_push    = ((state_q == COMPUTE) || (state_q == WAIT_DRAIN)) &&
                             ofm_valid_i && !ofm_fifo_full;
 
@@ -248,35 +270,52 @@ module systolic_controller #(
 
         // Handle OFM writes through a configurable FIFO.  The FIFO absorbs
         // systolic output rows while O-TCDM write grants are backpressured.
-        if (!ofm_fifo_empty) begin
-            if (cfg_requant_en_i) begin
+        if (cfg_requant_en_i) begin
+            if (requant_out_valid) begin
                 obi_o_req_o[0] = 1'b1;
                 obi_o_wdata_o[0] = requant_packed_data;
-                if (obi_o_gnt_i[0]) begin
-                    ofm_fifo_pop = 1'b1;
+                if (obi_o_gnt_i[0] || requant_invalid) begin
+                    requant_out_ready = 1'b1;
                     o_ptr_d = o_ptr_q + REQUANT_ROW_BYTES;
                     drain_cnt_d = drain_cnt_q - 1;
                 end
-            end else begin
-                obi_o_req_o = 4'b1111;
-                if (obi_o_gnt_i == 4'b1111) begin
-                    ofm_fifo_pop = 1'b1;
-                    o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
-                    drain_cnt_d = drain_cnt_q - 1;
+                if (requant_invalid) begin
+                    obi_o_req_o[0] = 1'b0;
                 end
+            end
+            if (!ofm_fifo_empty && requant_in_ready && !requant_config_invalid) begin
+                requant_in_valid = 1'b1;
+                ofm_fifo_pop = 1'b1;
+            end
+        end else if (!ofm_fifo_empty) begin
+            obi_o_req_o = 4'b1111;
+            if (obi_o_gnt_i == 4'b1111) begin
+                ofm_fifo_pop = 1'b1;
+                o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
+                drain_cnt_d = drain_cnt_q - 1;
             end
         end
 
         case (state_q)
             IDLE: begin
                 if (cfg_sys_start_i) begin
-                    w_ptr_d = cfg_sys_weight_ptr_i + ((ARRAY_DIM - 1) * 32);
-                    i_ptr_d = cfg_sys_ifm_ptr_i;
-                    o_ptr_d = cfg_sys_ofm_ptr_i;
-                    req_cnt_d   = ARRAY_DIM; // 32 rows of weights
-                    rsp_cnt_d   = ARRAY_DIM;
-                    drain_cnt_d = cfg_sys_dim_m_i;
-                    state_d = LOAD_WEIGHTS;
+                    if (cfg_requant_en_i && requant_config_invalid) begin
+                        w_ptr_d = cfg_sys_weight_ptr_i;
+                        i_ptr_d = cfg_sys_ifm_ptr_i;
+                        o_ptr_d = cfg_sys_ofm_ptr_i;
+                        req_cnt_d = '0;
+                        rsp_cnt_d = '0;
+                        drain_cnt_d = '0;
+                        state_d = DONE;
+                    end else begin
+                        w_ptr_d = cfg_sys_weight_ptr_i + ((ARRAY_DIM - 1) * 32);
+                        i_ptr_d = cfg_sys_ifm_ptr_i;
+                        o_ptr_d = cfg_sys_ofm_ptr_i;
+                        req_cnt_d   = ARRAY_DIM; // 32 rows of weights
+                        rsp_cnt_d   = ARRAY_DIM;
+                        drain_cnt_d = cfg_sys_dim_m_i;
+                        state_d = LOAD_WEIGHTS;
+                    end
                 end
             end
 
@@ -334,6 +373,10 @@ module systolic_controller #(
 
             DONE: begin
                 cfg_sys_done_o = 1'b1;
+                state_d = IDLE;
+            end
+
+            default: begin
                 state_d = IDLE;
             end
         endcase
