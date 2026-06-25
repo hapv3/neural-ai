@@ -135,6 +135,11 @@ $(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_arb.
 $(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg_ext.sv
 $(REPO_ROOT)/hw/register_interface/vendor/lowrisc_opentitan/src/prim_subreg.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_pulp_idma_ctrl_mm.sv
+$(REPO_ROOT)/hw/rtl/afu/afu_fifo_ff.sv
+$(REPO_ROOT)/hw/rtl/afu/afu_frontend.sv
+$(REPO_ROOT)/hw/rtl/afu/afu_backend.sv
+$(REPO_ROOT)/hw/rtl/afu/afu_core.sv
+$(REPO_ROOT)/hw/rtl/afu/afu.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
 $(REPO_ROOT)/hw/rtl/systolic/npu_systolic_array.sv

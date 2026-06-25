@@ -56,6 +56,13 @@ module afu #(
     logic wfifo_full, wfifo_almost_full, wfifo_empty, wfifo_all_empty;
     logic wfifo_push, wfifo_pop;
     logic [287:0] wfifo_wdata, wfifo_rdata;
+
+    logic core_done;
+    logic core_busy;
+    logic backend_idle;
+    logic afu_error;
+
+    assign afu_error = 1'b0;
     
     afu_frontend #(
         .ADDR_WIDTH (ADDR_WIDTH),
@@ -80,7 +87,9 @@ module afu #(
         .lut_addr_o     (lut_addr),
         .lut_wdata_o    (lut_wdata),
         .lut_be_o       (lut_be),
-        .afu_done_i     (done_o)
+        .afu_done_i     (done_o),
+        .afu_busy_i     (core_busy || !backend_idle),
+        .afu_error_i    (afu_error)
     );
     
     afu_backend #(
@@ -108,12 +117,11 @@ module afu #(
         .rfifo_data_o   (rfifo_wdata),
         .wfifo_empty_i  (wfifo_empty),
         .wfifo_pop_o    (wfifo_pop),
-        .wfifo_data_i   (wfifo_rdata)
+        .wfifo_data_i   (wfifo_rdata),
+        .idle_o         (backend_idle)
     );
-    
-    // Wait for core to be DONE, AND ALL FIFOs to be completely drained!
-    // rfifo is empty, wfifo is empty, backend is inactive
-    assign done_o = (i_core.state_q == 3'd4 /* ST_DONE */) && wfifo_all_empty && (i_backend.we_req == 1'b0); // 3'd4 is ST_DONE
+
+    assign done_o = core_done && wfifo_all_empty && backend_idle;
     
     afu_core #(
         .LUT_LANES (LUT_LANES)
@@ -134,7 +142,9 @@ module afu #(
         .rfifo_data_i   (rfifo_rdata),
         .wfifo_full_i   (wfifo_full),
         .wfifo_push_o   (wfifo_push),
-        .wfifo_data_o   (wfifo_wdata)
+        .wfifo_data_o   (wfifo_wdata),
+        .done_o         (core_done),
+        .busy_o         (core_busy)
     );
     
     afu_fifo_ff #(

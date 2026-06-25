@@ -18,6 +18,7 @@ firmware.
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
 | `sw/test/matmul` | `matmul.bin` | `test_matmul` | Raw systolic register matmul regression |
+| `sw/test/afu` | `afu.bin` | `test_afu_basic` | AFU LUT/CSR, TCDM master path, e8/e16/e32 output, AFU internal IRQ |
 | `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
 | `sw/test/spatz_vector` | `basic_mem_arith.bin`, etc. | `test_spatz_vector_basic` | Direct RVV instruction groups |
 
@@ -156,6 +157,23 @@ cocotb prepares deterministic M=64 W and IFM
 This test intentionally bypasses HAL tiling to preserve raw-controller coverage.
 Boundary M coverage lives in `test_independent_systolic`.
 
+### AFU
+
+```text
+firmware seeds deterministic source tensors in Shared Data TCDM
+  -> firmware loads 256-entry LUT through AFU MMIO
+  -> firmware enables NPU_IRQ_SRC_AFU
+  -> firmware starts AFU for e8, e16, and e32 output modes
+  -> firmware waits AFU done status and checks INT_PENDING
+  -> firmware compares every output element in TCDM
+  -> firmware writes NPU_IRQ_HOST_NOTIFY
+  -> cocotb compares the same output buffers against Python golden
+```
+
+Current cluster contract uses 32-byte-aligned source/destination buffers with
+non-multiple element counts to cover tail byte-enable behavior. Arbitrary
+unaligned e16/e32 destinations are not yet a scheduler contract.
+
 ---
 
 ## 5. Build Gates
@@ -167,6 +185,7 @@ make -C sw/test/independent_systolic
 make -C sw/test/spatz_vector
 make -C sw/test/spatz_ops
 make -C sw/test/matmul
+make -C sw/test/afu
 ```
 
 Spatz-related tests use the local toolchain under `hw/spatz/install` by default.
@@ -195,6 +214,9 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_matmul
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_afu_basic
 ```
 
 Optional diagnostic:

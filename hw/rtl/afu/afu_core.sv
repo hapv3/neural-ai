@@ -28,7 +28,10 @@ module afu_core #(
     // Write FIFO
     input  logic         wfifo_full_i,
     output logic         wfifo_push_o,
-    output logic [287:0] wfifo_data_o
+    output logic [287:0] wfifo_data_o,
+
+    output logic         done_o,
+    output logic         busy_o
 );
 
     localparam logic [1:0] MODE_8BIT  = 2'd0;
@@ -44,6 +47,9 @@ module afu_core #(
     } state_e;
 
     state_e state_q, state_n;
+
+    assign done_o = (state_q == ST_DONE);
+    assign busy_o = (state_q != ST_IDLE) && (state_q != ST_DONE);
 
     logic [31:0] src_addr_q, src_addr_n;
     logic [31:0] dst_addr_q, dst_addr_n;
@@ -238,7 +244,7 @@ module afu_core #(
             for (int i=0; i<LUT_LANES; i++) s2_lut_rdata_saved_q[i] <= '0;
         end else begin
             if (p1_valid_q && s2_stall && !s2_lut_rdata_saved_valid_q) begin
-                s2_lut_rdata_saved_q <= lut_rdata_ports;
+                for (int i=0; i<LUT_LANES; i++) s2_lut_rdata_saved_q[i] <= lut_rdata_ports[i];
                 s2_lut_rdata_saved_valid_q <= 1'b1;
             end else if (!s2_stall) begin
                 s2_lut_rdata_saved_valid_q <= 1'b0;

@@ -25,6 +25,8 @@ module afu_frontend #(
     output logic [1:0]              cfg_mode_o,
     output logic                    cfg_start_o,
     input  logic                    afu_done_i,
+    input  logic                    afu_busy_i,
+    input  logic                    afu_error_i,
     
     // LUT write interface
     output logic                    lut_we_o,
@@ -41,6 +43,8 @@ module afu_frontend #(
 
     logic        obi_s_rvalid_q;
     logic [31:0] obi_s_rdata_q;
+    logic        lut_sel;
+    logic        csr_sel;
 
     assign obi_s_gnt_o    = 1'b1;
     assign obi_s_rvalid_o = obi_s_rvalid_q;
@@ -51,6 +55,9 @@ module afu_frontend #(
     assign cfg_length_o  = cfg_length_q;
     assign cfg_mode_o    = cfg_mode_q;
     assign cfg_start_o   = cfg_start_q;
+
+    assign lut_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b00);
+    assign csr_sel = (obi_s_addr_i[11:10] == 2'b01) || (obi_s_addr_i[15:12] == 4'h1);
 
     function automatic logic [31:0] apply_cfg_be(
         input logic [31:0] current,
@@ -79,9 +86,9 @@ module afu_frontend #(
 
         if (obi_s_req_i) begin
             if (obi_s_we_i) begin
-                if (obi_s_addr_i[15:12] == 4'h0) begin
+                if (lut_sel) begin
                     lut_we_o = 1'b1;
-                end else if (obi_s_addr_i[15:12] == 4'h1) begin
+                end else if (csr_sel) begin
                     unique case (obi_s_addr_i[5:0])
                         6'h00: cfg_start_n   = obi_s_wdata_i[0];
                         6'h04: cfg_src_ptr_n = apply_cfg_be(cfg_src_ptr_q, obi_s_wdata_i, obi_s_be_i);
@@ -109,9 +116,9 @@ module afu_frontend #(
             obi_s_rdata_q  <= '0;
             
             if (obi_s_req_i && !obi_s_we_i) begin
-                if (obi_s_addr_i[15:12] == 4'h1) begin
+                if (csr_sel) begin
                     unique case (obi_s_addr_i[5:0])
-                        6'h00: obi_s_rdata_q <= {31'd0, afu_done_i};
+                        6'h00: obi_s_rdata_q <= {29'd0, afu_error_i, afu_busy_i, afu_done_i};
                         6'h04: obi_s_rdata_q <= cfg_src_ptr_q;
                         6'h08: obi_s_rdata_q <= cfg_dst_ptr_q;
                         6'h0c: obi_s_rdata_q <= cfg_length_q;

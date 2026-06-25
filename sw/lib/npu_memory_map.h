@@ -19,6 +19,7 @@
 #define NPU_CTRL_BASE   0x20000000
 #define NPU_IDMA_BASE   (NPU_CTRL_BASE + 0x1000)
 #define NPU_IRQ_BASE    (NPU_CTRL_BASE + 0x2000)
+#define NPU_AFU_BASE    (NPU_CTRL_BASE + 0x3000)
 
 // 5. External L2 / simulation memory window
 #define NPU_L2_BASE     0x80000000
@@ -88,6 +89,22 @@
 #define NPU_IRQ_SRC_AFU       0x00000004u
 #define NPU_IRQ_SRC_SPATZ     0x00000008u
 #define NPU_IRQ_HOST_DONE     0x00000001u
+
+// AFU control window. LUT entries occupy 0x000..0x3ff; CSRs start at 0x400.
+#define NPU_AFU_LUT_BASE      (NPU_AFU_BASE + 0x000)
+#define NPU_AFU_STATUS        (NPU_AFU_BASE + 0x400)
+#define NPU_AFU_SRC_PTR       (NPU_AFU_BASE + 0x404)
+#define NPU_AFU_DST_PTR       (NPU_AFU_BASE + 0x408)
+#define NPU_AFU_LENGTH        (NPU_AFU_BASE + 0x40C)
+#define NPU_AFU_MODE          (NPU_AFU_BASE + 0x410)
+
+#define NPU_AFU_STATUS_DONE   0x00000001u
+#define NPU_AFU_STATUS_BUSY   0x00000002u
+#define NPU_AFU_STATUS_ERROR  0x00000004u
+
+#define NPU_AFU_MODE_E8       0u
+#define NPU_AFU_MODE_E16      1u
+#define NPU_AFU_MODE_E32      2u
 
 // Register Access Macros
 #define REG_WRITE(addr, val) *((volatile uint32_t*)(addr)) = (val)

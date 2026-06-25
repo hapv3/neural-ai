@@ -13,6 +13,7 @@ module tb_afu;
     localparam logic [1:0] MODE_8BIT  = 2'd0;
     localparam logic [1:0] MODE_16BIT = 2'd1;
     localparam logic [1:0] MODE_32BIT = 2'd2;
+    localparam logic [31:0] AFU_CSR_BASE = 32'h400;
 
     logic clk_i;
     logic rst_ni;
@@ -172,17 +173,17 @@ module tb_afu;
         input logic [31:0] length,
         input logic [1:0]  mode
     );
-        write_obi(32'h1004, src_ptr);
-        write_obi(32'h1008, dst_ptr);
-        write_obi(32'h100c, length);
-        write_obi(32'h1010, {30'd0, mode});
-        write_obi(32'h1000, 32'd1);
+        write_obi(AFU_CSR_BASE + 32'h04, src_ptr);
+        write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
+        write_obi(AFU_CSR_BASE + 32'h0c, length);
+        write_obi(AFU_CSR_BASE + 32'h10, {30'd0, mode});
+        write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
 
     task automatic wait_done(input string name);
         logic [31:0] status;
         for (int poll = 0; poll < 20000; poll++) begin
-            read_obi(32'h1000, status);
+            read_obi(AFU_CSR_BASE + 32'h00, status);
             if (status[2]) begin
                 $fatal(1, "[AFU TB] %s reported error status 0x%08x", name, status);
             end
@@ -314,6 +315,9 @@ module tb_afu;
         check_case("mode8_aligned_257",  MODE_8BIT,  'h100, 'h400, 257, 1);
         check_case("mode16_aligned_129", MODE_16BIT, 'h100, 'h500, 129, 2);
         check_case("mode32_aligned_67",  MODE_32BIT, 'h200, 'h600, 67,  3);
+        check_case("mode8_unaligned_65", MODE_8BIT,  'h123, 'h477, 65,  0);
+        check_case("mode16_unaligned_33", MODE_16BIT, 'h13f, 'h584, 33, 1);
+        check_case("mode32_unaligned_17", MODE_32BIT, 'h255, 'h684, 17, 2);
 
         $display("========================================");
         if (errors == 0) begin
