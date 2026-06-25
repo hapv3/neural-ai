@@ -280,8 +280,29 @@ Matrix Engine
 2. DMA copies weights and IFM from L2 into L1 I-TCDM.
 3. Firmware programs Systolic Controller CSR with weight, IFM, OFM pointers.
 4. Systolic Controller reads weights/IFM from I-TCDM and streams them into `npu_systolic_array`.
-5. Systolic Controller writes OFM rows into O-TCDM through 4 parallel OBI write ports.
-6. DMA copies OFM from O-TCDM back to L2.
+5. Systolic Controller drains `M x 32` INT32 rows from the OFM FIFO.
+6. In raw mode, the controller writes each row as 32 INT32 values through 4 parallel OBI write ports.
+7. In requant mode, the controller applies per-channel bias/scale/shift/zero-point/clamp and writes one packed 32-byte INT8 row through output port 0.
+8. DMA copies OFM/activation buffers from O-TCDM back to L2.
+
+### Systolic Requant Path
+
+The systolic controller contains an optional fused requant path for Conv/GEMM layers whose next consumer expects INT8 activations:
+
+```text
+npu_systolic_array
+  -> output deskew
+  -> OFM FIFO row: 32 x INT32
+  -> requant_pipeline: per-channel INT32 -> INT8
+  -> packed row write: 32 bytes to O-TCDM
+```
+
+Default reset and the raw HAL path keep requant disabled, so debug and accumulator tests still observe full INT32 results. Firmware enables requant only through `systolic_gemm32_requant()` after programming the qparam arrays in `cluster_ctrl_regs`.
+
+| Mode | Row size | Write ports | Use case |
+|------|----------|-------------|----------|
+| Raw accumulator | 128 bytes | 4 × 256-bit OBI | Debug, full INT32 compare, layers needing accumulation output |
+| Requant INT8 | 32 bytes | 1 × 256-bit OBI | Conv/GEMM activation output for next INT8 layer |
 
 ---
 

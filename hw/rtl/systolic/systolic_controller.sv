@@ -18,6 +18,13 @@ module systolic_controller #(
     input  logic [31:0]               cfg_sys_ifm_ptr_i,
     input  logic [31:0]               cfg_sys_ofm_ptr_i,
     input  logic [31:0]               cfg_sys_dim_m_i, // Number of IFM rows (skewed)
+    input  logic                      cfg_requant_en_i,
+    input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_bias_i,
+    input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_multiplier_i,
+    input  logic [ARRAY_DIM-1:0][7:0]  cfg_requant_shift_i,
+    input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_zero_point_i,
+    input  logic [31:0]               cfg_requant_clamp_min_i,
+    input  logic [31:0]               cfg_requant_clamp_max_i,
     output logic                      cfg_sys_done_o,
 
     // 1x OBI Master for I-TCDM (Read Weights & IFM)
@@ -73,6 +80,7 @@ module systolic_controller #(
 
     localparam int unsigned OFM_BEAT_BYTES = DATA_WIDTH / 8;
     localparam int unsigned OFM_ROW_BYTES = (ARRAY_DIM * OFM_ELEM_WIDTH) / 8;
+    localparam int unsigned REQUANT_ROW_BYTES = ARRAY_DIM;
     localparam int unsigned OFM_ELEMS_PER_OBI = DATA_WIDTH / OFM_ELEM_WIDTH;
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
@@ -108,6 +116,8 @@ module systolic_controller #(
     logic          ofm_fifo_almost_full;
 
     logic          fifo_flush;
+    logic [255:0]  requant_packed_data;
+    logic          requant_invalid;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -115,6 +125,20 @@ module systolic_controller #(
     assign ifm_fifo_data    = obi_i_rdata_i;
     assign ofm_fifo_data    = ofm_data_i;
     assign ofm_fifo_almost_full = ofm_fifo_full || (ofm_fifo_usage >= OFM_FIFO_STOP_LEVEL);
+
+    requant_pipeline #(
+        .ARRAY_DIM(ARRAY_DIM)
+    ) i_requant_pipeline (
+        .acc_i         (ofm_fifo_out),
+        .bias_i        (cfg_requant_bias_i),
+        .multiplier_i  (cfg_requant_multiplier_i),
+        .shift_i       (cfg_requant_shift_i),
+        .zero_point_i  (cfg_requant_zero_point_i),
+        .clamp_min_i   (cfg_requant_clamp_min_i),
+        .clamp_max_i   (cfg_requant_clamp_max_i),
+        .packed_o      (requant_packed_data),
+        .invalid_o     (requant_invalid)
+    );
 
     fifo_v3 #(
         .FALL_THROUGH (1'b1),
@@ -225,11 +249,21 @@ module systolic_controller #(
         // Handle OFM writes through a configurable FIFO.  The FIFO absorbs
         // systolic output rows while O-TCDM write grants are backpressured.
         if (!ofm_fifo_empty) begin
-            obi_o_req_o = 4'b1111;
-            if (obi_o_gnt_i == 4'b1111) begin
-                ofm_fifo_pop = 1'b1;
-                o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
-                drain_cnt_d = drain_cnt_q - 1;
+            if (cfg_requant_en_i) begin
+                obi_o_req_o[0] = 1'b1;
+                obi_o_wdata_o[0] = requant_packed_data;
+                if (obi_o_gnt_i[0]) begin
+                    ofm_fifo_pop = 1'b1;
+                    o_ptr_d = o_ptr_q + REQUANT_ROW_BYTES;
+                    drain_cnt_d = drain_cnt_q - 1;
+                end
+            end else begin
+                obi_o_req_o = 4'b1111;
+                if (obi_o_gnt_i == 4'b1111) begin
+                    ofm_fifo_pop = 1'b1;
+                    o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
+                    drain_cnt_d = drain_cnt_q - 1;
+                end
             end
         end
 

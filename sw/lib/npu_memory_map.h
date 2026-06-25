@@ -73,6 +73,15 @@
 #define REG_SYS_DIM_M   (NPU_CTRL_BASE + 0x10C)
 #define REG_SYS_START   (NPU_CTRL_BASE + 0x110)
 #define REG_SYS_DONE    (NPU_CTRL_BASE + 0x114)
+#define REG_RQ_CTRL     (NPU_CTRL_BASE + 0x120)
+#define REG_RQ_CMIN     (NPU_CTRL_BASE + 0x124)
+#define REG_RQ_CMAX     (NPU_CTRL_BASE + 0x128)
+#define REG_RQ_BIAS(ch) (NPU_CTRL_BASE + 0x200 + ((ch) * 4u))
+#define REG_RQ_MULT(ch) (NPU_CTRL_BASE + 0x280 + ((ch) * 4u))
+#define REG_RQ_SHIFT(ch) (NPU_CTRL_BASE + 0x300 + ((ch) * 4u))
+#define REG_RQ_ZP(ch)   (NPU_CTRL_BASE + 0x380 + ((ch) * 4u))
+
+#define REG_RQ_CTRL_EN  0x00000001u
 
 // Interrupt controller registers
 #define NPU_IRQ_INT_ENABLE    (NPU_IRQ_BASE + 0x00)

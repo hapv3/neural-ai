@@ -8,5 +8,13 @@
 #define SYSTOLIC_GEMM32_TILE_M 1024u
 
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
+void systolic_requant_disable(void);
+void systolic_requant_config_per_channel(const int32_t *bias,
+                                         const int32_t *multiplier,
+                                         const uint8_t *shift,
+                                         const int32_t *zero_point,
+                                         int32_t clamp_min,
+                                         int32_t clamp_max);
+void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
 
 #endif
