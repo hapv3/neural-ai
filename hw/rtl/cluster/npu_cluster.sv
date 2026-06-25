@@ -552,6 +552,13 @@ module npu_cluster (
     logic [31:0] cfg_sys_o_ptr;
     logic [31:0] cfg_sys_dim_m;
     logic        cfg_sys_done;
+    logic        cfg_requant_en;
+    logic [31:0][31:0] cfg_requant_bias;
+    logic [31:0][31:0] cfg_requant_multiplier;
+    logic [31:0][7:0]  cfg_requant_shift;
+    logic [31:0][31:0] cfg_requant_zero_point;
+    logic [31:0]       cfg_requant_clamp_min;
+    logic [31:0]       cfg_requant_clamp_max;
 
     cluster_ctrl_regs #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -579,6 +586,13 @@ module npu_cluster (
         .cfg_sys_ifm_ptr_o    (cfg_sys_i_ptr),
         .cfg_sys_ofm_ptr_o    (cfg_sys_o_ptr),
         .cfg_sys_dim_m_o      (cfg_sys_dim_m),
+        .cfg_requant_en_o     (cfg_requant_en),
+        .cfg_requant_bias_o   (cfg_requant_bias),
+        .cfg_requant_multiplier_o (cfg_requant_multiplier),
+        .cfg_requant_shift_o  (cfg_requant_shift),
+        .cfg_requant_zero_point_o (cfg_requant_zero_point),
+        .cfg_requant_clamp_min_o (cfg_requant_clamp_min),
+        .cfg_requant_clamp_max_o (cfg_requant_clamp_max),
         .cfg_sys_done_i       (cfg_sys_done)
     );
 
@@ -1118,6 +1132,13 @@ module npu_cluster (
         .cfg_sys_ifm_ptr_i  (cfg_sys_i_ptr),
         .cfg_sys_ofm_ptr_i  (cfg_sys_o_ptr),
         .cfg_sys_dim_m_i    (cfg_sys_dim_m),
+        .cfg_requant_en_i   (cfg_requant_en),
+        .cfg_requant_bias_i (cfg_requant_bias),
+        .cfg_requant_multiplier_i (cfg_requant_multiplier),
+        .cfg_requant_shift_i(cfg_requant_shift),
+        .cfg_requant_zero_point_i (cfg_requant_zero_point),
+        .cfg_requant_clamp_min_i (cfg_requant_clamp_min),
+        .cfg_requant_clamp_max_i (cfg_requant_clamp_max),
         .cfg_sys_done_o     (cfg_sys_done),
 
         .obi_i_req_o        (sys_obi_i_req),

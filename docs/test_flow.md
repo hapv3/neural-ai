@@ -17,6 +17,7 @@ firmware.
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
+| `sw/test/systolic_requant` | `systolic_requant.bin` | `test_systolic_requant` | Systolic GEMM32 with RTL per-channel requant and packed INT8 output |
 | `sw/test/matmul` | `matmul.bin` | `test_matmul` | Raw systolic register matmul regression |
 | `sw/test/afu` | `afu.bin` | `test_afu_basic` | AFU LUT/CSR, TCDM master path, e8/e16/e32 output, AFU internal IRQ |
 | `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
@@ -57,7 +58,8 @@ Run independent suites before micro-model or graph-level work:
 3. **RVV**: proves Spatz instruction groups before operator wrappers depend on them.
 4. **Operators**: proves reusable C-callable Spatz ops before scheduler use.
 5. **Systolic**: proves HAL GEMM32 tiling and full output correctness.
-6. **Legacy Matmul**: keeps raw register-level systolic regression alive.
+6. **Systolic Requant**: proves fused INT32→INT8 drain path before graph use.
+7. **Legacy Matmul**: keeps raw register-level systolic regression alive.
 
 Micro-YOLO or graph scheduler tests should only run after these gates are green.
 
@@ -143,6 +145,22 @@ cocotb writes signed INT8 W and IFM to L2
 
 Pass criteria: all `M x 32` INT32 words match golden.
 
+### Systolic Requant
+
+```text
+cocotb writes signed INT8 W and IFM to L2
+  -> cocotb loads systolic_requant firmware into I-TCM and releases fetch
+  -> firmware DMA-copies fixtures into TCDM
+  -> firmware programs per-channel requant qparams
+  -> firmware calls systolic_gemm32_requant for M={1,2,31,32,33,64}
+  -> controller drains each INT32 OFM row through requant_pipeline
+  -> controller writes one packed 32-byte INT8 row to O-TCDM
+  -> firmware copies packed output rows back to L2
+  -> cocotb compares every byte against Python golden
+```
+
+Pass criteria: all `M x 32` INT8 bytes match the exact requant formula.
+
 ### Matmul
 
 ```text
@@ -182,6 +200,7 @@ unaligned e16/e32 destinations are not yet a scheduler contract.
 make -C sw/test/boot
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
+make -C sw/test/systolic_requant
 make -C sw/test/spatz_vector
 make -C sw/test/spatz_ops
 make -C sw/test/matmul
@@ -211,6 +230,9 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_independent_systolic
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_systolic_requant
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_matmul
