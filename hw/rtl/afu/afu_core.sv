@@ -79,15 +79,32 @@ module afu_core #(
     logic [31:0] lut_rdata_ports [LUT_LANES];
     logic [31:0] lut_rdata_dummy [LUT_LANES];
 
-    // Read byte extraction for S1
-    logic [255:0] shift_in;
+    // Read byte extraction for S1.  Keep this as per-lane byte muxing instead
+    // of shifting the full 256-bit read beat by a dynamic byte offset.
     logic [4:0] in_off_s1;
+    logic [5:0] lut_byte_idx_s1 [LUT_LANES];
     assign in_off_s1 = src_addr_q[4:0];
-    assign shift_in  = in_buf_q >> {in_off_s1, 3'd0};
+
+    function automatic logic [7:0] select_input_byte(
+        input logic [255:0] data,
+        input logic [5:0] byte_idx
+    );
+        logic [7:0] selected;
+        begin
+            selected = 8'h00;
+            for (int unsigned b = 0; b < 32; b++) begin
+                if (byte_idx == 6'(b)) begin
+                    selected = data[b*8 +: 8];
+                end
+            end
+            select_input_byte = selected;
+        end
+    endfunction
 
     generate
         for (genvar i = 0; i < LUT_LANES; i++) begin : gen_lut_sram
-            assign lut_idx_s1[i] = shift_in[i*8 +: 8];
+            assign lut_byte_idx_s1[i] = {1'b0, in_off_s1} + 6'(i);
+            assign lut_idx_s1[i] = select_input_byte(in_buf_q, lut_byte_idx_s1[i]);
 
             tc_sram #(
                 .NumWords  (256),
