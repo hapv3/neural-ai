@@ -363,6 +363,25 @@ module npu_cluster (
     logic                      irq_ctrl_rvalid;
     logic [MMIO_DATA_WIDTH-1:0] irq_ctrl_rdata;
 
+    logic                      afu_mm_req;
+    logic                      afu_mm_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] afu_mm_addr;
+    logic                      afu_mm_we;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] afu_mm_be;
+    logic [MMIO_DATA_WIDTH-1:0] afu_mm_wdata;
+    logic                      afu_mm_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] afu_mm_rdata;
+
+    logic                      afu_obi_req;
+    logic                      afu_obi_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] afu_obi_addr;
+    logic                      afu_obi_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] afu_obi_be;
+    logic [OBI_DATA_WIDTH-1:0] afu_obi_wdata;
+    logic                      afu_obi_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] afu_obi_rdata;
+    logic                      afu_done;
+
     obi_demux_1to4 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(SNITCH_D_DATA_WIDTH),
@@ -471,7 +490,7 @@ module npu_cluster (
         .M0_BASE (32'h2000_0000), .M0_MASK (32'hFFFF_F000), // Cluster control
         .M1_BASE (32'h2000_1000), .M1_MASK (32'hFFFF_F000), // iDMA-style control
         .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Interrupt controller
-        .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000)  // Reserved
+        .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000)  // AFU control + LUT
     ) u_mmio_demux_1to4 (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
@@ -511,14 +530,14 @@ module npu_cluster (
         .m2_rvalid_i  (irq_ctrl_rvalid),
         .m2_rdata_i   (irq_ctrl_rdata),
 
-        .m3_req_o     (),
-        .m3_gnt_i     (1'b1),
-        .m3_addr_o    (),
-        .m3_we_o      (),
-        .m3_be_o      (),
-        .m3_wdata_o   (),
-        .m3_rvalid_i  (1'b1),
-        .m3_rdata_i   ('0)
+        .m3_req_o     (afu_mm_req),
+        .m3_gnt_i     (afu_mm_gnt),
+        .m3_addr_o    (afu_mm_addr),
+        .m3_we_o      (afu_mm_we),
+        .m3_be_o      (afu_mm_be),
+        .m3_wdata_o   (afu_mm_wdata),
+        .m3_rvalid_i  (afu_mm_rvalid),
+        .m3_rdata_i   (afu_mm_rdata)
     );
 
     logic        cfg_dma_start;
@@ -579,16 +598,43 @@ module npu_cluster (
         .rdata_o       (irq_ctrl_rdata),
         .dma_done_i    (cfg_dma_done),
         .sys_done_i    (cfg_sys_done),
-        .afu_done_i    (1'b0),
+        .afu_done_i    (afu_done),
         .spatz_done_i  (acc_pvalid),
         .snitch_irq_o  (snitch_irq),
         .host_irq_o    (irq_o)
     );
 
+    afu #(
+        .ADDR_WIDTH     (OBI_ADDR_WIDTH),
+        .CFG_DATA_WIDTH (MMIO_DATA_WIDTH),
+        .MEM_DATA_WIDTH (OBI_DATA_WIDTH),
+        .LUT_LANES      (4)
+    ) u_afu (
+        .clk_i          (clk_i),
+        .rst_ni         (rst_ni),
+        .obi_s_req_i    (afu_mm_req),
+        .obi_s_gnt_o    (afu_mm_gnt),
+        .obi_s_addr_i   (afu_mm_addr - 32'h2000_3000),
+        .obi_s_we_i     (afu_mm_we),
+        .obi_s_be_i     (afu_mm_be),
+        .obi_s_wdata_i  (afu_mm_wdata),
+        .obi_s_rvalid_o (afu_mm_rvalid),
+        .obi_s_rdata_o  (afu_mm_rdata),
+        .obi_m_req_o    (afu_obi_req),
+        .obi_m_gnt_i    (afu_obi_gnt),
+        .obi_m_addr_o   (afu_obi_addr),
+        .obi_m_we_o     (afu_obi_we),
+        .obi_m_be_o     (afu_obi_be),
+        .obi_m_wdata_o  (afu_obi_wdata),
+        .obi_m_rvalid_i (afu_obi_rvalid),
+        .obi_m_rdata_i  (afu_obi_rdata),
+        .done_o         (afu_done)
+    );
+
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (10 Masters)
+    // 5. Shared Data TCDM Interconnect (11 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 10;
+    localparam int unsigned NUM_MASTERS = 11;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
@@ -599,6 +645,7 @@ module npu_cluster (
     // Master 7: Systolic Controller Write Port 3 (O-TCDM)
     // Master 8: Spatz Vector Engine (VLSU port 1)
     // Master 9: PULP iDMA OBI2AXI read port
+    // Master 10: AFU LUT processor
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -648,9 +695,9 @@ module npu_cluster (
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(10'h1FA), // M1, M3-M8: Spatz + Systolic
-        .DMA_MASTER_MASK (10'h204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(10'h001)  // M0: Snitch D-Bus
+        .HWPE_MASTER_MASK(11'h5FA), // M1, M3-M8, M10: Spatz + Systolic + AFU
+        .DMA_MASTER_MASK (11'h204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(11'h001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -1011,6 +1058,16 @@ module npu_cluster (
     assign idma_obi_read_gnt    = master_rsp[9].gnt;
     assign idma_obi_read_rvalid = master_rsp[9].rvalid;
     assign idma_obi_read_rdata  = master_rsp[9].rdata;
+
+    assign master_req[10].req   = afu_obi_req;
+    assign master_req[10].we    = afu_obi_we;
+    assign master_req[10].be    = afu_obi_be;
+    assign master_req[10].addr  = afu_obi_addr;
+    assign master_req[10].wdata = afu_obi_wdata;
+
+    assign afu_obi_gnt    = master_rsp[10].gnt;
+    assign afu_obi_rvalid = master_rsp[10].rvalid;
+    assign afu_obi_rdata  = master_rsp[10].rdata;
 
     //=========================================================
     // 7. Systolic Array (Matrix Engine)
