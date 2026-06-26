@@ -550,8 +550,10 @@ module npu_cluster (
     logic [31:0] cfg_sys_w_ptr;
     logic [31:0] cfg_sys_i_ptr;
     logic [31:0] cfg_sys_o_ptr;
+    logic [31:0] cfg_sys_psum_ptr;
     logic [31:0] cfg_sys_dim_m;
     logic        cfg_sys_done;
+    logic        cfg_sys_accum_en;
     logic        cfg_requant_en;
     logic [31:0][31:0] cfg_requant_bias;
     logic [31:0][31:0] cfg_requant_multiplier;
@@ -585,7 +587,9 @@ module npu_cluster (
         .cfg_sys_weight_ptr_o (cfg_sys_w_ptr),
         .cfg_sys_ifm_ptr_o    (cfg_sys_i_ptr),
         .cfg_sys_ofm_ptr_o    (cfg_sys_o_ptr),
+        .cfg_sys_psum_ptr_o   (cfg_sys_psum_ptr),
         .cfg_sys_dim_m_o      (cfg_sys_dim_m),
+        .cfg_sys_accum_en_o   (cfg_sys_accum_en),
         .cfg_requant_en_o     (cfg_requant_en),
         .cfg_requant_bias_o   (cfg_requant_bias),
         .cfg_requant_multiplier_o (cfg_requant_multiplier),
@@ -1131,7 +1135,9 @@ module npu_cluster (
         .cfg_sys_weight_ptr_i(cfg_sys_w_ptr),
         .cfg_sys_ifm_ptr_i  (cfg_sys_i_ptr),
         .cfg_sys_ofm_ptr_i  (cfg_sys_o_ptr),
+        .cfg_sys_psum_ptr_i (cfg_sys_psum_ptr),
         .cfg_sys_dim_m_i    (cfg_sys_dim_m),
+        .cfg_sys_accum_en_i (cfg_sys_accum_en),
         .cfg_requant_en_i   (cfg_requant_en),
         .cfg_requant_bias_i (cfg_requant_bias),
         .cfg_requant_multiplier_i (cfg_requant_multiplier),

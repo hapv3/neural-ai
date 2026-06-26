@@ -9,6 +9,7 @@ as test firmware.
 | Directory | Firmware | Target |
 |-----------|----------|--------|
 | `boot` | `boot.bin` | Snitch boot, AXI I-TCM load, host IRQ signature, iDMA MMIO smoke |
+| `conv_feeder` | `conv_feeder.bin` | P1 software Conv2D feeder, Conv1x1 K>32 accumulation, Conv3x3 pad1 |
 | `independent_memory` | `independent_memory.bin` | L2 fixtures, iDMA 1D/2D/3D, TCDM bank/boundary decode |
 | `independent_systolic` | `independent_systolic.bin` | HAL GEMM32 for boundary `M` sizes with full INT32 output compare |
 | `matmul` | `matmul.bin` | Raw systolic register path with M=64 cocotb regression |
@@ -26,6 +27,7 @@ as test firmware.
 
 ```sh
 make -C sw/test/boot
+make -C sw/test/conv_feeder
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
 make -C sw/test/matmul

@@ -9,14 +9,24 @@
 #define L2_WEIGHT   0x80000000u
 #define L2_IFM      0x80001000u
 #define L2_OUT      0x80010000u
+#define L2_WEIGHT_K64 0x80040000u
+#define L2_IFM_K64    0x80041000u
+#define L2_OUT_K64    0x80050000u
 
 #define T_WEIGHT    0x10100000u
 #define T_IFM       0x10101000u
 #define T_OFM       0x10140000u
+#define T_WEIGHT_K64 0x10102000u
+#define T_IFM_K64    0x10103000u
 
 #define WEIGHT_BYTES (32u * 32u)
 #define MAX_M        1024u
 #define IFM_BYTES    (MAX_M * 32u)
+#define K64_BLOCKS   2u
+#define K64_M        16u
+#define K64_WEIGHT_BYTES (K64_BLOCKS * WEIGHT_BYTES)
+#define K64_IFM_BYTES    (K64_BLOCKS * K64_M * 32u)
+#define K64_OUT_BYTES    (K64_M * 32u * 4u)
 
 #define NUM_DIMS 8u
 
@@ -59,6 +69,23 @@ int main(void) {
         out_offset += out_bytes;
         spatz_rt_pass_step();
     }
+
+    spatz_rt_set_phase(5, K64_M);
+    spatz_rt_dma_1d(T_WEIGHT_K64, L2_WEIGHT_K64, K64_WEIGHT_BYTES);
+    spatz_rt_dma_wait_all();
+    spatz_rt_dma_1d(T_IFM_K64, L2_IFM_K64, K64_IFM_BYTES);
+    spatz_rt_dma_wait_all();
+
+    systolic_gemm32(T_WEIGHT_K64, T_IFM_K64, T_OFM, K64_M);
+    systolic_gemm32_accumulate(T_WEIGHT_K64 + WEIGHT_BYTES,
+                               T_IFM_K64 + (K64_M * 32u),
+                               T_OFM,
+                               T_OFM,
+                               K64_M);
+
+    spatz_rt_dma_1d(L2_OUT_K64, T_OFM, K64_OUT_BYTES);
+    spatz_rt_dma_wait_all();
+    spatz_rt_pass_step();
 
     spatz_rt_pass();
     return 0;

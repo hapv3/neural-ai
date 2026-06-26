@@ -14,6 +14,7 @@ firmware.
 | Directory | Binary | Primary RTL test | Target |
 |-----------|--------|------------------|--------|
 | `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, AXI I-TCM load, host IRQ completion, iDMA MMIO smoke |
+| `sw/test/conv_feeder` | `conv_feeder.bin` | `test_conv_feeder` | P1 software Conv2D feeder, im2col tile dump, Conv1x1 K>32, Conv3x3 pad1 |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
@@ -59,7 +60,8 @@ Run independent suites before micro-model or graph-level work:
 4. **Operators**: proves reusable C-callable Spatz ops before scheduler use.
 5. **Systolic**: proves HAL GEMM32 tiling and full output correctness.
 6. **Systolic Requant**: proves fused INT32→INT8 drain path before graph use.
-7. **Legacy Matmul**: keeps raw register-level systolic regression alive.
+7. **Conv Feeder**: proves P1 software Conv2D lowering before graph/model use.
+8. **Legacy Matmul**: keeps raw register-level systolic regression alive.
 
 Micro-YOLO or graph scheduler tests should only run after these gates are green.
 
@@ -138,12 +140,13 @@ cocotb writes signed INT8 W and IFM to L2
   -> cocotb loads firmware into I-TCM and releases fetch
   -> firmware DMA-copies fixtures into TCDM
   -> firmware calls systolic_gemm32 for M={1,2,31,32,33,64,128,1024}
+  -> firmware runs K=64 as base GEMM32 + accumulated GEMM32 psum block
   -> HAL tiles large M safely
   -> firmware copies all INT32 OFM words back to L2
   -> cocotb compares full tensors with Python golden
 ```
 
-Pass criteria: all `M x 32` INT32 words match golden.
+Pass criteria: all `M x 32` INT32 words and the `K=64` accumulated tensor match golden.
 
 ### Systolic Requant
 
@@ -154,12 +157,31 @@ cocotb writes signed INT8 W and IFM to L2
   -> firmware programs per-channel requant qparams
   -> firmware calls systolic_gemm32_requant for M={1,2,31,32,33,64}
   -> controller drains each INT32 OFM row through requant_pipeline
+  -> firmware runs K=64 as base GEMM32 + accumulated final requant GEMM32
   -> controller writes one packed 32-byte INT8 row to O-TCDM
   -> firmware copies packed output rows back to L2
   -> cocotb compares every byte against Python golden
 ```
 
-Pass criteria: all `M x 32` INT8 bytes match the exact requant formula.
+Pass criteria: all `M x 32` INT8 bytes and the fused `K=64` accumulated
+requant tensor match the exact requant formula.
+
+### Conv Feeder
+
+```text
+cocotb writes NHWC input and K32-packed OC32 weights to L2
+  -> firmware DMA-copies fixtures into Shared Data TCDM
+  -> firmware materializes Conv1x1 K-tile rows into TCDM im2col buffer
+  -> firmware copies both Conv1x1 im2col K-block dumps back to L2
+  -> firmware runs Conv1x1 IC=33 as GEMM32 + accumulated GEMM32
+  -> firmware runs Conv3x3 stride1 pad1 IC=3 as one GEMM32
+  -> firmware copies full INT32 outputs back to L2
+  -> cocotb compares im2col bytes and every output word against Python golden
+```
+
+Pass criteria: materialized `M x 32` IFM rows and both Conv output tensors
+match exactly. Firmware buffers must stay inside the Shared Data TCDM window;
+the current OFM test buffer uses `0x1014_0000`.
 
 ### Matmul
 
@@ -198,6 +220,7 @@ unaligned e16/e32 destinations are not yet a scheduler contract.
 
 ```bash
 make -C sw/test/boot
+make -C sw/test/conv_feeder
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
 make -C sw/test/systolic_requant
@@ -221,6 +244,9 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_independent_memory
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_feeder
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic
