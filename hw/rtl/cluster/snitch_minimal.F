@@ -109,6 +109,7 @@ $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to5.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_narrow_to_wide.sv
 $(REPO_ROOT)/hw/rtl/cluster/axi_lite_to_obi.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_ctrl_regs.sv
+$(REPO_ROOT)/hw/rtl/systolic/systolic_ctrl_regs.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_interrupt_ctrl.sv
 $(REPO_ROOT)/hw/idma/src/idma_pkg.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_axil_read.sv
@@ -141,6 +142,7 @@ $(REPO_ROOT)/hw/rtl/afu/afu_backend.sv
 $(REPO_ROOT)/hw/rtl/afu/afu_core.sv
 $(REPO_ROOT)/hw/rtl/afu/afu.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
+$(REPO_ROOT)/hw/rtl/systolic/conv2d_feeder.sv
 $(REPO_ROOT)/hw/rtl/systolic/requant_pipeline.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
 $(REPO_ROOT)/hw/rtl/systolic/npu_systolic_array.sv
