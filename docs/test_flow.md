@@ -14,8 +14,9 @@ firmware.
 | Directory | Binary | Primary RTL test | Target |
 |-----------|--------|------------------|--------|
 | `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, AXI I-TCM load, host IRQ completion, iDMA MMIO smoke |
-| `sw/test/conv_feeder` | `conv_feeder.bin` | `test_conv_feeder` | P1 software Conv2D feeder, im2col tile dump, Conv1x1 K>32, Conv3x3 pad1 |
-| `sw/test/conv_feeder_rtl` | `conv_feeder_rtl.bin` | `test_conv_feeder_rtl` | P2 RTL Conv2D feeder direct stream, optional im2col tile dump, Conv1x1 K>32, Conv3x3 pad1 |
+| `sw/test/conv_perf` | `conv_perf.bin` | `test_conv_perf` | Packed Conv2D scheduler, iDMA/RVV backend checks, exact output compare, cycle stats in L2 |
+| `sw/test/conv_feeder` | `conv_feeder.bin` | `test_conv_feeder` | Legacy/debug software im2col reference, Conv1x1 K>32, Conv3x3 pad1 |
+| `sw/test/conv_feeder_rtl` | `conv_feeder_rtl.bin` | `test_conv_feeder_rtl` | Legacy/debug RTL feeder coverage; not a performance roadmap gate |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
@@ -61,10 +62,12 @@ Run independent suites before micro-model or graph-level work:
 4. **Operators**: proves reusable C-callable Spatz ops before scheduler use.
 5. **Systolic**: proves HAL GEMM32 tiling and full output correctness.
 6. **Systolic Requant**: proves fused INT32→INT8 drain path before graph use.
-7. **Conv Feeder**: proves P1 software and P2 RTL Conv2D lowering before graph/model use.
+7. **Conv Packed Scheduler**: proves software+iDMA+Spatz packed Conv2D lowering and records cycle stats before graph/model use.
 8. **Legacy Matmul**: keeps raw register-level systolic regression alive.
 
 Micro-YOLO or graph scheduler tests should only run after these gates are green.
+Legacy Conv Feeder tests may run as debug/reference regressions, but they are
+not performance roadmap gates.
 
 ---
 
@@ -167,7 +170,7 @@ cocotb writes signed INT8 W and IFM to L2
 Pass criteria: all `M x 32` INT8 bytes and the fused `K=64` accumulated
 requant tensor match the exact requant formula.
 
-### Conv Feeder
+### Legacy Conv Feeder Debug
 
 ```text
 cocotb writes NHWC input and K32-packed OC32 weights to L2
@@ -189,6 +192,29 @@ window; the current OFM test buffer uses `0x1014_0000`.
 address generator. The P2 compute path streams feeder rows directly into the
 systolic IFM input; materialization remains enabled as a debug mode and is used
 by cocotb to compare im2col bytes against Python golden.
+
+This suite is retained for historical RTL/debug coverage only. Do not add new
+performance features or roadmap acceptance criteria to the RTL feeder path.
+
+### Conv Packed Performance
+
+```text
+cocotb writes the same Conv1x1 and Conv3x3 fixtures to L2
+  -> firmware keeps Conv1x1 input in L2 for iDMA 2D pack and DMA-copies RGB input for RVV pack
+  -> npu_conv2d_packed_run_oc32 prepares packed M x 32 IFM tiles in TCDM
+     using iDMA for contiguous Conv1x1/K-tail tiles and Spatz RVV segment copies for RGB/padding tiles
+  -> firmware runs systolic GEMM32/accumulate over the packed tile
+  -> firmware records mcycle deltas for prepare, GEMM, total, last K tile, and backend tile counts
+  -> firmware copies full INT32 outputs and stats back to L2
+  -> cocotb compares output tensors and checks iDMA/RVV backend selection
+```
+
+Pass criteria: Conv outputs match Python golden exactly, scheduler status is
+`NPU_CONV2D_PACKED_OK`, scalar prepare tile count is zero, Conv1x1 uses iDMA
+for contiguous K tiles, `IC=32/64` pointwise cases prove full and multi-K
+tiles, and RGB pad1 Conv3x3 uses Spatz RVV pack. This is the current
+performance-path gate. RTL feeder tests are legacy debug/reference regressions
+and are not performance acceptance criteria.
 
 ### Matmul
 
@@ -229,6 +255,7 @@ unaligned e16/e32 destinations are not yet a scheduler contract.
 make -C sw/test/boot
 make -C sw/test/conv_feeder
 make -C sw/test/conv_feeder_rtl
+make -C sw/test/conv_perf
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
 make -C sw/test/systolic_requant
@@ -258,6 +285,9 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_feeder_rtl
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic

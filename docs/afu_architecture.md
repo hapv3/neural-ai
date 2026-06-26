@@ -1,25 +1,25 @@
-# Kiến trúc AFU (Activation Function Unit) & Mapping Operators
+# AFU (Activation Function Unit) Architecture & Operators Mapping
 
-Tài liệu này quy hoạch thiết kế vi kiến trúc của khối AFU để xử lý các hàm phi tuyến (SiLU, Sigmoid, GELU, Softmax, LayerNorm) trên NPU, bù đắp cho điểm yếu thiếu FPU của Spatz Vector Engine. Bản cập nhật này bao gồm các thay đổi mới nhất về Dataflow, OBI Compliance và Pipeline Optimization.
+This document outlines the micro-architecture design of the AFU block for processing non-linear functions (SiLU, Sigmoid, GELU, Softmax, LayerNorm) on the NPU, compensating for the Spatz Vector Engine's lack of an FPU. This update includes the latest changes on Dataflow, OBI Compliance, and Pipeline Optimization.
 
-## 1. Triết lý Thiết kế (Design Philosophy)
+## 1. Design Philosophy
 
-Mô hình học máy lượng tử hóa (INT8) có một đặc điểm cực kỳ lợi hại: **Dữ liệu đầu vào chỉ có 256 giá trị khả dĩ (-128 đến 127)**.
-Do đó, thay vì xây dựng các khối tính toán Taylor/Chebyshev phức tạp, chúng ta sẽ thiết kế AFU dưới dạng một **Streaming LUT Processor**. 
+Quantized (INT8) machine learning models have a highly advantageous characteristic: **The input data only has 256 possible values (-128 to 127)**.
+Therefore, instead of building complex Taylor/Chebyshev compute blocks, we will design the AFU as a **Streaming LUT Processor**.
 
-- **Không cần nội suy (No Interpolation):** Ánh xạ 1-1 (1-to-1 mapping). Bất kỳ hàm $f(x)$ nào (SiLU, Sigmoid, Tanh) đều có thể tính trước (pre-computed) thành một mảng 256 bytes bởi trình biên dịch (Compiler/Firmware) và nạp vào SRAM của AFU.
-- **Tốc độ:** Phase hiện tại dùng 4 LUT lanes nội bộ. Data path AFU nối vào Shared Data TCDM 256-bit; core tiêu thụ theo nhóm byte từ read FIFO và phát write beat có byte-enable theo tail.
-- **Phân công phần cứng:** 
-  - AFU lo **Vector Element-wise Non-linear** (bảng tra).
-  - Spatz Vector Engine lo **Vector Reductions & Arithmetic** (max, sum, mul, add).
-  - Snitch Scalar Core lo **Scalar Non-linear** (tính 1 giá trị 1/sqrt hoặc 1/x).
-- **Quy tắc Căn lề Bộ nhớ (Memory Alignment Rule):** Firmware/HAL phase hiện tại yêu cầu `src_ptr` và `dst_ptr` căn lề 32-byte khi tích hợp cluster. Mảng có số phần tử không chia hết beat vẫn được hỗ trợ bằng byte-enable tail; arbitrary unaligned e16/e32 destination chưa là contract scheduler.
+- **No Interpolation:** 1-to-1 mapping. Any function $f(x)$ (SiLU, Sigmoid, Tanh) can be pre-computed into a 256-byte array by the compiler/firmware and loaded into the AFU's SRAM.
+- **Speed:** The current phase uses 4 internal LUT lanes. The AFU data path connects to the Shared Data TCDM 256-bit; the core consumes byte groups from the read FIFO and issues write beats with byte-enables based on the tail.
+- **Hardware distribution:**
+  - AFU handles **Vector Element-wise Non-linear** (lookup tables).
+  - Spatz Vector Engine handles **Vector Reductions & Arithmetic** (max, sum, mul, add).
+  - Snitch Scalar Core handles **Scalar Non-linear** (computing 1 value like 1/sqrt or 1/x).
+- **Memory Alignment Rule:** The firmware/HAL in the current phase requires `src_ptr` and `dst_ptr` to be 32-byte aligned when integrated into the cluster. Arrays with element counts not divisible by the beat size are still supported via tail byte-enables; arbitrary unaligned e16/e32 destination is not yet a scheduler contract.
 
 ---
 
 ## 2. AFU Micro-Architecture
 
-AFU sẽ được gắn vào Data TCDM Interconnect như một **DMA Master** độc lập.
+The AFU will be attached to the Data TCDM Interconnect as an independent **DMA Master**.
 
 ```text
                       ┌────────────────────────────────────────┐
@@ -31,9 +31,9 @@ AFU sẽ được gắn vào Data TCDM Interconnect như một **DMA Master** đ
   Interconnect        │  └──────────────────────────────────┘  │
   (Master Port)       │                                        │
         ▲             │  ┌──────────────────────────────────┐  │
-        │ 256-bit     │  │  Dual-Mode LUT SRAM (1 KB)       │  │<-- Firmware nạp
-        │ R/W         │  │  (Hỗ trợ 256x8, 256x16, 256x32)  │  │    bảng tra vào đây
-        ▼             │  └──────────────────────────────────┘  │    khi chuyển layer
+        │ 256-bit     │  │  Dual-Mode LUT SRAM (1 KB)       │  │<-- Firmware loads
+        │ R/W         │  │  (Supports 256x8, 256x16, 256x32)│  │    lookup table here
+        ▼             │  └──────────────────────────────────┘  │    when switching layers
                       │                                        │
                       │  ┌──────────┐  Address   ┌──────────┐  │
                       │  │ Read     │----------->│ 2-Stage  │  │
@@ -47,64 +47,64 @@ AFU sẽ được gắn vào Data TCDM Interconnect như một **DMA Master** đ
                       └────────────────────────────────────────┘
 ```
 
-### 2.1. Thiết kế RTL Chi tiết (RTL Components)
+### 2.1. Detailed RTL Components
 
-Hệ thống AFU được chia thành 5 module chính để đảm bảo dễ bảo trì và phân tách rõ ràng trách nhiệm (Separation of Concerns):
+The AFU system is divided into 5 main modules to ensure maintainability and clear Separation of Concerns:
 
-1. **`afu.sv` (Top-level Wrapper):** 
-   - Đóng vai trò là cầu nối liên kết tất cả các module con. 
-   - Khai báo các giao diện OBI (Slave cho config, Master cho memory access).
-   - Instantiations: Gọi `afu_frontend`, `afu_backend`, `afu_core`, và hai bộ `afu_fifo_ff` (rfifo và wfifo).
+1. **`afu.sv` (Top-level Wrapper):**
+   - Acts as the bridge connecting all sub-modules.
+   - Declares OBI interfaces (Slave for config, Master for memory access).
+   - Instantiations: Calls `afu_frontend`, `afu_backend`, `afu_core`, and two `afu_fifo_ff` instances (rfifo and wfifo).
 
 2. **`afu_frontend.sv` (Control & CSRs):**
-   - Đóng vai trò là OBI Slave nhận các lệnh cấu hình từ Snitch Core.
-   - Quản lý các thanh ghi CSR: `src_ptr`, `dst_ptr`, `length`, `mode`.
-   - Sinh ra xung `start` để đánh thức các khối khác khi firmware ghi vào thanh ghi `START`.
-   - Phơi bày dải địa chỉ của SRAM LUT (từ 0x000 đến 0x3FC) để firmware có thể nạp bảng tra hàm.
+   - Acts as an OBI Slave receiving configuration commands from the Snitch Core.
+   - Manages CSR registers: `src_ptr`, `dst_ptr`, `length`, `mode`.
+   - Generates the `start` pulse to wake up other blocks when firmware writes to the `START` register.
+   - Exposes the SRAM LUT address range (from 0x000 to 0x3FC) so firmware can load the lookup tables.
 
 3. **`afu_backend.sv` (Memory Access Engine):**
-   - Đóng vai trò là OBI Master, tự động hóa việc đọc dữ liệu chưa xử lý (từ `src_ptr`) và ghi dữ liệu đã xử lý (tới `dst_ptr`).
-   - Tuân thủ chặt chẽ OBI Handshake (`req`, `gnt`, `rvalid`). Các tín hiệu request được chốt trong pending transaction register cho tới khi có `gnt`, đồng thời read side giới hạn một outstanding read để tránh ghi đè dữ liệu trả về.
-   - Quản lý vòng lặp địa chỉ: Mỗi lần đọc/ghi đều kiểm tra xem đã chạm đến địa chỉ kết thúc (`end_addr`) chưa để dừng phát req.
+   - Acts as an OBI Master, automating the reading of unprocessed data (from `src_ptr`) and writing processed data (to `dst_ptr`).
+   - Strictly adheres to the OBI Handshake (`req`, `gnt`, `rvalid`). Request signals are latched in a pending transaction register until `gnt` is received, while the read side is limited to one outstanding read to prevent overwriting returning data.
+   - Address loop management: Every read/write checks if the `end_addr` has been reached to stop issuing reqs.
 
 4. **`afu_core.sv` (2-Stage Compute Pipeline):**
-   - **Trái tim của AFU**, nơi thực hiện việc tra bảng (LUT Lookup) với độ trễ thấp nhất.
-   - **Stage 1 (S1):** Rút dữ liệu (pop) từ Read FIFO, tính toán số lượng phần tử hơp lệ dựa trên `elem_cnt`, phân tách dữ liệu 32-bit thành 4 khối 8-bit và đưa vào 4 port địa chỉ truy vấn LUT SRAM (`tc_sram`).
-   - **Stage 2 (S2):** Nhận dữ liệu kết quả từ SRAM (trễ 1 chu kỳ), tổng hợp lại thành một block hoàn chỉnh. Tính toán mặt nạ Byte Enables (`s2_out_be_comb`) để đảm bảo không ghi lạm vào vùng nhớ khác khi `length` là số lẻ. Đẩy kết quả vào Write FIFO.
-   - **Stall Protection:** Nếu S2 bị kẹt do Write FIFO đầy (`s2_stall`), mạch sẽ dùng thanh ghi đệm `s2_lut_rdata_saved_q` để chốt cứng lại kết quả từ SRAM, tránh việc dữ liệu bị hỏng khi S1 lỡ cập nhật địa chỉ mới.
+   - **The heart of the AFU**, where LUT Lookups are performed with minimal latency.
+   - **Stage 1 (S1):** Pops data from the Read FIFO, calculates the number of valid elements based on `elem_cnt`, splits the 32-bit data into 4 8-bit blocks, and feeds them into the 4 address ports for LUT SRAM query (`tc_sram`).
+   - **Stage 2 (S2):** Receives the result data from SRAM (1 cycle latency), synthesizes it into a complete block. Calculates the Byte Enables mask (`s2_out_be_comb`) to ensure no out-of-bounds memory writes when `length` is odd. Pushes the result to the Write FIFO.
+   - **Stall Protection:** If S2 stalls because the Write FIFO is full (`s2_stall`), the circuit will use the `s2_lut_rdata_saved_q` buffer register to freeze the result from SRAM, preventing data corruption if S1 accidentally updates to a new address.
 
 5. **`afu_fifo_ff.sv` (Flip-Flop Based FIFOs):**
-   - Hàng đợi dữ liệu trung gian giữa Backend và Core, giúp hấp thụ (absorb) độ trễ của giao thức OBI.
-   - Vì độ sâu chỉ cần `DEPTH=2`, việc thiết kế bằng Flip-Flop thay vì gọi SRAM Macro giúp tiết kiệm đáng kể diện tích (Area), giảm đường trễ (Routing delay), và tránh phải dùng bộ khởi tạo bộ nhớ phức tạp.
+   - Intermediate data queues between the Backend and Core, helping to absorb OBI protocol latency.
+   - Since the depth only requires `DEPTH=2`, designing it with Flip-Flops instead of calling an SRAM Macro saves significant Area, reduces routing delay, and avoids using complex memory initializers.
 
-### 2.2. Workflow cơ bản của AFU (Dual-Mode)
-1. Firmware Snitch tính trước hàm $f(x)$ và ghi bảng kết quả vào LUT SRAM của AFU.
-2. Firmware ghi cấu hình `Src_Ptr`, `Dst_Ptr`, `Length`, và **`Mode`** (8-bit, 16-bit, hoặc 32-bit output).
-3. Kích hoạt AFU. Tùy theo Mode:
-   - **Mode 8-bit (SiLU, Sigmoid):** AFU xử lý 4 bytes/cycle (hoặc theo độ rộng bus nếu cấu hình rộng hơn), tra 4 kết quả 8-bit và đẩy vào Write FIFO. Cực kỳ nhanh.
-   - **Mode 16/32-bit (exp, x^2 cho Softmax/Norm):** AFU đọc từng byte, tra ra kết quả 16-bit hoặc 32-bit để giữ độ chính xác tối đa, sau đó ghi các từ 16/32-bit này ra TCDM để Spatz xử lý cộng dồn tiếp theo.
+### 2.2. Basic AFU Workflow (Dual-Mode)
+1. Snitch Firmware pre-calculates the function $f(x)$ and writes the result table into the AFU's LUT SRAM.
+2. Firmware writes configuration: `Src_Ptr`, `Dst_Ptr`, `Length`, and **`Mode`** (8-bit, 16-bit, or 32-bit output).
+3. Activate the AFU. Depending on the Mode:
+   - **8-bit Mode (SiLU, Sigmoid):** The AFU processes 4 bytes/cycle (or based on bus width if configured wider), looks up 4 8-bit results, and pushes them to the Write FIFO. Extremely fast.
+   - **16/32-bit Mode (exp, x^2 for Softmax/Norm):** The AFU reads byte by byte, looks up 16-bit or 32-bit results to maintain maximum precision, then writes these 16/32-bit words to TCDM for Spatz to handle subsequent accumulations.
 
 ---
 
-## 3. Đánh giá Performance Hiện Tại
+## 3. Current Performance Evaluation
 
-Đánh giá này áp dụng cho RTL hiện tại: `MEM_DATA_WIDTH=256`, `LUT_LANES=4`, RFIFO/WFIFO depth 2, AFU là một TCDM master riêng và LUT SRAM có latency 1 cycle. Đây là đánh giá **AFU active path**, không tính thời gian host AXI nạp firmware, firmware tự check output, hoặc cocotb readback.
+This evaluation applies to the current RTL: `MEM_DATA_WIDTH=256`, `LUT_LANES=4`, RFIFO/WFIFO depth 2, the AFU is a dedicated TCDM master, and the LUT SRAM has a 1-cycle latency. This is an **AFU active path** evaluation, not counting the time for host AXI firmware loading, firmware self-checks, or cocotb readbacks.
 
-### 3.1. Throughput lý thuyết
+### 3.1. Theoretical Throughput
 
-Core có 4 LUT lanes nên upper bound compute là **4 input elements/cycle** cho cả 3 mode. Khác biệt giữa các mode nằm ở output bandwidth:
+The Core has 4 LUT lanes, so the upper compute bound is **4 input elements/cycle** for all 3 modes. The difference between modes lies in the output bandwidth:
 
-| Mode | Input element | Output element | Core throughput | Output bandwidth @ 1 GHz | Total TCDM bandwidth cần |
+| Mode | Input element | Output element | Core throughput | Output bandwidth @ 1 GHz | Total required TCDM bandwidth |
 |------|---------------|----------------|-----------------|--------------------------|--------------------------|
 | `e8` | 8-bit | 8-bit | 4 elems/cycle | 4 GB/s | 8 GB/s = 4 GB/s read + 4 GB/s write |
 | `e16` | 8-bit | 16-bit | 4 elems/cycle | 8 GB/s | 12 GB/s = 4 GB/s read + 8 GB/s write |
 | `e32` | 8-bit | 32-bit | 4 elems/cycle | 16 GB/s | 20 GB/s = 4 GB/s read + 16 GB/s write |
 
-Shared Data TCDM port của AFU là 256-bit, nên peak một beat/cycle tương đương **32 GB/s @ 1 GHz** nếu không bị arbitration stall. Vì vậy với cấu hình 4 lanes hiện tại, AFU chủ yếu **lane-limited**, chưa phải TCDM-bandwidth-limited trong điều kiện không tranh chấp.
+The AFU's Shared Data TCDM port is 256-bit, so a peak of one beat/cycle equals **32 GB/s @ 1 GHz** if there are no arbitration stalls. Thus, with the current 4-lane configuration, the AFU is mainly **lane-limited**, not yet TCDM-bandwidth-limited under non-contention conditions.
 
-### 3.2. Cycle model dùng để estimate
+### 3.2. Cycle model used for estimation
 
-Với tensor dài `N` phần tử 8-bit input và output width `B ∈ {1,2,4}` byte:
+With a tensor of length `N` 8-bit input elements and output width `B ∈ {1,2,4}` bytes:
 
 ```text
 compute_cycles       = ceil(N / 4)
@@ -114,97 +114,97 @@ active_cycles_lower  ≈ max(compute_cycles, read_beats_256b + write_beats_256b)
 active_cycles_upper  ≈ compute_cycles + read_beats_256b + write_beats_256b + small_pipeline_drain
 ```
 
-Trong workload dài, backend read/write và core lookup overlap một phần, nên số cycle thực tế nên nằm gần lower bound nếu TCDM grant đều. Trong workload nhỏ, overhead start, read-first latency, write drain, IRQ/polling, và LUT programming sẽ chiếm tỷ lệ lớn.
+In a long workload, backend read/write and core lookup partially overlap, so the actual cycle count should be closer to the lower bound if TCDM grants are steady. In small workloads, overheads for start, read-first latency, write drain, IRQ/polling, and LUT programming will take up a larger proportion.
 
-### 3.3. Ví dụ workload
+### 3.3. Workload Examples
 
-| Tensor | Mode | Elements | Ideal compute cycles | Traffic | Nhận xét |
+| Tensor | Mode | Elements | Ideal compute cycles | Traffic | Remarks |
 |--------|------|----------|----------------------|---------|----------|
-| Micro-YOLO activation `32×32×32` | `e8` | 32,768 | 8,192 | 32 KB read + 32 KB write | AFU active khoảng vài microsecond ở 1 GHz; firmware/LUT setup có thể đáng kể nếu chỉ chạy một tensor nhỏ. |
-| ViT/Softmax exp row batch 32k elems | `e16` | 32,768 | 8,192 | 32 KB read + 64 KB write | Vẫn lane-limited; output traffic tăng nhưng dưới peak TCDM port. |
-| Precision staging 32k elems | `e32` | 32,768 | 8,192 | 32 KB read + 128 KB write | Gần bandwidth hơn nhưng vẫn chỉ cần ~20/32 GB/s ở 1 GHz nếu không tranh chấp. |
-| YOLO feature map `80×80×64` | `e8` | 409,600 | 102,400 | 400 KB read + 400 KB write | Phù hợp AFU streaming; LUT programming amortize tốt trên tensor lớn. |
+| Micro-YOLO activation `32×32×32` | `e8` | 32,768 | 8,192 | 32 KB read + 32 KB write | AFU active for a few microseconds at 1 GHz; firmware/LUT setup can be significant if only running one small tensor. |
+| ViT/Softmax exp row batch 32k elems | `e16` | 32,768 | 8,192 | 32 KB read + 64 KB write | Still lane-limited; output traffic increases but remains under peak TCDM port bandwidth. |
+| Precision staging 32k elems | `e32` | 32,768 | 8,192 | 32 KB read + 128 KB write | Closer to bandwidth limits but still only needs ~20/32 GB/s at 1 GHz if no contention. |
+| YOLO feature map `80×80×64` | `e8` | 409,600 | 102,400 | 400 KB read + 400 KB write | Highly suitable for AFU streaming; LUT programming amortizes well over large tensors. |
 
-### 3.4. Bottleneck thực tế hiện tại
+### 3.4. Current Practical Bottlenecks
 
-- **LUT programming cost:** mỗi bảng LUT cần 256 MMIO writes. Với nhiều layer dùng cùng activation/qparam, firmware nên cache/reuse LUT và chỉ nạp lại khi bảng đổi.
-- **TCDM arbitration:** AFU hiện đi chung Shared Data TCDM với DMA, Systolic và Spatz. Khi chạy overlap thật, AFU có thể bị stall bởi HWPE traffic có priority cao hơn; chưa có PMU counter riêng để đo stall.
-- **Backend policy:** backend hiện ưu tiên write hơn read và giới hạn một read outstanding để giữ OBI response đơn giản. Cấu hình này đúng cho correctness, nhưng chưa tối ưu bandwidth tuyệt đối.
-- **FIFO depth:** RFIFO/WFIFO depth 2 đủ cho regression hiện tại; nếu TCDM grant jitter cao, tăng FIFO hoặc thêm outstanding read/write queue có thể cải thiện utilization.
-- **Firmware wait:** test hiện dùng polling `afu_wait_done`; event-driven `wfi`/trap sẽ giảm năng lượng và scalar busy cycles, nhưng không thay đổi AFU active throughput.
+- **LUT programming cost:** Each LUT table requires 256 MMIO writes. For multiple layers using the same activation/qparam, the firmware should cache/reuse the LUT and only reload when the table changes.
+- **TCDM arbitration:** The AFU currently shares the Shared Data TCDM with DMA, Systolic, and Spatz. During true overlapping execution, the AFU might stall due to higher-priority HWPE traffic; there is no dedicated PMU counter to measure these stalls yet.
+- **Backend policy:** The backend currently prioritizes writes over reads and limits reads to one outstanding request to keep OBI responses simple. This configuration is correct for correctness, but not yet optimized for absolute bandwidth.
+- **FIFO depth:** RFIFO/WFIFO depth 2 is sufficient for the current regression; if TCDM grant jitter is high, increasing FIFO depth or adding an outstanding read/write queue could improve utilization.
+- **Firmware wait:** The test currently polls `afu_wait_done`; an event-driven `wfi`/trap approach would reduce energy and scalar busy cycles, though it won't change AFU active throughput.
 
-### 3.5. Số liệu regression hiện tại
+### 3.5. Current Regression Metrics
 
-`test_afu_basic` chạy pass ở mức cluster và kết thúc ở khoảng `24,532 ns` simulation time với clock 1 ns. Con số này **không phải latency thuần AFU**, vì bao gồm AXI boot load, firmware seed data, 3 lần nạp LUT, AFU run, firmware self-check và host notify. Nó chỉ chứng minh rằng path tích hợp hiện tại chạy đúng và không timeout. Để có số liệu performance thật, cần thêm counter đo:
+`test_afu_basic` passes at the cluster level and finishes at around `24,532 ns` simulation time with a 1 ns clock. This number **is not pure AFU latency**, as it includes AXI boot load, firmware seed data generation, 3 LUT programming phases, AFU run, firmware self-check, and host notification. It only proves that the current integration path is functionally correct and does not timeout. To get real performance metrics, we need additional counters:
 
-- `afu_active_cycles`: từ `start` tới `done_o`.
-- `afu_core_stall_cycles`: `s2_stall` hoặc core chờ RFIFO.
+- `afu_active_cycles`: From `start` to `done_o`.
+- `afu_core_stall_cycles`: `s2_stall` or core waiting for RFIFO.
 - `afu_tcdm_wait_cycles`: `obi_m_req_o && !obi_m_gnt_i`.
-- `afu_read_beats` / `afu_write_beats`: số beat TCDM thực tế.
+- `afu_read_beats` / `afu_write_beats`: Actual TCDM beats.
 
-Các counter này nên đi vào PMU hoặc debug CSR trước khi dùng số liệu AFU để tối ưu scheduler/performance.
+These counters should be added to the PMU or debug CSRs before using AFU metrics to optimize the scheduler/performance.
 
 ---
 
-## 4. Mapping Cụ Thể Từng Function
+## 4. Specific Function Mapping
 
-### 4.1. Các hàm Element-wise Đơn Thuần (SiLU, Sigmoid, Tanh, GELU)
-**Model:** YOLO (SiLU/Sigmoid), ViT (GELU), CNN (Tanh).
-- **Cách chạy:** Đẩy 100% vào AFU.
-- **Quy trình:**
-  1. Trình biên dịch (Compiler) offline sinh ra mảng tĩnh `const uint8_t silu_lut[256] = {...}`.
-  2. Snitch copy mảng này vào `AFU_LUT_RAM`.
-  3. AFU chạy một lèo hết tensor. Tốc độ cao nhất (100% utilization).
+### 4.1. Pure Element-wise Functions (SiLU, Sigmoid, Tanh, GELU)
+**Models:** YOLO (SiLU/Sigmoid), ViT (GELU), CNN (Tanh).
+- **Execution:** 100% offloaded to AFU.
+- **Process:**
+  1. The offline Compiler generates a static array `const uint8_t silu_lut[256] = {...}`.
+  2. Snitch copies this array into `AFU_LUT_RAM`.
+  3. The AFU streams through the entire tensor. Maximum speed (100% utilization).
 
 ### 4.2. Softmax (ViT Attention)
-Công thức: $y_i = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$
-- **Cách chạy:** Kết hợp Spatz + AFU.
-- **Quy trình:**
-  1. **Spatz:** Chạy lệnh `vmax` tìm giá trị lớn nhất của hàng (vector) -> $M$.
-  2. **Spatz:** Chạy lệnh `vsub` trừ đi $M$: $x' = x - M$.
-  3. **Snitch:** Cấu hình AFU với bảng LUT `exp()`.
-  4. **AFU:** Tra bảng biến mảng $x'$ thành mảng $E = e^{x'}$. (Lưu ý: Mảng Output được yêu cầu phải có độ chính xác 16/32-bit để chống sai số - dùng Mode 16/32).
-  5. **Spatz:** Chạy lệnh `vsum` trên mảng $E$ để ra tổng $S$.
-  6. **Snitch:** Dùng C code tính giá trị vô hướng (scalar) `inv_S = 1 / S`.
-  7. **Spatz:** Chạy lệnh `vmul` nhân toàn bộ mảng $E$ với `inv_S` để ra kết quả cuối.
+Formula: $y_i = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$
+- **Execution:** Combined Spatz + AFU.
+- **Process:**
+  1. **Spatz:** Runs `vmax` to find the maximum value of the row (vector) -> $M$.
+  2. **Spatz:** Runs `vsub` to subtract $M$: $x' = x - M$.
+  3. **Snitch:** Configures AFU with the `exp()` LUT.
+  4. **AFU:** Looks up the table to convert array $x'$ into array $E = e^{x'}$. (Note: The Output array is required to have 16/32-bit precision to prevent quantization loss - uses Mode 16/32).
+  5. **Spatz:** Runs `vsum` on array $E$ to get the sum $S$.
+  6. **Snitch:** Uses C code to compute the scalar value `inv_S = 1 / S`.
+  7. **Spatz:** Runs `vmul` multiplying the entire array $E$ by `inv_S` to yield the final result.
 
 ### 4.3. LayerNorm (ViT Layer)
-Công thức: $y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \times \gamma + \beta$
-- **Cách chạy:** Kết hợp Spatz + Snitch (Thực tế **không cần dùng AFU**).
-- **Quy trình:**
-  1. **Spatz:** Chạy `vsum` tìm tổng -> Tính Mean $\mu$.
-  2. **Spatz:** Chạy `vsub` -> $(x - \mu)$, `vmul` -> $(x - \mu)^2$, `vsum` -> Variance $\sigma^2$.
-  3. **Snitch:** Tính hàm `1/sqrt(sigma^2 + eps)` bằng thư viện C chuẩn trên scalar core. Vì đây chỉ là **1 giá trị vô hướng (scalar)** cho cả 1 hàng vector, Snitch tốn ~50 cycles là xong, không ảnh hưởng tổng thời gian. Lưu kết quả vào biến `inv_std`.
-  4. **Spatz:** Dùng `vmul` nhân mảng $(x-\mu)$ với `inv_std` và $\gamma$, dùng `vadd` cộng $\beta$.
+Formula: $y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \times \gamma + \beta$
+- **Execution:** Combined Spatz + Snitch (**no AFU needed** in practice).
+- **Process:**
+  1. **Spatz:** Runs `vsum` to find the sum -> Computes Mean $\mu$.
+  2. **Spatz:** Runs `vsub` -> $(x - \mu)$, `vmul` -> $(x - \mu)^2$, `vsum` -> Variance $\sigma^2$.
+  3. **Snitch:** Computes the function `1/sqrt(sigma^2 + eps)` using standard C libraries on the scalar core. Because this is just **1 scalar value** for an entire vector row, it takes Snitch ~50 cycles and doesn't impact total time. Saves the result in `inv_std`.
+  4. **Spatz:** Uses `vmul` to multiply array $(x-\mu)$ with `inv_std` and $\gamma$, uses `vadd` to add $\beta$.
 
 ---
 
-## 5. Tích hợp AFU vào Hệ thống (Integration Guide)
+## 5. Integrating AFU into the System (Integration Guide)
 
-Để lắp ráp khối IP `afu.sv` vào hệ thống NPU thực tế, cần thực hiện các bước cấu hình sau trên Top-level của NPU (như `npu_cluster.sv`):
+To assemble the `afu.sv` IP block into the actual NPU system, the following configuration steps must be performed at the NPU Top-level (e.g., `npu_cluster.sv`):
 
-### 5.1. Kết nối Mạng lưới (Interconnect)
-- **Gắn AFU vào Peripheral/System Interconnect (Cổng OBI Slave):**
-  - AFU là MMIO slave 32-bit sau D-side demux của Snitch.
-  - Dải địa chỉ hiện tại là `0x2000_3000 – 0x2000_3fff`. LUT ở offset `0x000..0x3ff`; CSR bắt đầu tại offset `0x400`.
-- **Gắn AFU vào TCDM Interconnect (Cổng OBI Master):**
-  - `NUM_MASTERS` của Shared Data TCDM hiện là 11.
-  - AFU dùng master port riêng trên Shared Data TCDM 256-bit để tự động đọc/ghi tensor L1.
+### 5.1. Interconnect Integration
+- **Attaching AFU to the Peripheral/System Interconnect (OBI Slave Port):**
+  - The AFU is a 32-bit MMIO slave behind the Snitch D-side demux.
+  - The current address range is `0x2000_3000 – 0x2000_3fff`. LUT is at offset `0x000..0x3ff`; CSRs start at offset `0x400`.
+- **Attaching AFU to the TCDM Interconnect (OBI Master Port):**
+  - `NUM_MASTERS` of the Shared Data TCDM is currently 11.
+  - The AFU uses a dedicated master port on the 256-bit Shared Data TCDM to automatically read/write L1 tensors.
 
-### 5.2. Kết nối Tín hiệu Điều khiển
-- **Clock và Reset:** Đồng bộ chung `clk_i` và `rst_ni` với toàn cụm Cluster.
-- **Tín hiệu Ngắt (Interrupt - `done_o`):**
-  - `done_o` đã nối vào `npu_interrupt_ctrl` bit `NPU_IRQ_SRC_AFU`.
-  - Firmware có thể enable/clear `INT_PENDING` để xác nhận AFU done; trap/WFI handler đầy đủ vẫn là phase sau.
+### 5.2. Control Signals Integration
+- **Clock and Reset:** Synchronized `clk_i` and `rst_ni` with the entire Cluster.
+- **Interrupt Signal (`done_o`):**
+  - `done_o` is connected to the `npu_interrupt_ctrl` bit `NPU_IRQ_SRC_AFU`.
+  - Firmware can enable/clear `INT_PENDING` to acknowledge AFU done; full trap/WFI handlers are planned for a later phase.
 
-### 5.3. Cập nhật Firmware (Software C)
-Bổ sung định nghĩa cấu trúc phần cứng vào SDK của Firmware để điều khiển bằng mã C:
+### 5.3. Firmware Update (Software C)
+Add hardware structure definitions to the Firmware SDK to control via C code:
 
 ```c
-// Địa chỉ cơ sở AFU trong cluster MMIO aperture
+// AFU base address in cluster MMIO aperture
 #define AFU_BASE_ADDR 0x20003000
 
-// Cấu trúc thanh ghi AFU
+// AFU register structure
 typedef struct {
     volatile uint32_t LUT_SRAM[256];  // 0x0000 - 0x03FC
     volatile uint32_t STATUS_START;   // 0x0400: read done/busy/error, write start pulse
