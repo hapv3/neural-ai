@@ -3,6 +3,7 @@
 module systolic_controller #(
     parameter int unsigned ADDR_WIDTH = 32,
     parameter int unsigned DATA_WIDTH = 256,
+    parameter int unsigned CFG_DATA_WIDTH = 32,
     parameter int unsigned ARRAY_DIM = 32,
     parameter int unsigned INPUT_ELEM_WIDTH = 8,
     parameter int unsigned OFM_ELEM_WIDTH = 32,
@@ -12,21 +13,17 @@ module systolic_controller #(
     input  logic clk_i,
     input  logic rst_ni,
 
-    // Configuration from MMIO
-    input  logic                      cfg_sys_start_i,
-    input  logic [31:0]               cfg_sys_weight_ptr_i,
-    input  logic [31:0]               cfg_sys_ifm_ptr_i,
-    input  logic [31:0]               cfg_sys_ofm_ptr_i,
-    input  logic [31:0]               cfg_sys_psum_ptr_i,
-    input  logic [31:0]               cfg_sys_dim_m_i, // Number of IFM rows (skewed)
-    input  logic                      cfg_sys_accum_en_i,
-    input  logic                      cfg_requant_en_i,
-    input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_bias_i,
-    input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_multiplier_i,
-    input  logic [ARRAY_DIM-1:0][7:0]  cfg_requant_shift_i,
-    input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_zero_point_i,
-    input  logic [31:0]               cfg_requant_clamp_min_i,
-    input  logic [31:0]               cfg_requant_clamp_max_i,
+    // MMIO slave for integrated systolic/conv/requant register block.
+    input  logic                          ctrl_req_i,
+    output logic                          ctrl_gnt_o,
+    input  logic [ADDR_WIDTH-1:0]         ctrl_addr_i,
+    input  logic                          ctrl_we_i,
+    input  logic [(CFG_DATA_WIDTH/8)-1:0] ctrl_be_i,
+    input  logic [CFG_DATA_WIDTH-1:0]     ctrl_wdata_i,
+    output logic                          ctrl_rvalid_o,
+    output logic [CFG_DATA_WIDTH-1:0]     ctrl_rdata_o,
+
+    // Completion pulse to cluster interrupt controller.
     output logic                      cfg_sys_done_o,
 
     // 1x OBI Master for I-TCDM (Read Weights & IFM)
@@ -38,6 +35,16 @@ module systolic_controller #(
     output logic [DATA_WIDTH-1:0]     obi_i_wdata_o,
     input  logic                      obi_i_rvalid_i,
     input  logic [DATA_WIDTH-1:0]     obi_i_rdata_i,
+
+    // 1x OBI Master for integrated Conv2D feeder TCDM/debug path.
+    output logic                      conv_obi_req_o,
+    input  logic                      conv_obi_gnt_i,
+    output logic [ADDR_WIDTH-1:0]     conv_obi_addr_o,
+    output logic                      conv_obi_we_o,
+    output logic [(DATA_WIDTH/8)-1:0] conv_obi_be_o,
+    output logic [DATA_WIDTH-1:0]     conv_obi_wdata_o,
+    input  logic                      conv_obi_rvalid_i,
+    input  logic [DATA_WIDTH-1:0]     conv_obi_rdata_i,
 
     // 4x OBI Masters for O-TCDM (Write OFM)
     output logic [3:0]                obi_o_req_o,
@@ -135,6 +142,44 @@ module systolic_controller #(
     logic          requant_config_invalid;
     logic [$clog2(OFM_ROW_BEATS+1)-1:0] accum_beat_q, accum_beat_d;
     logic          accum_requant_sent_q, accum_requant_sent_d;
+    logic          stream_ifm_valid;
+    logic          stream_ifm_ready;
+    input_row_t    stream_ifm_data;
+    logic          cfg_sys_start_i;
+    logic [31:0]   cfg_sys_weight_ptr_i;
+    logic [31:0]   cfg_sys_ifm_ptr_i;
+    logic [31:0]   cfg_sys_ofm_ptr_i;
+    logic [31:0]   cfg_sys_psum_ptr_i;
+    logic [31:0]   cfg_sys_dim_m_i;
+    logic          cfg_sys_accum_en_i;
+    logic          cfg_sys_ifm_stream_en_i;
+    logic          cfg_requant_en_i;
+    logic [ARRAY_DIM-1:0][31:0] cfg_requant_bias_i;
+    logic [ARRAY_DIM-1:0][31:0] cfg_requant_multiplier_i;
+    logic [ARRAY_DIM-1:0][7:0] cfg_requant_shift_i;
+    logic [ARRAY_DIM-1:0][31:0] cfg_requant_zero_point_i;
+    logic [31:0]   cfg_requant_clamp_min_i;
+    logic [31:0]   cfg_requant_clamp_max_i;
+    logic          cfg_conv_start_i;
+    logic [31:0]   cfg_conv_input_ptr_i;
+    logic [31:0]   cfg_conv_output_ptr_i;
+    logic [31:0]   cfg_conv_rows_i;
+    logic [31:0]   cfg_conv_output_w_i;
+    logic [31:0]   cfg_conv_input_h_i;
+    logic [31:0]   cfg_conv_input_w_i;
+    logic [31:0]   cfg_conv_input_c_i;
+    logic [15:0]   cfg_conv_kernel_h_i;
+    logic [15:0]   cfg_conv_kernel_w_i;
+    logic [15:0]   cfg_conv_stride_h_i;
+    logic [15:0]   cfg_conv_stride_w_i;
+    logic [15:0]   cfg_conv_pad_h_i;
+    logic [15:0]   cfg_conv_pad_w_i;
+    logic [15:0]   cfg_conv_dilation_h_i;
+    logic [15:0]   cfg_conv_dilation_w_i;
+    logic [31:0]   cfg_conv_k_base_i;
+    logic          cfg_conv_stream_en_i;
+    logic          cfg_conv_done;
+    logic          cfg_conv_busy;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -234,6 +279,98 @@ module systolic_controller #(
         .pop_i      (ofm_fifo_pop)
     );
 
+    systolic_ctrl_regs #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(CFG_DATA_WIDTH)
+    ) i_systolic_ctrl_regs (
+        .clk_i              (clk_i),
+        .rst_ni             (rst_ni),
+        .req_i              (ctrl_req_i),
+        .gnt_o              (ctrl_gnt_o),
+        .addr_i             (ctrl_addr_i),
+        .we_i               (ctrl_we_i),
+        .be_i               (ctrl_be_i),
+        .wdata_i            (ctrl_wdata_i),
+        .rvalid_o           (ctrl_rvalid_o),
+        .rdata_o            (ctrl_rdata_o),
+        .cfg_sys_start_o    (cfg_sys_start_i),
+        .cfg_sys_weight_ptr_o(cfg_sys_weight_ptr_i),
+        .cfg_sys_ifm_ptr_o  (cfg_sys_ifm_ptr_i),
+        .cfg_sys_ofm_ptr_o  (cfg_sys_ofm_ptr_i),
+        .cfg_sys_psum_ptr_o (cfg_sys_psum_ptr_i),
+        .cfg_sys_dim_m_o    (cfg_sys_dim_m_i),
+        .cfg_sys_accum_en_o (cfg_sys_accum_en_i),
+        .cfg_sys_ifm_stream_en_o(cfg_sys_ifm_stream_en_i),
+        .cfg_requant_en_o   (cfg_requant_en_i),
+        .cfg_requant_bias_o (cfg_requant_bias_i),
+        .cfg_requant_multiplier_o(cfg_requant_multiplier_i),
+        .cfg_requant_shift_o(cfg_requant_shift_i),
+        .cfg_requant_zero_point_o(cfg_requant_zero_point_i),
+        .cfg_requant_clamp_min_o(cfg_requant_clamp_min_i),
+        .cfg_requant_clamp_max_o(cfg_requant_clamp_max_i),
+        .cfg_sys_done_i     (cfg_sys_done_o),
+        .cfg_conv_start_o   (cfg_conv_start_i),
+        .cfg_conv_input_ptr_o(cfg_conv_input_ptr_i),
+        .cfg_conv_output_ptr_o(cfg_conv_output_ptr_i),
+        .cfg_conv_rows_o    (cfg_conv_rows_i),
+        .cfg_conv_output_w_o(cfg_conv_output_w_i),
+        .cfg_conv_input_h_o (cfg_conv_input_h_i),
+        .cfg_conv_input_w_o (cfg_conv_input_w_i),
+        .cfg_conv_input_c_o (cfg_conv_input_c_i),
+        .cfg_conv_kernel_h_o(cfg_conv_kernel_h_i),
+        .cfg_conv_kernel_w_o(cfg_conv_kernel_w_i),
+        .cfg_conv_stride_h_o(cfg_conv_stride_h_i),
+        .cfg_conv_stride_w_o(cfg_conv_stride_w_i),
+        .cfg_conv_pad_h_o   (cfg_conv_pad_h_i),
+        .cfg_conv_pad_w_o   (cfg_conv_pad_w_i),
+        .cfg_conv_dilation_h_o(cfg_conv_dilation_h_i),
+        .cfg_conv_dilation_w_o(cfg_conv_dilation_w_i),
+        .cfg_conv_k_base_o  (cfg_conv_k_base_i),
+        .cfg_conv_stream_en_o(cfg_conv_stream_en_i),
+        .cfg_conv_done_i    (cfg_conv_done),
+        .cfg_conv_busy_i    (cfg_conv_busy)
+    );
+
+    conv2d_feeder #(
+        .ADDR_WIDTH(ADDR_WIDTH),
+        .DATA_WIDTH(DATA_WIDTH),
+        .K_TILE    (ARRAY_DIM)
+    ) i_conv2d_feeder (
+        .clk_i             (clk_i),
+        .rst_ni            (rst_ni),
+        .cfg_input_ptr_i   (cfg_conv_input_ptr_i),
+        .cfg_output_ptr_i  (cfg_conv_output_ptr_i),
+        .cfg_rows_i        (cfg_conv_rows_i),
+        .cfg_output_w_i    (cfg_conv_output_w_i),
+        .cfg_input_h_i     (cfg_conv_input_h_i),
+        .cfg_input_w_i     (cfg_conv_input_w_i),
+        .cfg_input_c_i     (cfg_conv_input_c_i),
+        .cfg_kernel_h_i    (cfg_conv_kernel_h_i),
+        .cfg_kernel_w_i    (cfg_conv_kernel_w_i),
+        .cfg_stride_h_i    (cfg_conv_stride_h_i),
+        .cfg_stride_w_i    (cfg_conv_stride_w_i),
+        .cfg_pad_h_i       (cfg_conv_pad_h_i),
+        .cfg_pad_w_i       (cfg_conv_pad_w_i),
+        .cfg_dilation_h_i  (cfg_conv_dilation_h_i),
+        .cfg_dilation_w_i  (cfg_conv_dilation_w_i),
+        .cfg_k_base_i      (cfg_conv_k_base_i),
+        .cfg_stream_en_i   (cfg_conv_stream_en_i),
+        .start_i           (cfg_conv_start_i),
+        .done_o            (cfg_conv_done),
+        .busy_o            (cfg_conv_busy),
+        .stream_ifm_valid_o(stream_ifm_valid),
+        .stream_ifm_ready_i(stream_ifm_ready),
+        .stream_ifm_data_o (stream_ifm_data),
+        .obi_req_o         (conv_obi_req_o),
+        .obi_gnt_i         (conv_obi_gnt_i),
+        .obi_addr_o        (conv_obi_addr_o),
+        .obi_we_o          (conv_obi_we_o),
+        .obi_be_o          (conv_obi_be_o),
+        .obi_wdata_o       (conv_obi_wdata_o),
+        .obi_rvalid_i      (conv_obi_rvalid_i),
+        .obi_rdata_i       (conv_obi_rdata_i)
+    );
+
     // Tie off unused
     assign psum_data_o = '0;
     assign obi_i_we_o = 1'b0;
@@ -274,6 +411,7 @@ module systolic_controller #(
         weight_fifo_pop  = 1'b0;
         ifm_fifo_push    = 1'b0;
         ifm_fifo_pop     = 1'b0;
+        stream_ifm_ready = 1'b0;
         ofm_fifo_pop     = 1'b0;
         requant_in_valid = 1'b0;
         requant_out_ready = 1'b0;
@@ -381,24 +519,38 @@ module systolic_controller #(
             end
 
             COMPUTE: begin
-                if (req_cnt_q > 0) begin
-                    obi_i_req_o = !ifm_fifo_full && !ofm_fifo_almost_full;
-                    obi_i_addr_o = i_ptr_q;
-                    if (obi_i_req_o && obi_i_gnt_i) begin
-                        i_ptr_d = i_ptr_q + 32;
-                        req_cnt_d   = req_cnt_q - 1;
+                if (cfg_sys_ifm_stream_en_i) begin
+                    stream_ifm_ready = (req_cnt_q > 0) && !ofm_fifo_almost_full;
+                    if (stream_ifm_valid && stream_ifm_ready) begin
+                        compute_en_o = 1'b1;
+                        clear_acc_o  = 1'b0;
+                        ifm_data_o   = stream_ifm_data;
+                        req_cnt_d = req_cnt_q - 1;
+                        rsp_cnt_d = rsp_cnt_q - 1;
+                        if (req_cnt_q == 32'd1) begin
+                            state_d = WAIT_DRAIN;
+                        end
                     end
-                end
-                ifm_fifo_push = obi_i_rvalid_i && !ifm_fifo_full;
-                if (!ifm_fifo_empty && !ofm_fifo_almost_full) begin
-                    compute_en_o = 1'b1;
-                    clear_acc_o  = 1'b0;
-                    ifm_fifo_pop = 1'b1;
-                    ifm_data_o   = ifm_fifo_out;
-                    rsp_cnt_d = rsp_cnt_q - 1;
-                end
-                if (req_cnt_q == 0 && rsp_cnt_q == 1 && ifm_fifo_pop) begin
-                    state_d = WAIT_DRAIN;
+                end else begin
+                    if (req_cnt_q > 0) begin
+                        obi_i_req_o = !ifm_fifo_full && !ofm_fifo_almost_full;
+                        obi_i_addr_o = i_ptr_q;
+                        if (obi_i_req_o && obi_i_gnt_i) begin
+                            i_ptr_d = i_ptr_q + 32;
+                            req_cnt_d   = req_cnt_q - 1;
+                        end
+                    end
+                    ifm_fifo_push = obi_i_rvalid_i && !ifm_fifo_full;
+                    if (!ifm_fifo_empty && !ofm_fifo_almost_full) begin
+                        compute_en_o = 1'b1;
+                        clear_acc_o  = 1'b0;
+                        ifm_fifo_pop = 1'b1;
+                        ifm_data_o   = ifm_fifo_out;
+                        rsp_cnt_d = rsp_cnt_q - 1;
+                    end
+                    if (req_cnt_q == 0 && rsp_cnt_q == 1 && ifm_fifo_pop) begin
+                        state_d = WAIT_DRAIN;
+                    end
                 end
             end
 

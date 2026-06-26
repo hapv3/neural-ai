@@ -344,6 +344,15 @@ module npu_cluster (
     logic [MMIO_DATA_WIDTH-1:0] ctrl_wdata;
     logic                      ctrl_rvalid;
     logic [MMIO_DATA_WIDTH-1:0] ctrl_rdata;
+    logic                      dma_ctrl_req;
+    logic                      dma_ctrl_gnt;
+    logic                      dma_ctrl_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] dma_ctrl_rdata;
+    logic                      systolic_ctrl_req;
+    logic                      systolic_ctrl_gnt;
+    logic                      systolic_ctrl_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] systolic_ctrl_rdata;
+    logic                      ctrl_systolic_sel;
 
     logic                      idma_mm_req;
     logic                      idma_mm_gnt;
@@ -546,21 +555,15 @@ module npu_cluster (
     logic [31:0] cfg_dma_length;
     logic        cfg_dma_done;
 
-    logic        cfg_sys_start;
-    logic [31:0] cfg_sys_w_ptr;
-    logic [31:0] cfg_sys_i_ptr;
-    logic [31:0] cfg_sys_o_ptr;
-    logic [31:0] cfg_sys_psum_ptr;
-    logic [31:0] cfg_sys_dim_m;
     logic        cfg_sys_done;
-    logic        cfg_sys_accum_en;
-    logic        cfg_requant_en;
-    logic [31:0][31:0] cfg_requant_bias;
-    logic [31:0][31:0] cfg_requant_multiplier;
-    logic [31:0][7:0]  cfg_requant_shift;
-    logic [31:0][31:0] cfg_requant_zero_point;
-    logic [31:0]       cfg_requant_clamp_min;
-    logic [31:0]       cfg_requant_clamp_max;
+
+    assign ctrl_systolic_sel = ((ctrl_addr & 32'hFFFF) >= 32'h0100) &&
+                               ((ctrl_addr & 32'hFFFF) < 32'h0500);
+    assign dma_ctrl_req = ctrl_req && !ctrl_systolic_sel;
+    assign systolic_ctrl_req = ctrl_req && ctrl_systolic_sel;
+    assign ctrl_gnt = ctrl_systolic_sel ? systolic_ctrl_gnt : dma_ctrl_gnt;
+    assign ctrl_rvalid = systolic_ctrl_rvalid | dma_ctrl_rvalid;
+    assign ctrl_rdata = systolic_ctrl_rvalid ? systolic_ctrl_rdata : dma_ctrl_rdata;
 
     cluster_ctrl_regs #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -568,36 +571,20 @@ module npu_cluster (
     ) u_ctrl_regs (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
-        .req_i              (ctrl_req),
-        .gnt_o              (ctrl_gnt),
+        .req_i              (dma_ctrl_req),
+        .gnt_o              (dma_ctrl_gnt),
         .addr_i             (ctrl_addr),
         .we_i               (ctrl_we),
         .be_i               (ctrl_be),
         .wdata_i            (ctrl_wdata),
-        .rvalid_o           (ctrl_rvalid),
-        .rdata_o            (ctrl_rdata),
+        .rvalid_o           (dma_ctrl_rvalid),
+        .rdata_o            (dma_ctrl_rdata),
 
         .cfg_dma_start_o    (cfg_dma_start),
         .cfg_dma_src_addr_o (cfg_dma_src_addr),
         .cfg_dma_dst_addr_o (cfg_dma_dst_addr),
         .cfg_dma_length_o   (cfg_dma_length),
-        .cfg_dma_done_i     (cfg_dma_done),
-
-        .cfg_sys_start_o      (cfg_sys_start),
-        .cfg_sys_weight_ptr_o (cfg_sys_w_ptr),
-        .cfg_sys_ifm_ptr_o    (cfg_sys_i_ptr),
-        .cfg_sys_ofm_ptr_o    (cfg_sys_o_ptr),
-        .cfg_sys_psum_ptr_o   (cfg_sys_psum_ptr),
-        .cfg_sys_dim_m_o      (cfg_sys_dim_m),
-        .cfg_sys_accum_en_o   (cfg_sys_accum_en),
-        .cfg_requant_en_o     (cfg_requant_en),
-        .cfg_requant_bias_o   (cfg_requant_bias),
-        .cfg_requant_multiplier_o (cfg_requant_multiplier),
-        .cfg_requant_shift_o  (cfg_requant_shift),
-        .cfg_requant_zero_point_o (cfg_requant_zero_point),
-        .cfg_requant_clamp_min_o (cfg_requant_clamp_min),
-        .cfg_requant_clamp_max_o (cfg_requant_clamp_max),
-        .cfg_sys_done_i       (cfg_sys_done)
+        .cfg_dma_done_i     (cfg_dma_done)
     );
 
     npu_interrupt_ctrl #(
@@ -650,9 +637,9 @@ module npu_cluster (
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (11 Masters)
+    // 5. Shared Data TCDM Interconnect (12 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 11;
+    localparam int unsigned NUM_MASTERS = 12;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
@@ -664,6 +651,7 @@ module npu_cluster (
     // Master 8: Spatz Vector Engine (VLSU port 1)
     // Master 9: PULP iDMA OBI2AXI read port
     // Master 10: AFU LUT processor
+    // Master 11: RTL Conv2D feeder TCDM/debug path
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -713,9 +701,9 @@ module npu_cluster (
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(11'h5FA), // M1, M3-M8, M10: Spatz + Systolic + AFU
-        .DMA_MASTER_MASK (11'h204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(11'h001)  // M0: Snitch D-Bus
+        .HWPE_MASTER_MASK(12'hDFA), // M1, M3-M8, M10-M11: Spatz + Systolic + AFU + Conv feeder
+        .DMA_MASTER_MASK (12'h204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(12'h001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -1088,7 +1076,29 @@ module npu_cluster (
     assign afu_obi_rdata  = master_rsp[10].rdata;
 
     //=========================================================
-    // 7. Systolic Array (Matrix Engine)
+    // 7. Systolic-integrated Conv2D feeder TCDM/debug path
+    //=========================================================
+    logic                      conv_obi_req;
+    logic                      conv_obi_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] conv_obi_addr;
+    logic                      conv_obi_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] conv_obi_be;
+    logic [OBI_DATA_WIDTH-1:0] conv_obi_wdata;
+    logic                      conv_obi_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] conv_obi_rdata;
+
+    assign master_req[11].req   = conv_obi_req;
+    assign master_req[11].we    = conv_obi_we;
+    assign master_req[11].be    = conv_obi_be;
+    assign master_req[11].addr  = conv_obi_addr;
+    assign master_req[11].wdata = conv_obi_wdata;
+
+    assign conv_obi_gnt    = master_rsp[11].gnt;
+    assign conv_obi_rvalid = master_rsp[11].rvalid;
+    assign conv_obi_rdata  = master_rsp[11].rdata;
+
+    //=========================================================
+    // 8. Systolic Array (Matrix Engine)
     //=========================================================
     // Wires between systolic_controller and npu_systolic_array
     logic                      sys_weight_load_en;
@@ -1122,6 +1132,7 @@ module npu_cluster (
     systolic_controller #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
+        .CFG_DATA_WIDTH(MMIO_DATA_WIDTH),
         .ARRAY_DIM(32),
         .INPUT_ELEM_WIDTH(8),
         .OFM_ELEM_WIDTH(32),
@@ -1131,20 +1142,14 @@ module npu_cluster (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
 
-        .cfg_sys_start_i    (cfg_sys_start),
-        .cfg_sys_weight_ptr_i(cfg_sys_w_ptr),
-        .cfg_sys_ifm_ptr_i  (cfg_sys_i_ptr),
-        .cfg_sys_ofm_ptr_i  (cfg_sys_o_ptr),
-        .cfg_sys_psum_ptr_i (cfg_sys_psum_ptr),
-        .cfg_sys_dim_m_i    (cfg_sys_dim_m),
-        .cfg_sys_accum_en_i (cfg_sys_accum_en),
-        .cfg_requant_en_i   (cfg_requant_en),
-        .cfg_requant_bias_i (cfg_requant_bias),
-        .cfg_requant_multiplier_i (cfg_requant_multiplier),
-        .cfg_requant_shift_i(cfg_requant_shift),
-        .cfg_requant_zero_point_i (cfg_requant_zero_point),
-        .cfg_requant_clamp_min_i (cfg_requant_clamp_min),
-        .cfg_requant_clamp_max_i (cfg_requant_clamp_max),
+        .ctrl_req_i         (systolic_ctrl_req),
+        .ctrl_gnt_o         (systolic_ctrl_gnt),
+        .ctrl_addr_i        (ctrl_addr),
+        .ctrl_we_i          (ctrl_we),
+        .ctrl_be_i          (ctrl_be),
+        .ctrl_wdata_i       (ctrl_wdata),
+        .ctrl_rvalid_o      (systolic_ctrl_rvalid),
+        .ctrl_rdata_o       (systolic_ctrl_rdata),
         .cfg_sys_done_o     (cfg_sys_done),
 
         .obi_i_req_o        (sys_obi_i_req),
@@ -1155,6 +1160,15 @@ module npu_cluster (
         .obi_i_wdata_o      (sys_obi_i_wdata),
         .obi_i_rvalid_i     (sys_obi_i_rvalid),
         .obi_i_rdata_i      (sys_obi_i_rdata),
+
+        .conv_obi_req_o     (conv_obi_req),
+        .conv_obi_gnt_i     (conv_obi_gnt),
+        .conv_obi_addr_o    (conv_obi_addr),
+        .conv_obi_we_o      (conv_obi_we),
+        .conv_obi_be_o      (conv_obi_be),
+        .conv_obi_wdata_o   (conv_obi_wdata),
+        .conv_obi_rvalid_i  (conv_obi_rvalid),
+        .conv_obi_rdata_i   (conv_obi_rdata),
 
         .obi_o_req_o        (sys_obi_o_req),
         .obi_o_gnt_i        (sys_obi_o_gnt),
