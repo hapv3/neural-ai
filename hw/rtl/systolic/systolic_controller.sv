@@ -17,7 +17,9 @@ module systolic_controller #(
     input  logic [31:0]               cfg_sys_weight_ptr_i,
     input  logic [31:0]               cfg_sys_ifm_ptr_i,
     input  logic [31:0]               cfg_sys_ofm_ptr_i,
+    input  logic [31:0]               cfg_sys_psum_ptr_i,
     input  logic [31:0]               cfg_sys_dim_m_i, // Number of IFM rows (skewed)
+    input  logic                      cfg_sys_accum_en_i,
     input  logic                      cfg_requant_en_i,
     input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_bias_i,
     input  logic [ARRAY_DIM-1:0][31:0] cfg_requant_multiplier_i,
@@ -63,6 +65,9 @@ module systolic_controller #(
         LOAD_WEIGHTS,
         COMPUTE,
         WAIT_DRAIN,
+        ACCUM_READ,
+        ACCUM_WRITE,
+        ACCUM_REQUANT,
         DONE
     } state_e;
 
@@ -74,6 +79,7 @@ module systolic_controller #(
     logic [31:0] w_ptr_q, w_ptr_d;
     logic [31:0] i_ptr_q, i_ptr_d;
     logic [31:0] o_ptr_q, o_ptr_d;
+    logic [31:0] a_ptr_q, a_ptr_d;
     logic [31:0] req_cnt_q, req_cnt_d; // Counter for requests
     logic [31:0] rsp_cnt_q, rsp_cnt_d; // Counter for responses
     logic [31:0] drain_cnt_q, drain_cnt_d; // Counter for valid outputs
@@ -82,6 +88,7 @@ module systolic_controller #(
     localparam int unsigned OFM_ROW_BYTES = (ARRAY_DIM * OFM_ELEM_WIDTH) / 8;
     localparam int unsigned REQUANT_ROW_BYTES = ARRAY_DIM;
     localparam int unsigned OFM_ELEMS_PER_OBI = DATA_WIDTH / OFM_ELEM_WIDTH;
+    localparam int unsigned OFM_ROW_BEATS = OFM_ROW_BYTES / OFM_BEAT_BYTES;
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
     typedef logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   ofm_row_t;
@@ -108,6 +115,9 @@ module systolic_controller #(
 
     ofm_row_t      ofm_fifo_data;
     ofm_row_t      ofm_fifo_out;
+    ofm_row_t      accum_row_q, accum_row_d;
+    ofm_row_t      accum_sum;
+    ofm_row_t      requant_acc;
     logic          ofm_fifo_push;
     logic          ofm_fifo_pop;
     logic          ofm_fifo_full;
@@ -123,6 +133,8 @@ module systolic_controller #(
     logic [255:0]  requant_packed_data;
     logic          requant_invalid;
     logic          requant_config_invalid;
+    logic [$clog2(OFM_ROW_BEATS+1)-1:0] accum_beat_q, accum_beat_d;
+    logic          accum_requant_sent_q, accum_requant_sent_d;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -130,6 +142,14 @@ module systolic_controller #(
     assign ifm_fifo_data    = obi_i_rdata_i;
     assign ofm_fifo_data    = ofm_data_i;
     assign ofm_fifo_almost_full = ofm_fifo_full || (ofm_fifo_usage >= OFM_FIFO_STOP_LEVEL);
+
+    always_comb begin
+        for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
+            accum_sum[ch] = ofm_fifo_out[ch] + accum_row_q[ch];
+        end
+    end
+
+    assign requant_acc = (state_q == ACCUM_REQUANT) ? accum_sum : ofm_fifo_out;
 
     always_comb begin
         requant_config_invalid = ($signed(cfg_requant_clamp_min_i) > $signed(cfg_requant_clamp_max_i));
@@ -147,7 +167,7 @@ module systolic_controller #(
         .rst_ni        (rst_ni),
         .in_valid_i    (requant_in_valid),
         .in_ready_o    (requant_in_ready),
-        .acc_i         (ofm_fifo_out),
+        .acc_i         (requant_acc),
         .bias_i        (cfg_requant_bias_i),
         .multiplier_i  (cfg_requant_multiplier_i),
         .shift_i       (cfg_requant_shift_i),
@@ -232,9 +252,13 @@ module systolic_controller #(
         w_ptr_d = w_ptr_q;
         i_ptr_d = i_ptr_q;
         o_ptr_d = o_ptr_q;
+        a_ptr_d = a_ptr_q;
         req_cnt_d   = req_cnt_q;
         rsp_cnt_d   = rsp_cnt_q;
         drain_cnt_d = drain_cnt_q;
+        accum_row_d = accum_row_q;
+        accum_beat_d = accum_beat_q;
+        accum_requant_sent_d = accum_requant_sent_q;
 
         cfg_sys_done_o = 1'b0;
 
@@ -253,7 +277,9 @@ module systolic_controller #(
         ofm_fifo_pop     = 1'b0;
         requant_in_valid = 1'b0;
         requant_out_ready = 1'b0;
-        ofm_fifo_push    = ((state_q == COMPUTE) || (state_q == WAIT_DRAIN)) &&
+        ofm_fifo_push    = ((state_q == COMPUTE) || (state_q == WAIT_DRAIN) ||
+                            (state_q == ACCUM_READ) || (state_q == ACCUM_WRITE) ||
+                            (state_q == ACCUM_REQUANT)) &&
                             ofm_valid_i && !ofm_fifo_full;
 
         // OBI Output ports (Write)
@@ -263,14 +289,18 @@ module systolic_controller #(
         obi_o_addr_o[2] = o_ptr_q + (2 * OFM_BEAT_BYTES);
         obi_o_addr_o[3] = o_ptr_q + (3 * OFM_BEAT_BYTES);
         
-        obi_o_wdata_o[0] = ofm_fifo_out[OFM_ELEMS_PER_OBI-1:0];
-        obi_o_wdata_o[1] = ofm_fifo_out[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
-        obi_o_wdata_o[2] = ofm_fifo_out[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
-        obi_o_wdata_o[3] = ofm_fifo_out[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
+        obi_o_wdata_o[0] = (state_q == ACCUM_WRITE) ? accum_sum[OFM_ELEMS_PER_OBI-1:0] :
+                                                     ofm_fifo_out[OFM_ELEMS_PER_OBI-1:0];
+        obi_o_wdata_o[1] = (state_q == ACCUM_WRITE) ? accum_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI] :
+                                                     ofm_fifo_out[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
+        obi_o_wdata_o[2] = (state_q == ACCUM_WRITE) ? accum_sum[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)] :
+                                                     ofm_fifo_out[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
+        obi_o_wdata_o[3] = (state_q == ACCUM_WRITE) ? accum_sum[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)] :
+                                                     ofm_fifo_out[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
 
         // Handle OFM writes through a configurable FIFO.  The FIFO absorbs
         // systolic output rows while O-TCDM write grants are backpressured.
-        if (cfg_requant_en_i) begin
+        if (!cfg_sys_accum_en_i && cfg_requant_en_i) begin
             if (requant_out_valid) begin
                 obi_o_req_o[0] = 1'b1;
                 obi_o_wdata_o[0] = requant_packed_data;
@@ -287,7 +317,7 @@ module systolic_controller #(
                 requant_in_valid = 1'b1;
                 ofm_fifo_pop = 1'b1;
             end
-        end else if (!ofm_fifo_empty) begin
+        end else if (!cfg_sys_accum_en_i && !ofm_fifo_empty) begin
             obi_o_req_o = 4'b1111;
             if (obi_o_gnt_i == 4'b1111) begin
                 ofm_fifo_pop = 1'b1;
@@ -303,17 +333,25 @@ module systolic_controller #(
                         w_ptr_d = cfg_sys_weight_ptr_i;
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
+                        a_ptr_d = cfg_sys_psum_ptr_i;
                         req_cnt_d = '0;
                         rsp_cnt_d = '0;
                         drain_cnt_d = '0;
+                        accum_row_d = '0;
+                        accum_beat_d = '0;
+                        accum_requant_sent_d = 1'b0;
                         state_d = DONE;
                     end else begin
                         w_ptr_d = cfg_sys_weight_ptr_i + ((ARRAY_DIM - 1) * 32);
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
+                        a_ptr_d = cfg_sys_psum_ptr_i;
                         req_cnt_d   = ARRAY_DIM; // 32 rows of weights
                         rsp_cnt_d   = ARRAY_DIM;
                         drain_cnt_d = cfg_sys_dim_m_i;
+                        accum_row_d = '0;
+                        accum_beat_d = '0;
+                        accum_requant_sent_d = 1'b0;
                         state_d = LOAD_WEIGHTS;
                     end
                 end
@@ -365,9 +403,75 @@ module systolic_controller #(
             end
 
             WAIT_DRAIN: begin
-                // Wait until all outputs are drained to memory
-                if (drain_cnt_q == 0 && ofm_fifo_empty) begin
-                    state_d = DONE;
+                if (cfg_sys_accum_en_i) begin
+                    if (drain_cnt_q == 0 && ofm_fifo_empty) begin
+                        state_d = DONE;
+                    end else if (!ofm_fifo_empty) begin
+                        req_cnt_d = OFM_ROW_BEATS;
+                        rsp_cnt_d = OFM_ROW_BEATS;
+                        accum_row_d = '0;
+                        accum_beat_d = '0;
+                        state_d = ACCUM_READ;
+                    end
+                end else begin
+                    if (drain_cnt_q == 0 && ofm_fifo_empty) begin
+                        state_d = DONE;
+                    end
+                end
+            end
+
+            ACCUM_READ: begin
+                if (req_cnt_q > 0) begin
+                    obi_i_req_o = 1'b1;
+                    obi_i_addr_o = a_ptr_q;
+                    if (obi_i_gnt_i) begin
+                        a_ptr_d = a_ptr_q + OFM_BEAT_BYTES;
+                        req_cnt_d = req_cnt_q - 1;
+                    end
+                end
+                if (obi_i_rvalid_i) begin
+                    for (int unsigned elem = 0; elem < OFM_ELEMS_PER_OBI; elem++) begin
+                        accum_row_d[(accum_beat_q * OFM_ELEMS_PER_OBI) + elem] =
+                            obi_i_rdata_i[elem * OFM_ELEM_WIDTH +: OFM_ELEM_WIDTH];
+                    end
+                    accum_beat_d = accum_beat_q + 1;
+                    rsp_cnt_d = rsp_cnt_q - 1;
+                    if (rsp_cnt_q == 1) begin
+                        state_d = cfg_requant_en_i ? ACCUM_REQUANT : ACCUM_WRITE;
+                    end
+                end
+            end
+
+            ACCUM_WRITE: begin
+                obi_o_req_o = 4'b1111;
+                if (obi_o_gnt_i == 4'b1111) begin
+                    ofm_fifo_pop = 1'b1;
+                    o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
+                    drain_cnt_d = drain_cnt_q - 1;
+                    state_d = WAIT_DRAIN;
+                end
+            end
+
+            ACCUM_REQUANT: begin
+                if (!accum_requant_sent_q && requant_in_ready && !requant_config_invalid) begin
+                    requant_in_valid = 1'b1;
+                    ofm_fifo_pop = 1'b1;
+                    accum_requant_sent_d = 1'b1;
+                end
+
+                if (requant_out_valid) begin
+                    obi_o_req_o[0] = 1'b1;
+                    obi_o_wdata_o[0] = requant_packed_data;
+                    if (obi_o_gnt_i[0] || requant_invalid) begin
+                        requant_out_ready = 1'b1;
+                        o_ptr_d = o_ptr_q + REQUANT_ROW_BYTES;
+                        drain_cnt_d = drain_cnt_q - 1;
+                        accum_requant_sent_d = 1'b0;
+                        state_d = WAIT_DRAIN;
+                    end
+                    if (requant_invalid) begin
+                        obi_o_req_o[0] = 1'b0;
+                    end
                 end
             end
 
@@ -388,17 +492,25 @@ module systolic_controller #(
             w_ptr_q         <= '0;
             i_ptr_q         <= '0;
             o_ptr_q         <= '0;
+            a_ptr_q         <= '0;
             req_cnt_q       <= '0;
             rsp_cnt_q       <= '0;
             drain_cnt_q     <= '0;
+            accum_row_q     <= '0;
+            accum_beat_q    <= '0;
+            accum_requant_sent_q <= 1'b0;
         end else begin
             state_q     <= state_d;
             w_ptr_q     <= w_ptr_d;
             i_ptr_q     <= i_ptr_d;
             o_ptr_q     <= o_ptr_d;
+            a_ptr_q     <= a_ptr_d;
             req_cnt_q   <= req_cnt_d;
             rsp_cnt_q   <= rsp_cnt_d;
             drain_cnt_q <= drain_cnt_d;
+            accum_row_q <= accum_row_d;
+            accum_beat_q <= accum_beat_d;
+            accum_requant_sent_q <= accum_requant_sent_d;
         end
     end
 

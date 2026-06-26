@@ -29,7 +29,9 @@ module cluster_ctrl_regs #(
     output logic [31:0]               cfg_sys_weight_ptr_o,
     output logic [31:0]               cfg_sys_ifm_ptr_o,
     output logic [31:0]               cfg_sys_ofm_ptr_o,
+    output logic [31:0]               cfg_sys_psum_ptr_o,
     output logic [31:0]               cfg_sys_dim_m_o,
+    output logic                      cfg_sys_accum_en_o,
     output logic                      cfg_requant_en_o,
     output logic [31:0][31:0]         cfg_requant_bias_o,
     output logic [31:0][31:0]         cfg_requant_multiplier_o,
@@ -54,6 +56,8 @@ module cluster_ctrl_regs #(
     localparam logic [ADDR_WIDTH-1:0] REG_SYS_DIM_M = 32'h010C;
     localparam logic [ADDR_WIDTH-1:0] REG_SYS_START = 32'h0110;
     localparam logic [ADDR_WIDTH-1:0] REG_SYS_DONE  = 32'h0114;
+    localparam logic [ADDR_WIDTH-1:0] REG_SYS_PSUM_PTR = 32'h0118;
+    localparam logic [ADDR_WIDTH-1:0] REG_SYS_ACCUM_CTRL = 32'h011C;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_CTRL   = 32'h0120;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_CMIN   = 32'h0124;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_CMAX   = 32'h0128;
@@ -72,9 +76,11 @@ module cluster_ctrl_regs #(
     logic [31:0] r_sys_w_ptr;
     logic [31:0] r_sys_i_ptr;
     logic [31:0] r_sys_o_ptr;
+    logic [31:0] r_sys_psum_ptr;
     logic [31:0] r_sys_dim_m;
     logic        r_sys_start;
     logic        r_sys_done;
+    logic        r_sys_accum_en;
     logic        r_requant_en;
     logic [31:0][31:0] r_requant_bias;
     logic [31:0][31:0] r_requant_multiplier;
@@ -101,9 +107,11 @@ module cluster_ctrl_regs #(
             r_sys_w_ptr <= '0;
             r_sys_i_ptr <= '0;
             r_sys_o_ptr <= '0;
+            r_sys_psum_ptr <= '0;
             r_sys_dim_m <= '0;
             r_sys_start <= 1'b0;
             r_sys_done  <= 1'b0;
+            r_sys_accum_en <= 1'b0;
             r_requant_en <= 1'b0;
             r_requant_clamp_min <= 32'hFFFF_FF80;
             r_requant_clamp_max <= 32'h0000_007F;
@@ -152,9 +160,11 @@ module cluster_ctrl_regs #(
                                 REG_SYS_W_PTR: r_sys_w_ptr <= wdata_word;
                                 REG_SYS_I_PTR: r_sys_i_ptr <= wdata_word;
                                 REG_SYS_O_PTR: r_sys_o_ptr <= wdata_word;
+                                REG_SYS_PSUM_PTR: r_sys_psum_ptr <= wdata_word;
                                 REG_SYS_DIM_M: r_sys_dim_m <= wdata_word;
                                 REG_SYS_START: r_sys_start <= wdata_word[0];
                                 REG_SYS_DONE:  r_sys_done  <= 1'b0;
+                                REG_SYS_ACCUM_CTRL: r_sys_accum_en <= wdata_word[0];
                                 REG_RQ_CTRL:   r_requant_en <= wdata_word[0];
                                 REG_RQ_CMIN:   r_requant_clamp_min <= wdata_word;
                                 REG_RQ_CMAX:   r_requant_clamp_max <= wdata_word;
@@ -203,9 +213,11 @@ module cluster_ctrl_regs #(
                     REG_SYS_W_PTR: rdata_word = r_sys_w_ptr;
                     REG_SYS_I_PTR: rdata_word = r_sys_i_ptr;
                     REG_SYS_O_PTR: rdata_word = r_sys_o_ptr;
+                    REG_SYS_PSUM_PTR: rdata_word = r_sys_psum_ptr;
                     REG_SYS_DIM_M: rdata_word = r_sys_dim_m;
                     REG_SYS_START: rdata_word = {31'd0, r_sys_start};
                     REG_SYS_DONE:  rdata_word = {31'd0, r_sys_done};
+                    REG_SYS_ACCUM_CTRL: rdata_word = {31'd0, r_sys_accum_en};
                     REG_RQ_CTRL:   rdata_word = {31'd0, r_requant_en};
                     REG_RQ_CMIN:   rdata_word = r_requant_clamp_min;
                     REG_RQ_CMAX:   rdata_word = r_requant_clamp_max;
@@ -238,7 +250,9 @@ module cluster_ctrl_regs #(
     assign cfg_sys_weight_ptr_o = r_sys_w_ptr;
     assign cfg_sys_ifm_ptr_o    = r_sys_i_ptr;
     assign cfg_sys_ofm_ptr_o    = r_sys_o_ptr;
+    assign cfg_sys_psum_ptr_o   = r_sys_psum_ptr;
     assign cfg_sys_dim_m_o      = r_sys_dim_m;
+    assign cfg_sys_accum_en_o   = r_sys_accum_en;
     assign cfg_requant_en_o     = r_requant_en;
     assign cfg_requant_bias_o   = r_requant_bias;
     assign cfg_requant_multiplier_o = r_requant_multiplier;

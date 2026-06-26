@@ -18,8 +18,12 @@ from npu_test_utils import (
 L2_WEIGHT = 0x80000000
 L2_IFM = 0x80001000
 L2_OUT = 0x80010000
+L2_WEIGHT_K64 = 0x80040000
+L2_IFM_K64 = 0x80041000
+L2_OUT_K64 = 0x80050000
 DIMS = [1, 2, 31, 32, 33, 64, 128, 1024]
 MAX_M = 1024
+K64_M = 16
 
 
 def signal_to_int(signal):
@@ -60,6 +64,32 @@ def make_ifm_bytes():
     return [to_u8(ifm_value(m, k)) for m in range(MAX_M) for k in range(32)]
 
 
+def weight_k64_value(block, k, n):
+    return ((block * 5 + k * 7 + n * 3) % 13) - 6
+
+
+def ifm_k64_value(block, m, k):
+    return ((block * 9 + m * 5 + k * 11) % 15) - 7
+
+
+def make_weight_k64_bytes():
+    out = []
+    for block in range(2):
+        for k in range(32):
+            for n in range(32):
+                out.append(to_u8(weight_k64_value(block, k, n)))
+    return out
+
+
+def make_ifm_k64_bytes():
+    out = []
+    for block in range(2):
+        for m in range(K64_M):
+            for k in range(32):
+                out.append(to_u8(ifm_k64_value(block, m, k)))
+    return out
+
+
 def golden_for_dim(dim_m):
     out = []
     for m in range(dim_m):
@@ -67,6 +97,18 @@ def golden_for_dim(dim_m):
             acc = 0
             for k in range(32):
                 acc += ifm_value(m, k) * weight_value(k, n)
+            out.extend(s32_to_bytes(acc & 0xFFFFFFFF))
+    return out
+
+
+def golden_k64():
+    out = []
+    for m in range(K64_M):
+        for n in range(32):
+            acc = 0
+            for block in range(2):
+                for k in range(32):
+                    acc += ifm_k64_value(block, m, k) * weight_k64_value(block, k, n)
             out.extend(s32_to_bytes(acc & 0xFFFFFFFF))
     return out
 
@@ -82,6 +124,8 @@ async def boot_and_run_independent_systolic(dut, test_file):
     await load_firmware_axi(axi_master, fw_path)
     await write_l2_bytes(dut, L2_WEIGHT, make_weight_bytes())
     await write_l2_bytes(dut, L2_IFM, make_ifm_bytes())
+    await write_l2_bytes(dut, L2_WEIGHT_K64, make_weight_k64_bytes())
+    await write_l2_bytes(dut, L2_IFM_K64, make_ifm_k64_bytes())
     await release_fetch(dut)
 
     await wait_for_host_irq(dut, timeout_cycles=200000)
@@ -99,3 +143,11 @@ async def check_independent_systolic_output(dut):
                 f"got=0x{got_byte:02x} expected=0x{exp_byte:02x}"
             )
         offset += len(expected)
+
+    expected = golden_k64()
+    got = await read_l2_bytes(dut, L2_OUT_K64, len(expected))
+    for idx, (got_byte, exp_byte) in enumerate(zip(got, expected)):
+        assert got_byte == exp_byte, (
+            f"GEMM32 K=64 accumulation byte {idx}: "
+            f"got=0x{got_byte:02x} expected=0x{exp_byte:02x}"
+        )
