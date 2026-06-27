@@ -12,8 +12,8 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -O2 -fno-builtin -fno-jump-tables -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
          -I../../lib -T link.ld -Wl,--no-relax -DCONV_PERF_GROUP=$(CONV_PERF_GROUP)
 
-SRCS = start.S main.c ../../lib/conv2d_feeder_sw.c ../../lib/conv2d_packed.c ../../lib/hal_systolic.c ../../lib/spatz_ops.S ../../lib/spatz_rt.c
-HDRS = ../../lib/conv2d_feeder_sw.h ../../lib/conv2d_packed.h ../../lib/hal_systolic.h ../../lib/idma_mm_utils.h ../../lib/npu_memory_map.h ../../lib/npu_types.h ../../lib/spatz_ops.h ../../lib/spatz_rt.h
+SRCS = start.S main.c ../../lib/conv2d_packed.c ../../lib/hal_systolic.c ../../lib/spatz_ops.S ../../lib/spatz_rt.c
+HDRS = ../../lib/conv2d_packed.h ../../lib/hal_systolic.h ../../lib/idma_mm_utils.h ../../lib/npu_memory_map.h ../../lib/npu_types.h ../../lib/spatz_ops.h ../../lib/spatz_rt.h
 
 all: conv_perf.bin conv_perf.hex
 

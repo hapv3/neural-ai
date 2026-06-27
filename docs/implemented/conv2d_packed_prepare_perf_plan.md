@@ -2,7 +2,7 @@
 
 ## Decision
 
-RTL `conv2d_feeder` is dropped from the Conv2D performance roadmap.
+The old direct Conv2D RTL lowering path is dropped from the Conv2D performance roadmap.
 
 The active performance path is:
 
@@ -13,9 +13,9 @@ software scheduler
   -> systolic GEMM32 / accumulated GEMM32 / final requant
 ```
 
-`conv2d_feeder.sv` and `conv2d_feeder_cache.sv` remain only as legacy
-debug/reference regressions until removal is explicitly scheduled. No new
-performance features should be added to that RTL path.
+The old direct Conv2D RTL modules and matching firmware/debug tests have since
+been removed from the active tree. No new performance features should be added to
+that removed path.
 
 ## Rationale
 
@@ -35,7 +35,7 @@ The new path proves the right backend selection:
 - Scalar prepare is no longer used by the performance test.
 
 The remaining bottleneck is now packed-tile preparation policy and overhead,
-not the byte-serial RTL feeder. Continuing to optimize the existing RTL feeder
+not the byte-serial RTL lowering path. Continuing to optimize that old RTL path
 would split effort across two Conv2D lowering paths without proving model-level
 benefit.
 
@@ -76,7 +76,7 @@ benefit.
 ## Verification Gates
 
 The performance roadmap should be gated by `sw/test/conv_perf` and
-`test_conv_perf`, not by RTL feeder tests.
+`test_conv_perf`, not by removed RTL lowering tests.
 
 Required coverage before micro-model use:
 
@@ -96,14 +96,9 @@ Pass criteria:
 - `prepare_scalar_tiles == 0`.
 - Cycle stats are recorded for prepare, GEMM, total, and final K tile.
 
-## Legacy RTL Policy
+## Removed RTL Policy
 
-`test_conv_feeder_rtl` remains useful for:
-
-- checking the old address generator against Python im2col golden,
-- preserving direct feeder-to-systolic stream coverage,
-- debugging historical RTL behavior if a regression appears.
-
-It is not a performance gate for YOLO/CNN/ViT work. Any future Conv2D
-performance work should improve the packed prepare scheduler, iDMA usage,
-Spatz RVV kernels, or systolic scheduling/requant path instead.
+The previous direct Conv2D-to-systolic stream path is not a performance gate
+for YOLO/CNN/ViT work and is no longer present in active RTL/software. Any
+future Conv2D performance work should improve the packed prepare scheduler,
+iDMA usage, Spatz RVV kernels, or systolic scheduling/requant path instead.

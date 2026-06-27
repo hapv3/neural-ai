@@ -142,8 +142,6 @@ $(REPO_ROOT)/hw/rtl/afu/afu_backend.sv
 $(REPO_ROOT)/hw/rtl/afu/afu_core.sv
 $(REPO_ROOT)/hw/rtl/afu/afu.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
-$(REPO_ROOT)/hw/rtl/systolic/conv2d_feeder_cache.sv
-$(REPO_ROOT)/hw/rtl/systolic/conv2d_feeder.sv
 $(REPO_ROOT)/hw/rtl/systolic/requant_pipeline.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
 $(REPO_ROOT)/hw/rtl/systolic/npu_systolic_array.sv

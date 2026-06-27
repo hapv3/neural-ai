@@ -6,7 +6,7 @@
 /*
  * Scenario: P0/P1 packed Conv2D software scheduler benchmark.
  * Target: keep Conv2D performance work in software/iDMA/Spatz-prepared
- * Mx32 buffers and measure cycle cost before adding more RTL feeder logic.
+ * Mx32 buffers and measure cycle cost before adding new Conv2D hardware.
  */
 #define L2_CONV1_INPUT   0x80000000u
 #define L2_CONV1_WEIGHT  0x80002000u
@@ -130,7 +130,7 @@ static void publish_stats_pair(uint32_t l2_addr,
     spatz_rt_dma_wait_all();
 }
 
-static void init_cfg(conv2d_feeder_sw_cfg_t *cfg,
+static void init_cfg(npu_conv2d_packed_cfg_t *cfg,
                      uint32_t input_addr,
                      uint32_t weight_addr,
                      uint32_t output_addr,
@@ -183,7 +183,7 @@ static void run_oc32_case(uint32_t case_id,
                           uint32_t pad_h,
                           uint32_t pad_w,
                           uint32_t fail_code) {
-    conv2d_feeder_sw_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
     uint32_t rows = output_h * output_w;
     uint32_t input_bytes = input_h * input_w * input_c;
@@ -234,7 +234,7 @@ static void copy_oc32_to_oc64_l2(uint32_t l2_addr, uint32_t src_addr, uint32_t r
 }
 
 static void run_oc64_case(uint32_t case_id) {
-    conv2d_feeder_sw_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats0;
     npu_conv2d_packed_stats_t stats1;
     uint32_t rows = P3_ROWS;
@@ -293,7 +293,7 @@ static void init_qparams(void) {
 }
 
 static void run_requant_case(uint32_t case_id) {
-    conv2d_feeder_sw_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
     uint32_t rows = P3_ROWS;
     uint32_t weight_bytes = k_tiles_for(64u, 1u, 1u) * 32u * 32u;
@@ -330,7 +330,7 @@ static void run_requant_case(uint32_t case_id) {
 }
 
 static void run_conv1x1_k33(void) {
-    conv2d_feeder_sw_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
 
     cfg.input_addr = L2_CONV1_INPUT;
@@ -365,7 +365,7 @@ static void run_conv1x1_k33(void) {
 }
 
 static void run_conv3x3_pad1_c3(void) {
-    conv2d_feeder_sw_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
 
     cfg.input_addr = T_INPUT;
@@ -408,7 +408,7 @@ static void run_conv1x1_p3(uint32_t input_addr,
                            uint32_t input_c,
                            uint32_t weight_bytes,
                            uint32_t fail_code) {
-    conv2d_feeder_sw_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
 
     cfg.input_addr = input_addr;

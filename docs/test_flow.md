@@ -15,8 +15,6 @@ firmware.
 |-----------|--------|------------------|--------|
 | `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, AXI I-TCM load, host IRQ completion, iDMA MMIO smoke |
 | `sw/test/conv_perf` | `conv_perf.bin` | `test_conv_perf` | Packed Conv2D scheduler, iDMA/RVV backend checks, exact output compare, cycle stats in L2 |
-| `sw/test/conv_feeder` | `conv_feeder.bin` | `test_conv_feeder` | Legacy/debug software im2col reference, Conv1x1 K>32, Conv3x3 pad1 |
-| `sw/test/conv_feeder_rtl` | `conv_feeder_rtl.bin` | `test_conv_feeder_rtl` | Legacy/debug RTL feeder coverage; not a performance roadmap gate |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
@@ -66,8 +64,6 @@ Run independent suites before micro-model or graph-level work:
 8. **Legacy Matmul**: keeps raw register-level systolic regression alive.
 
 Micro-YOLO or graph scheduler tests should only run after these gates are green.
-Legacy Conv Feeder tests may run as debug/reference regressions, but they are
-not performance roadmap gates.
 
 ---
 
@@ -170,32 +166,6 @@ cocotb writes signed INT8 W and IFM to L2
 Pass criteria: all `M x 32` INT8 bytes and the fused `K=64` accumulated
 requant tensor match the exact requant formula.
 
-### Legacy Conv Feeder Debug
-
-```text
-cocotb writes NHWC input and K32-packed OC32 weights to L2
-  -> firmware DMA-copies fixtures into Shared Data TCDM
-  -> P1 firmware materializes K-tile rows into TCDM im2col buffers
-  -> P2 RTL feeder streams K-tile rows directly into systolic
-  -> P2 materialize mode copies Conv1x1 im2col K-block dumps back to L2
-  -> firmware runs Conv1x1 IC=33 as GEMM32 + accumulated GEMM32
-  -> firmware runs Conv3x3 stride1 pad1 IC=3 as one GEMM32
-  -> firmware copies full INT32 outputs back to L2
-  -> cocotb compares im2col bytes and every output word against Python golden
-```
-
-Pass criteria: debug/materialized `M x 32` IFM rows and both Conv output
-tensors match exactly. Firmware buffers must stay inside the Shared Data TCDM
-window; the current OFM test buffer uses `0x1014_0000`.
-
-`test_conv_feeder_rtl` repeats the same functional coverage through the RTL
-address generator. The P2 compute path streams feeder rows directly into the
-systolic IFM input; materialization remains enabled as a debug mode and is used
-by cocotb to compare im2col bytes against Python golden.
-
-This suite is retained for historical RTL/debug coverage only. Do not add new
-performance features or roadmap acceptance criteria to the RTL feeder path.
-
 ### Conv Packed Performance
 
 ```text
@@ -215,8 +185,7 @@ for contiguous K tiles, `IC=32/64` pointwise cases prove full and multi-K
 tiles, RGB/padding/border cases use Spatz RVV pack, OC64 tiling stores both
 output-channel tiles at the correct row stride, and final accumulated K-block
 requant matches the exact INT32-to-INT8 golden formula. This is the current
-performance-path gate. RTL feeder tests are legacy debug/reference regressions
-and are not performance acceptance criteria.
+performance-path gate. `conv_perf` is the only Conv2D performance-path gate.
 
 `test_conv_perf` can run as one full binary or as shorter focused groups:
 
@@ -274,8 +243,6 @@ unaligned e16/e32 destinations are not yet a scheduler contract.
 
 ```bash
 make -C sw/test/boot
-make -C sw/test/conv_feeder
-make -C sw/test/conv_feeder_rtl
 make -C sw/test/conv_perf
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
@@ -300,12 +267,6 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_independent_memory
-
-env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
-  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_feeder
-
-env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
-  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_feeder_rtl
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf

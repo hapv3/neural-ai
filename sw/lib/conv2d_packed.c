@@ -30,7 +30,7 @@ static void clear_stats(npu_conv2d_packed_stats_t *stats) {
     }
 }
 
-static uint32_t validate_cfg(const conv2d_feeder_sw_cfg_t *cfg) {
+static uint32_t validate_cfg(const npu_conv2d_packed_cfg_t *cfg) {
     if (!cfg || cfg->input_c == 0u || cfg->kernel_h == 0u || cfg->kernel_w == 0u ||
         cfg->output_h == 0u || cfg->output_w == 0u) {
         return NPU_CONV2D_PACKED_ERR_BAD_SHAPE;
@@ -47,7 +47,7 @@ static uint32_t min_u32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
 }
 
-static uint32_t is_contiguous_conv1x1(const conv2d_feeder_sw_cfg_t *cfg) {
+static uint32_t is_contiguous_conv1x1(const npu_conv2d_packed_cfg_t *cfg) {
     return cfg->kernel_h == 1u &&
            cfg->kernel_w == 1u &&
            cfg->stride_h == 1u &&
@@ -62,8 +62,8 @@ static uint32_t is_l1_addr(uint32_t addr) {
     return idma_mm_is_l1_addr(addr);
 }
 
-static void zero_im2col_tile(const conv2d_feeder_sw_cfg_t *cfg, uint32_t rows) {
-    spatz_rt_memset((void *)cfg->im2col_addr, 0, rows * CONV2D_FEEDER_K_TILE);
+static void zero_im2col_tile(const npu_conv2d_packed_cfg_t *cfg, uint32_t rows) {
+    spatz_rt_memset((void *)cfg->im2col_addr, 0, rows * NPU_CONV2D_PACKED_K_TILE);
 }
 
 static uint32_t wait_idma_or_fail(uint32_t direction, int tx_id) {
@@ -73,11 +73,11 @@ static uint32_t wait_idma_or_fail(uint32_t direction, int tx_id) {
     return idma_mm_wait_for_completion(direction, (uint32_t)tx_id);
 }
 
-static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const conv2d_feeder_sw_cfg_t *cfg,
+static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const npu_conv2d_packed_cfg_t *cfg,
                                                                uint32_t k_block,
                                                                uint32_t rows) {
-    uint32_t k_base = k_block * CONV2D_FEEDER_K_TILE;
-    uint32_t valid = (k_base < cfg->input_c) ? min_u32(CONV2D_FEEDER_K_TILE, cfg->input_c - k_base) : 0u;
+    uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
+    uint32_t valid = (k_base < cfg->input_c) ? min_u32(NPU_CONV2D_PACKED_K_TILE, cfg->input_c - k_base) : 0u;
 
     zero_im2col_tile(cfg, rows);
     if (valid == 0u) {
@@ -88,7 +88,7 @@ static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const conv2d_feed
     uint32_t dst = cfg->im2col_addr;
 
     if (!is_l1_addr(src)) {
-        int tx_id = idma_L2ToL1_2d(src, dst, valid, cfg->input_c, CONV2D_FEEDER_K_TILE, rows);
+        int tx_id = idma_L2ToL1_2d(src, dst, valid, cfg->input_c, NPU_CONV2D_PACKED_K_TILE, rows);
         if (wait_idma_or_fail(IDMA_DIR_L2_TO_L1, tx_id)) {
             return NPU_CONV2D_PREPARE_IDMA;
         }
@@ -96,7 +96,7 @@ static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const conv2d_feed
 
     for (uint32_t row = 0; row < rows; row++) {
         const int8_t *row_src = (const int8_t *)(src + (row * cfg->input_c));
-        int8_t *row_dst = (int8_t *)(dst + (row * CONV2D_FEEDER_K_TILE));
+        int8_t *row_dst = (int8_t *)(dst + (row * NPU_CONV2D_PACKED_K_TILE));
         spatz_vec_copy_i8(row_src, row_dst, valid);
     }
 
@@ -138,10 +138,10 @@ static uint32_t output_valid_range(uint32_t output_len,
     return 1;
 }
 
-static uint32_t try_prepare_single_spatial_idma(const conv2d_feeder_sw_cfg_t *cfg,
+static uint32_t try_prepare_single_spatial_idma(const npu_conv2d_packed_cfg_t *cfg,
                                                 uint32_t k_block,
                                                 uint32_t rows) {
-    uint32_t k_base = k_block * CONV2D_FEEDER_K_TILE;
+    uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
     uint32_t kernel_spatial = cfg->kernel_h * cfg->kernel_w;
     uint32_t k_total = kernel_spatial * cfg->input_c;
 
@@ -151,8 +151,8 @@ static uint32_t try_prepare_single_spatial_idma(const conv2d_feeder_sw_cfg_t *cf
 
     uint32_t spatial_index = k_base / cfg->input_c;
     uint32_t channel_base = k_base - (spatial_index * cfg->input_c);
-    uint32_t tile_valid = min_u32(CONV2D_FEEDER_K_TILE, k_total - k_base);
-    uint32_t valid = min_u32(CONV2D_FEEDER_K_TILE, cfg->input_c - channel_base);
+    uint32_t tile_valid = min_u32(NPU_CONV2D_PACKED_K_TILE, k_total - k_base);
+    uint32_t valid = min_u32(NPU_CONV2D_PACKED_K_TILE, cfg->input_c - channel_base);
     if (valid == 0u || valid != tile_valid || k_base + valid > k_total) {
         return 0;
     }
@@ -177,11 +177,11 @@ static uint32_t try_prepare_single_spatial_idma(const conv2d_feeder_sw_cfg_t *cf
     int32_t ih = signed_coord(first_oh * cfg->stride_h, kh, cfg->pad_h);
     int32_t iw = signed_coord(first_ow * cfg->stride_w, kw, cfg->pad_w);
     uint32_t src = cfg->input_addr + ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + channel_base);
-    uint32_t dst = cfg->im2col_addr + (((first_oh * cfg->output_w) + first_ow) * CONV2D_FEEDER_K_TILE);
+    uint32_t dst = cfg->im2col_addr + (((first_oh * cfg->output_w) + first_ow) * NPU_CONV2D_PACKED_K_TILE);
     uint32_t src_stride_2 = cfg->stride_w * cfg->input_c;
-    uint32_t dst_stride_2 = CONV2D_FEEDER_K_TILE;
+    uint32_t dst_stride_2 = NPU_CONV2D_PACKED_K_TILE;
     uint32_t src_stride_3 = cfg->stride_h * cfg->input_w * cfg->input_c;
-    uint32_t dst_stride_3 = cfg->output_w * CONV2D_FEEDER_K_TILE;
+    uint32_t dst_stride_3 = cfg->output_w * NPU_CONV2D_PACKED_K_TILE;
     int tx_id = idma_L2ToL1_3d(src, dst, valid,
                                src_stride_2, dst_stride_2, valid_ow,
                                src_stride_3, dst_stride_3, valid_oh);
@@ -190,12 +190,12 @@ static uint32_t try_prepare_single_spatial_idma(const conv2d_feeder_sw_cfg_t *cf
     return wait_idma_or_fail(IDMA_DIR_L2_TO_L1, tx_id);
 }
 
-static void prepare_spatz_segmented(const conv2d_feeder_sw_cfg_t *cfg,
+static void prepare_spatz_segmented(const npu_conv2d_packed_cfg_t *cfg,
                                     uint32_t k_block,
                                     uint32_t rows) {
     uint32_t kernel_spatial = cfg->kernel_h * cfg->kernel_w;
     uint32_t k_total = kernel_spatial * cfg->input_c;
-    uint32_t k_base = k_block * CONV2D_FEEDER_K_TILE;
+    uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
 
     zero_im2col_tile(cfg, rows);
 
@@ -204,7 +204,7 @@ static void prepare_spatz_segmented(const conv2d_feeder_sw_cfg_t *cfg,
         uint32_t ow = row - (oh * cfg->output_w);
         uint32_t lane = 0;
 
-        while (lane < CONV2D_FEEDER_K_TILE) {
+        while (lane < NPU_CONV2D_PACKED_K_TILE) {
             uint32_t k_index = k_base + lane;
             if (k_index >= k_total) {
                 break;
@@ -216,7 +216,7 @@ static void prepare_spatz_segmented(const conv2d_feeder_sw_cfg_t *cfg,
             uint32_t kw = spatial_index - (kh * cfg->kernel_w);
             int32_t ih = signed_coord(oh * cfg->stride_h, kh * cfg->dilation_h, cfg->pad_h);
             int32_t iw = signed_coord(ow * cfg->stride_w, kw * cfg->dilation_w, cfg->pad_w);
-            uint32_t run = min_u32(CONV2D_FEEDER_K_TILE - lane, cfg->input_c - ic);
+            uint32_t run = min_u32(NPU_CONV2D_PACKED_K_TILE - lane, cfg->input_c - ic);
 
             if (k_index + run > k_total) {
                 run = k_total - k_index;
@@ -224,7 +224,7 @@ static void prepare_spatz_segmented(const conv2d_feeder_sw_cfg_t *cfg,
 
             if (ih >= 0 && iw >= 0 && (uint32_t)ih < cfg->input_h && (uint32_t)iw < cfg->input_w) {
                 uint32_t src = cfg->input_addr + ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + ic);
-                uint32_t dst = cfg->im2col_addr + (row * CONV2D_FEEDER_K_TILE) + lane;
+                uint32_t dst = cfg->im2col_addr + (row * NPU_CONV2D_PACKED_K_TILE) + lane;
                 spatz_vec_copy_i8((const int8_t *)src, (int8_t *)dst, run);
             }
 
@@ -233,7 +233,7 @@ static void prepare_spatz_segmented(const conv2d_feeder_sw_cfg_t *cfg,
     }
 }
 
-static npu_conv2d_prepare_backend_t prepare_k_tile(const conv2d_feeder_sw_cfg_t *cfg,
+static npu_conv2d_prepare_backend_t prepare_k_tile(const npu_conv2d_packed_cfg_t *cfg,
                                                    uint32_t k_block,
                                                    uint32_t rows) {
     if (is_contiguous_conv1x1(cfg)) {
@@ -249,7 +249,7 @@ static npu_conv2d_prepare_backend_t prepare_k_tile(const conv2d_feeder_sw_cfg_t 
     return NPU_CONV2D_PREPARE_SPATZ;
 }
 
-uint32_t npu_conv2d_packed_run_oc32(const conv2d_feeder_sw_cfg_t *cfg,
+uint32_t npu_conv2d_packed_run_oc32(const npu_conv2d_packed_cfg_t *cfg,
                                     npu_conv2d_packed_stats_t *stats) {
     clear_stats(stats);
 
@@ -263,8 +263,8 @@ uint32_t npu_conv2d_packed_run_oc32(const conv2d_feeder_sw_cfg_t *cfg,
 
     uint32_t rows = cfg->output_h * cfg->output_w;
     uint32_t k_total = cfg->kernel_h * cfg->kernel_w * cfg->input_c;
-    uint32_t k_tiles = ceil_div_u32(k_total, CONV2D_FEEDER_K_TILE);
-    uint32_t psum_addr = cfg->output_addr + (rows * CONV2D_FEEDER_OC_TILE);
+    uint32_t k_tiles = ceil_div_u32(k_total, NPU_CONV2D_PACKED_K_TILE);
+    uint32_t psum_addr = cfg->output_addr + (rows * NPU_CONV2D_PACKED_OC_TILE);
     uint32_t total_start = spatz_rt_read_cycle();
 
     if (stats) {
@@ -273,7 +273,7 @@ uint32_t npu_conv2d_packed_run_oc32(const conv2d_feeder_sw_cfg_t *cfg,
     }
 
     for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
-        uint32_t weight_addr = cfg->weight_addr + (k_block * CONV2D_FEEDER_K_TILE * CONV2D_FEEDER_OC_TILE);
+        uint32_t weight_addr = cfg->weight_addr + (k_block * NPU_CONV2D_PACKED_K_TILE * NPU_CONV2D_PACKED_OC_TILE);
 
         uint32_t prepare_start = spatz_rt_read_cycle();
         npu_conv2d_prepare_backend_t backend = prepare_k_tile(cfg, k_block, rows);
@@ -310,7 +310,7 @@ uint32_t npu_conv2d_packed_run_oc32(const conv2d_feeder_sw_cfg_t *cfg,
     return NPU_CONV2D_PACKED_OK;
 }
 
-uint32_t npu_conv2d_packed_run_oc32_requant(const conv2d_feeder_sw_cfg_t *cfg,
+uint32_t npu_conv2d_packed_run_oc32_requant(const npu_conv2d_packed_cfg_t *cfg,
                                             npu_conv2d_packed_stats_t *stats) {
     clear_stats(stats);
 
@@ -324,8 +324,8 @@ uint32_t npu_conv2d_packed_run_oc32_requant(const conv2d_feeder_sw_cfg_t *cfg,
 
     uint32_t rows = cfg->output_h * cfg->output_w;
     uint32_t k_total = cfg->kernel_h * cfg->kernel_w * cfg->input_c;
-    uint32_t k_tiles = ceil_div_u32(k_total, CONV2D_FEEDER_K_TILE);
-    uint32_t psum_addr = cfg->output_addr + (rows * CONV2D_FEEDER_OC_TILE);
+    uint32_t k_tiles = ceil_div_u32(k_total, NPU_CONV2D_PACKED_K_TILE);
+    uint32_t psum_addr = cfg->output_addr + (rows * NPU_CONV2D_PACKED_OC_TILE);
     uint32_t total_start = spatz_rt_read_cycle();
 
     if (stats) {
@@ -334,7 +334,7 @@ uint32_t npu_conv2d_packed_run_oc32_requant(const conv2d_feeder_sw_cfg_t *cfg,
     }
 
     for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
-        uint32_t weight_addr = cfg->weight_addr + (k_block * CONV2D_FEEDER_K_TILE * CONV2D_FEEDER_OC_TILE);
+        uint32_t weight_addr = cfg->weight_addr + (k_block * NPU_CONV2D_PACKED_K_TILE * NPU_CONV2D_PACKED_OC_TILE);
         uint32_t is_last = (k_block + 1u) == k_tiles;
 
         uint32_t prepare_start = spatz_rt_read_cycle();

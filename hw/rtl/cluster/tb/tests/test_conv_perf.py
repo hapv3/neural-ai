@@ -13,25 +13,15 @@ from npu_test_utils import (
     wait_for_host_irq,
     write_l2_bytes,
 )
-from test_conv_feeder import (
-    L2_CONV1_INPUT,
-    L2_CONV1_OUT,
-    L2_CONV1_WEIGHT,
-    L2_CONV3_INPUT,
-    L2_CONV3_OUT,
-    L2_CONV3_WEIGHT,
-    STATUS_BASE,
-    bytes_to_s32,
-    golden_conv1,
-    golden_conv3,
-    make_conv1_input,
-    make_conv1_weight_packed,
-    make_conv3_input,
-    make_conv3_weight_packed,
-)
 
 
+L2_CONV1_INPUT = 0x80000000
+L2_CONV1_WEIGHT = 0x80002000
+L2_CONV1_OUT = 0x80010000
 L2_CONV1_STATS = 0x80018000
+L2_CONV3_INPUT = 0x80020000
+L2_CONV3_WEIGHT = 0x80022000
+L2_CONV3_OUT = 0x80030000
 L2_CONV3_STATS = 0x80038000
 L2_CONV1_C32_INPUT = 0x80040000
 L2_CONV1_C32_WEIGHT = 0x80044000
@@ -45,8 +35,15 @@ L2_P3_BASE = 0x80080000
 P3_CASE_STRIDE = 0x00010000
 P3_H = 4
 P3_W = 4
+CONV1_H = 4
+CONV1_W = 5
+CONV1_C = 33
+CONV3_H = 5
+CONV3_W = 5
+CONV3_C = 3
 OC = 32
 K_TILE = 32
+STATUS_BASE = 0x10008000
 
 P3_CASE_IC1 = 0
 P3_CASE_IC3 = 1
@@ -120,6 +117,11 @@ def bytes_to_u32(data, word_index):
     return value
 
 
+def bytes_to_s32(data, word_index):
+    value = bytes_to_u32(data, word_index)
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
 def to_u8(value):
     return value & 0xFF
 
@@ -134,6 +136,81 @@ def conv1_input_value(h, w, c):
 
 def conv1_weight_value(c, oc):
     return ((c * 7 + oc * 3) % 17) - 8
+
+
+def conv3_input_value(h, w, c):
+    return ((h * 13 + w * 7 + c * 5) % 11) - 5
+
+
+def conv3_weight_value(kh, kw, c, oc):
+    return ((kh * 19 + kw * 11 + c * 7 + oc * 3) % 15) - 7
+
+
+def make_conv1_input():
+    return [
+        to_u8(conv1_input_value(h, w, c))
+        for h in range(CONV1_H)
+        for w in range(CONV1_W)
+        for c in range(CONV1_C)
+    ]
+
+
+def make_conv1_weight_packed():
+    return make_conv1_weight_packed_generic(CONV1_C)
+
+
+def make_conv3_input():
+    return [
+        to_u8(conv3_input_value(h, w, c))
+        for h in range(CONV3_H)
+        for w in range(CONV3_W)
+        for c in range(CONV3_C)
+    ]
+
+
+def make_conv3_weight_packed():
+    packed = []
+    k_total = 3 * 3 * CONV3_C
+    for lane in range(K_TILE):
+        kh = kw = c = 0
+        if lane < k_total:
+            spatial = lane // CONV3_C
+            c = lane - spatial * CONV3_C
+            kh = spatial // 3
+            kw = spatial - kh * 3
+        for oc in range(OC):
+            value = conv3_weight_value(kh, kw, c, oc) if lane < k_total else 0
+            packed.append(to_u8(value))
+    return packed
+
+
+def golden_conv1():
+    out = []
+    for h in range(CONV1_H):
+        for w in range(CONV1_W):
+            for oc in range(OC):
+                acc = 0
+                for c in range(CONV1_C):
+                    acc += conv1_input_value(h, w, c) * conv1_weight_value(c, oc)
+                out.extend(s32_to_bytes(acc & 0xFFFFFFFF))
+    return out
+
+
+def golden_conv3():
+    out = []
+    for oh in range(CONV3_H):
+        for ow in range(CONV3_W):
+            for oc in range(OC):
+                acc = 0
+                for kh in range(3):
+                    ih = oh + kh - 1
+                    for kw in range(3):
+                        iw = ow + kw - 1
+                        for c in range(CONV3_C):
+                            if 0 <= ih < CONV3_H and 0 <= iw < CONV3_W:
+                                acc += conv3_input_value(ih, iw, c) * conv3_weight_value(kh, kw, c, oc)
+                out.extend(s32_to_bytes(acc & 0xFFFFFFFF))
+    return out
 
 
 def p3_input_addr(case_id):

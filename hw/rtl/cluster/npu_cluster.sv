@@ -637,9 +637,9 @@ module npu_cluster (
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (12 Masters)
+    // 5. Shared Data TCDM Interconnect (11 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 12;
+    localparam int unsigned NUM_MASTERS = 11;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
@@ -651,7 +651,6 @@ module npu_cluster (
     // Master 8: Spatz Vector Engine (VLSU port 1)
     // Master 9: PULP iDMA OBI2AXI read port
     // Master 10: AFU LUT processor
-    // Master 11: RTL Conv2D feeder TCDM/debug path
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -701,9 +700,9 @@ module npu_cluster (
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(12'hDFA), // M1, M3-M8, M10-M11: Spatz + Systolic + AFU + Conv feeder
-        .DMA_MASTER_MASK (12'h204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(12'h001)  // M0: Snitch D-Bus
+        .HWPE_MASTER_MASK(11'h5FA), // M1, M3-M8, M10: Spatz + Systolic + AFU
+        .DMA_MASTER_MASK (11'h204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(11'h001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -1076,29 +1075,7 @@ module npu_cluster (
     assign afu_obi_rdata  = master_rsp[10].rdata;
 
     //=========================================================
-    // 7. Systolic-integrated Conv2D feeder TCDM/debug path
-    //=========================================================
-    logic                      conv_obi_req;
-    logic                      conv_obi_gnt;
-    logic [OBI_ADDR_WIDTH-1:0] conv_obi_addr;
-    logic                      conv_obi_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] conv_obi_be;
-    logic [OBI_DATA_WIDTH-1:0] conv_obi_wdata;
-    logic                      conv_obi_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] conv_obi_rdata;
-
-    assign master_req[11].req   = conv_obi_req;
-    assign master_req[11].we    = conv_obi_we;
-    assign master_req[11].be    = conv_obi_be;
-    assign master_req[11].addr  = conv_obi_addr;
-    assign master_req[11].wdata = conv_obi_wdata;
-
-    assign conv_obi_gnt    = master_rsp[11].gnt;
-    assign conv_obi_rvalid = master_rsp[11].rvalid;
-    assign conv_obi_rdata  = master_rsp[11].rdata;
-
-    //=========================================================
-    // 8. Systolic Array (Matrix Engine)
+    // 7. Systolic Array (Matrix Engine)
     //=========================================================
     // Wires between systolic_controller and npu_systolic_array
     logic                      sys_weight_load_en;
@@ -1160,15 +1137,6 @@ module npu_cluster (
         .obi_i_wdata_o      (sys_obi_i_wdata),
         .obi_i_rvalid_i     (sys_obi_i_rvalid),
         .obi_i_rdata_i      (sys_obi_i_rdata),
-
-        .conv_obi_req_o     (conv_obi_req),
-        .conv_obi_gnt_i     (conv_obi_gnt),
-        .conv_obi_addr_o    (conv_obi_addr),
-        .conv_obi_we_o      (conv_obi_we),
-        .conv_obi_be_o      (conv_obi_be),
-        .conv_obi_wdata_o   (conv_obi_wdata),
-        .conv_obi_rvalid_i  (conv_obi_rvalid),
-        .conv_obi_rdata_i   (conv_obi_rdata),
 
         .obi_o_req_o        (sys_obi_o_req),
         .obi_o_gnt_i        (sys_obi_o_gnt),
