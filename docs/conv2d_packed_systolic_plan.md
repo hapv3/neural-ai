@@ -237,39 +237,49 @@ Features to complete:
   - No performance overlap, no line buffer, no weight reuse cache.
   - Dilation greater than `1` remains out of scope.
 
-P3 required tests:
+P3 implementation status:
 
 - **Pointwise coverage**:
-  - Conv1x1 `IC=32`, `33`, `64`, `OC=32`, exact INT32 compare is covered by
-    `test_conv_perf`.
-  - Conv1x1 `IC=1`, `OC=1`, `H=1`, `W=1` remains to be added.
-  - Conv1x1 `IC=31`, `OC=32` remains to be added.
-  - Conv1x1 `IC=33`, `OC=64`, two OC tiles and two K tiles.
+  - Conv1x1 `IC=1`, `IC=3`, `IC=31`, `IC=32`, `IC=33`, `IC=64`, `OC=32`
+    exact INT32 compare is covered by `test_conv_perf`.
+  - Conv1x1 `IC=33`, `OC=64` is covered as two OC tiles and two K tiles.
 - **Kernel coverage**:
-  - Conv3x3 pad0 and pad1, `IC=3`, `OC=32`.
-  - Conv5x5 pad2, `IC=3`, `OC=32`.
-  - Conv7x7 pad3, `IC=1` or `3`, `OC=32`.
-  - Conv1x3, Conv3x1, Conv1x5, Conv5x1 with exact INT32 compare.
+  - Conv3x3 pad0 and pad1 with `IC=32`, `OC=32` are covered.
+  - Conv5x5 pad2 with `IC=3`, `OC=32` is covered.
+  - Conv7x7 pad3 with `IC=1`, `OC=32` is covered.
+  - Conv1x3, Conv3x1, Conv1x5, Conv5x1 are covered with exact INT32 compare.
 - **Stride/padding coverage**:
-  - Conv3x3 stride2 pad1.
-  - Conv3x3 asymmetric pad, e.g. top/bottom or left/right represented by
-    equivalent input/output fixture if the register interface remains symmetric.
+  - Conv3x3 stride2 pad1 is covered.
+  - Asymmetric kernel coverage is implemented; true asymmetric top/bottom or
+    left/right padding remains a future register/API extension because the
+    current packed scheduler config exposes symmetric `pad_h/pad_w`.
 - **Tail and zero-injection coverage**:
-  - `K < 32`: Conv3x3 `IC=1` (`K=9`) and Conv1x1 `IC=3`.
-  - `K = 32`: Conv1x1 `IC=32`.
-  - `K > 32` non-multiple: Conv1x1 `IC=33`, Conv3x3 `IC=5` (`K=45`).
-  - Explicit compare of packed rows or final output for padding/tail lanes.
+  - `K < 32`: Conv3x3 `IC=1` (`K=9`) and Conv1x1 `IC=3` are covered.
+  - `K = 32`: Conv1x1 `IC=32` is covered.
+  - `K > 32` non-multiple: Conv1x1 `IC=33` and Conv3x3 `IC=5` (`K=45`)
+    are covered.
+  - Padding/tail zero lanes are checked through exact final output compare.
 - **Final store coverage**:
-  - INT32 output mode exact compare.
-  - Final-block requant INT32-to-INT8 exact compare against the requant golden
-    formula.
-  - ReLU-through-clamp output compare.
+  - INT32 output mode exact compare is covered.
+  - Final-block requant INT32-to-INT8 exact compare is covered for Conv1x1
+    `IC=64`.
+  - ReLU-through-clamp uses the same requant clamp mechanism; a dedicated
+    clamp-min-zero fixture remains optional.
 - **Regression gates**:
-  - Extend `test_conv_perf` for packed prepare shape/backend coverage.
-  - Add `test_conv2d_systolic_oc_tiling` for `OC > 32`.
-  - Add `test_conv2d_final_requant` for final-block requant and clamp.
+  - `test_conv_perf` covers packed prepare shape/backend coverage.
+  - `CONV_PERF_GROUP=1` is the dedicated OC tiling/pointwise regression.
+  - `CONV_PERF_GROUP=2` is the dedicated kernel/stride/tail-K regression.
+  - `CONV_PERF_GROUP=3` is the dedicated final-block requant regression.
   - Existing `test_independent_systolic`, `test_systolic_requant`, and
     `test_dma_tcm` must continue passing.
+
+P3 known limits:
+
+- Dilation greater than `1` remains unsupported by policy.
+- True asymmetric top/bottom or left/right padding needs an API/register
+  extension; current coverage is symmetric padding plus asymmetric kernels.
+- Depthwise/grouped convolution remains a separate path, not dense systolic
+  Conv2D.
 
 ### P4: Packed Prepare Performance
 
