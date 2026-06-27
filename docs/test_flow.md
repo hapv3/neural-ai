@@ -212,9 +212,30 @@ cocotb writes the same Conv1x1 and Conv3x3 fixtures to L2
 Pass criteria: Conv outputs match Python golden exactly, scheduler status is
 `NPU_CONV2D_PACKED_OK`, scalar prepare tile count is zero, Conv1x1 uses iDMA
 for contiguous K tiles, `IC=32/64` pointwise cases prove full and multi-K
-tiles, and RGB pad1 Conv3x3 uses Spatz RVV pack. This is the current
+tiles, RGB/padding/border cases use Spatz RVV pack, OC64 tiling stores both
+output-channel tiles at the correct row stride, and final accumulated K-block
+requant matches the exact INT32-to-INT8 golden formula. This is the current
 performance-path gate. RTL feeder tests are legacy debug/reference regressions
 and are not performance acceptance criteria.
+
+`test_conv_perf` can run as one full binary or as shorter focused groups:
+
+```bash
+make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=1
+env CONV_PERF_GROUP=1 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
+
+make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=2
+env CONV_PERF_GROUP=2 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
+
+make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=3
+env CONV_PERF_GROUP=3 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
+```
+
+Group `1` covers pointwise/OC tiling, group `2` covers kernel shapes, and group
+`3` covers final-block requant.
 
 ### Matmul
 

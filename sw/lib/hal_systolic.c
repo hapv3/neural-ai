@@ -120,6 +120,7 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
                                         uint32_t ofm_addr,
                                         uint32_t dim_m) {
     uint32_t row = 0;
+    REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
 
     while (row < dim_m) {
         uint32_t tile_m = dim_m - row;
@@ -140,6 +141,7 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
 
 void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
     uint32_t row = 0;
+    REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
 
     while (row < dim_m) {
         uint32_t tile_m = dim_m - row;
