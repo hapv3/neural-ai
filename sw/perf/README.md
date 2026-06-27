@@ -7,9 +7,6 @@ path without adding more Conv2D RTL.
 
 ## Target
 
-- Estimate current P2.5 legacy RTL path cost with the `tc_sram` cache hit
-  latency, cache flush, K-base decode, padding zeros, and direct-mapped cache
-  misses.
 - Estimate P4 raw-wide read cost with one-segment, two-segment, unaligned, and
   slow rows.
 - Estimate P4 packed-buffer cost with prepare/compute double buffering.
@@ -26,7 +23,7 @@ make -C sw/perf csv
 Custom shape format:
 
 ```sh
-python3 sw/perf/conv2d_feeder_p4_perf.py \
+python3 sw/perf/conv2d_packed_prepare_perf.py \
   --shape conv3x3_c48,16,16,48,3,3,1,1,1,1
 ```
 
@@ -42,8 +39,6 @@ scope and is rejected by the estimator.
 ## Modeling Notes
 
 - The estimator is architectural, not cycle-exact RTL simulation.
-- Current feeder defaults assume cache hits cost 2 cycles per valid byte and
-  misses add 2 cycles for read request/response.
 - P4 packed mode assumes `M x 32` rows are already materialized before systolic
   compute; raw NHWC cannot generally use `base + row * 32` unless `IC == 32`
   and the layer/tile is contiguous.

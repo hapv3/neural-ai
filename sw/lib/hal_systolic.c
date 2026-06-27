@@ -6,16 +6,13 @@ static void systolic_gemm32_tile_ex(uint32_t weight_addr,
                                     uint32_t psum_addr,
                                     uint32_t ofm_addr,
                                     uint32_t dim_m,
-                                    uint32_t accum_en,
-                                    uint32_t ifm_stream_en) {
+                                    uint32_t accum_en) {
     REG_WRITE(REG_SYS_W_PTR, weight_addr);
     REG_WRITE(REG_SYS_I_PTR, ifm_addr);
     REG_WRITE(REG_SYS_O_PTR, ofm_addr);
     REG_WRITE(REG_SYS_PSUM_PTR, psum_addr);
     REG_WRITE(REG_SYS_DIM_M, dim_m);
-    REG_WRITE(REG_SYS_ACCUM_CTRL,
-              (accum_en ? REG_SYS_ACCUM_CTRL_EN : 0u) |
-                  (ifm_stream_en ? REG_SYS_ACCUM_CTRL_IFM_STREAM_EN : 0u));
+    REG_WRITE(REG_SYS_ACCUM_CTRL, accum_en ? REG_SYS_ACCUM_CTRL_EN : 0u);
     REG_WRITE(REG_SYS_DONE, 0);
     REG_WRITE(REG_SYS_START, 1);
 
@@ -27,11 +24,7 @@ static void systolic_gemm32_tile_ex(uint32_t weight_addr,
 }
 
 static void systolic_gemm32_tile(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
-    systolic_gemm32_tile_ex(weight_addr, ifm_addr, 0u, ofm_addr, dim_m, 0u, 0u);
-}
-
-static void systolic_gemm32_tile_stream(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m) {
-    systolic_gemm32_tile_ex(weight_addr, 0u, 0u, ofm_addr, dim_m, 0u, 1u);
+    systolic_gemm32_tile_ex(weight_addr, ifm_addr, 0u, ofm_addr, dim_m, 0u);
 }
 
 void systolic_requant_disable(void) {
@@ -76,11 +69,6 @@ void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr,
     }
 }
 
-void systolic_gemm32_stream(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m) {
-    systolic_requant_disable();
-    systolic_gemm32_tile_stream(weight_addr, ofm_addr, dim_m);
-}
-
 void systolic_gemm32_accumulate(uint32_t weight_addr,
                                 uint32_t ifm_addr,
                                 uint32_t psum_addr,
@@ -100,18 +88,9 @@ void systolic_gemm32_accumulate(uint32_t weight_addr,
                                 psum_addr + row * 32u * 4u,
                                 ofm_addr + row * 32u * 4u,
                                 tile_m,
-                                1u,
-                                0u);
+                                1u);
         row += tile_m;
     }
-}
-
-void systolic_gemm32_accumulate_stream(uint32_t weight_addr,
-                                       uint32_t psum_addr,
-                                       uint32_t ofm_addr,
-                                       uint32_t dim_m) {
-    systolic_requant_disable();
-    systolic_gemm32_tile_ex(weight_addr, 0u, psum_addr, ofm_addr, dim_m, 1u, 1u);
 }
 
 void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
@@ -133,8 +112,7 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
                                 psum_addr + row * 32u * 4u,
                                 ofm_addr + row * 32u,
                                 tile_m,
-                                1u,
-                                0u);
+                                1u);
         row += tile_m;
     }
 }

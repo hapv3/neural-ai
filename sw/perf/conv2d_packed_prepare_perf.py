@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Software performance estimator for Conv2D feeder P4 options.
+"""Software performance estimator for Conv2D packed-prepare options.
 
 The model is intentionally architectural, not cycle-exact RTL simulation.  It
-answers the P4 design question: does the current byte-serial feeder dominate
-runtime enough to justify a packed-buffer or wide-read path?
+compares a legacy byte-serial prepare baseline with packed-buffer and
+wide-read alternatives.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ class ConvShape:
 
 
 @dataclass
-class CurrentFeederStats:
+class LegacySerialStats:
     cycles: int = 0
     valid_lanes: int = 0
     zero_lanes: int = 0
@@ -250,8 +250,8 @@ def cache_lookup(cache: dict[tuple[int, int], int], line: int, model: PerfModel)
     return hit
 
 
-def estimate_current_feeder(shape: ConvShape, model: PerfModel) -> CurrentFeederStats:
-    stats = CurrentFeederStats(rows=shape.rows * shape.k_tiles)
+def estimate_legacy_serial(shape: ConvShape, model: PerfModel) -> LegacySerialStats:
+    stats = LegacySerialStats(rows=shape.rows * shape.k_tiles)
 
     for k_tile in range(shape.k_tiles):
         k_base = k_tile * K_TILE
@@ -353,7 +353,7 @@ def broken_k_tiles(shape: ConvShape) -> int:
 
 
 def summarize_shape(shape: ConvShape, model: PerfModel) -> dict[str, int | str | float]:
-    current = estimate_current_feeder(shape, model)
+    legacy = estimate_legacy_serial(shape, model)
     raw = estimate_p4_raw_wide(shape, model)
     prepare_total = estimate_packed_prepare(shape, model)
 
@@ -396,16 +396,16 @@ def summarize_shape(shape: ConvShape, model: PerfModel) -> dict[str, int | str |
         "K_total": shape.k_total,
         "K_tiles": shape.k_tiles,
         "broken_k_tiles": broken_k_tiles(shape),
-        "current_cycles": current.cycles,
-        "current_hit_rate": round((current.cache_hits / current.valid_lanes) if current.valid_lanes else 0.0, 3),
-        "current_tcdm_reads": current.tcdm_reads,
+        "legacy_serial_cycles": legacy.cycles,
+        "legacy_serial_hit_rate": round((legacy.cache_hits / legacy.valid_lanes) if legacy.valid_lanes else 0.0, 3),
+        "legacy_serial_tcdm_reads": legacy.tcdm_reads,
         "p4_raw_cycles": p4_raw_total,
         "p4_raw_slow_rows": raw.slow_rows,
         "p4_raw_two_seg_rows": raw.two_segment_rows,
         "p4_packed_no_overlap": p4_packed_no_overlap,
         "p4_packed_overlap": p4_packed_overlap,
-        "speedup_raw": round(current.cycles / p4_raw_total, 2) if p4_raw_total else 0.0,
-        "speedup_packed": round(current.cycles / p4_packed_overlap, 2) if p4_packed_overlap else 0.0,
+        "speedup_raw": round(legacy.cycles / p4_raw_total, 2) if p4_raw_total else 0.0,
+        "speedup_packed": round(legacy.cycles / p4_packed_overlap, 2) if p4_packed_overlap else 0.0,
     }
 
 
@@ -418,7 +418,7 @@ def print_markdown(rows: list[dict[str, int | str | float]], out: TextIO) -> Non
         "K_total",
         "K_tiles",
         "broken_k_tiles",
-        "current_cycles",
+        "legacy_serial_cycles",
         "p4_raw_cycles",
         "p4_packed_overlap",
         "speedup_raw",

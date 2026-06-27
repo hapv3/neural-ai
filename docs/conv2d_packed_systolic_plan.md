@@ -123,84 +123,22 @@ The verification plan must cover the packed Conv2D operator family, not only
 - Add exact data-output tests for `K=64` INT32 accumulation and fused final
   requant.
 
-### P1: Software Tile Feeder
+### Removed Legacy Conv2D Lowering Paths
 
-- Generate tile-local IFM rows in firmware into TCDM.
-- Verify Conv `1x1`, then Conv `3x3` with padding.
-- Keep the systolic RTL unchanged except P0 accumulation support.
+The previous software materializer test and RTL debug path have been dropped
+from active RTL/software. Conv2D
+lowering now uses the packed prepare path in `sw/lib/conv2d_packed.*`, with
+iDMA for contiguous K tiles and Spatz RVV copies for segmented/padded tiles.
 
-Current implementation status:
-
-- `sw/lib/conv2d_feeder_sw.*` implements NHWC software materialization for
-  `M x 32` IFM rows and `OC=32` execution.
-- `sw/test/conv_feeder` verifies Conv `1x1` with `IC=33` so the path exercises
-  two K-blocks and INT32 psum accumulation.
-- The same suite verifies Conv `3x3`, stride `1`, pad `1`, `IC=3`, including
-  padding zero injection.
-- The cocotb test checks both dumped im2col K tiles and full INT32 output
-  tensors against Python golden.
-- All temporary/output buffers must stay inside the Shared Data TCDM address
-  window; the P1 OFM buffer is `0x1014_0000`.
-
-### P2: Legacy RTL Conv2D Path
-
-This phase is implemented but no longer part of the Conv2D performance
-roadmap. Keep it as legacy debug/reference coverage only.
-
-Current implementation status:
-
-- `hw/rtl/systolic/conv2d_feeder.sv` implements the RTL address generator and
-  supports both direct `M x 32` IFM streaming into systolic and optional
-  materialization into Shared Data TCDM.
-- The legacy RTL path is controlled through cluster MMIO registers at
-  `0x2000_0400` and uses a dedicated TCDM master.
-- P2 direct streaming is retained only as a debug/reference path. The active
-  performance path is packed prepare through software+iDMA+Spatz.
-- `sw/test/conv_feeder_rtl` and `test_conv_feeder_rtl` repeat the P1 Conv1x1
-  `IC=33` and Conv3x3 pad1 checks through RTL-generated im2col rows.
-- The legacy Conv2D register block now belongs to the systolic subsystem:
-  `systolic_controller` owns the `systolic_ctrl_regs` instance and the
-  `conv2d_feeder` instance. `npu_cluster` only routes the systolic MMIO
-  subrange and the debug TCDM master.
-- Verified RTL feature set at the end of this phase:
-  - NHWC INT8 input tensor flattened in Shared Data TCDM.
-  - Configurable `input_h`, `input_w`, `input_c`, `output_w`, `rows`.
-  - Configurable `kernel_h/kernel_w`, `stride_h/stride_w`,
-    `pad_h/pad_w`, `dilation_h/dilation_w`.
-  - Zero injection for padding and invalid K lanes when `K` is not a multiple
-    of `32`.
-  - Direct legacy-RTL-to-systolic IFM stream with ready/valid gating.
-  - Debug materialization of `M x 32` tile rows into TCDM.
-  - K tiling through `k_base`, including `K > 32` accumulation in firmware.
-- P2.5 ASIC cleanup applied after RTL review:
-  - Replaced byte-by-byte TCDM fetches with aligned 256-bit beat reads and a
-    direct-mapped `128-entry x 256-bit` IFM beat cache.
-  - Organized the cache as `4 bank x 32 line` so adjacent NHWC/channel beats
-    distribute across banks while keeping a simple single-lookup datapath.
-  - Split the cache into `hw/rtl/systolic/conv2d_feeder_cache.sv`; data/tag/valid
-    storage uses `tc_sram` so the legacy RTL path no longer owns large memory
-    arrays.
-  - Replaced combinational address division/multiplication with nested counters,
-    incremental pointers, and sequential precompute for stride/pad/dilation byte
-    deltas.
-  - Kept the existing register interface, stream mode, and debug materialization
-    mode stable for firmware compatibility.
-  - No further performance optimization is planned for this RTL path.
-- P2 acceptance tests:
-  - `test_conv_feeder_rtl`: Conv1x1, `H=4`, `W=5`, `IC=33`, two K tiles
-    (`k_base=0` and `k_base=32`), full INT32 output compare.
-  - `test_conv_feeder_rtl`: Conv3x3, `H=5`, `W=5`, `IC=3`, stride 1, pad 1,
-    full INT32 output compare.
-  - Debug materialization compare for Conv1x1 K tiles against Python golden
-    im2col rows.
-  - `test_independent_systolic`: regression for GEMM/accumulation paths after
-    moving systolic registers into the controller.
+Active Conv2D verification lives in `sw/test/conv_perf` and
+`test_conv_perf`. Do not add new roadmap features or acceptance criteria to the
+removed path. If prepare performance is insufficient, add a new
+wide-segment extractor architecture instead of reviving byte-serial lowering.
 
 ### P3: Packed Conv2D Functional Completeness
 
 Goal: turn the software+iDMA+Spatz packed prepare path into a reusable Conv2D
-operator backend for model layers. RTL `conv2d_feeder` is not a performance
-dependency for this phase.
+operator backend for model layers. There is no active direct-Conv2D RTL dependency for this phase.
 
 Features to complete:
 
