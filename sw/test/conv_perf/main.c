@@ -368,7 +368,7 @@ static void run_conv3x3_pad1_c3(void) {
     npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
 
-    cfg.input_addr = T_INPUT;
+    cfg.input_addr = L2_CONV3_INPUT;
     cfg.weight_addr = T_WEIGHT;
     cfg.im2col_addr = T_IM2COL;
     cfg.output_addr = T_OUTPUT;
@@ -386,8 +386,6 @@ static void run_conv3x3_pad1_c3(void) {
     cfg.dilation_h = 1u;
     cfg.dilation_w = 1u;
 
-    spatz_rt_dma_1d(T_INPUT, L2_CONV3_INPUT, CONV3_INPUT_BYTES);
-    spatz_rt_dma_wait_all();
     spatz_rt_dma_1d(T_WEIGHT, L2_CONV3_WEIGHT, CONV3_WEIGHT_BYTES);
     spatz_rt_dma_wait_all();
 

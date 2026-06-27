@@ -36,6 +36,7 @@ typedef struct {
     uint32_t last_gemm_cycles;
     uint32_t status;
     uint32_t prepare_idma_tiles;
+    uint32_t prepare_idma_transfers;
     uint32_t prepare_spatz_tiles;
     uint32_t prepare_scalar_tiles;
 } npu_conv2d_packed_stats_t;

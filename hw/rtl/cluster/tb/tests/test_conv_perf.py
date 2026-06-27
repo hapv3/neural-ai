@@ -439,7 +439,7 @@ async def check_output(dut, name, addr, expected):
 
 
 async def check_stats(dut, name, addr, expected_rows, expected_k_tiles, expected_idma_tiles=None, expected_spatz_tiles=None):
-    stats = await read_l2_bytes(dut, addr, 44)
+    stats = await read_l2_bytes(dut, addr, 48)
     rows = bytes_to_u32(stats, 0)
     k_tiles = bytes_to_u32(stats, 1)
     prepare_cycles = bytes_to_u32(stats, 2)
@@ -449,8 +449,9 @@ async def check_stats(dut, name, addr, expected_rows, expected_k_tiles, expected
     last_gemm_cycles = bytes_to_u32(stats, 6)
     status = bytes_to_u32(stats, 7)
     idma_tiles = bytes_to_u32(stats, 8)
-    spatz_tiles = bytes_to_u32(stats, 9)
-    scalar_tiles = bytes_to_u32(stats, 10)
+    idma_transfers = bytes_to_u32(stats, 9)
+    spatz_tiles = bytes_to_u32(stats, 10)
+    scalar_tiles = bytes_to_u32(stats, 11)
 
     assert status == 0, f"{name}: scheduler status=0x{status:08x}"
     assert rows == expected_rows, f"{name}: rows={rows} expected={expected_rows}"
@@ -468,11 +469,17 @@ async def check_stats(dut, name, addr, expected_rows, expected_k_tiles, expected
     assert scalar_tiles == 0, f"{name}: scalar prepare backend must not be used"
     if expected_idma_tiles is not None:
         assert idma_tiles == expected_idma_tiles, f"{name}: idma_tiles={idma_tiles} expected={expected_idma_tiles}"
+        if expected_idma_tiles:
+            assert idma_transfers >= idma_tiles, (
+                f"{name}: idma_transfers={idma_transfers} must cover idma_tiles={idma_tiles}"
+            )
+        else:
+            assert idma_transfers == 0, f"{name}: idma_transfers={idma_transfers} expected=0"
     if expected_spatz_tiles is not None:
         assert spatz_tiles == expected_spatz_tiles, f"{name}: spatz_tiles={spatz_tiles} expected={expected_spatz_tiles}"
 
     dut._log.info(
-        "%s stats: rows=%d k_tiles=%d prepare=%d gemm=%d total=%d last_prepare=%d last_gemm=%d idma=%d spatz=%d scalar=%d",
+        "%s stats: rows=%d k_tiles=%d prepare=%d gemm=%d total=%d last_prepare=%d last_gemm=%d idma=%d idma_tx=%d spatz=%d scalar=%d",
         name,
         rows,
         k_tiles,
@@ -482,15 +489,16 @@ async def check_stats(dut, name, addr, expected_rows, expected_k_tiles, expected
         last_prepare_cycles,
         last_gemm_cycles,
         idma_tiles,
+        idma_transfers,
         spatz_tiles,
         scalar_tiles,
     )
 
 
 async def check_stats_pair(dut, name, addr, expected_rows, expected_k_tiles, expected_idma_tiles, expected_spatz_tiles):
-    stats = await read_l2_bytes(dut, addr, 88)
+    stats = await read_l2_bytes(dut, addr, 96)
     for tile in range(2):
-        base = tile * 44
+        base = tile * 48
         rows = bytes_to_u32(stats[base:], 0)
         k_tiles = bytes_to_u32(stats[base:], 1)
         prepare_cycles = bytes_to_u32(stats[base:], 2)
@@ -500,8 +508,9 @@ async def check_stats_pair(dut, name, addr, expected_rows, expected_k_tiles, exp
         last_gemm_cycles = bytes_to_u32(stats[base:], 6)
         status = bytes_to_u32(stats[base:], 7)
         idma_tiles = bytes_to_u32(stats[base:], 8)
-        spatz_tiles = bytes_to_u32(stats[base:], 9)
-        scalar_tiles = bytes_to_u32(stats[base:], 10)
+        idma_transfers = bytes_to_u32(stats[base:], 9)
+        spatz_tiles = bytes_to_u32(stats[base:], 10)
+        scalar_tiles = bytes_to_u32(stats[base:], 11)
         assert status == 0, f"{name} tile {tile}: scheduler status=0x{status:08x}"
         assert rows == expected_rows, f"{name} tile {tile}: rows={rows} expected={expected_rows}"
         assert k_tiles == expected_k_tiles, f"{name} tile {tile}: k_tiles={k_tiles} expected={expected_k_tiles}"
@@ -513,10 +522,16 @@ async def check_stats_pair(dut, name, addr, expected_rows, expected_k_tiles, exp
         assert last_prepare_cycles > 0, f"{name} tile {tile}: last_prepare_cycles must be non-zero"
         assert last_gemm_cycles > 0, f"{name} tile {tile}: last_gemm_cycles must be non-zero"
         assert idma_tiles == expected_idma_tiles, f"{name} tile {tile}: idma={idma_tiles} expected={expected_idma_tiles}"
+        if expected_idma_tiles:
+            assert idma_transfers >= idma_tiles, (
+                f"{name} tile {tile}: idma_transfers={idma_transfers} must cover idma_tiles={idma_tiles}"
+            )
+        else:
+            assert idma_transfers == 0, f"{name} tile {tile}: idma_transfers={idma_transfers} expected=0"
         assert spatz_tiles == expected_spatz_tiles, f"{name} tile {tile}: spatz={spatz_tiles} expected={expected_spatz_tiles}"
         assert scalar_tiles == 0, f"{name} tile {tile}: scalar prepare backend must not be used"
         dut._log.info(
-            "%s tile %d stats: rows=%d k_tiles=%d prepare=%d gemm=%d total=%d idma=%d spatz=%d scalar=%d",
+            "%s tile %d stats: rows=%d k_tiles=%d prepare=%d gemm=%d total=%d idma=%d idma_tx=%d spatz=%d scalar=%d",
             name,
             tile,
             rows,
@@ -525,6 +540,7 @@ async def check_stats_pair(dut, name, addr, expected_rows, expected_k_tiles, exp
             gemm_cycles,
             total_cycles,
             idma_tiles,
+            idma_transfers,
             spatz_tiles,
             scalar_tiles,
         )
@@ -553,8 +569,8 @@ async def test_conv_perf(dut):
             L2_CONV3_STATS,
             expected_rows=25,
             expected_k_tiles=1,
-            expected_idma_tiles=0,
-            expected_spatz_tiles=1,
+            expected_idma_tiles=1,
+            expected_spatz_tiles=0,
         )
 
         await check_output(dut, "conv1x1 IC32 packed", L2_CONV1_C32_OUT, golden_conv1_generic(32))

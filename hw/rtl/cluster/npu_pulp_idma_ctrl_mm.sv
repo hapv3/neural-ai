@@ -4,6 +4,7 @@ module npu_pulp_idma_ctrl_mm #(
     parameter int unsigned ADDR_WIDTH = 32,
     parameter int unsigned CFG_DATA_WIDTH = 32,
     parameter int unsigned DATA_WIDTH = 256,
+    parameter int unsigned IDMA_JOB_FIFO_DEPTH = 16,
     parameter logic [ADDR_WIDTH-1:0] BASE_ADDR = 32'h2000_1000
 )(
     input  logic clk_i,
@@ -296,21 +297,23 @@ module npu_pulp_idma_ctrl_mm #(
         .completed_o (a2o_done_id)
     );
 
-    assign a2o_front_ready = !a2o_fe_valid || a2o_fe_ready;
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-            a2o_fe_valid <= 1'b0;
-            a2o_fe_req <= '0;
-        end else begin
-            if (a2o_front_valid && a2o_front_ready) begin
-                a2o_fe_valid <= 1'b1;
-                a2o_fe_req <= a2o_front_req;
-            end else if (a2o_fe_valid && a2o_fe_ready) begin
-                a2o_fe_valid <= 1'b0;
-            end
-        end
-    end
+    stream_fifo_optimal_wrap #(
+        .Depth     (IDMA_JOB_FIFO_DEPTH),
+        .type_t    (idma_nd_req_t),
+        .PrintInfo (1'b0)
+    ) i_a2o_job_fifo (
+        .clk_i,
+        .rst_ni,
+        .testmode_i (1'b0),
+        .flush_i    (1'b0),
+        .usage_o    (),
+        .data_i     (a2o_front_req),
+        .valid_i    (a2o_front_valid),
+        .ready_o    (a2o_front_ready),
+        .data_o     (a2o_fe_req),
+        .valid_o    (a2o_fe_valid),
+        .ready_i    (a2o_fe_ready)
+    );
 
     idma_nd_midend #(
         .NumDim        (NUM_DIMS),
@@ -476,21 +479,23 @@ module npu_pulp_idma_ctrl_mm #(
         .completed_o (o2a_done_id)
     );
 
-    assign o2a_front_ready = !o2a_fe_valid || o2a_fe_ready;
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-            o2a_fe_valid <= 1'b0;
-            o2a_fe_req <= '0;
-        end else begin
-            if (o2a_front_valid && o2a_front_ready) begin
-                o2a_fe_valid <= 1'b1;
-                o2a_fe_req <= o2a_front_req;
-            end else if (o2a_fe_valid && o2a_fe_ready) begin
-                o2a_fe_valid <= 1'b0;
-            end
-        end
-    end
+    stream_fifo_optimal_wrap #(
+        .Depth     (IDMA_JOB_FIFO_DEPTH),
+        .type_t    (idma_nd_req_t),
+        .PrintInfo (1'b0)
+    ) i_o2a_job_fifo (
+        .clk_i,
+        .rst_ni,
+        .testmode_i (1'b0),
+        .flush_i    (1'b0),
+        .usage_o    (),
+        .data_i     (o2a_front_req),
+        .valid_i    (o2a_front_valid),
+        .ready_o    (o2a_front_ready),
+        .data_o     (o2a_fe_req),
+        .valid_o    (o2a_fe_valid),
+        .ready_i    (o2a_fe_ready)
+    );
 
     idma_nd_midend #(
         .NumDim        (NUM_DIMS),

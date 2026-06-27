@@ -170,11 +170,13 @@ requant tensor match the exact requant formula.
 
 ```text
 cocotb writes the same Conv1x1 and Conv3x3 fixtures to L2
-  -> firmware keeps Conv1x1 input in L2 for iDMA 2D pack and DMA-copies RGB input for RVV pack
+  -> firmware keeps L2-resident inputs in L2 so iDMA can pack regular tiles
   -> npu_conv2d_packed_run_oc32 prepares packed M x 32 IFM tiles in TCDM
-     using iDMA for contiguous Conv1x1/K-tail tiles and Spatz RVV segment copies for RGB/padding tiles
+     using iDMA 2D for contiguous Conv1x1/K-tail tiles, iDMA 3D for
+     regular multi-spatial Conv2D segments, and Spatz RVV for fallback cases
   -> firmware runs systolic GEMM32/accumulate over the packed tile
-  -> firmware records mcycle deltas for prepare, GEMM, total, last K tile, and backend tile counts
+  -> firmware records mcycle deltas for prepare, GEMM, total, last K tile,
+     backend tile counts, and actual iDMA transfer counts
   -> firmware copies full INT32 outputs and stats back to L2
   -> cocotb compares output tensors and checks iDMA/RVV backend selection
 ```
@@ -182,9 +184,10 @@ cocotb writes the same Conv1x1 and Conv3x3 fixtures to L2
 Pass criteria: Conv outputs match Python golden exactly, scheduler status is
 `NPU_CONV2D_PACKED_OK`, scalar prepare tile count is zero, Conv1x1 uses iDMA
 for contiguous K tiles, `IC=32/64` pointwise cases prove full and multi-K
-tiles, RGB/padding/border cases use Spatz RVV pack, OC64 tiling stores both
-output-channel tiles at the correct row stride, and final accumulated K-block
-requant matches the exact INT32-to-INT8 golden formula. This is the current
+tiles, L2-resident regular Conv3x3/RGB tiles use iDMA 3D multi-spatial pack,
+fallback L1/irregular cases use Spatz RVV pack, OC64 tiling stores both output
+channel tiles at the correct row stride, and final accumulated K-block requant
+matches the exact INT32-to-INT8 golden formula. This is the current
 performance-path gate. `conv_perf` is the only Conv2D performance-path gate.
 
 `test_conv_perf` can run as one full binary or as shorter focused groups:
