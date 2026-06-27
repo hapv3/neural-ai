@@ -128,7 +128,8 @@ The verification plan must cover the packed Conv2D operator family, not only
 The previous software materializer test and RTL debug path have been dropped
 from active RTL/software. Conv2D
 lowering now uses the packed prepare path in `sw/lib/conv2d_packed.*`, with
-iDMA for contiguous K tiles and Spatz RVV copies for segmented/padded tiles.
+iDMA for contiguous and regular multi-spatial L2 tiles, plus Spatz RVV copies
+for fallback L1/TCDM or irregular tiles.
 
 Active Conv2D verification lives in `sw/test/conv_perf` and
 `test_conv_perf`. Do not add new roadmap features or acceptance criteria to the
@@ -166,8 +167,11 @@ Features to complete:
     the current YOLO/CNN/Vision Transformer target path.
 - **Backend policy**:
   - Conv1x1/contiguous K tiles use iDMA 2D pack.
-  - Larger-IC Conv3x3 uses iDMA only for regular one-segment tiles.
-  - RGB, padding, border, and tile-crossing cases use Spatz RVV pack.
+  - Regular multi-spatial Conv2D tiles from L2 use iDMA 3D segment pack.
+  - RGB/padding/border cases use iDMA 3D when representable as regular L2
+    segments; otherwise they fall back to Spatz RVV pack.
+  - L1/TCDM source tensors use Spatz RVV pack until an L1-side DMA/backend is
+    introduced.
   - Scalar prepare must remain disabled for performance tests.
 - **Unsupported in P3**:
   - Depthwise/grouped conv are tracked as separate paths; dense systolic Conv2D

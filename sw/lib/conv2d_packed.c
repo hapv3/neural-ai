@@ -25,6 +25,7 @@ static void clear_stats(npu_conv2d_packed_stats_t *stats) {
         stats->last_gemm_cycles = 0;
         stats->status = NPU_CONV2D_PACKED_OK;
         stats->prepare_idma_tiles = 0;
+        stats->prepare_idma_transfers = 0;
         stats->prepare_spatz_tiles = 0;
         stats->prepare_scalar_tiles = 0;
     }
@@ -75,7 +76,8 @@ static uint32_t wait_idma_or_fail(uint32_t direction, int tx_id) {
 
 static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const npu_conv2d_packed_cfg_t *cfg,
                                                                uint32_t k_block,
-                                                               uint32_t rows) {
+                                                               uint32_t rows,
+                                                               uint32_t *idma_transfers) {
     uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
     uint32_t valid = (k_base < cfg->input_c) ? min_u32(NPU_CONV2D_PACKED_K_TILE, cfg->input_c - k_base) : 0u;
 
@@ -90,6 +92,7 @@ static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const npu_conv2d_
     if (!is_l1_addr(src)) {
         int tx_id = idma_L2ToL1_2d(src, dst, valid, cfg->input_c, NPU_CONV2D_PACKED_K_TILE, rows);
         if (wait_idma_or_fail(IDMA_DIR_L2_TO_L1, tx_id)) {
+            *idma_transfers = 1u;
             return NPU_CONV2D_PREPARE_IDMA;
         }
     }
@@ -140,7 +143,8 @@ static uint32_t output_valid_range(uint32_t output_len,
 
 static uint32_t try_prepare_single_spatial_idma(const npu_conv2d_packed_cfg_t *cfg,
                                                 uint32_t k_block,
-                                                uint32_t rows) {
+                                                uint32_t rows,
+                                                uint32_t *idma_transfers) {
     uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
     uint32_t kernel_spatial = cfg->kernel_h * cfg->kernel_w;
     uint32_t k_total = kernel_spatial * cfg->input_c;
@@ -187,7 +191,88 @@ static uint32_t try_prepare_single_spatial_idma(const npu_conv2d_packed_cfg_t *c
                                src_stride_3, dst_stride_3, valid_oh);
 
     (void)rows;
-    return wait_idma_or_fail(IDMA_DIR_L2_TO_L1, tx_id);
+    if (wait_idma_or_fail(IDMA_DIR_L2_TO_L1, tx_id)) {
+        *idma_transfers = 1u;
+        return 1;
+    }
+    return 0;
+}
+
+static uint32_t try_prepare_multi_spatial_idma(const npu_conv2d_packed_cfg_t *cfg,
+                                               uint32_t k_block,
+                                               uint32_t rows,
+                                               uint32_t *idma_transfers) {
+    uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
+    uint32_t kernel_spatial = cfg->kernel_h * cfg->kernel_w;
+    uint32_t k_total = kernel_spatial * cfg->input_c;
+    uint32_t lane = 0;
+    uint32_t transfers = 0;
+    int last_tx_id = 0;
+
+    if (k_base >= k_total || is_l1_addr(cfg->input_addr)) {
+        return 0;
+    }
+
+    while (lane < NPU_CONV2D_PACKED_K_TILE) {
+        uint32_t k_index = k_base + lane;
+        if (k_index >= k_total) {
+            break;
+        }
+
+        uint32_t spatial_index = k_index / cfg->input_c;
+        uint32_t channel_base = k_index - (spatial_index * cfg->input_c);
+        uint32_t kh = spatial_index / cfg->kernel_w;
+        uint32_t kw = spatial_index - (kh * cfg->kernel_w);
+        uint32_t valid = min_u32(NPU_CONV2D_PACKED_K_TILE - lane, cfg->input_c - channel_base);
+        uint32_t first_oh;
+        uint32_t valid_oh;
+        uint32_t first_ow;
+        uint32_t valid_ow;
+
+        if (k_index + valid > k_total) {
+            valid = k_total - k_index;
+        }
+
+        if (valid == 0u) {
+            return 0;
+        }
+
+        if (output_valid_range(cfg->output_h, cfg->stride_h, kh, cfg->pad_h, cfg->input_h, &first_oh, &valid_oh) &&
+            output_valid_range(cfg->output_w, cfg->stride_w, kw, cfg->pad_w, cfg->input_w, &first_ow, &valid_ow)) {
+            int32_t ih = signed_coord(first_oh * cfg->stride_h, kh, cfg->pad_h);
+            int32_t iw = signed_coord(first_ow * cfg->stride_w, kw, cfg->pad_w);
+            uint32_t src = cfg->input_addr + ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + channel_base);
+            uint32_t dst = cfg->im2col_addr + (((first_oh * cfg->output_w) + first_ow) * NPU_CONV2D_PACKED_K_TILE) + lane;
+            uint32_t src_stride_2 = cfg->stride_w * cfg->input_c;
+            uint32_t dst_stride_2 = NPU_CONV2D_PACKED_K_TILE;
+            uint32_t src_stride_3 = cfg->stride_h * cfg->input_w * cfg->input_c;
+            uint32_t dst_stride_3 = cfg->output_w * NPU_CONV2D_PACKED_K_TILE;
+            int tx_id = idma_L2ToL1_3d(src, dst, valid,
+                                       src_stride_2, dst_stride_2, valid_ow,
+                                       src_stride_3, dst_stride_3, valid_oh);
+
+            if (tx_id <= 0) {
+                if (last_tx_id > 0) {
+                    (void)wait_idma_or_fail(IDMA_DIR_L2_TO_L1, last_tx_id);
+                }
+                return 0;
+            }
+            last_tx_id = tx_id;
+            transfers++;
+        }
+
+        lane += valid;
+    }
+
+    (void)rows;
+    if (last_tx_id <= 0) {
+        return 0;
+    }
+    if (last_tx_id > 0 && !wait_idma_or_fail(IDMA_DIR_L2_TO_L1, last_tx_id)) {
+        return 0;
+    }
+    *idma_transfers = transfers;
+    return 1;
 }
 
 static void prepare_spatz_segmented(const npu_conv2d_packed_cfg_t *cfg,
@@ -235,13 +320,18 @@ static void prepare_spatz_segmented(const npu_conv2d_packed_cfg_t *cfg,
 
 static npu_conv2d_prepare_backend_t prepare_k_tile(const npu_conv2d_packed_cfg_t *cfg,
                                                    uint32_t k_block,
-                                                   uint32_t rows) {
+                                                   uint32_t rows,
+                                                   uint32_t *idma_transfers) {
+    *idma_transfers = 0;
     if (is_contiguous_conv1x1(cfg)) {
-        return prepare_conv1x1_contiguous(cfg, k_block, rows);
+        return prepare_conv1x1_contiguous(cfg, k_block, rows, idma_transfers);
     }
 
     zero_im2col_tile(cfg, rows);
-    if (try_prepare_single_spatial_idma(cfg, k_block, rows)) {
+    if (try_prepare_single_spatial_idma(cfg, k_block, rows, idma_transfers)) {
+        return NPU_CONV2D_PREPARE_IDMA;
+    }
+    if (try_prepare_multi_spatial_idma(cfg, k_block, rows, idma_transfers)) {
         return NPU_CONV2D_PREPARE_IDMA;
     }
 
@@ -274,9 +364,10 @@ uint32_t npu_conv2d_packed_run_oc32(const npu_conv2d_packed_cfg_t *cfg,
 
     for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
         uint32_t weight_addr = cfg->weight_addr + (k_block * NPU_CONV2D_PACKED_K_TILE * NPU_CONV2D_PACKED_OC_TILE);
+        uint32_t idma_transfers = 0;
 
         uint32_t prepare_start = spatz_rt_read_cycle();
-        npu_conv2d_prepare_backend_t backend = prepare_k_tile(cfg, k_block, rows);
+        npu_conv2d_prepare_backend_t backend = prepare_k_tile(cfg, k_block, rows, &idma_transfers);
         uint32_t prepare_cycles = spatz_rt_read_cycle() - prepare_start;
 
         uint32_t gemm_start = spatz_rt_read_cycle();
@@ -294,6 +385,7 @@ uint32_t npu_conv2d_packed_run_oc32(const npu_conv2d_packed_cfg_t *cfg,
             stats->last_gemm_cycles = gemm_cycles;
             if (backend == NPU_CONV2D_PREPARE_IDMA) {
                 stats->prepare_idma_tiles++;
+                stats->prepare_idma_transfers += idma_transfers;
             } else if (backend == NPU_CONV2D_PREPARE_SPATZ) {
                 stats->prepare_spatz_tiles++;
             } else {
@@ -336,9 +428,10 @@ uint32_t npu_conv2d_packed_run_oc32_requant(const npu_conv2d_packed_cfg_t *cfg,
     for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
         uint32_t weight_addr = cfg->weight_addr + (k_block * NPU_CONV2D_PACKED_K_TILE * NPU_CONV2D_PACKED_OC_TILE);
         uint32_t is_last = (k_block + 1u) == k_tiles;
+        uint32_t idma_transfers = 0;
 
         uint32_t prepare_start = spatz_rt_read_cycle();
-        npu_conv2d_prepare_backend_t backend = prepare_k_tile(cfg, k_block, rows);
+        npu_conv2d_prepare_backend_t backend = prepare_k_tile(cfg, k_block, rows, &idma_transfers);
         uint32_t prepare_cycles = spatz_rt_read_cycle() - prepare_start;
 
         uint32_t gemm_start = spatz_rt_read_cycle();
@@ -360,6 +453,7 @@ uint32_t npu_conv2d_packed_run_oc32_requant(const npu_conv2d_packed_cfg_t *cfg,
             stats->last_gemm_cycles = gemm_cycles;
             if (backend == NPU_CONV2D_PREPARE_IDMA) {
                 stats->prepare_idma_tiles++;
+                stats->prepare_idma_transfers += idma_transfers;
             } else if (backend == NPU_CONV2D_PREPARE_SPATZ) {
                 stats->prepare_spatz_tiles++;
             } else {

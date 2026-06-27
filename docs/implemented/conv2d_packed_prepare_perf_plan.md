@@ -9,13 +9,18 @@ The active performance path is:
 ```text
 software scheduler
   -> iDMA 2D/3D packed tile prepare for contiguous regions
-  -> Spatz RVV packed tile prepare for RGB, padding, border, and irregular regions
+  -> iDMA 3D multi-spatial packed tile prepare for regular L2 Conv2D segments
+  -> Spatz RVV packed tile prepare for L1/TCDM fallback and irregular regions
   -> systolic GEMM32 / accumulated GEMM32 / final requant
 ```
 
 The old direct Conv2D RTL modules and matching firmware/debug tests have since
 been removed from the active tree. No new performance features should be added to
 that removed path.
+
+Update: the original RGB/padding Spatz-only path has been superseded for
+L2-resident regular Conv2D tiles by the generic multi-spatial iDMA path in
+`sw/lib/conv2d_packed.c`. Spatz remains the fallback backend.
 
 ## Rationale
 
@@ -26,12 +31,15 @@ bottleneck, not systolic compute:
 |------|--------------------|-------------|------|---------|
 | Conv1x1 `M=20`, `IC=33` | `108592` cycles | `10658` cycles | `666` cycles | iDMA 2D, 2 K tiles |
 | Conv3x3 `M=25`, `IC=3`, pad1 | `95822` cycles | `42108` cycles | `202` cycles | Spatz RVV, 1 K tile |
+| Conv3x3 `M=25`, `IC=3`, pad1 | `42108` cycles | `11630` cycles | `200` cycles | iDMA 3D multi-spatial, 1 K tile / 9 queued transfers |
 
 The new path proves the right backend selection:
 
 - Conv1x1 contiguous K tiles use iDMA 2D pack.
 - K-tail lanes are zero-filled before copying valid bytes.
-- RGB/padding uses Spatz RVV segment copies with explicit zero injection.
+- L2-resident regular RGB/padding segments use iDMA 3D multi-spatial pack.
+- L1/TCDM or irregular cases use Spatz RVV segment copies with explicit zero
+  injection.
 - Scalar prepare is no longer used by the performance test.
 
 The remaining bottleneck is now packed-tile preparation policy and overhead,
@@ -64,7 +72,8 @@ benefit.
 ### RGB / IC < 32 / Padding / Border
 
 - Pre-clear the packed destination tile.
-- Use Spatz RVV segment copies for in-bound contiguous channel runs.
+- Use iDMA 3D multi-spatial segment copies for regular L2-resident tiles.
+- Use Spatz RVV segment copies for L1/TCDM or irregular fallback runs.
 - Leave invalid padding/tail lanes as zero.
 
 ### Unsupported
@@ -93,6 +102,10 @@ Pass criteria:
 - Output tensors match Python golden exactly.
 - Firmware status is `NPU_CONV2D_PACKED_OK`.
 - Backend tile counters match expected path selection.
+- `prepare_idma_transfers` records actual iDMA commands, which may be larger
+  than `prepare_idma_tiles` for multi-spatial Conv2D K tiles.
+- The iDMA frontend has a configurable job FIFO, so regular multi-spatial
+  Conv2D prepare can queue segment transfers and wait only for the final ID.
 - `prepare_scalar_tiles == 0`.
 - Cycle stats are recorded for prepare, GEMM, total, and final K tile.
 
