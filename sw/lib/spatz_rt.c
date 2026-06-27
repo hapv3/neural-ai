@@ -38,6 +38,12 @@ void spatz_rt_fail_at(uint32_t test_id, uint32_t index, int32_t got, int32_t exp
     }
 }
 
+uint32_t spatz_rt_read_cycle(void) {
+    uint32_t cycle;
+    __asm__ volatile("csrr %0, 0xB00" : "=r"(cycle));
+    return cycle;
+}
+
 void *spatz_rt_memset(void *ptr, int value, uint32_t num) {
     uint8_t *dst = (uint8_t *)ptr;
     for (uint32_t i = 0; i < num; i++) {

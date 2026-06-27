@@ -177,7 +177,7 @@ module conv2d_feeder_cache #(
                 .DataWidth (DATA_WIDTH),
                 .NumPorts  (2),
                 .Latency   (1),
-                .SimInit   ("zeros")
+                .SimInit   ("none")
             ) i_data_sram (
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),
@@ -194,7 +194,7 @@ module conv2d_feeder_cache #(
                 .DataWidth (CACHE_META_W),
                 .NumPorts  (2),
                 .Latency   (1),
-                .SimInit   ("zeros")
+                .SimInit   ("none")
             ) i_meta_sram (
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),

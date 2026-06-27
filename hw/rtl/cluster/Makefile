@@ -36,7 +36,7 @@ VERILOG_SOURCES = $(PWD)/tb/tb_npu_cluster.sv
 
 # Verilator extra args: pass expanded .F which contains all other sources
 EXTRA_ARGS += -Wno-fatal -Wno-WIDTH -Wno-UNOPTFLAT -Wno-IMPLICIT -Wno-PINMISSING \
-              --timing -j $(VERILATOR_JOBS)
+              --timing -DSNITCH_ENABLE_PERF -j $(VERILATOR_JOBS)
 
 # Cocotb's Verilator backend invokes `make -C $(SIM_BUILD) ... -f Vtop.mk`.
 # Pass `-j` into that generated C++ build as well; Verilator's `-j` only

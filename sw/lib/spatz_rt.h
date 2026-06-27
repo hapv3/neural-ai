@@ -23,6 +23,7 @@ void spatz_rt_set_phase(uint32_t phase, uint32_t op);
 void spatz_rt_pass_step(void);
 void spatz_rt_pass(void);
 void spatz_rt_fail_at(uint32_t test_id, uint32_t index, int32_t got, int32_t expected);
+uint32_t spatz_rt_read_cycle(void);
 void *spatz_rt_memset(void *ptr, int value, uint32_t num);
 void *spatz_rt_memcpy(void *dst, const void *src, uint32_t num);
 void spatz_rt_dma_1d(uint32_t dst_addr, uint32_t src_addr, uint32_t size);
