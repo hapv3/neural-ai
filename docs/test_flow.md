@@ -113,6 +113,10 @@ Covered groups today:
 
 - `basic_mem_arith`: e32 load/store, add/sub/logic, logical shifts.
 - `memory_width`: e8/e16/e32 load-store.
+- `strided_indexed`: e8 strided load/store plus unordered/ordered indexed
+  load-store with e8 index vectors. This group currently exposes an RTL failure
+  at `vsuxei8.v`; keep indexed-store users blocked until the regression is
+  green.
 - `arith_mask`: multiply, min/max, arithmetic shift, compare/merge.
 - `reduction`: e32 sum reduction.
 

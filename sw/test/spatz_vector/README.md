@@ -15,6 +15,7 @@ the data with scalar golden code.
 |------|--------|
 | `tests/basic_mem_arith.S` | `vsetvli`, `vle32/vse32`, add/sub/logic, logical shifts |
 | `tests/memory_width.S` | `vle/vse` for e8, e16, and e32 |
+| `tests/strided_indexed.S` | `vlse8/vsse8`, `vluxei8/vsuxei8`, `vloxei8/vsoxei8` |
 | `tests/arith_mask.S` | multiply, min/max, arithmetic shift, compare, mask merge |
 | `tests/reduction.S` | e32 `vredsum.vs` reduction |
 
@@ -48,6 +49,11 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic
 ```
 
+Current result after adding `strided_indexed`: the firmware builds, `vlse8/vsse8`
+and `vluxei8` execute far enough for exact cocotb checks, but the RTL regression
+currently fails at `vsuxei8.v` with the first scattered byte still zero. Treat
+indexed store as blocked until this regression is debugged.
+
 ## Coverage Roadmap
 
 The suite is intentionally split-ready: add one `.S` file per instruction group
@@ -55,7 +61,9 @@ and one cocotb wrapper or parameterized loader per binary.
 
 - Config: `vsetivli`, `vsetvl`
 - Memory widths: `vle8/16/32`, `vse8/16/32`
-- Strided/indexed memory: `vlse/vsse`, `vluxei/vsuxei`, `vloxei/vsoxei`
+- Strided/indexed memory: e8 data/index with `vlse8/vsse8`,
+  `vluxei8/vsuxei8`, and `vloxei8/vsoxei8`; wider data/index variants remain
+  follow-up coverage.
 - Arithmetic: `vmin/vminu`, `vmax/vmaxu`, `vmul`, `vmulh/u/su`
 - Divide/remainder: `vdiv/u`, `vrem/u`
 - Compare/mask: `vmseq`, `vmsne`, `vmslt/u`, `vmsle/u`, `vmsgt/u`
