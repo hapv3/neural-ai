@@ -16,6 +16,49 @@ spatz_vec_copy_i8:
 2:
     ret
 
+    .global spatz_vec_strided_copy_i8
+    .type spatz_vec_strided_copy_i8, @function
+spatz_vec_strided_copy_i8:
+    beqz a2, 2f
+1:
+    vsetvli t0, a2, e8, m8, ta, ma
+    vlse8.v v8, (a0), a3
+    vsse8.v v8, (a1), a4
+    mul t1, t0, a3
+    mul t2, t0, a4
+    add a0, a0, t1
+    add a1, a1, t2
+    sub a2, a2, t0
+    bnez a2, 1b
+2:
+    ret
+
+    .global spatz_im2col_rect_i8
+    .type spatz_im2col_rect_i8, @function
+spatz_im2col_rect_i8:
+    beqz a2, 4f
+    beqz a3, 4f
+1:
+    mv t3, a0
+    mv t4, a1
+    mv t5, a3
+2:
+    vsetvli t0, t5, e8, m8, ta, ma
+    vlse8.v v8, (t3), a4
+    vsse8.v v8, (t4), a5
+    mul t1, t0, a4
+    mul t2, t0, a5
+    add t3, t3, t1
+    add t4, t4, t2
+    sub t5, t5, t0
+    bnez t5, 2b
+    add a0, a0, a6
+    add a1, a1, a7
+    addi a2, a2, -1
+    bnez a2, 1b
+4:
+    ret
+
     .global spatz_vec_relu_i8
     .type spatz_vec_relu_i8, @function
 spatz_vec_relu_i8:

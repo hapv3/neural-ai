@@ -28,7 +28,10 @@ DST_VLUXEI = 0x10104500
 DST_VSUXEI = 0x10104600
 DST_VLOXEI = 0x10104A00
 DST_VSOXEI = 0x10104B00
+DST_STRIDE32 = 0x10104C00
+DST_M8 = 0x10105000
 STRIDED_INDEXED_VL = 16
+STRIDED_INDEXED_VL_M8 = 96
 SIG_STATUS = 0x10008000
 SIG_PASS_COUNT = 0x10008004
 SIG_FAIL_TEST = 0x10008008
@@ -89,6 +92,13 @@ def check_strided_indexed_outputs(dut):
         )
         check_byte(
             dut,
+            DST_STRIDE32 + lane * 32,
+            (15 * lane + 7) & 0xFF,
+            "vlse8.v/vsse8.v stride32",
+            lane,
+        )
+        check_byte(
+            dut,
             DST_VSUXEI + lane * 2,
             (45 * lane + 12) & 0xFF,
             "vsuxei8.v",
@@ -106,6 +116,14 @@ def check_strided_indexed_outputs(dut):
             DST_VSOXEI + lane * 3,
             (28 * lane + 25) & 0xFF,
             "vsoxei8.v",
+            lane,
+        )
+    for lane in range(STRIDED_INDEXED_VL_M8):
+        check_byte(
+            dut,
+            DST_M8 + lane * 32,
+            (33 * lane + 19) & 0xFF,
+            "vlse8.v/vsse8.v m8 stride32",
             lane,
         )
 

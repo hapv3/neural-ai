@@ -49,10 +49,11 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_spatz_vector_basic
 ```
 
-Current result after adding `strided_indexed`: the firmware builds, `vlse8/vsse8`
-and `vluxei8` execute far enough for exact cocotb checks, but the RTL regression
-currently fails at `vsuxei8.v` with the first scattered byte still zero. Treat
-indexed store as blocked until this regression is debugged.
+Current result: `strided_indexed` passes the RTL regression with exact firmware
+and cocotb data checks for `vlse8/vsse8`, LMUL `m8` stride-32 store,
+`vluxei8/vsuxei8`, and `vloxei8/vsoxei8`. Indexed load/store and m8 strided
+load/store are therefore available for higher-level Spatz gather/scatter
+helpers, with wider data/index variants still tracked as follow-up coverage.
 
 ## Coverage Roadmap
 
@@ -61,9 +62,9 @@ and one cocotb wrapper or parameterized loader per binary.
 
 - Config: `vsetivli`, `vsetvl`
 - Memory widths: `vle8/16/32`, `vse8/16/32`
-- Strided/indexed memory: e8 data/index with `vlse8/vsse8`,
-  `vluxei8/vsuxei8`, and `vloxei8/vsoxei8`; wider data/index variants remain
-  follow-up coverage.
+- Strided/indexed memory: e8 data/index with `vlse8/vsse8`, LMUL `m8`
+  stride-32 store, `vluxei8/vsuxei8`, and `vloxei8/vsoxei8`; wider data/index
+  variants remain follow-up coverage.
 - Arithmetic: `vmin/vminu`, `vmax/vmaxu`, `vmul`, `vmulh/u/su`
 - Divide/remainder: `vdiv/u`, `vrem/u`
 - Compare/mask: `vmseq`, `vmsne`, `vmslt/u`, `vmsle/u`, `vmsgt/u`

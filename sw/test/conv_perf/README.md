@@ -54,3 +54,23 @@ env CONV_PERF_GROUP=3 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 Group `1` covers legacy pointwise, IC tails, and OC64 tiling. Group `2` covers
 kernel/stride/padding/tail-K shapes, including iDMA 3D multi-spatial and Spatz
 fallback coverage. Group `3` covers final-block INT8 requant.
+
+For single-case debug, compile and run with `CONV_PERF_CASE=<case_id>`. This
+overrides `CONV_PERF_GROUP` and skips legacy cases:
+
+```sh
+make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_CASE=6
+env CONV_PERF_CASE=6 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
+```
+
+Set `CONV_PERF_SPATZ_RECT=0` while compiling to compare the older segmented
+Spatz fallback against the rectangle-strided `vlse8`/`vsse8` path.
+
+Current focused RTL measurement for `CONV_PERF_CASE=6` (`Conv5x5 pad2 IC3`,
+L1/TCDM input source):
+
+| Mode | Prepare cycles | GEMM cycles | Total cycles |
+| --- | ---: | ---: | ---: |
+| 2D rectangle-strided Spatz fallback | 34904 | 780 | 35922 |
+| Older segmented Spatz fallback (`CONV_PERF_SPATZ_RECT=0`) | 75560 | 780 | 76578 |

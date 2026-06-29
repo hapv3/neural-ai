@@ -114,9 +114,10 @@ Covered groups today:
 - `basic_mem_arith`: e32 load/store, add/sub/logic, logical shifts.
 - `memory_width`: e8/e16/e32 load-store.
 - `strided_indexed`: e8 strided load/store plus unordered/ordered indexed
-  load-store with e8 index vectors. This group currently exposes an RTL failure
-  at `vsuxei8.v`; keep indexed-store users blocked until the regression is
-  green.
+  load-store with e8 index vectors. This group passes RTL with exact firmware
+  and cocotb output checks, so higher-level Spatz gather/scatter code may use
+  indexed e8 load/store. It also checks a stride-32 packed-row store pattern
+  used by Conv2D `M x 32` im2col tiles, including an LMUL `m8` case.
 - `arith_mask`: multiply, min/max, arithmetic shift, compare/merge.
 - `reduction`: e32 sum reduction.
 
@@ -177,7 +178,8 @@ cocotb writes the same Conv1x1 and Conv3x3 fixtures to L2
   -> firmware keeps L2-resident inputs in L2 so iDMA can pack regular tiles
   -> npu_conv2d_packed_run_oc32 prepares packed M x 32 IFM tiles in TCDM
      using iDMA 2D for contiguous Conv1x1/K-tail tiles, iDMA 3D for
-     regular multi-spatial Conv2D segments, and Spatz RVV for fallback cases
+     regular multi-spatial Conv2D segments, and Spatz RVV strided copies for
+     L1/TCDM fallback cases
   -> firmware runs systolic GEMM32/accumulate over the packed tile
   -> firmware records mcycle deltas for prepare, GEMM, total, last K tile,
      backend tile counts, and actual iDMA transfer counts
@@ -212,6 +214,11 @@ env CONV_PERF_GROUP=3 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 Group `1` covers pointwise/OC tiling, group `2` covers kernel shapes, and group
 `3` covers final-block requant.
+
+For one-case debug, compile with `CONV_PERF_CASE=<case_id>` and pass the same
+environment variable to cocotb. Example: `CONV_PERF_CASE=6` runs the L1-source
+`Conv5x5 pad2 IC3` Spatz fallback case. Compile with `CONV_PERF_SPATZ_RECT=0`
+to compare against the older segmented Spatz fallback.
 
 ### Matmul
 
