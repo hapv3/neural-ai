@@ -90,16 +90,26 @@
 #define CONV_PERF_GROUP 0
 #endif
 
+#ifndef CONV_PERF_CASE
+#define CONV_PERF_CASE -1
+#endif
+
 #define CONV_PERF_GROUP_ALL       0
 #define CONV_PERF_GROUP_POINTWISE 1
 #define CONV_PERF_GROUP_KERNELS   2
 #define CONV_PERF_GROUP_REQUANT   3
 
 static uint32_t should_run_legacy(void) {
+    if (CONV_PERF_CASE >= 0) {
+        return 0u;
+    }
     return (CONV_PERF_GROUP == CONV_PERF_GROUP_ALL) || (CONV_PERF_GROUP == CONV_PERF_GROUP_POINTWISE);
 }
 
 static uint32_t should_run_case(uint32_t case_id) {
+    if (CONV_PERF_CASE >= 0) {
+        return case_id == (uint32_t)CONV_PERF_CASE;
+    }
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_ALL) {
         return 1u;
     }

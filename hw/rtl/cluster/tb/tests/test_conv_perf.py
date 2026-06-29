@@ -82,6 +82,7 @@ P3_CASES = {
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
+CONV_PERF_CASE = int(os.environ.get("CONV_PERF_CASE", "-1"))
 CONV_PERF_GROUP_ALL = 0
 CONV_PERF_GROUP_POINTWISE = 1
 CONV_PERF_GROUP_KERNELS = 2
@@ -89,10 +90,14 @@ CONV_PERF_GROUP_REQUANT = 3
 
 
 def legacy_enabled():
+    if CONV_PERF_CASE >= 0:
+        return False
     return CONV_PERF_GROUP in (CONV_PERF_GROUP_ALL, CONV_PERF_GROUP_POINTWISE)
 
 
 def p3_case_enabled(case_id):
+    if CONV_PERF_CASE >= 0:
+        return case_id == CONV_PERF_CASE
     if CONV_PERF_GROUP == CONV_PERF_GROUP_ALL:
         return True
     if CONV_PERF_GROUP == CONV_PERF_GROUP_POINTWISE:

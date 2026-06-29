@@ -26,10 +26,15 @@
     .equ DST_ORD_IDX8,    0x10104900
     .equ DST_VLOXEI,      0x10104a00
     .equ DST_VSOXEI,      0x10104b00
+    .equ DST_STRIDE32,    0x10104c00
+    .equ SRC_M8,          0x10104e00
+    .equ DST_M8,          0x10105000
 
     .equ VL,              16
+    .equ VL_M8,           96
     .equ STRIDE_LOAD,     3
     .equ STRIDE_STORE,    2
+    .equ IM2COL_STRIDE,   32
 
     .section .text.init
     .global _start
@@ -65,7 +70,37 @@ _start:
     jal ra, verify_strided
     jal ra, mark_pass
 
-    # Test 2: unordered indexed load gathers sparse bytes into a dense vector.
+    # Test 2: im2col-like scatter uses a 32-byte row stride.
+    li t0, VL
+    vsetvli t1, t0, e8, m1, ta, ma
+    li a0, SRC_STRIDED
+    li a1, STRIDE_LOAD
+    vlse8.v v1, (a0), a1
+    li a0, DST_STRIDE32
+    li a1, IM2COL_STRIDE
+    vsse8.v v1, (a0), a1
+    fence
+    li a0, DST_STRIDE32
+    li a1, 2
+    jal ra, verify_stride32
+    jal ra, mark_pass
+
+    # Test 3: LMUL=8 strided load/store covers a row wider than one m1 vector.
+    li t0, VL_M8
+    vsetvli t1, t0, e8, m8, ta, ma
+    li a0, SRC_M8
+    li a1, STRIDE_LOAD
+    vlse8.v v8, (a0), a1
+    li a0, DST_M8
+    li a1, IM2COL_STRIDE
+    vsse8.v v8, (a0), a1
+    fence
+    li a0, DST_M8
+    li a1, 3
+    jal ra, verify_m8_stride32
+    jal ra, mark_pass
+
+    # Test 4: unordered indexed load gathers sparse bytes into a dense vector.
     li t0, VL
     vsetvli t1, t0, e8, m1, ta, ma
     li a0, SRC_IDX8
@@ -76,11 +111,11 @@ _start:
     vse8.v v1, (a0)
     fence
     li a0, DST_VLUXEI
-    li a1, 2
+    li a1, 4
     jal ra, verify_vluxei
     jal ra, mark_pass
 
-    # Test 3: unordered indexed store scatters the gathered vector.
+    # Test 5: unordered indexed store scatters the gathered vector.
     li t0, VL
     vsetvli t1, t0, e8, m1, ta, ma
     li a0, DST_IDX8
@@ -89,11 +124,11 @@ _start:
     vsuxei8.v v1, (a0), v2
     fence
     li a0, DST_VSUXEI
-    li a1, 3
+    li a1, 5
     jal ra, verify_vsuxei
     jal ra, mark_pass
 
-    # Test 4: ordered indexed load uses a different source/index fixture.
+    # Test 6: ordered indexed load uses a different source/index fixture.
     li t0, VL
     vsetvli t1, t0, e8, m1, ta, ma
     li a0, ORD_IDX8
@@ -104,11 +139,11 @@ _start:
     vse8.v v1, (a0)
     fence
     li a0, DST_VLOXEI
-    li a1, 4
+    li a1, 6
     jal ra, verify_vloxei
     jal ra, mark_pass
 
-    # Test 5: ordered indexed store scatters the ordered-load result.
+    # Test 7: ordered indexed store scatters the ordered-load result.
     li t0, VL
     vsetvli t1, t0, e8, m1, ta, ma
     li a0, DST_ORD_IDX8
@@ -117,7 +152,7 @@ _start:
     vsoxei8.v v1, (a0), v2
     fence
     li a0, DST_VSOXEI
-    li a1, 5
+    li a1, 7
     jal ra, verify_vsoxei
     jal ra, mark_pass
 
@@ -144,6 +179,30 @@ seed_strided:
     addi t0, t0, 1
     li t2, 80
     blt t0, t2, 1b
+
+    li a0, DST_STRIDE32
+    li t0, 0
+2:
+    sb zero, 0(a0)
+    addi a0, a0, 1
+    addi t0, t0, 1
+    li t2, 512
+    blt t0, t2, 2b
+
+    li a0, SRC_M8
+    li a1, DST_M8
+    li t0, 0
+3:
+    li t1, 11
+    mul t1, t1, t0
+    addi t1, t1, 19
+    sb t1, 0(a0)
+    sb zero, 0(a1)
+    addi a0, a0, 1
+    addi a1, a1, 1
+    addi t0, t0, 1
+    li t2, 3072
+    blt t0, t2, 3b
     ret
 
 seed_indexed:
@@ -233,6 +292,38 @@ verify_strided:
     bne t1, t2, fail
     addi t0, t0, 1
     li t4, VL
+    blt t0, t4, 1b
+    ret
+
+verify_stride32:
+    li t0, 0
+1:
+    slli t3, t0, 5
+    add t3, a0, t3
+    lbu t1, 0(t3)
+    li t2, 15
+    mul t2, t2, t0
+    addi t2, t2, 7
+    andi t2, t2, 0xff
+    bne t1, t2, fail
+    addi t0, t0, 1
+    li t4, VL
+    blt t0, t4, 1b
+    ret
+
+verify_m8_stride32:
+    li t0, 0
+1:
+    slli t3, t0, 5
+    add t3, a0, t3
+    lbu t1, 0(t3)
+    li t2, 33
+    mul t2, t2, t0
+    addi t2, t2, 19
+    andi t2, t2, 0xff
+    bne t1, t2, fail
+    addi t0, t0, 1
+    li t4, VL_M8
     blt t0, t4, 1b
     ret
 

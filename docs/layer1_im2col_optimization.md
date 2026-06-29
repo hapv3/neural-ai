@@ -132,11 +132,28 @@ Recommended next implementation:
    use Spatz gather only when the scheduler has already staged the source tile
    into TCDM or when iDMA cannot express the shape efficiently.
 
-Current local RVV gate status: `strided_indexed` has been added to
-`sw/test/spatz_vector`, but the RTL regression exposes a `vsuxei8.v` store
-failure. Do not rely on indexed stores for im2col scatter until that test is
-green. The first Spatz gather helper should therefore use indexed/strided loads
-plus strided or unit stores only.
+Current local RVV gate status: `strided_indexed` passes the RTL regression with
+exact firmware and cocotb checks for `vlse8/vsse8`, LMUL `m8` stride-32 store,
+`vluxei8/vsuxei8`, and `vloxei8/vsoxei8`. The first production Spatz gather
+helper still starts with the lower-risk rectangle path using `vlse8.v` plus
+`vsse8.v`; indexed load/store is now unblocked for follow-up irregular
+sparse-row gather/scatter.
+
+The first rectangle-strided fallback is implemented for L1/TCDM-resident Conv2D
+input tiles when the current software tile covers the full output rectangle
+(`rows == output_h * output_w`). It zero-fills the packed tile, splits padding
+into valid output rectangles, and copies each channel stream with a 2D Spatz
+helper using `vlse8.v` load stride `stride_w * IC` plus `vsse8.v` store stride
+`32`. The helper uses LMUL `m8`, which is now covered by the local RTL RVV
+regression, and moves the row loop into assembly so C only calls once per
+channel rectangle instead of once per output row.
+
+On the focused RTL fixture `CONV_PERF_CASE=6` (`Conv5x5 pad2 IC3`, L1 source,
+`rows=16`, `k_tiles=3`), the path is correctness-clean and reduces prepare
+cycles from `75560` to `34904` versus the older segmented Spatz fallback. This
+is a useful `~2.2x` improvement, but still not sufficient as the final Layer-1
+strategy; the next step remains indexed-offset gather for larger row tiles and
+sparse border lists.
 
 ## Engineering Conclusion
 

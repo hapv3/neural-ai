@@ -4,6 +4,10 @@
 #include "spatz_ops.h"
 #include "spatz_rt.h"
 
+#ifndef NPU_CONV2D_ENABLE_SPATZ_RECT
+#define NPU_CONV2D_ENABLE_SPATZ_RECT 1
+#endif
+
 typedef enum {
     NPU_CONV2D_PREPARE_SCALAR = 0,
     NPU_CONV2D_PREPARE_IDMA = 1,
@@ -318,6 +322,72 @@ static void prepare_spatz_segmented(const npu_conv2d_packed_cfg_t *cfg,
     }
 }
 
+static uint32_t prepare_spatz_rect_strided(const npu_conv2d_packed_cfg_t *cfg,
+                                           uint32_t k_block,
+                                           uint32_t rows) {
+    uint32_t kernel_spatial = cfg->kernel_h * cfg->kernel_w;
+    uint32_t k_total = kernel_spatial * cfg->input_c;
+    uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
+    uint32_t lane = 0;
+
+    if (!is_l1_addr(cfg->input_addr) || k_base >= k_total || rows != (cfg->output_h * cfg->output_w)) {
+        return 0;
+    }
+
+    while (lane < NPU_CONV2D_PACKED_K_TILE) {
+        uint32_t k_index = k_base + lane;
+        if (k_index >= k_total) {
+            break;
+        }
+
+        uint32_t spatial_index = k_index / cfg->input_c;
+        uint32_t channel_base = k_index - (spatial_index * cfg->input_c);
+        uint32_t kh = spatial_index / cfg->kernel_w;
+        uint32_t kw = spatial_index - (kh * cfg->kernel_w);
+        uint32_t valid = min_u32(NPU_CONV2D_PACKED_K_TILE - lane, cfg->input_c - channel_base);
+        uint32_t first_oh;
+        uint32_t valid_oh;
+        uint32_t first_ow;
+        uint32_t valid_ow;
+
+        if (k_index + valid > k_total) {
+            valid = k_total - k_index;
+        }
+        if (valid == 0u) {
+            return 0;
+        }
+
+        if (output_valid_range(cfg->output_h, cfg->stride_h, kh, cfg->pad_h, cfg->input_h, &first_oh, &valid_oh) &&
+            output_valid_range(cfg->output_w, cfg->stride_w, kw, cfg->pad_w, cfg->input_w, &first_ow, &valid_ow)) {
+            int32_t ih = signed_coord(first_oh * cfg->stride_h, kh * cfg->dilation_h, cfg->pad_h);
+            int32_t iw = signed_coord(first_ow * cfg->stride_w, kw * cfg->dilation_w, cfg->pad_w);
+            uint32_t src_base = cfg->input_addr + ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + channel_base);
+            uint32_t dst_base = cfg->im2col_addr + (((first_oh * cfg->output_w) + first_ow) * NPU_CONV2D_PACKED_K_TILE) + lane;
+            int32_t src_col_stride = (int32_t)(cfg->stride_w * cfg->input_c);
+            int32_t dst_col_stride = (int32_t)NPU_CONV2D_PACKED_K_TILE;
+            uint32_t src_row_stride = cfg->stride_h * cfg->input_w * cfg->input_c;
+            uint32_t dst_row_stride = cfg->output_w * NPU_CONV2D_PACKED_K_TILE;
+
+            for (uint32_t channel = 0; channel < valid; channel++) {
+                uint32_t src_channel_base = src_base + channel;
+                uint32_t dst_channel_base = dst_base + channel;
+                spatz_im2col_rect_i8((const int8_t *)src_channel_base,
+                                      (int8_t *)dst_channel_base,
+                                      valid_oh,
+                                      valid_ow,
+                                      src_col_stride,
+                                      dst_col_stride,
+                                      src_row_stride,
+                                      dst_row_stride);
+            }
+        }
+
+        lane += valid;
+    }
+
+    return 1;
+}
+
 static npu_conv2d_prepare_backend_t prepare_k_tile(const npu_conv2d_packed_cfg_t *cfg,
                                                    uint32_t k_block,
                                                    uint32_t rows,
@@ -334,6 +404,12 @@ static npu_conv2d_prepare_backend_t prepare_k_tile(const npu_conv2d_packed_cfg_t
     if (try_prepare_multi_spatial_idma(cfg, k_block, rows, idma_transfers)) {
         return NPU_CONV2D_PREPARE_IDMA;
     }
+
+#if NPU_CONV2D_ENABLE_SPATZ_RECT
+    if (prepare_spatz_rect_strided(cfg, k_block, rows)) {
+        return NPU_CONV2D_PREPARE_SPATZ;
+    }
+#endif
 
     prepare_spatz_segmented(cfg, k_block, rows);
     return NPU_CONV2D_PREPARE_SPATZ;
