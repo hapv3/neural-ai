@@ -145,15 +145,26 @@ input tiles when the current software tile covers the full output rectangle
 into valid output rectangles, and copies each channel stream with a 2D Spatz
 helper using `vlse8.v` load stride `stride_w * IC` plus `vsse8.v` store stride
 `32`. The helper uses LMUL `m8`, which is now covered by the local RTL RVV
-regression, and moves the row loop into assembly so C only calls once per
-channel rectangle instead of once per output row.
+regression, fuses the channel loop into assembly, and moves the row loop into
+assembly so C only calls once per valid command rectangle instead of once per
+output row/channel.
+
+The runtime now builds a per-layer prepare command list before the measured
+K-tile loop. Each command captures `k_block`, source/destination base,
+channel count, valid output rectangle, and source/destination strides. The hot
+prepare loop consumes this command list directly, so it no longer recalculates
+`output_valid_range`, `kh/kw`, lane placement, or channel grouping for each
+K tile. Packed-tile zero-fill is also done by Spatz vector word stores
+(`vse32.v`) when the im2col buffer and byte count are 32-bit aligned, falling
+back to byte stores only for unaligned generic use.
 
 On the focused RTL fixture `CONV_PERF_CASE=6` (`Conv5x5 pad2 IC3`, L1 source,
 `rows=16`, `k_tiles=3`), the path is correctness-clean and reduces prepare
-cycles from `75560` to `34904` versus the older segmented Spatz fallback. This
-is a useful `~2.2x` improvement, but still not sufficient as the final Layer-1
-strategy; the next step remains indexed-offset gather for larger row tiles and
-sparse border lists.
+cycles from `75560` to `11454` versus the older segmented Spatz fallback. This
+is a useful `~6.5x` improvement and also removes most C-side shape/control
+overhead from the measured prepare loop. The next step remains indexed-offset
+gather for larger row tiles and sparse border lists if larger Layer-1 fixtures
+still show strided VLSU memory latency as the dominant cost.
 
 ## Engineering Conclusion
 

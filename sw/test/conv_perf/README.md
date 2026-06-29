@@ -5,6 +5,8 @@
 Benchmark the packed Conv2D performance path.
 Firmware prepares `M x 32` IFM tiles in TCDM with iDMA/RVV helpers, runs
 systolic GEMM32/accumulate, and writes per-layer cycle counters to L2.
+The Conv2D packed runtime builds a per-layer prepare command list before the
+measured K-tile loop, then reuses those commands for iDMA/Spatz prepare.
 
 ## Target
 
@@ -72,5 +74,6 @@ L1/TCDM input source):
 
 | Mode | Prepare cycles | GEMM cycles | Total cycles |
 | --- | ---: | ---: | ---: |
-| 2D rectangle-strided Spatz fallback | 34904 | 780 | 35922 |
+| Command-list + fused-channel Spatz rectangle path | 11454 | 780 | 12472 |
+| Initial 2D rectangle-strided Spatz fallback | 34904 | 780 | 35922 |
 | Older segmented Spatz fallback (`CONV_PERF_SPATZ_RECT=0`) | 75560 | 780 | 76578 |
