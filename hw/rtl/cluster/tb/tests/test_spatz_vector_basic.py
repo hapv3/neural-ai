@@ -5,6 +5,8 @@ from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 from npu_test_utils import (
     firmware_path,
     load_firmware_axi,
+    read_dtcm_word,
+    read_tcdm_byte,
     read_tcdm_word32,
     release_fetch,
     reset_dut,
@@ -20,6 +22,20 @@ DST_XOR = 0x10100600
 DST_SLL = 0x10100700
 DST_SRL = 0x10100800
 VL = 16
+
+DST_STRIDED = 0x10104100
+DST_VLUXEI = 0x10104500
+DST_VSUXEI = 0x10104600
+DST_VLOXEI = 0x10104A00
+DST_VSOXEI = 0x10104B00
+STRIDED_INDEXED_VL = 16
+SIG_STATUS = 0x10008000
+SIG_PASS_COUNT = 0x10008004
+SIG_FAIL_TEST = 0x10008008
+SIG_FAIL_INDEX = 0x1000800C
+SIG_FAIL_GOT = 0x10008010
+SIG_FAIL_EXP = 0x10008014
+PASS_SIGNATURE = 0xDEADBEEF
 
 
 def expected_vectors():
@@ -47,6 +63,71 @@ def check_tcdm_outputs(dut):
             )
 
 
+def check_byte(dut, addr, expected, opname, lane):
+    got = read_tcdm_byte(dut, addr)
+    assert got == expected, (
+        f"{opname} output mismatch at lane {lane}: "
+        f"addr=0x{addr:08x} got=0x{got:02x} expected=0x{expected:02x}"
+    )
+
+
+def check_strided_indexed_outputs(dut):
+    for lane in range(STRIDED_INDEXED_VL):
+        check_byte(
+            dut,
+            DST_STRIDED + lane * 2,
+            (15 * lane + 7) & 0xFF,
+            "vlse8.v/vsse8.v",
+            lane,
+        )
+        check_byte(
+            dut,
+            DST_VLUXEI + lane,
+            (45 * lane + 12) & 0xFF,
+            "vluxei8.v",
+            lane,
+        )
+        check_byte(
+            dut,
+            DST_VSUXEI + lane * 2,
+            (45 * lane + 12) & 0xFF,
+            "vsuxei8.v",
+            lane,
+        )
+        check_byte(
+            dut,
+            DST_VLOXEI + lane,
+            (28 * lane + 25) & 0xFF,
+            "vloxei8.v",
+            lane,
+        )
+        check_byte(
+            dut,
+            DST_VSOXEI + lane * 3,
+            (28 * lane + 25) & 0xFF,
+            "vsoxei8.v",
+            lane,
+        )
+
+
+async def boot_and_wait(dut, axi_master, firmware, description, timeout_cycles=50000):
+    await reset_dut(dut)
+    await load_firmware_axi(axi_master, firmware_path(__file__, firmware))
+    await release_fetch(dut)
+    dut._log.info("Waiting for Spatz RVV firmware IRQ: %s", description)
+    await wait_for_host_irq(dut, timeout_cycles=timeout_cycles)
+    status = read_dtcm_word(dut, SIG_STATUS)
+    if status != PASS_SIGNATURE:
+        raise AssertionError(
+            f"{description} firmware failed: status=0x{status:08x} "
+            f"pass_count={read_dtcm_word(dut, SIG_PASS_COUNT)} "
+            f"fail_test={read_dtcm_word(dut, SIG_FAIL_TEST)} "
+            f"fail_index={read_dtcm_word(dut, SIG_FAIL_INDEX)} "
+            f"got=0x{read_dtcm_word(dut, SIG_FAIL_GOT):08x} "
+            f"expected=0x{read_dtcm_word(dut, SIG_FAIL_EXP):08x}"
+        )
+
+
 @cocotb.test()
 async def test_spatz_vector_basic(dut):
     clock = Clock(dut.clk_i, 1, unit="ns")
@@ -59,16 +140,19 @@ async def test_spatz_vector_basic(dut):
         reset_active_level=False,
     )
 
-    await reset_dut(dut)
-    await load_firmware_axi(
+    await boot_and_wait(
+        dut,
         axi_master,
-        firmware_path(__file__, "sw/test/spatz_vector/basic_mem_arith.bin"),
+        "sw/test/spatz_vector/basic_mem_arith.bin",
+        "vsetvli/vle32/vse32/arithmetic",
     )
-    await release_fetch(dut)
-
-    dut._log.info(
-        "Waiting for Spatz RVV firmware IRQ: vsetvli/vle32/vse32/arithmetic"
-    )
-    await wait_for_host_irq(dut, timeout_cycles=30000)
-
     check_tcdm_outputs(dut)
+
+    await boot_and_wait(
+        dut,
+        axi_master,
+        "sw/test/spatz_vector/strided_indexed.bin",
+        "vlse/vsse and indexed load/store",
+        timeout_cycles=100000,
+    )
+    check_strided_indexed_outputs(dut)

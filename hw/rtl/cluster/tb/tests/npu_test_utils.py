@@ -13,6 +13,7 @@ TCM_SIZE_BYTES = 32 * 1024
 TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
 TCDM_WORD_BYTES = 32
+NPU_DTCM_BASE = 0x10008000
 
 
 async def reset_dut(dut):
@@ -104,6 +105,12 @@ def read_tcdm_word32(dut, addr):
     for byte_idx in range(4):
         word |= read_tcdm_byte(dut, addr + byte_idx) << (byte_idx * 8)
     return word
+
+
+def read_dtcm_word(dut, addr):
+    index = (addr - NPU_DTCM_BASE) >> 2
+    value = dut.u_npu_cluster.u_sram_d_tcm.mem[index].value
+    return value.to_unsigned() if value.is_resolvable else 0
 
 
 def firmware_path(test_file, relative_fw):

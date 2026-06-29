@@ -152,6 +152,7 @@ $(REPO_ROOT)/hw/rtl/cluster/snitch_core.sv
 // -----------------------------------------------------------
 $(REPO_ROOT)/hw/spatz/hw/ip/spatz/src/reorder_buffer.sv
 $(REPO_ROOT)/hw/spatz/hw/ip/spatz/src/rvv_pkg.sv
+$(REPO_ROOT)/hw/spatz/hw/ip/spatz/src/vtl_pkg.sv
 // Local NPU override for generated Spatz configuration.
 // Keep submodule files pristine; only override files compiled by this cluster.
 $(REPO_ROOT)/hw/rtl/spatz_overlay/generated/spatz_pkg.sv

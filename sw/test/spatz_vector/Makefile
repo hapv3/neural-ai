@@ -11,7 +11,7 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -O2 -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
          -T link.ld -Wl,--no-relax
 
-TESTS = basic_mem_arith memory_width arith_mask reduction
+TESTS = basic_mem_arith memory_width arith_mask reduction strided_indexed
 
 .SECONDARY: $(addsuffix .elf,$(TESTS))
 

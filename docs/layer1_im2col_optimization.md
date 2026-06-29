@@ -71,6 +71,73 @@ The firmware stats now expose both `prepare_idma_tiles` and
 `prepare_idma_transfers`. For Layer-1 RGB, this distinction matters: one K tile
 uses nine iDMA 3D transfers, one per kernel spatial point.
 
+## Spatz Strided/Indexed Gather Opportunity
+
+Spatz supports strided and indexed vector memory operations in RTL, and the
+upstream Spatz tests include `vlse*` and `vloxei/vluxei*` cases. This is useful
+for the Spatz fallback path, but it does not replace the current iDMA path for
+L2-resident layer-1 input because Spatz VLSU only reaches local L1/TCDM in this
+cluster. If the source tensor remains in L2, iDMA is still the right first
+backend.
+
+The real bottleneck in the current Spatz fallback is not the tiny vector copy;
+it is the Snitch scalar loop in `prepare_spatz_segmented()`:
+
+```text
+rows * kernel_spatial scalar iterations
+  -> compute oh/ow/kh/kw/ih/iw
+  -> bounds check
+  -> call spatz_vec_copy_i8() for a very short channel run
+```
+
+For `Conv3x3 IC=3 M=1024`, that is `1024 * 9 = 9216` scalar loop iterations.
+Using Spatz gather/scatter can collapse this into vector chunks:
+
+- For each `(kh, kw, ic)`, load many output rows with `vluxei8.v` or row-local
+  `vlse8.v`.
+- Store into packed `M x 32` rows with `vsse8.v` stride `32`, or `vsuxei8.v`
+  when the valid output rows are sparse because of padding.
+- Zero-fill the packed tile first; invalid padding/tail rows remain zero.
+- Reuse a shape-local offset table instead of recomputing address arithmetic
+  inside the row loop.
+
+The expected gain is significant, but not the theoretical `~230x` instruction
+reduction. That estimate omits several real costs:
+
+- `IC=3` requires three gather/store streams per spatial point.
+- Raster order has a row-wrap discontinuity, so a single `vlse8.v` cannot cover
+  the full `H*W` tile unless the tile is split per output row; full-tile gather
+  needs indexed offsets.
+- Indexed/strided VLSU operations are implemented as single-element memory
+  operations in Spatz, so throughput is closer to one element per cycle plus
+  TCDM arbitration, not a wide burst.
+- Index vectors must be loaded or generated; a `1024`-row tile with 32-bit
+  source offsets costs `4 KiB` of index storage per reusable row-pattern table.
+- Masked indexed loads/stores are not part of the local verified test suite yet,
+  so padding should initially be handled by splitting valid rectangles or using
+  indexed stores only for valid row lists.
+
+Recommended next implementation:
+
+1. Add dedicated local RVV tests for `vlse8/vsse8`, `vluxei8/vsuxei8`, and
+   `vloxei8/vsoxei8` with exact TCDM output checks.
+2. Add `spatz_im2col_gather_i8()` as an assembly helper for L1/TCDM-resident
+   input tiles only.
+3. Start with the unmasked interior path: per `(kh, kw, ic)`, process valid
+   output rectangles using `vlse8.v` load stride `IC` and `vsse8.v` store stride
+   `32`.
+4. Add indexed-offset mode for full raster tiles and irregular border regions
+   after the basic strided path passes.
+5. Keep iDMA multi-spatial as the default for L2-resident regular layer-1 tiles;
+   use Spatz gather only when the scheduler has already staged the source tile
+   into TCDM or when iDMA cannot express the shape efficiently.
+
+Current local RVV gate status: `strided_indexed` has been added to
+`sw/test/spatz_vector`, but the RTL regression exposes a `vsuxei8.v` store
+failure. Do not rely on indexed stores for im2col scatter until that test is
+green. The first Spatz gather helper should therefore use indexed/strided loads
+plus strided or unit stores only.
+
 ## Engineering Conclusion
 
 - The performance path should be software scheduler + iDMA/Spatz packed prepare
@@ -78,6 +145,8 @@ uses nine iDMA 3D transfers, one per kernel spatial point.
 - iDMA is the preferred backend for L2-resident, regular Conv2D segments.
 - Spatz remains necessary for L1/TCDM sources, irregular small-channel fallback,
   and future tensor transforms that are not expressible as iDMA 2D/3D copies.
+  The next Spatz optimization should use strided/indexed memory instructions
+  rather than many short `spatz_vec_copy_i8()` calls.
 - The next performance work is not another feeder; it is measuring larger
   `M` tiles, adding transfer counters, and choosing tile sizes that amortize
   iDMA command overhead without exceeding TCDM capacity.
