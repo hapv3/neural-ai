@@ -97,8 +97,13 @@ async def boot_and_run_systolic_requant(dut, test_file):
     await write_l2_bytes(dut, L2_IFM, make_ifm_bytes()[: MAX_M * 32])
     await write_l2_bytes(dut, L2_WEIGHT_K64, make_weight_k64_bytes())
     await write_l2_bytes(dut, L2_IFM_K64, make_ifm_k64_bytes())
-    await release_fetch(dut)
-    await wait_for_host_irq(dut, timeout_cycles=80000)
+    await release_fetch(dut, axi_master=axi_master)
+    await wait_for_host_irq(
+        dut,
+        timeout_cycles=80000,
+        axi_master=axi_master,
+        report_name="test_systolic_requant",
+    )
 
 
 @cocotb.test()

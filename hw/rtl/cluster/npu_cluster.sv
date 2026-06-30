@@ -91,6 +91,24 @@ module npu_cluster (
     logic                      s_axi_obi_rvalid;
     logic [ITCM_DATA_WIDTH-1:0] s_axi_obi_rdata;
 
+    logic                      host_itcm_req;
+    logic                      host_itcm_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] host_itcm_addr;
+    logic                      host_itcm_we;
+    logic [(ITCM_DATA_WIDTH/8)-1:0] host_itcm_be;
+    logic [ITCM_DATA_WIDTH-1:0] host_itcm_wdata;
+    logic                      host_itcm_rvalid;
+    logic [ITCM_DATA_WIDTH-1:0] host_itcm_rdata;
+
+    logic                      pmu_mm_req;
+    logic                      pmu_mm_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] pmu_mm_addr;
+    logic                      pmu_mm_we;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] pmu_mm_be;
+    logic [MMIO_DATA_WIDTH-1:0] pmu_mm_wdata;
+    logic                      pmu_mm_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] pmu_mm_rdata;
+
     axi_lite_to_obi #(
         .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH(AXI_HOST_DATA_WIDTH),
@@ -128,6 +146,62 @@ module npu_cluster (
         .obi_rdata_i      (s_axi_obi_rdata)
     );
     assign s_axi_r_last_o = s_axi_r_valid_o;
+
+    obi_demux_1to4 #(
+        .ADDR_WIDTH(OBI_ADDR_WIDTH),
+        .DATA_WIDTH(ITCM_DATA_WIDTH),
+        .M0_BASE (32'h1000_0000), .M0_MASK (32'hFFFF_8000), // I-TCM boot window
+        .M1_BASE (32'h2000_4000), .M1_MASK (32'hFFFF_F000), // Host PMU window
+        .M2_BASE (32'hFFFF_0000), .M2_MASK (32'hFFFF_F000), // Unused/error sink
+        .M3_BASE (32'hFFFF_1000), .M3_MASK (32'hFFFF_F000)  // Unused/error sink
+    ) u_host_axi_demux_1to4 (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .slv_req_i   (s_axi_obi_req),
+        .slv_gnt_o   (s_axi_obi_gnt),
+        .slv_addr_i  (s_axi_obi_addr),
+        .slv_we_i    (s_axi_obi_we),
+        .slv_be_i    (s_axi_obi_be),
+        .slv_wdata_i (s_axi_obi_wdata),
+        .slv_rvalid_o(s_axi_obi_rvalid),
+        .slv_rdata_o (s_axi_obi_rdata),
+
+        .m0_req_o     (host_itcm_req),
+        .m0_gnt_i     (host_itcm_gnt),
+        .m0_addr_o    (host_itcm_addr),
+        .m0_we_o      (host_itcm_we),
+        .m0_be_o      (host_itcm_be),
+        .m0_wdata_o   (host_itcm_wdata),
+        .m0_rvalid_i  (host_itcm_rvalid),
+        .m0_rdata_i   (host_itcm_rdata),
+
+        .m1_req_o     (pmu_mm_req),
+        .m1_gnt_i     (pmu_mm_gnt),
+        .m1_addr_o    (pmu_mm_addr),
+        .m1_we_o      (pmu_mm_we),
+        .m1_be_o      (pmu_mm_be),
+        .m1_wdata_o   (pmu_mm_wdata),
+        .m1_rvalid_i  (pmu_mm_rvalid),
+        .m1_rdata_i   (pmu_mm_rdata),
+
+        .m2_req_o     (),
+        .m2_gnt_i     (1'b1),
+        .m2_addr_o    (),
+        .m2_we_o      (),
+        .m2_be_o      (),
+        .m2_wdata_o   (),
+        .m2_rvalid_i  (1'b1),
+        .m2_rdata_i   ('0),
+
+        .m3_req_o     (),
+        .m3_gnt_i     (1'b1),
+        .m3_addr_o    (),
+        .m3_we_o      (),
+        .m3_be_o      (),
+        .m3_wdata_o   (),
+        .m3_rvalid_i  (1'b1),
+        .m3_rdata_i   ('0)
+    );
 
     //=========================================================
     // 2. Snitch Core & I-TCM Arbitration
@@ -177,6 +251,7 @@ module npu_cluster (
     logic        fpu_fmt_mode;
     logic [4:0]  fpu_status;
     snitch_pkg::interrupts_t snitch_irq;
+    snitch_pkg::core_events_t snitch_core_events;
 
     snitch_core #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -231,7 +306,8 @@ module npu_cluster (
         // FPU side-channel
         .fpu_rnd_mode_o   (fpu_rnd_mode),
         .fpu_fmt_mode_o   (fpu_fmt_mode),
-        .fpu_status_i     (fpu_status)
+        .fpu_status_i     (fpu_status),
+        .core_events_o    (snitch_core_events)
     );
 
     // Arbiter for I-TCM
@@ -251,14 +327,14 @@ module npu_cluster (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
         
-        .m0_req_i    (s_axi_obi_req),
-        .m0_gnt_o    (s_axi_obi_gnt),
-        .m0_addr_i   (s_axi_obi_addr),
-        .m0_we_i     (s_axi_obi_we),
-        .m0_be_i     (s_axi_obi_be),
-        .m0_wdata_i  (s_axi_obi_wdata),
-        .m0_rvalid_o (s_axi_obi_rvalid),
-        .m0_rdata_o  (s_axi_obi_rdata),
+        .m0_req_i    (host_itcm_req),
+        .m0_gnt_o    (host_itcm_gnt),
+        .m0_addr_i   (host_itcm_addr),
+        .m0_we_i     (host_itcm_we),
+        .m0_be_i     (host_itcm_be),
+        .m0_wdata_i  (host_itcm_wdata),
+        .m0_rvalid_o (host_itcm_rvalid),
+        .m0_rdata_o  (host_itcm_rdata),
         
         .m1_req_i    (snitch_i_req),
         .m1_gnt_o    (snitch_i_gnt),
@@ -493,14 +569,15 @@ module npu_cluster (
     //=========================================================
     // 4. Cluster Control Registers (MMIO)
     //=========================================================
-    obi_demux_1to4 #(
+    obi_demux_1to5 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(MMIO_DATA_WIDTH),
         .M0_BASE (32'h2000_0000), .M0_MASK (32'hFFFF_F000), // Cluster control
         .M1_BASE (32'h2000_1000), .M1_MASK (32'hFFFF_F000), // iDMA-style control
         .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Interrupt controller
-        .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000)  // AFU control + LUT
-    ) u_mmio_demux_1to4 (
+        .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000), // AFU control + LUT
+        .M4_BASE (32'h2000_4000), .M4_MASK (32'hFFFF_F000)  // Host-only PMU sink on Snitch side
+    ) u_mmio_demux_1to5 (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
         .slv_req_i   (reg_req),
@@ -546,7 +623,16 @@ module npu_cluster (
         .m3_be_o      (afu_mm_be),
         .m3_wdata_o   (afu_mm_wdata),
         .m3_rvalid_i  (afu_mm_rvalid),
-        .m3_rdata_i   (afu_mm_rdata)
+        .m3_rdata_i   (afu_mm_rdata),
+
+        .m4_req_o     (),
+        .m4_gnt_i     (1'b1),
+        .m4_addr_o    (),
+        .m4_we_o      (),
+        .m4_be_o      (),
+        .m4_wdata_o   (),
+        .m4_rvalid_i  (1'b1),
+        .m4_rdata_i   ('0)
     );
 
     logic        cfg_dma_start;
@@ -1195,5 +1281,90 @@ module npu_cluster (
         assign sys_obi_o_rvalid[i] = master_rsp[4+i].rvalid;
         assign sys_obi_o_rdata[i]  = master_rsp[4+i].rdata;
     end
+
+    //=========================================================
+    // 8. Performance Management Unit
+    //=========================================================
+    localparam int unsigned PMU_NUM_COUNTERS = 32;
+    localparam int unsigned PMU_INC_WIDTH = 16;
+
+    logic [PMU_NUM_COUNTERS-1:0][PMU_INC_WIDTH-1:0] pmu_event_inc;
+
+    always_comb begin
+        pmu_event_inc = '0;
+
+        // 0-4: Global/Snitch core events.
+        pmu_event_inc[0] = PMU_INC_WIDTH'(1);
+        pmu_event_inc[1] = PMU_INC_WIDTH'(snitch_core_events.retired_instr);
+        pmu_event_inc[2] = PMU_INC_WIDTH'(snitch_core_events.retired_load);
+        pmu_event_inc[3] = PMU_INC_WIDTH'(snitch_core_events.retired_i);
+        pmu_event_inc[4] = PMU_INC_WIDTH'(snitch_core_events.retired_acc);
+
+        // 5-6: Snitch shared TCDM traffic.
+        pmu_event_inc[5] = PMU_INC_WIDTH'(master_req[0].req);
+        pmu_event_inc[6] = PMU_INC_WIDTH'(master_req[0].req & ~master_rsp[0].gnt);
+
+        // 7-10: Spatz issue/response and VLSU TCDM traffic.
+        pmu_event_inc[7]  = PMU_INC_WIDTH'(acc_qvalid & acc_qready);
+        pmu_event_inc[8]  = PMU_INC_WIDTH'(acc_pvalid & acc_pready);
+        pmu_event_inc[9]  = PMU_INC_WIDTH'(master_req[1].req) + PMU_INC_WIDTH'(master_req[8].req);
+        pmu_event_inc[10] = PMU_INC_WIDTH'(master_req[1].req & ~master_rsp[1].gnt) +
+                            PMU_INC_WIDTH'(master_req[8].req & ~master_rsp[8].gnt);
+
+        // 11-15: iDMA status and local TCDM traffic.
+        pmu_event_inc[11] = PMU_INC_WIDTH'(idma_irq_a2o_busy | idma_irq_o2a_busy);
+        pmu_event_inc[12] = PMU_INC_WIDTH'(idma_irq_a2o_start) + PMU_INC_WIDTH'(idma_irq_o2a_start);
+        pmu_event_inc[13] = PMU_INC_WIDTH'(idma_irq_a2o_done) + PMU_INC_WIDTH'(idma_irq_o2a_done);
+        pmu_event_inc[14] = PMU_INC_WIDTH'(master_req[2].req) + PMU_INC_WIDTH'(master_req[9].req);
+        pmu_event_inc[15] = PMU_INC_WIDTH'(master_req[2].req & ~master_rsp[2].gnt) +
+                            PMU_INC_WIDTH'(master_req[9].req & ~master_rsp[9].gnt);
+
+        // 16-18: AFU completion and TCDM traffic.
+        pmu_event_inc[16] = PMU_INC_WIDTH'(afu_done);
+        pmu_event_inc[17] = PMU_INC_WIDTH'(master_req[10].req);
+        pmu_event_inc[18] = PMU_INC_WIDTH'(master_req[10].req & ~master_rsp[10].gnt);
+
+        // 19-25: Systolic control and TCDM traffic.
+        pmu_event_inc[19] = PMU_INC_WIDTH'(sys_compute_en);
+        pmu_event_inc[20] = PMU_INC_WIDTH'(sys_weight_load_en);
+        pmu_event_inc[21] = PMU_INC_WIDTH'(sys_ofm_valid);
+        pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req);
+        pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req & ~master_rsp[3].gnt);
+        for (int port = 0; port < 4; port++) begin
+            pmu_event_inc[24] += PMU_INC_WIDTH'(master_req[4 + port].req);
+            pmu_event_inc[25] += PMU_INC_WIDTH'(master_req[4 + port].req & ~master_rsp[4 + port].gnt);
+        end
+
+        // 26-31: Shared TCDM aggregate request, grant/stall, bank activity.
+        for (int mst = 0; mst < NUM_MASTERS; mst++) begin
+            pmu_event_inc[26] += PMU_INC_WIDTH'(master_req[mst].req);
+            pmu_event_inc[27] += PMU_INC_WIDTH'(master_req[mst].req & master_rsp[mst].gnt);
+            pmu_event_inc[28] += PMU_INC_WIDTH'(master_req[mst].req & ~master_rsp[mst].gnt);
+            pmu_event_inc[30] += PMU_INC_WIDTH'(master_req[mst].req & ~master_req[mst].we);
+            pmu_event_inc[31] += PMU_INC_WIDTH'(master_req[mst].req & master_req[mst].we);
+        end
+        for (int bank = 0; bank < TCDM_NUM_BANKS; bank++) begin
+            pmu_event_inc[29] += PMU_INC_WIDTH'(slave_req[bank].req);
+        end
+    end
+
+    npu_pmu #(
+        .ADDR_WIDTH   (OBI_ADDR_WIDTH),
+        .DATA_WIDTH   (MMIO_DATA_WIDTH),
+        .NUM_COUNTERS (PMU_NUM_COUNTERS),
+        .INC_WIDTH    (PMU_INC_WIDTH)
+    ) u_pmu (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .req_i       (pmu_mm_req),
+        .gnt_o       (pmu_mm_gnt),
+        .addr_i      (pmu_mm_addr),
+        .we_i        (pmu_mm_we),
+        .be_i        (pmu_mm_be),
+        .wdata_i     (pmu_mm_wdata),
+        .rvalid_o    (pmu_mm_rvalid),
+        .rdata_o     (pmu_mm_rdata),
+        .event_inc_i (pmu_event_inc)
+    );
 
 endmodule

@@ -9,6 +9,49 @@ FAIL_SIGNATURE_PREFIX = 0xBAD00000
 
 ITCM_BASE = 0x10000000
 TCM_SIZE_BYTES = 32 * 1024
+PMU_BASE = 0x20004000
+PMU_CTRL = PMU_BASE + 0x0000
+PMU_STATUS = PMU_BASE + 0x0004
+PMU_NUM_COUNTERS = PMU_BASE + 0x0008
+PMU_COUNTER_BASE = PMU_BASE + 0x0100
+PMU_CTRL_ENABLE = 0x00000001
+PMU_CTRL_CLEAR = 0x00000002
+PMU_CTRL_SNAPSHOT = 0x00000004
+
+PMU_COUNTER_NAMES = [
+    "cycle",
+    "snitch_retired_instr",
+    "snitch_retired_load",
+    "snitch_retired_int",
+    "snitch_retired_acc",
+    "snitch_tcdm_req",
+    "snitch_tcdm_stall",
+    "spatz_issue",
+    "spatz_rsp",
+    "spatz_tcdm_req",
+    "spatz_tcdm_stall",
+    "idma_busy",
+    "idma_start",
+    "idma_done",
+    "idma_tcdm_req",
+    "idma_tcdm_stall",
+    "afu_done",
+    "afu_tcdm_req",
+    "afu_tcdm_stall",
+    "sys_compute",
+    "sys_weight_load",
+    "sys_ofm_valid",
+    "sys_ifm_req",
+    "sys_ifm_stall",
+    "sys_ofm_req",
+    "sys_ofm_stall",
+    "tcdm_req",
+    "tcdm_gnt",
+    "tcdm_stall",
+    "tcdm_bank_req",
+    "tcdm_read_req",
+    "tcdm_write_req",
+]
 
 TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
@@ -52,16 +95,110 @@ async def load_firmware_axi(axi_master, filename, base_addr=ITCM_BASE, width=4):
             raise AssertionError(f"AXI boot image exceeds I-TCM at 0x{addr:08x}")
         await axi_master.write(base_addr + offset, firmware[offset : offset + width])
 
-async def release_fetch(dut):
+async def _axi_read32(axi_master, addr):
+    resp = await axi_master.read(addr, 4)
+    data = resp.data if hasattr(resp, "data") else resp
+    return int.from_bytes(bytes(data), "little")
+
+
+async def _axi_write32(axi_master, addr, value):
+    await axi_master.write(addr, int(value & 0xFFFFFFFF).to_bytes(4, "little"))
+
+
+async def pmu_start(axi_master):
+    await _axi_write32(axi_master, PMU_CTRL, PMU_CTRL_CLEAR)
+    await _axi_write32(axi_master, PMU_CTRL, PMU_CTRL_ENABLE)
+
+
+async def pmu_snapshot_report(axi_master):
+    await _axi_write32(axi_master, PMU_CTRL, PMU_CTRL_ENABLE | PMU_CTRL_SNAPSHOT)
+    await _axi_write32(axi_master, PMU_CTRL, 0)
+
+    num_counters = min(await _axi_read32(axi_master, PMU_NUM_COUNTERS), len(PMU_COUNTER_NAMES))
+    counters = {}
+    for counter_id in range(num_counters):
+        lo = await _axi_read32(axi_master, PMU_COUNTER_BASE + counter_id * 8)
+        hi = await _axi_read32(axi_master, PMU_COUNTER_BASE + counter_id * 8 + 4)
+        counters[PMU_COUNTER_NAMES[counter_id]] = (hi << 32) | lo
+
+    counters["overflow_status"] = await _axi_read32(axi_master, PMU_STATUS)
+    return counters
+
+
+def format_pmu_report(counters):
+    cycles = counters.get("cycle", 0)
+
+    def pct(name):
+        return (100.0 * counters.get(name, 0) / cycles) if cycles else 0.0
+
+    lines = [
+        "PMU performance report:",
+        f"  cycles={cycles}",
+        (
+            "  snitch: "
+            f"instr={counters.get('snitch_retired_instr', 0)} "
+            f"load={counters.get('snitch_retired_load', 0)} "
+            f"tcdm_req={counters.get('snitch_tcdm_req', 0)} "
+            f"stall={counters.get('snitch_tcdm_stall', 0)}"
+        ),
+        (
+            "  systolic: "
+            f"compute={counters.get('sys_compute', 0)} ({pct('sys_compute'):.2f}%) "
+            f"ifm_req={counters.get('sys_ifm_req', 0)} "
+            f"ofm_req={counters.get('sys_ofm_req', 0)} "
+            f"ofm_stall={counters.get('sys_ofm_stall', 0)}"
+        ),
+        (
+            "  spatz: "
+            f"issue={counters.get('spatz_issue', 0)} "
+            f"rsp={counters.get('spatz_rsp', 0)} "
+            f"tcdm_req={counters.get('spatz_tcdm_req', 0)} "
+            f"stall={counters.get('spatz_tcdm_stall', 0)}"
+        ),
+        (
+            "  idma: "
+            f"busy={counters.get('idma_busy', 0)} ({pct('idma_busy'):.2f}%) "
+            f"start={counters.get('idma_start', 0)} "
+            f"done={counters.get('idma_done', 0)} "
+            f"tcdm_stall={counters.get('idma_tcdm_stall', 0)}"
+        ),
+        (
+            "  afu: "
+            f"done={counters.get('afu_done', 0)} "
+            f"tcdm_req={counters.get('afu_tcdm_req', 0)} "
+            f"stall={counters.get('afu_tcdm_stall', 0)}"
+        ),
+        (
+            "  tcdm: "
+            f"req={counters.get('tcdm_req', 0)} "
+            f"gnt={counters.get('tcdm_gnt', 0)} "
+            f"stall={counters.get('tcdm_stall', 0)} "
+            f"read={counters.get('tcdm_read_req', 0)} "
+            f"write={counters.get('tcdm_write_req', 0)}"
+        ),
+    ]
+    if counters.get("overflow_status", 0):
+        lines.append(f"  overflow_status=0x{counters['overflow_status']:08x}")
+    return "\n".join(lines)
+
+
+async def release_fetch(dut, axi_master=None, enable_pmu=True):
+    if axi_master is not None and enable_pmu:
+        await pmu_start(axi_master)
     dut.fetch_enable_i.value = 1
     await Timer(1, unit="ns")
 
 
-async def wait_for_host_irq(dut, timeout_cycles=50000):
+async def wait_for_host_irq(dut, timeout_cycles=50000, axi_master=None, report_name=None):
     for _ in range(timeout_cycles):
         irq_value = dut.irq_o.value
         if irq_value.is_resolvable and int(irq_value) == 1:
-            return
+            if axi_master is not None:
+                report = await pmu_snapshot_report(axi_master)
+                prefix = f"{report_name}: " if report_name else ""
+                dut._log.info("%s%s", prefix, format_pmu_report(report))
+                return report
+            return None
         await RisingEdge(dut.clk_i)
     raise AssertionError("timeout waiting for host irq")
 

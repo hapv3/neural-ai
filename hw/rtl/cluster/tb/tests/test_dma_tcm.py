@@ -67,9 +67,9 @@ async def test_dma_tcm_path(dut):
     await write_l2_bytes(dut, L2_SRC_3D, [l2_3d_pattern(i) for i in range(l2_3d_fixture_len)])
     await write_l2_bytes(dut, L2_DST_2D, [0x5A] * len(make_expected_2d_output()))
     await write_l2_bytes(dut, L2_DST_3D, [0x6B] * len(make_expected_3d_output()))
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(dut, timeout_cycles=100000)
+    await wait_for_host_irq(dut, timeout_cycles=100000, axi_master=axi_master, report_name="test_dma_tcm")
     dut._log.info("dma/tcm smoke completed through host irq")
 
     got = await read_l2_bytes(dut, L2_DST, DMA_BYTES)

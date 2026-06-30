@@ -147,9 +147,14 @@ async def test_micro_yolo_e2e(dut):
     await write_l2_bytes(dut, L2_WEIGHT0, [to_u8(value) for value in weight0])
     await write_l2_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
     await load_firmware_axi(axi_master, fw_path)
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(dut, timeout_cycles=100000)
+    await wait_for_host_irq(
+        dut,
+        timeout_cycles=100000,
+        axi_master=axi_master,
+        report_name="test_micro_yolo_e2e",
+    )
 
     got = await read_l2_bytes(dut, L2_OUTPUT, OUTPUT_BYTES)
     for idx, (got_byte, exp_byte) in enumerate(zip(got, expected)):

@@ -24,8 +24,8 @@ async def test_snitch_boot(dut):
     fw_path = firmware_path(__file__, "sw/test/boot/boot.bin")
     assert os.path.exists(fw_path), "Run `make -C sw/test/boot` first."
     await load_firmware_axi(axi_master, fw_path)
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(dut, timeout_cycles=50000)
+    await wait_for_host_irq(dut, timeout_cycles=50000, axi_master=axi_master, report_name="test_snitch_boot")
 
     dut._log.info("TEST PASSED: Firmware raised host IRQ")

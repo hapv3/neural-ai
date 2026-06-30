@@ -86,9 +86,9 @@ async def test_afu_basic(dut):
 
     await reset_dut(dut)
     await load_firmware_axi(axi_master, fw_path)
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
     try:
-        await wait_for_host_irq(dut, timeout_cycles=120000)
+        await wait_for_host_irq(dut, timeout_cycles=120000, axi_master=axi_master, report_name="test_afu_basic")
     except AssertionError as exc:
         raise AssertionError(f"{exc}; AFU debug={debug_words(dut)}") from exc
 

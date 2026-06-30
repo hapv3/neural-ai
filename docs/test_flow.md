@@ -14,6 +14,7 @@ firmware.
 | Directory | Binary | Primary RTL test | Target |
 |-----------|--------|------------------|--------|
 | `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, AXI I-TCM load, host IRQ completion, iDMA MMIO smoke |
+| `sw/test/pmu` | `pmu.bin` | `test_pmu_basic` | Host AXI-Lite PMU control, snapshot, fixed counters, Snitch/TCDM event smoke |
 | `sw/test/conv_perf` | `conv_perf.bin` | `test_conv_perf` | Packed Conv2D scheduler, iDMA/RVV backend checks, exact output compare, cycle stats in L2 |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
@@ -48,6 +49,11 @@ The host AXI-Lite boot path reaches I-TCM only. Cocotb holds Snitch with
 does not read IRQ MMIO through AXI in the current topology; exact L2/TCDM output
 checks are the pass/fail oracle after `irq_o` asserts.
 
+The host AXI-Lite boot path also exposes the PMU window at `0x2000_4000`.
+Cocotb starts PMU counters before releasing fetch, snapshots/stops them after
+`irq_o`, and prints a performance report for each firmware test that passes an
+`axi_master` into `release_fetch`/`wait_for_host_irq`.
+
 ---
 
 ## 3. Independent Suite Order
@@ -55,9 +61,10 @@ checks are the pass/fail oracle after `irq_o` asserts.
 Run independent suites before micro-model or graph-level work:
 
 1. **Boot**: proves instruction load/execution and signature path.
-2. **Memory**: proves L2 fixtures, DMA paths, and TCDM decode without compute.
-3. **RVV**: proves Spatz instruction groups before operator wrappers depend on them.
-4. **Operators**: proves reusable C-callable Spatz ops before scheduler use.
+2. **PMU**: proves performance counters before using cycle/event data for optimization.
+3. **Memory**: proves L2 fixtures, DMA paths, and TCDM decode without compute.
+4. **RVV**: proves Spatz instruction groups before operator wrappers depend on them.
+5. **Operators**: proves reusable C-callable Spatz ops before scheduler use.
 5. **Systolic**: proves HAL GEMM32 tiling and full output correctness.
 6. **Systolic Requant**: proves fused INT32→INT8 drain path before graph use.
 7. **Conv Packed Scheduler**: proves software+iDMA+Spatz packed Conv2D lowering and records cycle stats before graph/model use.
@@ -257,6 +264,7 @@ unaligned e16/e32 destinations are not yet a scheduler contract.
 
 ```bash
 make -C sw/test/boot
+make -C sw/test/pmu
 make -C sw/test/conv_perf
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
@@ -278,6 +286,9 @@ Use the same Verilator/cocotb cluster target and select modules explicitly:
 ```bash
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_pmu_basic
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_independent_memory

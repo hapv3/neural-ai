@@ -131,9 +131,9 @@ def check_strided_indexed_outputs(dut):
 async def boot_and_wait(dut, axi_master, firmware, description, timeout_cycles=50000):
     await reset_dut(dut)
     await load_firmware_axi(axi_master, firmware_path(__file__, firmware))
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
     dut._log.info("Waiting for Spatz RVV firmware IRQ: %s", description)
-    await wait_for_host_irq(dut, timeout_cycles=timeout_cycles)
+    await wait_for_host_irq(dut, timeout_cycles=timeout_cycles, axi_master=axi_master, report_name=description)
     status = read_dtcm_word(dut, SIG_STATUS)
     if status != PASS_SIGNATURE:
         raise AssertionError(
