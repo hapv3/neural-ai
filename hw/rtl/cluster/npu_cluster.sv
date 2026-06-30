@@ -2,7 +2,11 @@
 
 import npu_cluster_pkg::*;
 
-module npu_cluster (
+module npu_cluster #(
+    parameter int unsigned SYSTOLIC_OFM_FIFO_DEPTH = 8,
+    parameter int unsigned SYSTOLIC_OTCDM_STALL_PERIOD = 0,
+    parameter int unsigned SYSTOLIC_OTCDM_STALL_HOLD = 0
+)(
     input  logic clk_i,       // 1 GHz NPU Core Clock
     input  logic rst_ni,      // NPU Core Reset
     input  logic fetch_enable_i,
@@ -1172,6 +1176,7 @@ module npu_cluster (
     logic signed [31:0][31:0]  sys_psum_data;
     logic signed [31:0][31:0]  sys_ofm_data;
     logic                      sys_ofm_valid;
+    logic                      sys_ofm_ready;
 
     // Systolic Controller OBI signals
     logic                      sys_obi_i_req;
@@ -1184,6 +1189,7 @@ module npu_cluster (
     logic [OBI_DATA_WIDTH-1:0] sys_obi_i_rdata;
 
     logic [3:0]                      sys_obi_o_req;
+    logic [3:0]                      sys_obi_o_tcdm_req;
     logic [3:0]                      sys_obi_o_gnt;
     logic [3:0][OBI_ADDR_WIDTH-1:0]  sys_obi_o_addr;
     logic [3:0]                      sys_obi_o_we;
@@ -1191,6 +1197,8 @@ module npu_cluster (
     logic [3:0][OBI_DATA_WIDTH-1:0]  sys_obi_o_wdata;
     logic [3:0]                      sys_obi_o_rvalid;
     logic [3:0][OBI_DATA_WIDTH-1:0]  sys_obi_o_rdata;
+    logic                            sys_otcdm_stall_active;
+    logic [31:0]                     sys_otcdm_stall_ctr_q;
 
     systolic_controller #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -1200,7 +1208,7 @@ module npu_cluster (
         .INPUT_ELEM_WIDTH(8),
         .OFM_ELEM_WIDTH(32),
         .INPUT_FIFO_DEPTH(4),
-        .OFM_FIFO_DEPTH(64)
+        .OFM_FIFO_DEPTH(SYSTOLIC_OFM_FIFO_DEPTH)
     ) u_sys_ctrl (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
@@ -1240,7 +1248,8 @@ module npu_cluster (
         .ifm_data_o         (sys_ifm_data),
         .psum_data_o        (sys_psum_data),
         .ofm_data_i         (sys_ofm_data),
-        .ofm_valid_i        (sys_ofm_valid)
+        .ofm_valid_i        (sys_ofm_valid),
+        .ofm_ready_o        (sys_ofm_ready)
     );
 
     npu_systolic_array #(
@@ -1251,6 +1260,7 @@ module npu_cluster (
         .weight_load_en_i   (sys_weight_load_en),
         .clear_acc_i        (sys_clear_acc),
         .compute_en_i       (sys_compute_en),
+        .ofm_ready_i        (sys_ofm_ready),
         .weight_data_i      (sys_weight_data),
         .ifm_data_i         (sys_ifm_data),
         .psum_data_i        (sys_psum_data),
@@ -1269,9 +1279,28 @@ module npu_cluster (
     assign sys_obi_i_rvalid = master_rsp[3].rvalid;
     assign sys_obi_i_rdata  = master_rsp[3].rdata;
 
+    if (SYSTOLIC_OTCDM_STALL_PERIOD == 0 || SYSTOLIC_OTCDM_STALL_HOLD == 0) begin : gen_no_sys_otcdm_stall
+        assign sys_otcdm_stall_active = 1'b0;
+        assign sys_otcdm_stall_ctr_q = '0;
+    end else begin : gen_sys_otcdm_stall
+        always_ff @(posedge clk_i or negedge rst_ni) begin
+            if (!rst_ni) begin
+                sys_otcdm_stall_ctr_q <= '0;
+            end else if (sys_otcdm_stall_ctr_q == (SYSTOLIC_OTCDM_STALL_PERIOD - 1)) begin
+                sys_otcdm_stall_ctr_q <= '0;
+            end else begin
+                sys_otcdm_stall_ctr_q <= sys_otcdm_stall_ctr_q + 32'd1;
+            end
+        end
+
+        assign sys_otcdm_stall_active = sys_otcdm_stall_ctr_q < SYSTOLIC_OTCDM_STALL_HOLD;
+    end
+
+    assign sys_obi_o_tcdm_req = sys_obi_o_req & {4{!sys_otcdm_stall_active}};
+
     // Masters 4-7: Systolic Controller Write Ports (O-TCDM)
     for (genvar i = 0; i < 4; i++) begin : gen_sys_obi_o
-        assign master_req[4+i].req   = sys_obi_o_req[i];
+        assign master_req[4+i].req   = sys_obi_o_tcdm_req[i];
         assign master_req[4+i].we    = sys_obi_o_we[i];
         assign master_req[4+i].be    = sys_obi_o_be[i];
         assign master_req[4+i].addr  = sys_obi_o_addr[i];
@@ -1331,8 +1360,8 @@ module npu_cluster (
         pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req);
         pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req & ~master_rsp[3].gnt);
         for (int port = 0; port < 4; port++) begin
-            pmu_event_inc[24] += PMU_INC_WIDTH'(master_req[4 + port].req);
-            pmu_event_inc[25] += PMU_INC_WIDTH'(master_req[4 + port].req & ~master_rsp[4 + port].gnt);
+            pmu_event_inc[24] += PMU_INC_WIDTH'(sys_obi_o_req[port]);
+            pmu_event_inc[25] += PMU_INC_WIDTH'(sys_obi_o_req[port] & ~sys_obi_o_gnt[port]);
         end
 
         // 26-31: Shared TCDM aggregate request, grant/stall, bank activity.

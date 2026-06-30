@@ -12,6 +12,7 @@ module npu_pe (
     // Control signals
     input  logic        clear_acc_i,   // Reset the accumulator
     input  logic        weight_load_i, // Load weight from top
+    input  logic        pipe_en_i,     // Hold all pipeline registers when downstream stalls
     
     // Data inputs
     input  logic signed [7:0]  weight_i,  // Weight from top neighbor
@@ -34,7 +35,7 @@ module npu_pe (
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             weight_q <= '0;
-        end else if (weight_load_i) begin
+        end else if (pipe_en_i && weight_load_i) begin
             weight_q <= weight_i;
         end
     end
@@ -46,7 +47,7 @@ module npu_pe (
         if (!rst_ni) begin
             ifm_q  <= '0;
             psum_q <= '0;
-        end else begin
+        end else if (pipe_en_i) begin
             ifm_q <= ifm_i; // Shift IFM right
             
             if (clear_acc_i) begin
@@ -78,6 +79,7 @@ module npu_systolic_array #(
     input  logic                                weight_load_en_i,
     input  logic                                clear_acc_i,
     input  logic                                compute_en_i,
+    input  logic                                ofm_ready_i,
 
     // Vector Inputs
     input  logic signed [ARRAY_DIM-1:0][7:0]    weight_data_i, // Top edge (32 x 8-bit)
@@ -93,6 +95,9 @@ module npu_systolic_array #(
     logic signed [7:0]  weight_wire [ARRAY_DIM+1][ARRAY_DIM];
     logic signed [7:0]  ifm_wire    [ARRAY_DIM][ARRAY_DIM+1];
     logic signed [31:0] psum_wire   [ARRAY_DIM+1][ARRAY_DIM];
+    logic pipe_en;
+
+    assign pipe_en = !ofm_valid_o || ofm_ready_i;
 
     // 1. Connect boundary inputs
     for (genvar c = 0; c < ARRAY_DIM; c++) begin : gen_top_edge
@@ -111,7 +116,7 @@ module npu_systolic_array #(
             always_ff @(posedge clk_i or negedge rst_ni) begin
                 if (!rst_ni) begin
                     for (int i = 0; i < r; i++) skew_regs[i] <= '0;
-                end else begin
+                end else if (pipe_en) begin
                     skew_regs[0] <= ifm_data_i[r];
                     for (int i = 1; i < r; i++) begin
                         skew_regs[i] <= skew_regs[i-1];
@@ -136,7 +141,7 @@ module npu_systolic_array #(
             always_ff @(posedge clk_i or negedge rst_ni) begin
                 if (!rst_ni) begin
                     for (int i = 0; i < DELAY; i++) deskew_regs[i] <= '0;
-                end else begin
+                end else if (pipe_en) begin
                     deskew_regs[0] <= psum_wire[ARRAY_DIM][c];
                     for (int i = 1; i < DELAY; i++) begin
                         deskew_regs[i] <= deskew_regs[i-1];
@@ -156,6 +161,7 @@ module npu_systolic_array #(
                 .rst_ni        ( rst_ni ),
                 .clear_acc_i   ( clear_acc_i ),
                 .weight_load_i ( weight_load_en_i ),
+                .pipe_en_i     ( pipe_en ),
                 .weight_i      ( weight_wire[r][c] ),
                 .ifm_i         ( ifm_wire[r][c] ),
                 .psum_i        ( psum_wire[r][c] ),
@@ -175,7 +181,7 @@ module npu_systolic_array #(
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             valid_sr <= '0;
-        end else begin
+        end else if (pipe_en) begin
             valid_sr <= {valid_sr[VALID_DELAY-2:0], compute_en_i};
         end
     end

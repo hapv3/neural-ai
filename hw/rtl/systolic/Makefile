@@ -19,7 +19,7 @@ SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
 TOPLEVEL = npu_systolic_array
 
 # Extra args for verilator
-EXTRA_ARGS += -Wno-fatal
+EXTRA_ARGS += -Wno-fatal -j8
 
 # Enable VCD dumping if DEBUG=1
 DEBUG ?= 0

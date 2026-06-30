@@ -1,5 +1,6 @@
 import cocotb
 from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge
 
 # Import components
 from systolic_item import SystolicTestItem
@@ -53,3 +54,41 @@ async def systolic_array_test(dut):
     dut._log.info("==================================================")
     dut._log.info("[TEST] Hoàn thành luồng kiểm thử!")
     dut._log.info("==================================================")
+
+
+@cocotb.test()
+async def ofm_ready_backpressure_hold_test(dut):
+    """
+    Verify true output ready/valid behavior at array level.
+    When ofm_valid_o is asserted and ofm_ready_i is deasserted, the array must
+    hold output valid/data stable instead of dropping or advancing rows.
+    """
+
+    clock = Clock(dut.clk_i, 10, units="ns")
+    cocotb.start_soon(clock.start())
+
+    item = SystolicTestItem(array_dim=32)
+    driver = SystolicDriver(dut, clock)
+
+    await driver.reset()
+    dut.ofm_ready_i.value = 1
+    await driver.load_weights(item)
+    await driver.stream_ifms(item)
+    dut.ofm_ready_i.value = 0
+
+    for _ in range(128):
+        await RisingEdge(dut.clk_i)
+        if dut.ofm_valid_o.value.is_resolvable and int(dut.ofm_valid_o.value) == 1:
+            break
+    else:
+        raise AssertionError("OFM valid did not assert before timeout.")
+
+    held_data = int(dut.ofm_data_o.value)
+
+    for _ in range(5):
+        await RisingEdge(dut.clk_i)
+        assert int(dut.ofm_valid_o.value) == 1, "OFM valid dropped while ready was low."
+        assert int(dut.ofm_data_o.value) == held_data, "OFM data changed while ready was low."
+
+    dut.ofm_ready_i.value = 1
+    await RisingEdge(dut.clk_i)

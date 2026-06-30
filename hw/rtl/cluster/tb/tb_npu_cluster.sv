@@ -2,7 +2,11 @@
 
 `include "axi/typedef.svh"
 
-module tb_npu_cluster (
+module tb_npu_cluster #(
+    parameter int unsigned SYSTOLIC_OFM_FIFO_DEPTH = 8,
+    parameter int unsigned SYSTOLIC_OTCDM_STALL_PERIOD = 0,
+    parameter int unsigned SYSTOLIC_OTCDM_STALL_HOLD = 0
+)(
     input  logic        clk_i,       // 1 GHz NPU Clock
     input  logic        rst_ni,      // NPU Reset
     input  logic        fetch_enable_i,
@@ -55,7 +59,11 @@ module tb_npu_cluster (
 
     // Instance of NPU Cluster
     initial $display("BOOT_ADDR is %h", u_npu_cluster.u_snitch_core.BOOT_ADDR);
-    npu_cluster u_npu_cluster (
+    npu_cluster #(
+        .SYSTOLIC_OFM_FIFO_DEPTH(SYSTOLIC_OFM_FIFO_DEPTH),
+        .SYSTOLIC_OTCDM_STALL_PERIOD(SYSTOLIC_OTCDM_STALL_PERIOD),
+        .SYSTOLIC_OTCDM_STALL_HOLD(SYSTOLIC_OTCDM_STALL_HOLD)
+    ) u_npu_cluster (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
         .fetch_enable_i   (fetch_enable_i),

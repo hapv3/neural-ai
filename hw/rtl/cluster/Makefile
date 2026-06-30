@@ -3,6 +3,9 @@
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 VERILATOR_JOBS ?= 8
+SYSTOLIC_OFM_FIFO_DEPTH ?= 8
+SYSTOLIC_OTCDM_STALL_PERIOD ?= 0
+SYSTOLIC_OTCDM_STALL_HOLD ?= 0
 
 PWD=$(shell pwd)
 REPO_ROOT=$(PWD)/../../..
@@ -36,7 +39,10 @@ VERILOG_SOURCES = $(PWD)/tb/tb_npu_cluster.sv
 
 # Verilator extra args: pass expanded .F which contains all other sources
 EXTRA_ARGS += -Wno-fatal -Wno-WIDTH -Wno-UNOPTFLAT -Wno-IMPLICIT -Wno-PINMISSING \
-              --timing -DSNITCH_ENABLE_PERF -j $(VERILATOR_JOBS)
+              --timing -DSNITCH_ENABLE_PERF -j $(VERILATOR_JOBS) \
+              -GSYSTOLIC_OFM_FIFO_DEPTH=$(SYSTOLIC_OFM_FIFO_DEPTH) \
+              -GSYSTOLIC_OTCDM_STALL_PERIOD=$(SYSTOLIC_OTCDM_STALL_PERIOD) \
+              -GSYSTOLIC_OTCDM_STALL_HOLD=$(SYSTOLIC_OTCDM_STALL_HOLD)
 
 # Cocotb's Verilator backend invokes `make -C $(SIM_BUILD) ... -f Vtop.mk`.
 # Pass `-j` into that generated C++ build as well; Verilator's `-j` only

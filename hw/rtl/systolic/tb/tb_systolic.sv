@@ -34,6 +34,7 @@ module tb_systolic;
         .weight_load_en_i (weight_load_en_i),
         .clear_acc_i      (clear_acc_i),
         .compute_en_i     (compute_en_i),
+        .ofm_ready_i      (1'b1),
         .weight_data_i    (weight_data_i),
         .ifm_data_i       (ifm_data_i),
         .psum_data_i      (psum_data_i),
