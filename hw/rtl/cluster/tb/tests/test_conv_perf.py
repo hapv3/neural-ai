@@ -421,9 +421,9 @@ async def boot_and_run(dut, test_file):
         ) = case
         await write_l2_bytes(dut, p3_input_addr(case_id), make_p3_input(input_h, input_w, input_c))
         await write_l2_bytes(dut, p3_weight_addr(case_id), make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count))
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
     try:
-        await wait_for_host_irq(dut, timeout_cycles=1600000)
+        await wait_for_host_irq(dut, timeout_cycles=1600000, axi_master=axi_master, report_name="test_conv_perf")
     except AssertionError as exc:
         status = read_dtcm_word(dut, STATUS_BASE + 0x00)
         pass_count = read_dtcm_word(dut, STATUS_BASE + 0x04)

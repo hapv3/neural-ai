@@ -5,7 +5,7 @@ Mục tiêu: Xây dựng một khối PMU (Performance Management Unit) phần c
 ## 1. Cơ Chế Hoạt Động Của PMU
 
 - **Kiến trúc:** PMU là một tập hợp các thanh ghi bộ đếm (Counters) 32-bit hoặc 64-bit.
-- **Giao tiếp:** Được map vào một dải địa chỉ MMIO riêng (ví dụ: `0x2000_2000`). Firmware Snitch có thể ghi để Xóa (Reset), Bật/Tắt (Start/Stop) và Đọc (Read) các counter này.
+- **Giao tiếp:** Được map vào một dải địa chỉ MMIO riêng trên AXI4-Lite host slave port. Implementation P0 dùng `0x2000_4000` vì `0x2000_2000` đã thuộc interrupt controller. Python/cocotb host có thể ghi để Xóa (Reset), Bật/Tắt (Start/Stop), Snapshot và Đọc (Read) các counter này sau mỗi test.
 - **Routing:** Mọi thành phần (DMA, Systolic, TCDM) sẽ xuất ra các cờ tín hiệu (Event Wires) như `is_active`, `is_stalled`, `conflict_pulse`. Các tín hiệu này được nối trực tiếp vào ngõ vào của khối PMU để kích hoạt tăng (increment) counter tương ứng trong mỗi chu kỳ xung nhịp (clock cycle).
 
 ---
@@ -29,7 +29,7 @@ Mục tiêu: Xây dựng một khối PMU (Performance Management Unit) phần c
 
 ### 2.2. iDMA (Data Movement Engine)
 Đặc tính: Bộ di chuyển dữ liệu bất đồng bộ.
-> **Tích hợp Native:** Rất may mắn là thư viện iDMA đã cung cấp sẵn module `idma_inst64_events` sinh ra các xung sự kiện (Events) dạng struct `dma_events_t`. Chúng ta sẽ nối thẳng các cờ này vào bộ PMU của NPU để đếm mà không cần tự viết logic phân tích AXI bus.
+> **P0 thực tế:** wrapper iDMA hiện tại chưa expose đầy đủ event struct native ra cluster top. PMU P0 đếm từ tín hiệu có sẵn: `busy`, `start`, `done`, TCDM master request/stall. Khi wrapper expose event bus native sau này, có thể map thêm byte counter và stall chi tiết theo AXI/L1.
 
 Các counter sẽ map trực tiếp từ cờ của iDMA:
 - **`DMA_ACTIVE_CYCLES`**: Nối từ cờ `dma_busy`. Đếm số chu kỳ iDMA đang có transfer in-flight.
@@ -69,7 +69,41 @@ Các counter sẽ map:
 [Snitch Core] ------- (sleep, active) ------> |         Unit (PMU)                |
                                               |                                   |
                                               |  - Counter 0: SYS_ACTIVE (32b)    |
-   MMIO Bus (0x2000_2000)                     |  - Counter 1: SYS_STALL  (32b)    |
+   MMIO Bus (0x2000_4000)                     |  - Counter 1: SYS_STALL  (32b)    |
    (Đọc kết quả / Reset Counters)  ---------> |  - Counter N: ...                 |
                                               +-----------------------------------+
 ```
+
+## 4. Implementation P0 Status
+
+P0 đã được instance trong `npu_cluster` với 32 fixed 64-bit counters và 32-bit host AXI4-Lite MMIO:
+
+- `0x2000_4000` `CTRL`: bit0 enable, bit1 clear, bit2 snapshot.
+- `0x2000_4004` `STATUS`: overflow sticky bits.
+- `0x2000_4008` `NUM_COUNTERS`: số fixed counters.
+- `0x2000_4100 + id*8`: counter low/high 32-bit.
+
+Counter map P0:
+
+| ID | Counter |
+| --- | --- |
+| 0 | cycle |
+| 1-4 | Snitch retired instruction/load/int/acc events |
+| 5-6 | Snitch TCDM request/stall |
+| 7-10 | Spatz issue/response/TCDM request/stall |
+| 11-15 | iDMA busy/start/done/TCDM request/stall |
+| 16-18 | AFU done/TCDM request/stall |
+| 19-25 | Systolic compute/weight/ofm/IFM/OFM request/stall |
+| 26-31 | Aggregate TCDM request/grant/stall/bank/read/write request |
+
+Access model P0:
+
+- Host AXI4-Lite slave port decodes `0x1000_0000` I-TCM for firmware boot and `0x2000_4000` PMU for profiling.
+- Snitch D-bus `0x2000_4000` is intentionally not connected to PMU; that window returns a sink response to avoid firmware hangs.
+- Cocotb starts PMU before `fetch_enable_i`, snapshots/stops it after `irq_o`, then prints a performance report.
+
+Validation P0:
+
+- `make -C sw/test/pmu`
+- `make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot`
+- `test_pmu_basic` firmware smoke generates Snitch/TCDM traffic; Python host verifies PMU MMIO, snapshot and non-zero TCDM counters. If building a dedicated simulator for this module is too heavy, it can reuse any up-to-date `tb_npu_cluster` Verilator binary because cocotb test module is selected at runtime.

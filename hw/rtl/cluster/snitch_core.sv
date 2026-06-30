@@ -63,7 +63,9 @@ module snitch_core #(
     // FPU side-channel
     output logic [2:0]                fpu_rnd_mode_o,
     output logic                      fpu_fmt_mode_o,
-    input  logic [4:0]                fpu_status_i
+    input  logic [4:0]                fpu_status_i,
+
+    output snitch_pkg::core_events_t  core_events_o
 );
 
     import snitch_pkg::*;
@@ -228,7 +230,7 @@ module snitch_core #(
         .fpu_rnd_mode_o         (fpu_rnd_mode_o),
         .fpu_fmt_mode_o         (fpu_fmt_mode_o),
         .fpu_status_i           (fpu_status_i),
-        .core_events_o          ()
+        .core_events_o          (core_events_o)
     );
 
     // --- Instruction Fetch Interface Adapter ---

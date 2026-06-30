@@ -58,7 +58,12 @@ async def test_spatz_operator_library(dut):
         axi_master,
         firmware_path(__file__, "sw/test/spatz_ops/spatz_ops_test.bin"),
     )
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(dut, timeout_cycles=30000)
+    await wait_for_host_irq(
+        dut,
+        timeout_cycles=30000,
+        axi_master=axi_master,
+        report_name="test_spatz_operator_library",
+    )
     check_tcdm_outputs(dut)

@@ -20,6 +20,7 @@
 #define NPU_IDMA_BASE   (NPU_CTRL_BASE + 0x1000)
 #define NPU_IRQ_BASE    (NPU_CTRL_BASE + 0x2000)
 #define NPU_AFU_BASE    (NPU_CTRL_BASE + 0x3000)
+#define NPU_PMU_BASE    (NPU_CTRL_BASE + 0x4000)
 
 // 5. External L2 / simulation memory window
 #define NPU_L2_BASE     0x80000000

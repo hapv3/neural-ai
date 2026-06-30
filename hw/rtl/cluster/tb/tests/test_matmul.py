@@ -64,9 +64,9 @@ async def test_matmul(dut):
         axi_master,
         firmware_path(__file__, "sw/test/matmul/matmul.bin"),
     )
-    await release_fetch(dut)
+    await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(dut, timeout_cycles=120000)
+    await wait_for_host_irq(dut, timeout_cycles=120000, axi_master=axi_master, report_name="test_matmul")
 
     ofm_data = await read_l2_bytes(dut, EXT_MEM_OFM, DIM_M * 32 * 4)
     ofm_words = unpack_i32_words(ofm_data)
