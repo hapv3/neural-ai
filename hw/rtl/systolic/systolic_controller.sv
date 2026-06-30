@@ -55,7 +55,8 @@ module systolic_controller #(
     output logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] ifm_data_o,
     output logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   psum_data_o,
     input  logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   ofm_data_i,
-    input  logic                      ofm_valid_i
+    input  logic                      ofm_valid_i,
+    output logic                      ofm_ready_o
 );
 
     typedef enum logic [2:0] {
@@ -70,9 +71,6 @@ module systolic_controller #(
     } state_e;
 
     state_e state_q, state_d;
-
-    // The Systolic Array has a 32-cycle latency.
-    localparam int unsigned SYS_LATENCY = 32;
 
     logic [31:0] w_ptr_q, w_ptr_d;
     logic [31:0] i_ptr_q, i_ptr_d;
@@ -92,10 +90,6 @@ module systolic_controller #(
     typedef logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   ofm_row_t;
 
     localparam int unsigned OFM_FIFO_ADDR_DEPTH = (OFM_FIFO_DEPTH > 1) ? $clog2(OFM_FIFO_DEPTH) : 1;
-    localparam int unsigned OFM_FIFO_RESERVE = SYS_LATENCY + INPUT_FIFO_DEPTH + 8;
-    localparam logic [OFM_FIFO_ADDR_DEPTH-1:0] OFM_FIFO_STOP_LEVEL =
-        (OFM_FIFO_DEPTH > OFM_FIFO_RESERVE) ? OFM_FIFO_ADDR_DEPTH'(OFM_FIFO_DEPTH - OFM_FIFO_RESERVE) :
-                                              OFM_FIFO_ADDR_DEPTH'(1);
 
     input_row_t    weight_fifo_data;
     input_row_t    weight_fifo_out;
@@ -121,7 +115,7 @@ module systolic_controller #(
     logic          ofm_fifo_full;
     logic          ofm_fifo_empty;
     logic [OFM_FIFO_ADDR_DEPTH-1:0] ofm_fifo_usage;
-    logic          ofm_fifo_almost_full;
+    logic          array_pipe_ready;
 
     logic          fifo_flush;
     logic          requant_in_valid;
@@ -153,7 +147,8 @@ module systolic_controller #(
     assign weight_fifo_data = obi_i_rdata_i;
     assign ifm_fifo_data    = obi_i_rdata_i;
     assign ofm_fifo_data    = ofm_data_i;
-    assign ofm_fifo_almost_full = ofm_fifo_full || (ofm_fifo_usage >= OFM_FIFO_STOP_LEVEL);
+    assign ofm_ready_o = !ofm_fifo_full;
+    assign array_pipe_ready = !ofm_valid_i || ofm_ready_o;
 
     always_comb begin
         for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
@@ -323,7 +318,7 @@ module systolic_controller #(
         ofm_fifo_push    = ((state_q == COMPUTE) || (state_q == WAIT_DRAIN) ||
                             (state_q == ACCUM_READ) || (state_q == ACCUM_WRITE) ||
                             (state_q == ACCUM_REQUANT)) &&
-                            ofm_valid_i && !ofm_fifo_full;
+                            ofm_valid_i && ofm_ready_o;
 
         // OBI Output ports (Write)
         obi_o_req_o = '0;
@@ -425,7 +420,7 @@ module systolic_controller #(
 
             COMPUTE: begin
                 if (req_cnt_q > 0) begin
-                    obi_i_req_o = !ifm_fifo_full && !ofm_fifo_almost_full;
+                    obi_i_req_o = !ifm_fifo_full && array_pipe_ready;
                     obi_i_addr_o = i_ptr_q;
                     if (obi_i_req_o && obi_i_gnt_i) begin
                         i_ptr_d = i_ptr_q + 32;
@@ -433,7 +428,7 @@ module systolic_controller #(
                     end
                 end
                 ifm_fifo_push = obi_i_rvalid_i && !ifm_fifo_full;
-                if (!ifm_fifo_empty && !ofm_fifo_almost_full) begin
+                if (!ifm_fifo_empty && array_pipe_ready) begin
                     compute_en_o = 1'b1;
                     clear_acc_o  = 1'b0;
                     ifm_fifo_pop = 1'b1;

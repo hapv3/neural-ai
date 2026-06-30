@@ -16,6 +16,7 @@ class SystolicDriver:
         self.dut.weight_load_en_i.value = 0
         self.dut.clear_acc_i.value = 0
         self.dut.compute_en_i.value = 0
+        self.dut.ofm_ready_i.value = 1
         self.dut.weight_data_i.value = 0
         self.dut.ifm_data_i.value = 0
         self.dut.psum_data_i.value = 0
