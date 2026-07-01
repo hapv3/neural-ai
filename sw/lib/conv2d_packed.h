@@ -44,12 +44,15 @@ typedef struct {
 enum {
     NPU_CONV2D_PACKED_OK = 0,
     NPU_CONV2D_PACKED_ERR_DILATION = 0xBAD20001u,
-    NPU_CONV2D_PACKED_ERR_BAD_SHAPE = 0xBAD20002u
+    NPU_CONV2D_PACKED_ERR_BAD_SHAPE = 0xBAD20002u,
+    NPU_CONV2D_PACKED_ERR_LINEBUF_K_TILES = 0xBAD20003u
 };
 
 uint32_t npu_conv2d_packed_run_oc32(const npu_conv2d_packed_cfg_t *cfg,
                                     npu_conv2d_packed_stats_t *stats);
 uint32_t npu_conv2d_packed_run_oc32_requant(const npu_conv2d_packed_cfg_t *cfg,
+                                            npu_conv2d_packed_stats_t *stats);
+uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
                                             npu_conv2d_packed_stats_t *stats);
 
 #endif

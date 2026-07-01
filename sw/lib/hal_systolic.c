@@ -27,6 +27,32 @@ static void systolic_gemm32_tile(uint32_t weight_addr, uint32_t ifm_addr, uint32
     systolic_gemm32_tile_ex(weight_addr, ifm_addr, 0u, ofm_addr, dim_m, 0u);
 }
 
+void systolic_linebuf_disable(void) {
+    REG_WRITE(REG_LB_CTRL, 0u);
+}
+
+void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg) {
+    REG_WRITE(REG_LB_CTRL, 0u);
+    REG_WRITE(REG_LB_INPUT_BASE, cfg->input_base);
+    REG_WRITE(REG_LB_INPUT_H, cfg->input_h);
+    REG_WRITE(REG_LB_INPUT_W, cfg->input_w);
+    REG_WRITE(REG_LB_INPUT_C, cfg->input_c);
+    REG_WRITE(REG_LB_OUTPUT_W, cfg->output_w);
+    REG_WRITE(REG_LB_STRIDE, ((uint32_t)cfg->stride_w << 16) | cfg->stride_h);
+    REG_WRITE(REG_LB_PAD, ((uint32_t)cfg->pad_w << 16) | cfg->pad_h);
+    REG_WRITE(REG_LB_TILE_BASE, ((uint32_t)cfg->tile_ow_base << 16) | cfg->tile_oh_base);
+    REG_WRITE(REG_LB_LANE_VALID, cfg->lane_valid);
+
+    for (uint32_t lane = 0; lane < 32u; lane++) {
+        uint32_t packed = ((uint32_t)cfg->lane_kh[lane] << 24) |
+                          ((uint32_t)cfg->lane_kw[lane] << 16) |
+                          cfg->lane_ic[lane];
+        REG_WRITE(REG_LB_LANE(lane), packed);
+    }
+
+    REG_WRITE(REG_LB_CTRL, REG_LB_CTRL_EN);
+}
+
 void systolic_requant_disable(void) {
     REG_WRITE(REG_RQ_CTRL, 0u);
 }
@@ -54,6 +80,7 @@ void systolic_requant_config_per_channel(const int32_t *bias,
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
     uint32_t row = 0;
     systolic_requant_disable();
+    systolic_linebuf_disable();
 
     while (row < dim_m) {
         uint32_t tile_m = dim_m - row;
@@ -69,6 +96,23 @@ void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr,
     }
 }
 
+void systolic_gemm32_linebuf(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m) {
+    uint32_t row = 0;
+    systolic_requant_disable();
+
+    while (row < dim_m) {
+        uint32_t tile_m = dim_m - row;
+        if (tile_m > SYSTOLIC_GEMM32_TILE_M) {
+            tile_m = SYSTOLIC_GEMM32_TILE_M;
+        }
+
+        systolic_gemm32_tile(weight_addr, 0u, ofm_addr + row * 32u * 4u, tile_m);
+        row += tile_m;
+    }
+
+    systolic_linebuf_disable();
+}
+
 void systolic_gemm32_accumulate(uint32_t weight_addr,
                                 uint32_t ifm_addr,
                                 uint32_t psum_addr,
@@ -76,6 +120,7 @@ void systolic_gemm32_accumulate(uint32_t weight_addr,
                                 uint32_t dim_m) {
     uint32_t row = 0;
     systolic_requant_disable();
+    systolic_linebuf_disable();
 
     while (row < dim_m) {
         uint32_t tile_m = dim_m - row;
@@ -99,6 +144,7 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
                                         uint32_t ofm_addr,
                                         uint32_t dim_m) {
     uint32_t row = 0;
+    systolic_linebuf_disable();
     REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
 
     while (row < dim_m) {
@@ -119,6 +165,7 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
 
 void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
     uint32_t row = 0;
+    systolic_linebuf_disable();
     REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
 
     while (row < dim_m) {

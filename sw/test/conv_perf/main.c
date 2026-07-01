@@ -86,6 +86,7 @@
 #define P3_CASE_3X3_C5     14u
 #define P3_CASE_REQUANT    15u
 #define P3_CASE_YOLO_RGB_TCDM_SPATZ 16u
+#define P3_CASE_LINEBUF_3X3_C3 17u
 
 #define YOLO_RGB_H          64u
 #define YOLO_RGB_W          64u
@@ -438,6 +439,43 @@ static void run_yolo_rgb_tcdm_spatz_case(uint32_t case_id) {
     publish_stats(P3_STATS_ADDR(case_id), &total_stats);
 }
 
+static void run_linebuf_3x3_c3_case(uint32_t case_id) {
+    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_stats_t stats;
+    uint32_t input_bytes = P3_H * P3_W * 3u;
+    uint32_t weight_bytes = 32u * 32u;
+
+    spatz_rt_dma_1d(T_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
+    spatz_rt_dma_wait_all();
+    spatz_rt_dma_1d(T_WEIGHT, P3_WEIGHT_ADDR(case_id), weight_bytes);
+    spatz_rt_dma_wait_all();
+
+    init_cfg(&cfg,
+             T_INPUT,
+             T_WEIGHT,
+             T_OUTPUT,
+             P3_H,
+             P3_W,
+             3u,
+             P3_H,
+             P3_W,
+             3u,
+             3u,
+             1u,
+             1u,
+             1u,
+             1u);
+
+    uint32_t status = npu_conv2d_packed_run_oc32_linebuf(&cfg, &stats);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(0xC1B0u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
+    }
+
+    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_OUTPUT, P3_OUT_BYTES);
+    spatz_rt_dma_wait_all();
+    publish_stats(P3_STATS_ADDR(case_id), &stats);
+}
+
 static void run_conv1x1_k33(void) {
     npu_conv2d_packed_cfg_t cfg;
     npu_conv2d_packed_stats_t stats;
@@ -681,6 +719,12 @@ int main(void) {
     if (should_run_case(P3_CASE_YOLO_RGB_TCDM_SPATZ)) {
         spatz_rt_set_phase(21, P3_CASE_YOLO_RGB_TCDM_SPATZ);
         run_yolo_rgb_tcdm_spatz_case(P3_CASE_YOLO_RGB_TCDM_SPATZ);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_3X3_C3)) {
+        spatz_rt_set_phase(22, P3_CASE_LINEBUF_3X3_C3);
+        run_linebuf_3x3_c3_case(P3_CASE_LINEBUF_3X3_C3);
         spatz_rt_pass_step();
     }
 

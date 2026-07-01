@@ -2,15 +2,17 @@
 
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
+VERILATOR_JOBS ?= 8
 
 PWD=$(shell pwd)
-
-# RTL sources
-VERILOG_SOURCES = $(PWD)/npu_systolic_array.sv
+REPO_ROOT=$(PWD)/../../..
 
 # MODULE is the basename of the Python test file
 export PYTHONPATH := $(PWD)/tb:$(PYTHONPATH)
 MODULE ?= test_systolic
+
+# RTL sources
+VERILOG_SOURCES = $(PWD)/npu_systolic_array.sv
 
 # Set build directory to tb/sim/<test_name>
 SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
@@ -19,7 +21,42 @@ SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
 TOPLEVEL = npu_systolic_array
 
 # Extra args for verilator
-EXTRA_ARGS += -Wno-fatal -j8
+EXTRA_ARGS += -Wno-fatal --timing -j $(VERILATOR_JOBS)
+BUILD_ARGS += -j$(VERILATOR_JOBS)
+
+ifeq ($(MODULE),test_systolic_controller)
+TOPLEVEL = tb_systolic_controller
+VERILOG_SOURCES = \
+	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_clk.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
+	$(PWD)/requant_pipeline.sv \
+	$(PWD)/npu_systolic_array.sv \
+	$(PWD)/conv_linebuf_packer.sv \
+	$(PWD)/systolic_ctrl_regs.sv \
+	$(PWD)/systolic_controller.sv \
+	$(PWD)/tb/tb_systolic_controller.sv
+EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
+endif
+
+ifeq ($(MODULE),test_conv_linebuf_packer)
+TOPLEVEL = conv_linebuf_packer
+VERILOG_SOURCES = \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_clk.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
+	$(PWD)/conv_linebuf_packer.sv
+endif
+
+ifeq ($(MODULE),test_conv_channel_linebuf_packer)
+TOPLEVEL = conv_channel_linebuf_packer
+VERILOG_SOURCES = \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_clk.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
+	$(PWD)/conv_channel_linebuf_packer.sv
+endif
 
 # Enable VCD dumping if DEBUG=1
 DEBUG ?= 0

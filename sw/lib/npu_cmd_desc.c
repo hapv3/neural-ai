@@ -5,6 +5,18 @@
 
 static uint32_t g_cmd_done_count;
 
+typedef struct {
+    uint32_t configured;
+    uint32_t base_addr;
+    uint32_t slot_bytes;
+    uint32_t slot_count;
+    uint32_t produce_slot;
+    uint32_t consume_slot;
+    uint32_t occupancy;
+} npu_cmd_rolling_state_t;
+
+static npu_cmd_rolling_state_t g_rolling_state[4];
+
 static void cmd_record_phase(uint32_t phase, uint32_t op) {
     volatile uint32_t *debug_words = (volatile uint32_t *)NPU_DTCM_BASE;
     debug_words[6] = phase;
@@ -48,6 +60,19 @@ typedef struct {
 static uint32_t min_u32(uint32_t lhs, uint32_t rhs) {
     return lhs < rhs ? lhs : rhs;
 }
+
+static void reset_rolling_state(void) {
+    for (uint32_t idx = 0; idx < 4u; idx++) {
+        g_rolling_state[idx].configured = 0u;
+        g_rolling_state[idx].base_addr = 0u;
+        g_rolling_state[idx].slot_bytes = 0u;
+        g_rolling_state[idx].slot_count = 0u;
+        g_rolling_state[idx].produce_slot = 0u;
+        g_rolling_state[idx].consume_slot = 0u;
+        g_rolling_state[idx].occupancy = 0u;
+    }
+}
+
 
 static uint32_t cmd_refill_window(npu_cmd_stream_t *stream, uint32_t offset, uint32_t bytes, uint32_t fail_ptr) {
     if (bytes == 0u || offset > stream->total_bytes || bytes > (stream->total_bytes - offset)) {
@@ -203,12 +228,74 @@ static uint32_t run_systolic(const npu_cmd_systolic_gemm32_t *cmd, uint32_t cmd_
     return NPU_CMD_FAIL_NONE;
 }
 
+static uint32_t run_rolling_buffer(const npu_cmd_rolling_buffer_t *cmd, uint32_t cmd_ptr) {
+    if (cmd->buffer_id >= 4u) {
+        return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x01u, cmd_ptr);
+    }
+
+    npu_cmd_rolling_state_t *state = &g_rolling_state[cmd->buffer_id];
+
+    if (cmd->op == NPU_CMD_ROLLING_RESET) {
+        if (cmd->slot_count == 0u || cmd->slot_bytes == 0u) {
+            return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x02u, cmd_ptr);
+        }
+        state->configured = 1u;
+        state->base_addr = cmd->base_addr;
+        state->slot_bytes = cmd->slot_bytes;
+        state->slot_count = cmd->slot_count;
+        state->produce_slot = 0u;
+        state->consume_slot = 0u;
+        state->occupancy = 0u;
+        return NPU_CMD_FAIL_NONE;
+    }
+
+    if (!state->configured) {
+        return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x03u, cmd_ptr);
+    }
+    if (cmd->base_addr != 0u && cmd->base_addr != state->base_addr) {
+        return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x04u, cmd_ptr);
+    }
+
+    if (cmd->op == NPU_CMD_ROLLING_PRODUCE) {
+        if (state->occupancy >= state->slot_count) {
+            return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x05u, cmd_ptr);
+        }
+        if (cmd->expected_slot != state->produce_slot) {
+            return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x06u, cmd_ptr);
+        }
+        state->produce_slot++;
+        if (state->produce_slot == state->slot_count) {
+            state->produce_slot = 0u;
+        }
+        state->occupancy++;
+        return NPU_CMD_FAIL_NONE;
+    }
+
+    if (cmd->op == NPU_CMD_ROLLING_CONSUME_RELEASE) {
+        if (state->occupancy == 0u) {
+            return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x07u, cmd_ptr);
+        }
+        if (cmd->expected_slot != state->consume_slot) {
+            return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x08u, cmd_ptr);
+        }
+        state->consume_slot++;
+        if (state->consume_slot == state->slot_count) {
+            state->consume_slot = 0u;
+        }
+        state->occupancy--;
+        return NPU_CMD_FAIL_NONE;
+    }
+
+    return cmd_fail(NPU_CMD_FAIL_ROLLING | 0x09u, cmd_ptr);
+}
+
 uint32_t npu_cmd_dispatch(uint32_t cmd_tcdm_base, uint32_t cmd_total_bytes) {
     npu_cmd_table_header_t table;
     uint32_t cmd_ptr;
     uint32_t cmd_end;
 
     g_cmd_done_count = 0u;
+    reset_rolling_state();
 
     if (!is_aligned32(cmd_tcdm_base) || !is_aligned32(cmd_total_bytes)) {
         return cmd_fail(NPU_CMD_FAIL_BAD_ALIGN, cmd_tcdm_base);
@@ -290,6 +377,14 @@ uint32_t npu_cmd_dispatch(uint32_t cmd_tcdm_base, uint32_t cmd_total_bytes) {
                 cmd_record_phase(0x380u, cmd_ptr);
                 dma_barrier();
                 break;
+            case NPU_CMD_TYPE_ROLLING_BUFFER: {
+                npu_cmd_rolling_buffer_t cmd;
+                cmd_record_phase(0x3A1u, cmd_ptr);
+                copy_from_cmd(&cmd, (const volatile void *)cmd_ptr, sizeof(cmd));
+                status = run_rolling_buffer(&cmd, cmd_ptr);
+                cmd_record_phase(0x3A2u, status);
+                break;
+            }
             default:
                 return cmd_fail(NPU_CMD_FAIL_UNSUPPORTED, cmd_ptr);
         }
@@ -315,6 +410,7 @@ static uint32_t npu_cmd_dispatch_stream(uint32_t cmd_l2_base, uint32_t cmd_total
     uint32_t status;
 
     g_cmd_done_count = 0u;
+    reset_rolling_state();
 
     if (!is_aligned32(cmd_l2_base) || !is_aligned32(cmd_total_bytes) ||
         !is_aligned32(cmd_tcdm_base) || !is_aligned32(cmd_tcdm_bytes)) {
@@ -422,6 +518,16 @@ static uint32_t npu_cmd_dispatch_stream(uint32_t cmd_l2_base, uint32_t cmd_total
                 cmd_record_phase(0x380u, cmd_ptr);
                 dma_barrier();
                 break;
+            case NPU_CMD_TYPE_ROLLING_BUFFER: {
+                npu_cmd_rolling_buffer_t cmd;
+                cmd_record_phase(0x3A1u, cmd_ptr);
+                status = stream_copy_from_cmd(&stream, &cmd, cmd_offset, sizeof(cmd), cmd_ptr);
+                if (status == NPU_CMD_FAIL_NONE) {
+                    status = run_rolling_buffer(&cmd, cmd_ptr);
+                    cmd_record_phase(0x3A2u, status);
+                }
+                break;
+            }
             default:
                 return cmd_fail(NPU_CMD_FAIL_UNSUPPORTED, cmd_ptr);
         }

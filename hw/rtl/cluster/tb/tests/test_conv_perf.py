@@ -62,6 +62,7 @@ P3_CASE_3X3_C1 = 13
 P3_CASE_3X3_C5 = 14
 P3_CASE_REQUANT = 15
 P3_CASE_YOLO_RGB_TCDM_SPATZ = 16
+P3_CASE_LINEBUF_3X3_C3 = 17
 
 YOLO_RGB_H = 64
 YOLO_RGB_W = 64
@@ -106,6 +107,7 @@ P3_CASES = {
         YOLO_RGB_OH // YOLO_RGB_TILE_OH,
         False,
     ),
+    P3_CASE_LINEBUF_3X3_C3: ("linebuffer conv3x3 IC3", 4, 4, 3, 4, 4, 3, 3, 1, 1, 1, 1, 32, 1, 0, 0, False),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -137,6 +139,10 @@ def p3_case_enabled(case_id):
     if CONV_PERF_GROUP == CONV_PERF_GROUP_YOLO:
         return case_id == P3_CASE_YOLO_RGB_TCDM_SPATZ
     return False
+
+
+def p3_case_is_linebuf(case_id):
+    return case_id == P3_CASE_LINEBUF_3X3_C3
 
 
 def read_dtcm_word(dut, addr):
@@ -473,7 +479,16 @@ async def check_output(dut, name, addr, expected):
         )
 
 
-async def check_stats(dut, name, addr, expected_rows, expected_k_tiles, expected_idma_tiles=None, expected_spatz_tiles=None):
+async def check_stats(
+    dut,
+    name,
+    addr,
+    expected_rows,
+    expected_k_tiles,
+    expected_idma_tiles=None,
+    expected_spatz_tiles=None,
+    allow_linebuf=False,
+):
     stats = await read_l2_bytes(dut, addr, 48)
     rows = bytes_to_u32(stats, 0)
     k_tiles = bytes_to_u32(stats, 1)
@@ -491,16 +506,25 @@ async def check_stats(dut, name, addr, expected_rows, expected_k_tiles, expected
     assert status == 0, f"{name}: scheduler status=0x{status:08x}"
     assert rows == expected_rows, f"{name}: rows={rows} expected={expected_rows}"
     assert k_tiles == expected_k_tiles, f"{name}: k_tiles={k_tiles} expected={expected_k_tiles}"
-    assert prepare_cycles > 0, f"{name}: prepare_cycles must be non-zero"
+    if allow_linebuf:
+        assert prepare_cycles == 0, f"{name}: linebuffer prepare_cycles={prepare_cycles} expected=0"
+        assert last_prepare_cycles == 0, f"{name}: linebuffer last_prepare_cycles={last_prepare_cycles} expected=0"
+    else:
+        assert prepare_cycles > 0, f"{name}: prepare_cycles must be non-zero"
+        assert last_prepare_cycles > 0, f"{name}: last_prepare_cycles must be non-zero"
     assert gemm_cycles > 0, f"{name}: gemm_cycles must be non-zero"
     assert total_cycles >= prepare_cycles + gemm_cycles, (
         f"{name}: total_cycles={total_cycles} prepare={prepare_cycles} gemm={gemm_cycles}"
     )
-    assert last_prepare_cycles > 0, f"{name}: last_prepare_cycles must be non-zero"
     assert last_gemm_cycles > 0, f"{name}: last_gemm_cycles must be non-zero"
-    assert idma_tiles + spatz_tiles + scalar_tiles == expected_k_tiles, (
-        f"{name}: backend tiles idma={idma_tiles} spatz={spatz_tiles} scalar={scalar_tiles}"
-    )
+    if allow_linebuf:
+        assert idma_tiles + spatz_tiles + scalar_tiles == 0, (
+            f"{name}: linebuffer backend counters idma={idma_tiles} spatz={spatz_tiles} scalar={scalar_tiles} expected=0"
+        )
+    else:
+        assert idma_tiles + spatz_tiles + scalar_tiles == expected_k_tiles, (
+            f"{name}: backend tiles idma={idma_tiles} spatz={spatz_tiles} scalar={scalar_tiles}"
+        )
     assert scalar_tiles == 0, f"{name}: scalar prepare backend must not be used"
     if expected_idma_tiles is not None:
         assert idma_tiles == expected_idma_tiles, f"{name}: idma_tiles={idma_tiles} expected={expected_idma_tiles}"
@@ -662,6 +686,7 @@ async def test_conv_perf(dut):
                 expected_k_tiles=expected_k_tiles,
                 expected_idma_tiles=expected_idma_tiles,
                 expected_spatz_tiles=expected_spatz_tiles,
+                allow_linebuf=p3_case_is_linebuf(case_id),
             )
         else:
             await check_stats(
@@ -672,4 +697,5 @@ async def test_conv_perf(dut):
                 expected_k_tiles=expected_k_tiles,
                 expected_idma_tiles=expected_idma_tiles,
                 expected_spatz_tiles=expected_spatz_tiles,
+                allow_linebuf=p3_case_is_linebuf(case_id),
             )

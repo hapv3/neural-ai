@@ -695,7 +695,7 @@ module npu_cluster #(
     );
 
     assign ctrl_systolic_sel = ((ctrl_addr & 32'hFFFF) >= 32'h0100) &&
-                               ((ctrl_addr & 32'hFFFF) < 32'h0500);
+                               ((ctrl_addr & 32'hFFFF) < 32'h0580);
     assign dma_ctrl_req = ctrl_req && !ctrl_systolic_sel;
     assign systolic_ctrl_req = ctrl_req && ctrl_systolic_sel;
     assign ctrl_gnt = ctrl_systolic_sel ? systolic_ctrl_gnt : dma_ctrl_gnt;
@@ -1214,14 +1214,10 @@ module npu_cluster #(
     //=========================================================
     // 7. Systolic Array (Matrix Engine)
     //=========================================================
-    // Wires between systolic_controller and npu_systolic_array
+    // Systolic controller PMU pulses. The array is instantiated inside the
+    // controller so cluster top only owns the controller instance.
     logic                      sys_weight_load_en;
-    logic                      sys_clear_acc;
     logic                      sys_compute_en;
-    logic signed [31:0][7:0]   sys_weight_data;
-    logic signed [31:0][7:0]   sys_ifm_data;
-    logic signed [31:0][31:0]  sys_psum_data;
-    logic signed [31:0][31:0]  sys_ofm_data;
     logic                      sys_ofm_valid;
     logic                      sys_ofm_ready;
 
@@ -1288,31 +1284,10 @@ module npu_cluster #(
         .obi_o_rvalid_i     (sys_obi_o_rvalid),
         .obi_o_rdata_i      (sys_obi_o_rdata),
 
-        .weight_load_en_o   (sys_weight_load_en),
-        .clear_acc_o        (sys_clear_acc),
-        .compute_en_o       (sys_compute_en),
-        .weight_data_o      (sys_weight_data),
-        .ifm_data_o         (sys_ifm_data),
-        .psum_data_o        (sys_psum_data),
-        .ofm_data_i         (sys_ofm_data),
-        .ofm_valid_i        (sys_ofm_valid),
-        .ofm_ready_o        (sys_ofm_ready)
-    );
-
-    npu_systolic_array #(
-        .ARRAY_DIM(32)
-    ) u_systolic_array (
-        .clk_i              (clk_i),
-        .rst_ni             (rst_ni),
-        .weight_load_en_i   (sys_weight_load_en),
-        .clear_acc_i        (sys_clear_acc),
-        .compute_en_i       (sys_compute_en),
-        .ofm_ready_i        (sys_ofm_ready),
-        .weight_data_i      (sys_weight_data),
-        .ifm_data_i         (sys_ifm_data),
-        .psum_data_i        (sys_psum_data),
-        .ofm_data_o         (sys_ofm_data),
-        .ofm_valid_o        (sys_ofm_valid)
+        .perf_weight_load_en_o(sys_weight_load_en),
+        .perf_compute_en_o  (sys_compute_en),
+        .perf_ofm_valid_o   (sys_ofm_valid),
+        .perf_ofm_ready_o   (sys_ofm_ready)
     );
 
     // Master 3: Systolic Controller Read Port (I-TCDM)
