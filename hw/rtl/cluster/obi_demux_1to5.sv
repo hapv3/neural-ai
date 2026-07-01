@@ -74,6 +74,9 @@ module obi_demux_1to5 #(
 );
 
     logic sel_m0, sel_m1, sel_m2, sel_m3, sel_m4;
+    logic outstanding_q;
+    logic selected_rvalid;
+    logic accept_req;
 
     assign sel_m0 = ((slv_addr_i & M0_MASK) == (M0_BASE & M0_MASK));
     assign sel_m1 = ((slv_addr_i & M1_MASK) == (M1_BASE & M1_MASK));
@@ -84,11 +87,11 @@ module obi_demux_1to5 #(
     logic [2:0] sel_q;
     logic [2:0] sel_d;
 
-    assign m0_req_o = slv_req_i & sel_m0;
-    assign m1_req_o = slv_req_i & sel_m1;
-    assign m2_req_o = slv_req_i & sel_m2;
-    assign m3_req_o = slv_req_i & sel_m3;
-    assign m4_req_o = slv_req_i & sel_m4;
+    assign m0_req_o = slv_req_i & sel_m0 & !outstanding_q;
+    assign m1_req_o = slv_req_i & sel_m1 & !outstanding_q;
+    assign m2_req_o = slv_req_i & sel_m2 & !outstanding_q;
+    assign m3_req_o = slv_req_i & sel_m3 & !outstanding_q;
+    assign m4_req_o = slv_req_i & sel_m4 & !outstanding_q;
 
     assign m0_addr_o = slv_addr_i;
     assign m1_addr_o = slv_addr_i;
@@ -116,12 +119,16 @@ module obi_demux_1to5 #(
 
     always_comb begin
         slv_gnt_o = 1'b0;
-        if (sel_m0) slv_gnt_o = m0_gnt_i;
-        else if (sel_m1) slv_gnt_o = m1_gnt_i;
-        else if (sel_m2) slv_gnt_o = m2_gnt_i;
-        else if (sel_m3) slv_gnt_o = m3_gnt_i;
-        else if (sel_m4) slv_gnt_o = m4_gnt_i;
+        if (!outstanding_q) begin
+            if (sel_m0) slv_gnt_o = m0_gnt_i;
+            else if (sel_m1) slv_gnt_o = m1_gnt_i;
+            else if (sel_m2) slv_gnt_o = m2_gnt_i;
+            else if (sel_m3) slv_gnt_o = m3_gnt_i;
+            else if (sel_m4) slv_gnt_o = m4_gnt_i;
+        end
     end
+
+    assign accept_req = slv_req_i && slv_gnt_o;
 
     always_comb begin
         sel_d = sel_q;
@@ -139,7 +146,7 @@ module obi_demux_1to5 #(
         if (!rst_ni) begin
             sel_q <= 3'd0;
         end else begin
-            if (slv_req_i && slv_gnt_o) begin
+            if (accept_req) begin
                 sel_q <= sel_d;
             end
         end
@@ -156,6 +163,21 @@ module obi_demux_1to5 #(
             3'd4: begin slv_rvalid_o = m4_rvalid_i; slv_rdata_o = m4_rdata_i; end
             default: ;
         endcase
+    end
+
+    assign selected_rvalid = slv_rvalid_o;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            outstanding_q <= 1'b0;
+        end else begin
+            if (accept_req) begin
+                outstanding_q <= 1'b1;
+            end
+            if (selected_rvalid) begin
+                outstanding_q <= 1'b0;
+            end
+        end
     end
 
 endmodule

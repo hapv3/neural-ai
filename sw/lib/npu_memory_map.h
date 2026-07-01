@@ -21,9 +21,15 @@
 #define NPU_IRQ_BASE    (NPU_CTRL_BASE + 0x2000)
 #define NPU_AFU_BASE    (NPU_CTRL_BASE + 0x3000)
 #define NPU_PMU_BASE    (NPU_CTRL_BASE + 0x4000)
+#define NPU_CMD_CTRL_BASE (NPU_CTRL_BASE + 0x5000)
 
 // 5. External L2 / simulation memory window
 #define NPU_L2_BASE     0x80000000
+
+// Reserved Shared TCDM command staging buffer. Host writes command streams to L2;
+// firmware refills this 4 KB window with iDMA while dispatching descriptors.
+#define NPU_CMD_TCDM_BASE 0x1017F000u
+#define NPU_CMD_TCDM_SIZE 0x00001000u
 
 // Legacy DMA Configuration Registers
 #define REG_DMA_START   (NPU_CTRL_BASE + 0x00)
@@ -119,6 +125,23 @@
 #define NPU_AFU_MODE_E8       0u
 #define NPU_AFU_MODE_E16      1u
 #define NPU_AFU_MODE_E32      2u
+
+// Host command-control bootstrap/status registers.
+#define NPU_CMD_L2_BASE       (NPU_CMD_CTRL_BASE + 0x00)
+#define NPU_CMD_TOTAL_BYTES   (NPU_CMD_CTRL_BASE + 0x04)
+#define NPU_CMD_TCDM_BASE_REG (NPU_CMD_CTRL_BASE + 0x08)
+#define NPU_CMD_TCDM_BYTES    (NPU_CMD_CTRL_BASE + 0x0C)
+#define NPU_CMD_START         (NPU_CMD_CTRL_BASE + 0x10)
+#define NPU_CMD_STATUS        (NPU_CMD_CTRL_BASE + 0x14)
+#define NPU_CMD_FAIL_CODE     (NPU_CMD_CTRL_BASE + 0x18)
+#define NPU_CMD_FAIL_PTR      (NPU_CMD_CTRL_BASE + 0x1C)
+#define NPU_CMD_DONE_COUNT    (NPU_CMD_CTRL_BASE + 0x20)
+
+#define NPU_CMD_STATUS_IDLE    0u
+#define NPU_CMD_STATUS_LOADING 1u
+#define NPU_CMD_STATUS_RUNNING 2u
+#define NPU_CMD_STATUS_PASS    3u
+#define NPU_CMD_STATUS_FAIL    4u
 
 // Register Access Macros
 #define REG_WRITE(addr, val) *((volatile uint32_t*)(addr)) = (val)
