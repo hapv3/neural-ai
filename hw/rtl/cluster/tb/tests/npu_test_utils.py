@@ -83,6 +83,10 @@ NPU_CMD_TYPE_IDMA_2D = 2
 NPU_CMD_TYPE_IDMA_3D = 3
 NPU_CMD_TYPE_SYSTOLIC_GEMM32 = 4
 NPU_CMD_TYPE_BARRIER = 5
+NPU_CMD_TYPE_ROLLING_BUFFER = 6
+NPU_CMD_ROLLING_RESET = 0
+NPU_CMD_ROLLING_PRODUCE = 1
+NPU_CMD_ROLLING_CONSUME_RELEASE = 2
 NPU_CMD_FLAG_ACCUM = 0x00000002
 NPU_CMD_FLAG_REQUANT = 0x00000004
 NPU_CMD_DIR_L2_TO_L1 = 0
@@ -195,6 +199,26 @@ def cmd_idma_3d(
 def cmd_systolic_gemm32(weight_addr, ifm_addr, ofm_addr, dim_m, psum_addr=0, flags=0, layer_id=0, tile_id=0):
     payload = _cmd_header(NPU_CMD_TYPE_SYSTOLIC_GEMM32, 64, flags, layer_id, tile_id)
     payload += struct.pack("<IIIIIIII", weight_addr, ifm_addr, psum_addr, ofm_addr, dim_m, 0, 0, 0)
+    return payload.ljust(64, b"\x00")
+
+
+def cmd_rolling_buffer(op, buffer_id, base_addr=0, slot_bytes=0, slot_count=0, expected_slot=0, layer_id=0, tile_id=0):
+    payload = _cmd_header(NPU_CMD_TYPE_ROLLING_BUFFER, 64, 0, layer_id, tile_id)
+    payload += struct.pack(
+        "<IIIIIIIIIIII",
+        op,
+        buffer_id,
+        base_addr,
+        slot_bytes,
+        slot_count,
+        expected_slot,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
     return payload.ljust(64, b"\x00")
 
 

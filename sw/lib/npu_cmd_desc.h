@@ -21,6 +21,7 @@
 #define NPU_CMD_FAIL_UNSUPPORTED   0xBADCD006u
 #define NPU_CMD_FAIL_DMA_TIMEOUT   0xBADCD007u
 #define NPU_CMD_FAIL_DMA_START     0xBADCD008u
+#define NPU_CMD_FAIL_ROLLING       0xBADCD009u
 
 typedef enum {
     NPU_CMD_TYPE_END = 0,
@@ -28,8 +29,15 @@ typedef enum {
     NPU_CMD_TYPE_IDMA_2D = 2,
     NPU_CMD_TYPE_IDMA_3D = 3,
     NPU_CMD_TYPE_SYSTOLIC_GEMM32 = 4,
-    NPU_CMD_TYPE_BARRIER = 5
+    NPU_CMD_TYPE_BARRIER = 5,
+    NPU_CMD_TYPE_ROLLING_BUFFER = 6
 } npu_cmd_type_t;
+
+typedef enum {
+    NPU_CMD_ROLLING_RESET = 0,
+    NPU_CMD_ROLLING_PRODUCE = 1,
+    NPU_CMD_ROLLING_CONSUME_RELEASE = 2
+} npu_cmd_rolling_op_t;
 
 typedef struct {
     uint32_t magic;
@@ -103,6 +111,22 @@ typedef struct {
     uint32_t reserved1;
     uint32_t reserved2;
 } npu_cmd_systolic_gemm32_t;
+
+typedef struct {
+    npu_cmd_header_t header;
+    uint32_t op;
+    uint32_t buffer_id;
+    uint32_t base_addr;
+    uint32_t slot_bytes;
+    uint32_t slot_count;
+    uint32_t expected_slot;
+    uint32_t reserved0;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint32_t reserved3;
+    uint32_t reserved4;
+    uint32_t reserved5;
+} npu_cmd_rolling_buffer_t;
 
 uint32_t npu_cmd_dispatch_from_ctrl(void);
 uint32_t npu_cmd_dispatch(uint32_t cmd_tcdm_base, uint32_t cmd_total_bytes);

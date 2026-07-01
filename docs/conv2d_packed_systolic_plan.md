@@ -116,6 +116,20 @@ conv_linebuf_scheduler
         psum accumulation or final requant/store
 ```
 
+### Design Strategies for Multi-Layer Reusability
+
+To ensure the physical linebuffer silicon can efficiently serve both the 3-channel RGB input layer and the deep intermediate layers (e.g., 32/64/128 channels) without area bloat, the architecture adopts the following strategies:
+
+1. **Shared Configurable Linebuffer Engine**: The hardware provides a generic, programmable linebuffer. Firmware configures spatial parameters (`input_base`, `input_w`, `input_c`, `tile_ow`, `kernel_h/w`, `stride_h/w`, `pad`, `layout`) per layer. A single physical SRAM block can buffer 5 full rows of an RGB image, or it can fold to buffer just 2 rows of a 32-channel intermediate feature map tile.
+2. **Tile-Local Linebuffer (Not Full-Width)**: The linebuffer is designed to buffer *spatial tiles*, not fixed full-image widths. The physical SRAM capacity is bound by `kernel_h * ((tile_ow - 1) * stride_w + kernel_w) * IC_tile`. This allows deep layers to run entirely within the SRAM by tiling spatially, avoiding the need for a massive buffer that scales with `W * C`.
+3. **Producer-Consumer Chaining Between Convs**: Layers are scheduled to maximize data reuse in L1. The OFM tile from Conv0 stays in the Shared Data TCDM (often double-buffered) and is immediately consumed by Conv1's linebuffer as input. This avoids spilling intermediate tensors to L2. The scheduler ensures that the necessary *halo* rows are retained in TCDM across tile boundaries.
+4. **Layer Pair Fusion**: When advantageous, the scheduler fuses patterns like `Conv -> ReLU/Requant -> Conv3x3` or `Conv -> Depthwise3x3 -> Pointwise1x1`. The primary constraint is that the intermediate OFM tile plus its halo must fit within the TCDM, and the requantization pipeline must finalize the values before the consumer reads them.
+5. **Multi-Layer Stripe Scheduling**: Vela-style cascade scheduling is natively supported. Instead of computing the entirety of Layer 1 before starting Layer 2, the NPU computes a minimal spatial *stripe* of Layer 1 (just enough rows to satisfy Layer 2's kernel), immediately runs the corresponding stripe of Layer 2, and emits the final stripe to L2. This drastically reduces L2 memory traffic.
+6. **Flexible Hardware Source Interfaces**: The linebuffer hardware supports multiple source modes:
+    - `SRC_L2_STRIPE_TCDM`: Input is copied from L2 to TCDM via iDMA.
+    - `SRC_PREV_OFM_TCDM`: Directly consume the previous layer's output tile residing in TCDM.
+    - `SRC_DIRECT_TCDM`: Normal direct reads from TCDM for pointwise or pre-arranged feature maps.
+
 The feeder reads input activation from Shared Data TCDM. If a source tensor
 lives in L2, the host-side compiler/runtime precomputes the required input
 stripe copies and emits them as command descriptors. Snitch firmware only

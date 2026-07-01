@@ -90,9 +90,21 @@
 #define REG_RQ_SHIFT(ch) (NPU_CTRL_BASE + 0x300 + ((ch) * 4u))
 #define REG_RQ_ZP(ch)   (NPU_CTRL_BASE + 0x380 + ((ch) * 4u))
 
+#define REG_LB_CTRL       (NPU_CTRL_BASE + 0x400)
+#define REG_LB_INPUT_BASE (NPU_CTRL_BASE + 0x404)
+#define REG_LB_INPUT_H    (NPU_CTRL_BASE + 0x408)
+#define REG_LB_INPUT_W    (NPU_CTRL_BASE + 0x40C)
+#define REG_LB_INPUT_C    (NPU_CTRL_BASE + 0x410)
+#define REG_LB_OUTPUT_W   (NPU_CTRL_BASE + 0x414)
+#define REG_LB_STRIDE     (NPU_CTRL_BASE + 0x418)
+#define REG_LB_PAD        (NPU_CTRL_BASE + 0x41C)
+#define REG_LB_TILE_BASE  (NPU_CTRL_BASE + 0x420)
+#define REG_LB_LANE_VALID (NPU_CTRL_BASE + 0x424)
+#define REG_LB_LANE(ch)   (NPU_CTRL_BASE + 0x500 + ((ch) * 4u))
 
 #define REG_RQ_CTRL_EN  0x00000001u
 #define REG_SYS_ACCUM_CTRL_EN 0x00000001u
+#define REG_LB_CTRL_EN  0x00000001u
 
 // Interrupt controller registers
 #define NPU_IRQ_INT_ENABLE    (NPU_IRQ_BASE + 0x00)
