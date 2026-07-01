@@ -67,6 +67,9 @@ module obi_demux_1to4 #(
 );
 
     logic sel_m0, sel_m1, sel_m2, sel_m3;
+    logic outstanding_q;
+    logic selected_rvalid;
+    logic accept_req;
 
     assign sel_m0 = ((slv_addr_i & M0_MASK) == (M0_BASE & M0_MASK));
     assign sel_m1 = ((slv_addr_i & M1_MASK) == (M1_BASE & M1_MASK));
@@ -74,10 +77,10 @@ module obi_demux_1to4 #(
     assign sel_m3 = ((slv_addr_i & M3_MASK) == (M3_BASE & M3_MASK));
 
     // Request Routing
-    assign m0_req_o   = slv_req_i & sel_m0;
-    assign m1_req_o   = slv_req_i & sel_m1;
-    assign m2_req_o   = slv_req_i & sel_m2;
-    assign m3_req_o   = slv_req_i & sel_m3;
+    assign m0_req_o   = slv_req_i & sel_m0 & !outstanding_q;
+    assign m1_req_o   = slv_req_i & sel_m1 & !outstanding_q;
+    assign m2_req_o   = slv_req_i & sel_m2 & !outstanding_q;
+    assign m3_req_o   = slv_req_i & sel_m3 & !outstanding_q;
 
     assign m0_addr_o  = slv_addr_i;
     assign m1_addr_o  = slv_addr_i;
@@ -100,7 +103,10 @@ module obi_demux_1to4 #(
     assign m3_wdata_o = slv_wdata_i;
 
     // Grant Routing
-    assign slv_gnt_o  = (sel_m0 & m0_gnt_i) | (sel_m1 & m1_gnt_i) | (sel_m2 & m2_gnt_i) | (sel_m3 & m3_gnt_i);
+    assign slv_gnt_o  = !outstanding_q &&
+                        ((sel_m0 & m0_gnt_i) | (sel_m1 & m1_gnt_i) |
+                         (sel_m2 & m2_gnt_i) | (sel_m3 & m3_gnt_i));
+    assign accept_req = slv_req_i && slv_gnt_o;
 
 
 
@@ -109,7 +115,7 @@ module obi_demux_1to4 #(
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             out_sel_q <= 2'b00;
-        end else if (slv_req_i && slv_gnt_o) begin
+        end else if (accept_req) begin
             if (sel_m0) out_sel_q <= 2'b00;
             else if (sel_m1) out_sel_q <= 2'b01;
             else if (sel_m2) out_sel_q <= 2'b10;
@@ -139,6 +145,21 @@ module obi_demux_1to4 #(
             end
             default: ;
         endcase
+    end
+
+    assign selected_rvalid = slv_rvalid_o;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            outstanding_q <= 1'b0;
+        end else begin
+            if (accept_req) begin
+                outstanding_q <= 1'b1;
+            end
+            if (selected_rvalid) begin
+                outstanding_q <= 1'b0;
+            end
+        end
     end
 
 endmodule

@@ -37,7 +37,9 @@ module obi_narrow_to_wide #(
     logic [OFFSET_BITS-1:0] w_offset;
     assign w_offset = mst_addr_i[$clog2(M_BYTES) +: OFFSET_BITS];
 
-    assign slv_req_o  = mst_req_i;
+    logic outstanding_q;
+
+    assign slv_req_o  = mst_req_i && !outstanding_q;
     assign slv_addr_o = {mst_addr_i[ADDR_WIDTH-1 : $clog2(M_BYTES)+OFFSET_BITS], {($clog2(M_BYTES)+OFFSET_BITS){1'b0}}};
     assign slv_we_o   = mst_we_i;
 
@@ -48,7 +50,7 @@ module obi_narrow_to_wide #(
         slv_wdata_o[w_offset * M_DATA_WIDTH +: M_DATA_WIDTH] = mst_wdata_i;
     end
 
-    assign mst_gnt_o = slv_gnt_i;
+    assign mst_gnt_o = slv_gnt_i && !outstanding_q;
     assign mst_rvalid_o = slv_rvalid_i;
 
     // To properly route read data, we need to know the offset.
@@ -58,9 +60,16 @@ module obi_narrow_to_wide #(
     logic [OFFSET_BITS-1:0] offset_q;
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-            offset_q <= '0;
-        end else if (mst_req_i && mst_gnt_o) begin
-            offset_q <= w_offset;
+            offset_q      <= '0;
+            outstanding_q <= 1'b0;
+        end else begin
+            if (mst_req_i && mst_gnt_o) begin
+                offset_q      <= w_offset;
+                outstanding_q <= 1'b1;
+            end
+            if (slv_rvalid_i) begin
+                outstanding_q <= 1'b0;
+            end
         end
     end
 

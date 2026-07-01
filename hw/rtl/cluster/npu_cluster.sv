@@ -113,6 +113,15 @@ module npu_cluster #(
     logic                      pmu_mm_rvalid;
     logic [MMIO_DATA_WIDTH-1:0] pmu_mm_rdata;
 
+    logic                      host_cmd_req;
+    logic                      host_cmd_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] host_cmd_addr;
+    logic                      host_cmd_we;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] host_cmd_be;
+    logic [MMIO_DATA_WIDTH-1:0] host_cmd_wdata;
+    logic                      host_cmd_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] host_cmd_rdata;
+
     axi_lite_to_obi #(
         .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH(AXI_HOST_DATA_WIDTH),
@@ -156,7 +165,7 @@ module npu_cluster #(
         .DATA_WIDTH(ITCM_DATA_WIDTH),
         .M0_BASE (32'h1000_0000), .M0_MASK (32'hFFFF_8000), // I-TCM boot window
         .M1_BASE (32'h2000_4000), .M1_MASK (32'hFFFF_F000), // Host PMU window
-        .M2_BASE (32'hFFFF_0000), .M2_MASK (32'hFFFF_F000), // Unused/error sink
+        .M2_BASE (32'h2000_5000), .M2_MASK (32'hFFFF_F000), // Host command-control window
         .M3_BASE (32'hFFFF_1000), .M3_MASK (32'hFFFF_F000)  // Unused/error sink
     ) u_host_axi_demux_1to4 (
         .clk_i       (clk_i),
@@ -188,14 +197,14 @@ module npu_cluster #(
         .m1_rvalid_i  (pmu_mm_rvalid),
         .m1_rdata_i   (pmu_mm_rdata),
 
-        .m2_req_o     (),
-        .m2_gnt_i     (1'b1),
-        .m2_addr_o    (),
-        .m2_we_o      (),
-        .m2_be_o      (),
-        .m2_wdata_o   (),
-        .m2_rvalid_i  (1'b1),
-        .m2_rdata_i   ('0),
+        .m2_req_o     (host_cmd_req),
+        .m2_gnt_i     (host_cmd_gnt),
+        .m2_addr_o    (host_cmd_addr),
+        .m2_we_o      (host_cmd_we),
+        .m2_be_o      (host_cmd_be),
+        .m2_wdata_o   (host_cmd_wdata),
+        .m2_rvalid_i  (host_cmd_rvalid),
+        .m2_rdata_i   (host_cmd_rdata),
 
         .m3_req_o     (),
         .m3_gnt_i     (1'b1),
@@ -461,6 +470,15 @@ module npu_cluster #(
     logic                      afu_mm_rvalid;
     logic [MMIO_DATA_WIDTH-1:0] afu_mm_rdata;
 
+    logic                      snitch_cmd_req;
+    logic                      snitch_cmd_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] snitch_cmd_addr;
+    logic                      snitch_cmd_we;
+    logic [(MMIO_DATA_WIDTH/8)-1:0] snitch_cmd_be;
+    logic [MMIO_DATA_WIDTH-1:0] snitch_cmd_wdata;
+    logic                      snitch_cmd_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] snitch_cmd_rdata;
+
     logic                      afu_obi_req;
     logic                      afu_obi_gnt;
     logic [OBI_ADDR_WIDTH-1:0] afu_obi_addr;
@@ -580,7 +598,7 @@ module npu_cluster #(
         .M1_BASE (32'h2000_1000), .M1_MASK (32'hFFFF_F000), // iDMA-style control
         .M2_BASE (32'h2000_2000), .M2_MASK (32'hFFFF_F000), // Interrupt controller
         .M3_BASE (32'h2000_3000), .M3_MASK (32'hFFFF_F000), // AFU control + LUT
-        .M4_BASE (32'h2000_4000), .M4_MASK (32'hFFFF_F000)  // Host-only PMU sink on Snitch side
+        .M4_BASE (32'h2000_5000), .M4_MASK (32'hFFFF_F000)  // Command-control bootstrap/status
     ) u_mmio_demux_1to5 (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
@@ -629,14 +647,14 @@ module npu_cluster #(
         .m3_rvalid_i  (afu_mm_rvalid),
         .m3_rdata_i   (afu_mm_rdata),
 
-        .m4_req_o     (),
-        .m4_gnt_i     (1'b1),
-        .m4_addr_o    (),
-        .m4_we_o      (),
-        .m4_be_o      (),
-        .m4_wdata_o   (),
-        .m4_rvalid_i  (1'b1),
-        .m4_rdata_i   ('0)
+        .m4_req_o     (snitch_cmd_req),
+        .m4_gnt_i     (snitch_cmd_gnt),
+        .m4_addr_o    (snitch_cmd_addr),
+        .m4_we_o      (snitch_cmd_we),
+        .m4_be_o      (snitch_cmd_be),
+        .m4_wdata_o   (snitch_cmd_wdata),
+        .m4_rvalid_i  (snitch_cmd_rvalid),
+        .m4_rdata_i   (snitch_cmd_rdata)
     );
 
     logic        cfg_dma_start;
@@ -646,6 +664,35 @@ module npu_cluster #(
     logic        cfg_dma_done;
 
     logic        cfg_sys_done;
+
+    npu_cmd_ctrl #(
+        .ADDR_WIDTH        (OBI_ADDR_WIDTH),
+        .DATA_WIDTH        (MMIO_DATA_WIDTH),
+        .BASE_ADDR         (32'h2000_5000),
+        .DEFAULT_TCDM_BASE (32'h1017_F000),
+        .DEFAULT_TCDM_BYTES(32'h0000_1000)
+    ) u_cmd_ctrl (
+        .clk_i            (clk_i),
+        .rst_ni           (rst_ni),
+
+        .host_req_i       (host_cmd_req),
+        .host_gnt_o       (host_cmd_gnt),
+        .host_addr_i      (host_cmd_addr),
+        .host_we_i        (host_cmd_we),
+        .host_be_i        (host_cmd_be),
+        .host_wdata_i     (host_cmd_wdata),
+        .host_rvalid_o    (host_cmd_rvalid),
+        .host_rdata_o     (host_cmd_rdata),
+
+        .snitch_req_i     (snitch_cmd_req),
+        .snitch_gnt_o     (snitch_cmd_gnt),
+        .snitch_addr_i    (snitch_cmd_addr),
+        .snitch_we_i      (snitch_cmd_we),
+        .snitch_be_i      (snitch_cmd_be),
+        .snitch_wdata_i   (snitch_cmd_wdata),
+        .snitch_rvalid_o  (snitch_cmd_rvalid),
+        .snitch_rdata_o   (snitch_cmd_rdata)
+    );
 
     assign ctrl_systolic_sel = ((ctrl_addr & 32'hFFFF) >= 32'h0100) &&
                                ((ctrl_addr & 32'hFFFF) < 32'h0500);

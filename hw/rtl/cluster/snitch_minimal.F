@@ -112,6 +112,7 @@ $(REPO_ROOT)/hw/rtl/cluster/cluster_ctrl_regs.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_ctrl_regs.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_interrupt_ctrl.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_pmu.sv
+$(REPO_ROOT)/hw/rtl/cluster/npu_cmd_ctrl.sv
 $(REPO_ROOT)/hw/idma/src/idma_pkg.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_axil_read.sv
 $(REPO_ROOT)/hw/idma/src/backend/idma_axil_write.sv

@@ -59,7 +59,7 @@ To achieve high-performance matrix and vector operations, the architecture integ
 |                                             |     |      |                                         |
 |                                             |     |      +------> +----------------------+         |
 |                                             |     |               | MMIO/CSR             |         |
-|                                             |     |               | cluster/idma/irq/AFU |         |
+|                                             |     |               | sys/idma/irq/afu/pmu |         |
 |                                             |     |               +----------+-----------+         |
 |                                             |     |                          | irq_o               |
 |                                             |     |                          v                     |
@@ -77,21 +77,15 @@ To achieve high-performance matrix and vector operations, the architecture integ
 |                                      +------------------+                                 |        |
 |                                                                                           v        |
 |  +----------------------------------------------------------------------------------------------+  |
-|  |                          Shared Data TCDM Interconnect (256-bit)                             |  |
-|  +-------+--------------------+---------------------+-----------------------+-------------------+  |
-|          ^                    ^                     ^                       |                      |
-|          |                    |                     |                       v                      |
-| +--------+--------+  +--------+--------+  +---------+---------+   +-------------------+            |
-| | Systolic Array  |  | Spatz Vector    |  | DMA Engine        |<--|  Data TCDM SRAM   |            |
-| | (Matrix Engine) |  | (Vector Engine) |  | (AXI4 Master to L2)|  | (12 I-TCDM Banks) |            |
-| +-----------------+  +-----------------+  +-------------------+   | (4 O-TCDM Banks)  |            |
-|          ^                    ^                     ^             +---------^---------+            |
-|          |                    |                     |                       |                      |
-|          +--------------------+---------------------+---------------+ +-----+------+               |
-|                                                                  AFU | | LUT Func |               |
-|                                                              256-bit | | Unit     |               |
-|                                                               master | +----------+               |
-|                                                                   +-------------------+            |
+|  |          Shared Data TCDM Interconnect (256-bit) (M0:Snitch, M1-M10:Engines)                 |  |
+|  +----+-----------------+------------------+-----------------+------------------+---------------+  |
+|       ^                 ^                  ^                 ^                  |                  |
+|       |                 |                  |                 |                  v                  |
+| +-----+-----+   +-------+-------+  +-------+-------+  +------+------+  +-------------------+       |
+| | Systolic  |   | Spatz Vector  |  | iDMA Engine   |  | AFU LUT     |  |  Data TCDM SRAM   |       |
+| | Array     |   | Engine        |  | (AXI Master)  |  | Engine      |  | (12 I-TCDM Banks) |       |
+| | (M3-M7)   |   | (M1, M8)      |  | (M2, M9)      |  | (M10)       |  | (4 O-TCDM Banks)  |       |
+| +-----------+   +---------------+  +---------------+  +-------------+  +-------------------+       |
 |                                                                                                    |
 +----------------------------------------------------------------------------------------------------+
 ```
@@ -101,8 +95,8 @@ To achieve high-performance matrix and vector operations, the architecture integ
 | ID | Name | Protocol | Width | Description |
 |----|------|----------|-------|-------------|
 | A  | Snitch I-Fetch | OBI | 32-bit | Instruction fetch path từ Snitch tới `u_itcm_arbiter`. |
-| B  | Host AXI4-Lite Slave | AXI4-Lite | 32-bit | Host/testbench chỉ nạp firmware vào I-TCM. Không dùng host frontend path để access D-TCM/MMIO. |
-| C  | AXI-to-OBI Boot Bridge | AXI4-Lite→OBI | 32-bit I-TCM-only | Convert host AXI-Lite boot writes sang OBI request đi trực tiếp tới `u_itcm_arbiter`. |
+| B  | Host AXI4-Lite Slave | AXI4-Lite | 32-bit | Host/testbench nạp firmware vào I-TCM và truy cập host-visible status/control windows như PMU hoặc command-control. Không dùng host frontend path để access D-TCM hoặc Shared TCDM trực tiếp. |
+| C  | AXI-to-OBI Host Bridge | AXI4-Lite→OBI | 32-bit | Converts host AXI-Lite transactions into OBI requests, then decodes to I-TCM or explicitly exposed host-visible status/control windows. |
 | D  | Snitch D-Bus | OBI | 32-bit | Bus dữ liệu của Snitch tới private D-TCM, Shared Data TCDM window và MMIO. Không arbitrate với host AXI path. |
 | E  | D-side OBI Demux | OBI Demux | 32-bit control side | Decode Snitch D-Bus access tới D-TCM, Shared Data TCDM window và MMIO; không decode I-TCM. |
 | F  | `u_itcm_arbiter` | OBI Arbiter 2→1 | 32-bit | Phân giải giữa host AXI boot bridge access vào I-TCM và Snitch I-fetch. |
@@ -115,20 +109,21 @@ To achieve high-performance matrix and vector operations, the architecture integ
 
 RTL hiện tại tách rõ boot instruction path và Snitch data path:
 
-- **`u_itcm_arbiter`** là I-TCM arbiter. `m0` nhận host AXI boot bridge; `m1` nhận Snitch I-fetch.
+- **`u_itcm_arbiter`** là I-TCM arbiter. `m0` nhận host AXI transactions decoded to the I-TCM boot window; `m1` nhận Snitch I-fetch.
 - **D-side demux** nhận trực tiếp Snitch D-Bus 32-bit và decode D-TCM, Shared Data TCDM window, MMIO, plus error sink.
-- **Legacy `u_sys_arbiter` path đã bỏ**: host không còn frontend access vào D-TCM/MMIO/TCDM; debug/readback dùng TB backdoor.
+- **Legacy `u_sys_arbiter` path đã bỏ**: host không còn frontend access vào D-TCM hoặc Shared TCDM; debug/readback dùng TB backdoor. Host-visible MMIO chỉ nên là các control/status block được expose rõ ràng như PMU hoặc command-control.
 
 ### Width Partitioning Direction
 
 Kiến trúc hiện tại tách hai miền width:
 
 - **Address width**: giữ thống nhất 32-bit physical address trên AXI-Lite/OBI nội bộ của cluster. Width refactor bên dưới là **data bus width**, không đổi memory map.
-- **Boot side 32-bit**: host AXI-Lite physical, AXI-to-OBI boot bridge, `u_itcm_arbiter`, và I-TCM SRAM.
+- **Host side 32-bit**: host AXI-Lite physical, AXI-to-OBI host bridge, I-TCM boot window, and selected host-visible status/control windows.
 - **Snitch control side 32-bit**: Snitch D-Bus, D-TCM và MMIO đều native 32-bit vì Snitch chỉ làm firmware control/scheduler.
 - **Compute/data side 256-bit**: Shared Data TCDM interconnect, DMA data path, Systolic ports, Spatz vector data movement, và SRAM banking cho tensor tiles.
 - **Boundary adapter**: chỉ dùng adapter tại boundary `Snitch D-Bus 32-bit → Shared Data TCDM 256-bit`. Không kéo Shared Data TCDM xuống 32-bit.
 - **Snitch D-TCM private**: host AXI-Lite không cần frontend access vào D-TCM. Debug/readback D-TCM trong verification dùng testbench backdoor function, không dùng memory-mapped host path.
+- **Command stream placement**: host writes command streams to L2/DRAM, then programs a small host-visible command-control register block. Firmware uses a fixed 4 KB Shared TCDM staging window and refills it from L2 with iDMA while dispatching descriptors.
 
 ---
 
@@ -161,7 +156,10 @@ Kiến trúc hiện tại tách hai miền width:
 | `2` | AFU | AFU operation done. Connected to AFU `done_o`. |
 | `3` | Spatz | Spatz accelerator response valid. |
 
-> Current host AXI-Lite frontend intentionally reaches **I-TCM only**. Therefore cocotb does not read interrupt MMIO through the host path today. Completion is observed via `irq_o`; correctness is proved by exact output data checks.
+> Current host AXI-Lite frontend reaches I-TCM and selected host-visible
+> status/control windows such as PMU. It must not expose D-TCM or the full
+> Shared TCDM aperture. Completion remains observed via `irq_o`; correctness is
+> proved by exact output data checks.
 
 ---
 
@@ -232,6 +230,7 @@ Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không ph�
 | `0x1000_0000 – 0x1000_7FFF` | 32 KB | **I-TCM** | Firmware Snitch instruction memory. Target host AXI-Lite boot path đi trực tiếp tới `u_itcm_arbiter`; Snitch fetch đi qua I-fetch port. |
 | `0x1000_8000 – 0x1000_FFFF` | 32 KB | **Snitch D-TCM** | Private data của Snitch: stack, `.data`, `.bss`, scalar state. Không expose trên AXI-Lite host path sau refactor; debug dùng TB backdoor. |
 | `0x1010_0000 – 0x1015_FFFF` | 384 KB | **I-TCDM logical window** | Weights và IFM tiles cho compute engines. |
+| `0x1017_F000 – 0x1017_FFFF` | 4 KB | **TCDM command staging window** | Reserved local command-stream staging buffer. Host does not write this directly; Snitch refills this window from L2 through iDMA as descriptor offsets advance. |
 | `0x1020_0000 – 0x1021_FFFF` | 128 KB | **O-TCDM logical window** | OFM / INT32 accumulator writeback. |
 | `0x2000_0000 – 0x2000_FFFF` | 64 KB | **MMIO / CSR** | `cluster_ctrl_regs`, iDMA, interrupt controller, AFU/accelerator control. |
 | `0x8000_0000+` | External | **L2 / AXI sim memory** | Testbench/external memory chứa input/output buffers. |
@@ -247,6 +246,7 @@ Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không ph�
 | `0x2000_1000` | `npu_idma_ctrl_mm` | iDMA-compatible 1D/2D/3D transfer configuration. |
 | `0x2000_2000` | `npu_interrupt_ctrl` | Internal done-event IRQ and firmware-driven host completion. |
 | `0x2000_3000` | `afu` | LUT activation unit. Offset `0x000..0x3ff` is LUT SRAM; offset `0x400+` is status/src/dst/length/mode CSR. |
+| `0x2000_5000` | `npu_cmd_ctrl` | Host-visible command bootstrap/status block: command L2 base, byte length, TCDM command staging base/size, start/status/fail registers. |
 
 ---
 
@@ -284,6 +284,24 @@ Matrix Engine
 6. In raw mode, the controller writes each row as 32 INT32 values through 4 parallel OBI write ports.
 7. In requant mode, the controller applies per-channel bias/scale/shift/zero-point/clamp and writes one packed 32-byte INT8 row through output port 0.
 8. DMA copies OFM/activation buffers from O-TCDM back to L2.
+
+### Future Direct Conv2D Linebuffer Path
+
+The active Conv2D path still materializes packed `M x 32` IFM tiles in TCDM
+through software+iDMA+Spatz prepare. A future direct Conv2D path may add one
+shared generic max-9-line linebuffer in front of the systolic controller. That
+linebuffer is shared across all output-channel filters for one systolic
+instance, emits K32 IFM rows directly to the existing systolic feed path, and
+keeps psum/requant/store on the current output side. To reduce Snitch workload,
+the host-side compiler/runtime computes tile descriptors, DMA stripe ranges,
+K32 lane descriptors, and linebuffer register images, writes the command stream
+to L2, and programs `npu_cmd_ctrl` through the cluster host AXI-slave path.
+Snitch refills the fixed 4 KB TCDM command staging window from L2, prefetches
+each descriptor into local scalar state before starting compute, then only
+dispatches precomputed descriptors and waits for iDMA/accelerator completion.
+
+Detailed architecture, requirements, and pseudo-code are tracked in
+[`conv2d_packed_systolic_plan.md`](conv2d_packed_systolic_plan.md).
 
 ### Systolic Requant Path
 
@@ -369,7 +387,7 @@ Snitch firmware:
   5. DMA OFM O-TCDM→L2
   6. Write pass/fail status into NPU_IRQ_HOST_NOTIFY
 Testbench reads L2 OFM and compares against NumPy golden
-Testbench waits `irq_o`; current host AXI path remains I-TCM-only
+Testbench waits `irq_o`; host AXI path is used only for I-TCM boot and explicit host-visible status/control windows
 ```
 
 ---

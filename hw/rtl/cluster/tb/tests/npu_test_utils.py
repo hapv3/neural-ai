@@ -1,4 +1,5 @@
 import os
+import struct
 
 from cocotb.triggers import ClockCycles, RisingEdge, Timer
 
@@ -57,6 +58,36 @@ TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
 TCDM_WORD_BYTES = 32
 NPU_DTCM_BASE = 0x10008000
+NPU_CMD_CTRL_BASE = 0x20005000
+NPU_CMD_L2_BASE = NPU_CMD_CTRL_BASE + 0x00
+NPU_CMD_TOTAL_BYTES = NPU_CMD_CTRL_BASE + 0x04
+NPU_CMD_TCDM_BASE_REG = NPU_CMD_CTRL_BASE + 0x08
+NPU_CMD_TCDM_BYTES = NPU_CMD_CTRL_BASE + 0x0C
+NPU_CMD_START = NPU_CMD_CTRL_BASE + 0x10
+NPU_CMD_STATUS = NPU_CMD_CTRL_BASE + 0x14
+NPU_CMD_FAIL_CODE = NPU_CMD_CTRL_BASE + 0x18
+NPU_CMD_FAIL_PTR = NPU_CMD_CTRL_BASE + 0x1C
+NPU_CMD_DONE_COUNT = NPU_CMD_CTRL_BASE + 0x20
+NPU_CMD_TCDM_BASE = 0x1017F000
+NPU_CMD_TCDM_SIZE = 0x00001000
+NPU_CMD_STATUS_IDLE = 0
+NPU_CMD_STATUS_LOADING = 1
+NPU_CMD_STATUS_RUNNING = 2
+NPU_CMD_STATUS_PASS = 3
+NPU_CMD_STATUS_FAIL = 4
+NPU_CMD_TABLE_MAGIC = 0x4E505543
+NPU_CMD_VERSION = 1
+NPU_CMD_TYPE_END = 0
+NPU_CMD_TYPE_IDMA_1D = 1
+NPU_CMD_TYPE_IDMA_2D = 2
+NPU_CMD_TYPE_IDMA_3D = 3
+NPU_CMD_TYPE_SYSTOLIC_GEMM32 = 4
+NPU_CMD_TYPE_BARRIER = 5
+NPU_CMD_FLAG_ACCUM = 0x00000002
+NPU_CMD_FLAG_REQUANT = 0x00000004
+NPU_CMD_DIR_L2_TO_L1 = 0
+NPU_CMD_DIR_L1_TO_L2 = 1
+NPU_CMD_DIR_L1_TO_L1 = 2
 
 
 async def reset_dut(dut):
@@ -103,6 +134,111 @@ async def _axi_read32(axi_master, addr):
 
 async def _axi_write32(axi_master, addr, value):
     await axi_master.write(addr, int(value & 0xFFFFFFFF).to_bytes(4, "little"))
+
+
+def _align32(data):
+    padding = (-len(data)) % 32
+    return data + (b"\x00" * padding)
+
+
+def _cmd_header(cmd_type, size_bytes, flags=0, layer_id=0, tile_id=0):
+    return struct.pack("<HHIII", cmd_type, size_bytes, flags, layer_id, tile_id)
+
+
+def cmd_idma_1d(src_addr, dst_addr, length, direction, layer_id=0, tile_id=0):
+    payload = _cmd_header(NPU_CMD_TYPE_IDMA_1D, 64, 0, layer_id, tile_id)
+    payload += struct.pack("<IIIIIIII", src_addr, dst_addr, length, direction, 0, 0, 0, 0)
+    return payload.ljust(64, b"\x00")
+
+
+def cmd_idma_2d(src_addr, dst_addr, length, src_stride, dst_stride, reps, direction, layer_id=0, tile_id=0):
+    payload = _cmd_header(NPU_CMD_TYPE_IDMA_2D, 64, 0, layer_id, tile_id)
+    payload += struct.pack("<IIIIIIIIII", src_addr, dst_addr, length, src_stride, dst_stride, reps, direction, 0, 0, 0)
+    return payload.ljust(64, b"\x00")
+
+
+def cmd_idma_3d(
+    src_addr,
+    dst_addr,
+    length,
+    src_stride_2,
+    dst_stride_2,
+    reps_2,
+    src_stride_3,
+    dst_stride_3,
+    reps_3,
+    direction,
+    layer_id=0,
+    tile_id=0,
+):
+    payload = _cmd_header(NPU_CMD_TYPE_IDMA_3D, 96, 0, layer_id, tile_id)
+    payload += struct.pack(
+        "<IIIIIIIIIIIIII",
+        src_addr,
+        dst_addr,
+        length,
+        src_stride_2,
+        dst_stride_2,
+        reps_2,
+        src_stride_3,
+        dst_stride_3,
+        reps_3,
+        direction,
+        0,
+        0,
+        0,
+        0,
+    )
+    return payload.ljust(96, b"\x00")
+
+
+def cmd_systolic_gemm32(weight_addr, ifm_addr, ofm_addr, dim_m, psum_addr=0, flags=0, layer_id=0, tile_id=0):
+    payload = _cmd_header(NPU_CMD_TYPE_SYSTOLIC_GEMM32, 64, flags, layer_id, tile_id)
+    payload += struct.pack("<IIIIIIII", weight_addr, ifm_addr, psum_addr, ofm_addr, dim_m, 0, 0, 0)
+    return payload.ljust(64, b"\x00")
+
+
+def cmd_barrier(layer_id=0, tile_id=0):
+    return _cmd_header(NPU_CMD_TYPE_BARRIER, 32, 0, layer_id, tile_id).ljust(32, b"\x00")
+
+
+def cmd_end(layer_id=0, tile_id=0):
+    return _cmd_header(NPU_CMD_TYPE_END, 32, 0, layer_id, tile_id).ljust(32, b"\x00")
+
+
+def build_command_table(commands):
+    body = b"".join(commands)
+    entry_offset = 32
+    total_bytes = entry_offset + len(body)
+    header = struct.pack(
+        "<IIIIIIII",
+        NPU_CMD_TABLE_MAGIC,
+        NPU_CMD_VERSION,
+        total_bytes,
+        entry_offset,
+        len(commands),
+        0,
+        0,
+        0,
+    )
+    table = header + body
+    if len(table) != total_bytes:
+        raise AssertionError("internal command table size mismatch")
+    if total_bytes % 32:
+        raise AssertionError("command table must stay 32-byte aligned")
+    return table
+
+
+async def program_command_queue(axi_master, l2_base, total_bytes, tcdm_base=NPU_CMD_TCDM_BASE, tcdm_size=NPU_CMD_TCDM_SIZE):
+    await _axi_write32(axi_master, NPU_CMD_L2_BASE, l2_base)
+    await _axi_write32(axi_master, NPU_CMD_TOTAL_BYTES, total_bytes)
+    await _axi_write32(axi_master, NPU_CMD_TCDM_BASE_REG, tcdm_base)
+    await _axi_write32(axi_master, NPU_CMD_TCDM_BYTES, tcdm_size)
+    await _axi_write32(axi_master, NPU_CMD_FAIL_CODE, 0)
+    await _axi_write32(axi_master, NPU_CMD_FAIL_PTR, 0)
+    await _axi_write32(axi_master, NPU_CMD_DONE_COUNT, 0)
+    await _axi_write32(axi_master, NPU_CMD_STATUS, 0)
+    await _axi_write32(axi_master, NPU_CMD_START, 1)
 
 
 async def pmu_start(axi_master):

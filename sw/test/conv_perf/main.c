@@ -29,11 +29,11 @@
 #define L2_CONV1_C64_STATS  0x80078000u
 
 #define L2_P3_BASE          0x80080000u
-#define P3_CASE_STRIDE      0x00010000u
+#define P3_CASE_STRIDE      0x00040000u
 #define P3_INPUT_ADDR(id)   (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u)
 #define P3_WEIGHT_ADDR(id)  (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u)
 #define P3_OUT_ADDR(id)     (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x6000u)
-#define P3_STATS_ADDR(id)   (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0xE000u)
+#define P3_STATS_ADDR(id)   (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u)
 
 #define T_INPUT          0x10100000u
 #define T_WEIGHT         0x10102000u
@@ -85,6 +85,17 @@
 #define P3_CASE_3X3_C1     13u
 #define P3_CASE_3X3_C5     14u
 #define P3_CASE_REQUANT    15u
+#define P3_CASE_YOLO_RGB_TCDM_SPATZ 16u
+
+#define YOLO_RGB_H          64u
+#define YOLO_RGB_W          64u
+#define YOLO_RGB_C          3u
+#define YOLO_RGB_OH         32u
+#define YOLO_RGB_OW         32u
+#define YOLO_RGB_TILE_OH    8u
+#define YOLO_RGB_INPUT_BYTES (YOLO_RGB_H * YOLO_RGB_W * YOLO_RGB_C)
+#define YOLO_RGB_WEIGHT_BYTES (32u * 32u)
+#define YOLO_RGB_TILE_OUT_BYTES (YOLO_RGB_TILE_OH * YOLO_RGB_OW * 32u * 4u)
 
 #ifndef CONV_PERF_GROUP
 #define CONV_PERF_GROUP 0
@@ -98,6 +109,7 @@
 #define CONV_PERF_GROUP_POINTWISE 1
 #define CONV_PERF_GROUP_KERNELS   2
 #define CONV_PERF_GROUP_REQUANT   3
+#define CONV_PERF_GROUP_YOLO      4
 
 static uint32_t should_run_legacy(void) {
     if (CONV_PERF_CASE >= 0) {
@@ -122,6 +134,9 @@ static uint32_t should_run_case(uint32_t case_id) {
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT) {
         return case_id == P3_CASE_REQUANT;
     }
+    if (CONV_PERF_GROUP == CONV_PERF_GROUP_YOLO) {
+        return case_id == P3_CASE_YOLO_RGB_TCDM_SPATZ;
+    }
     return 0u;
 }
 
@@ -138,6 +153,22 @@ static void publish_stats_pair(uint32_t l2_addr,
     spatz_rt_memcpy((void *)(T_STATS + sizeof(*stats0)), stats1, sizeof(*stats1));
     spatz_rt_dma_1d(l2_addr, T_STATS, sizeof(*stats0) + sizeof(*stats1));
     spatz_rt_dma_wait_all();
+}
+
+static void accumulate_stats(npu_conv2d_packed_stats_t *accum,
+                             const npu_conv2d_packed_stats_t *tile) {
+    accum->rows += tile->rows;
+    accum->k_tiles += tile->k_tiles;
+    accum->prepare_cycles += tile->prepare_cycles;
+    accum->gemm_cycles += tile->gemm_cycles;
+    accum->total_cycles += tile->total_cycles;
+    accum->last_prepare_cycles = tile->last_prepare_cycles;
+    accum->last_gemm_cycles = tile->last_gemm_cycles;
+    accum->status = tile->status;
+    accum->prepare_idma_tiles += tile->prepare_idma_tiles;
+    accum->prepare_idma_transfers += tile->prepare_idma_transfers;
+    accum->prepare_spatz_tiles += tile->prepare_spatz_tiles;
+    accum->prepare_scalar_tiles += tile->prepare_scalar_tiles;
 }
 
 static void init_cfg(npu_conv2d_packed_cfg_t *cfg,
@@ -337,6 +368,74 @@ static void run_requant_case(uint32_t case_id) {
     spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_OUTPUT, rows * 32u);
     spatz_rt_dma_wait_all();
     publish_stats(P3_STATS_ADDR(case_id), &stats);
+}
+
+static void run_yolo_rgb_tcdm_spatz_case(uint32_t case_id) {
+    npu_conv2d_packed_stats_t total_stats;
+    uint32_t weight_addr = P3_WEIGHT_ADDR(case_id);
+    uint32_t input_addr = P3_INPUT_ADDR(case_id);
+    uint32_t out_addr = P3_OUT_ADDR(case_id);
+
+    spatz_rt_memset(&total_stats, 0, sizeof(total_stats));
+    spatz_rt_dma_1d(T_WEIGHT, weight_addr, YOLO_RGB_WEIGHT_BYTES);
+    spatz_rt_dma_wait_all();
+
+    for (uint32_t oh_start = 0; oh_start < YOLO_RGB_OH; oh_start += YOLO_RGB_TILE_OH) {
+        uint32_t tile_oh = YOLO_RGB_TILE_OH;
+        if ((oh_start + tile_oh) > YOLO_RGB_OH) {
+            tile_oh = YOLO_RGB_OH - oh_start;
+        }
+
+        uint32_t first_ih = 0u;
+        if ((oh_start * 2u) > 0u) {
+            first_ih = (oh_start * 2u) - 1u;
+        }
+
+        uint32_t last_oh = oh_start + tile_oh - 1u;
+        uint32_t last_ih = (last_oh * 2u) + 1u;
+        if (last_ih >= YOLO_RGB_H) {
+            last_ih = YOLO_RGB_H - 1u;
+        }
+
+        uint32_t local_input_h = last_ih - first_ih + 1u;
+        uint32_t local_pad_h = 1u + first_ih - (oh_start * 2u);
+        uint32_t input_offset = first_ih * YOLO_RGB_W * YOLO_RGB_C;
+        uint32_t input_bytes = local_input_h * YOLO_RGB_W * YOLO_RGB_C;
+        npu_conv2d_packed_cfg_t cfg;
+        npu_conv2d_packed_stats_t tile_stats;
+
+        spatz_rt_dma_1d(T_INPUT, input_addr + input_offset, input_bytes);
+        spatz_rt_dma_wait_all();
+
+        init_cfg(&cfg,
+                 T_INPUT,
+                 T_WEIGHT,
+                 T_OUTPUT,
+                 local_input_h,
+                 YOLO_RGB_W,
+                 YOLO_RGB_C,
+                 tile_oh,
+                 YOLO_RGB_OW,
+                 3u,
+                 3u,
+                 2u,
+                 2u,
+                 local_pad_h,
+                 1u);
+
+        uint32_t status = npu_conv2d_packed_run_oc32(&cfg, &tile_stats);
+        if (status != NPU_CONV2D_PACKED_OK) {
+            spatz_rt_fail_at(0xC800u, oh_start, (int32_t)status, NPU_CONV2D_PACKED_OK);
+        }
+
+        spatz_rt_dma_1d(out_addr + (oh_start * YOLO_RGB_OW * 32u * 4u),
+                        T_OUTPUT,
+                        tile_oh * YOLO_RGB_OW * 32u * 4u);
+        spatz_rt_dma_wait_all();
+        accumulate_stats(&total_stats, &tile_stats);
+    }
+
+    publish_stats(P3_STATS_ADDR(case_id), &total_stats);
 }
 
 static void run_conv1x1_k33(void) {
@@ -576,6 +675,12 @@ int main(void) {
     if (should_run_case(P3_CASE_REQUANT)) {
         spatz_rt_set_phase(20, P3_CASE_REQUANT);
         run_requant_case(P3_CASE_REQUANT);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_YOLO_RGB_TCDM_SPATZ)) {
+        spatz_rt_set_phase(21, P3_CASE_YOLO_RGB_TCDM_SPATZ);
+        run_yolo_rgb_tcdm_spatz_case(P3_CASE_YOLO_RGB_TCDM_SPATZ);
         spatz_rt_pass_step();
     }
 

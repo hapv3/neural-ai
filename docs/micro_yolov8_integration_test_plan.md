@@ -6,32 +6,43 @@ Prove that the NPU (Systolic Array + Spatz + iDMA) can continuously run a neural
 
 Input: **96x96 RGB INT8**
 
+First end-to-end target: run the backbone/neck/head Conv path and write the
+**raw head tensor as INT8**. DFL/Softmax/decode remain in the graph roadmap but
+are not required for the first raw-head E2E pass.
+
 ---
 
 ## 1. Topology
 
-| # | Layer | Op | Config | Output (NxCxHxW) | Hardware Unit |
+| # | Layer | Op | Config | Output (logical NxCxHxW) | Hardware Unit |
 |---|---|---|---|---|---|
 | 0 | Input | - | - | 1x3x96x96 | L2 |
-| 1 | Conv_Stem | **Conv2D** | K=3x3, S=2, Pad=1, OC=16 | 1x16x48x48 | Spatz Im2Col (IC=3) + Systolic |
-| 2 | SiLU_Sig | **Logistic** | element-wise sigmoid | 1x16x48x48 | Spatz (LUT-256) |
-| 3 | SiLU_Mul | **Mul** | L1 * L2 | 1x16x48x48 | Spatz (vmul.vv) |
-| 4 | C2f_Split | **StridedSlice** | channel split: [0:8], [8:16] | 2x (1x8x48x48) | Firmware pointer |
-| 5 | C2f_Conv | **Conv2D** | K=3x3, S=1, Pad=1, IC=8, OC=16 | 1x16x48x48 | Spatz Im2Col (IC=8) + Systolic |
-| 6 | C2f_Add | **Add** | L4_branch0 + L5 (broadcast/pad) | 1x16x48x48 | Spatz (vadd.vv) |
-| 7 | Conv_Down | **Conv2D** | K=3x3, S=2, Pad=1, OC=32 | 1x32x24x24 | Systolic (IC=16 < 32 => Spatz prep) |
+| 1 | Conv_Stem | **Conv2D** | K=3x3, S=2, Pad=1, OC=32 | 1x32x48x48 | Spatz/iDMA pack (IC=3) + Systolic |
+| 2 | SiLU_Sig | **Logistic** | element-wise sigmoid | 1x32x48x48 | AFU LUT or Spatz LUT fallback |
+| 3 | SiLU_Mul | **Mul** | L1 * L2 | 1x32x48x48 | Spatz (vmul + requant) |
+| 4 | C2f_Route | **Identity/Slice** | route L3 as residual branch | 1x32x48x48 | Firmware metadata |
+| 5 | C2f_Conv | **Conv2D** | K=3x3, S=1, Pad=1, IC=32, OC=32 | 1x32x48x48 | iDMA/Spatz pack + Systolic |
+| 6 | C2f_Add | **Add** | L4 + L5, same shape | 1x32x48x48 | Spatz (vadd + clamp/requant) |
+| 7 | Conv_Down | **Conv2D** | K=3x3, S=2, Pad=1, IC=32, OC=32 | 1x32x24x24 | iDMA/Spatz pack + Systolic |
 | 8 | SPPF_Pool | **MaxPool2D** | K=5x5, S=1, Pad=2 | 1x32x24x24 | Spatz |
 | 9 | Upsample | **Upsample** | Nearest 2x | 1x32x48x48 | Spatz / iDMA 2D |
-| 10 | Concat | **Concat** | L9 + L3 along C-axis | 1x48x48x48 | iDMA copy |
-| 11 | Head_Conv | **Conv2D** | K=1x1, S=1, OC=32 | 1x32x48x48 | Fast Path (IC=48>=32) |
-| 12 | Head_Split | **StridedSlice** | split Box[0:16] and Class[16:32] | 1x16x48x48 x2 | Firmware pointer |
-| 13 | Transpose | **Transpose** | [N,C,H,W] -> [N,H,W,C] | 1x48x48x16 | iDMA 2D stride |
-| 14 | Reshape | **Reshape** | flatten -> [1, 2304, 16] | 1x2304x16 | Zero-cost (metadata) |
-| 15 | DFL_Soft | **Softmax** | on Box branch (dim=-1) | 1x2304x16 | Spatz |
-| 16 | Cls_Sig | **Logistic** | on Class branch | 1x2304x16 | Spatz (LUT-256) |
+| 10 | Concat | **Concat** | L9 + L3 along C-axis | 1x64x48x48 | iDMA/Spatz compact copy |
+| 11 | Head_Conv | **Conv2D** | K=1x1, S=1, IC=64, OC=32 | 1x32x48x48 | Fast Path (IC>=32) + Systolic |
+| 12 | Raw_Head_Out | **DMA_OUT** | write raw head INT8 to L2 | 1x32x48x48 | iDMA |
+| 13 | Future_Head_Split | **StridedSlice** | split Box[0:16] and Class[16:32] | 1x16x48x48 x2 | Future postprocess |
+| 14 | Future_Transpose | **Transpose** | [N,C,H,W] -> [N,H,W,C] | 1x48x48x16 | Future postprocess |
+| 15 | Future_Reshape | **Reshape** | flatten -> [1, 2304, 16] | 1x2304x16 | Future postprocess |
+| 16 | Future_DFL_Soft | **Softmax** | on Box branch (dim=-1) | 1x2304x16 | Future Spatz/AFU |
+| 17 | Future_Cls_Sig | **Logistic** | on Class branch | 1x2304x16 | Future AFU/Spatz |
 
-**12 unique operators:** Conv2D, Logistic, Mul, StridedSlice, Add,
-MaxPool2D, Upsample, Concat, Transpose, Reshape, Softmax + Requant (fused).
+Internal implementation should keep tensors in the existing HWC/NHWC packed
+layout used by `conv2d_packed`; the NxCxHxW notation above is only the logical
+model shape.
+
+First E2E unique operators: Conv2D, Logistic, Mul, Identity/Slice, Add,
+MaxPool2D, Upsample, Concat, Requant, DMA_OUT. Transpose, Reshape, DFL Softmax,
+and class Sigmoid are retained as future postprocess operators after raw-head
+INT8 passes.
 
 ---
 
@@ -41,7 +52,7 @@ MaxPool2D, Upsample, Concat, Transpose, Reshape, Softmax + Requant (fused).
 
 | Op | API | File | Notes |
 |---|---|---|---|
-| Conv2D | `npu_conv2d_packed_run_oc32_requant()` | `sw/lib/conv2d_packed.c` | Fully supports 3x3, 1x1. Fixed OC=32. |
+| Conv2D | `npu_conv2d_packed_run_oc32_requant()` | `sw/lib/conv2d_packed.c` | Supports the first E2E topology because every Conv output tile is OC=32. |
 | Copy | `spatz_vec_copy_i8()` | `sw/lib/spatz_ops.h` | Used for Concat/Slice |
 | ReLU | `spatz_vec_relu_i8()` | `sw/lib/spatz_ops.h` | Backup if SiLU is dropped |
 | Requant | `spatz_requant_i32_to_i8()` | `sw/lib/spatz_ops.h` | INT32->INT8 with multiplier+shift |
@@ -53,10 +64,10 @@ MaxPool2D, Upsample, Concat, Transpose, Reshape, Softmax + Requant (fused).
 |---|---|---|---|
 | **Add** | Easy | Add 2 saturated INT8 vectors | `vadd.vv` + `vmax`/`vmin` clamp |
 | **Mul** | Easy | Multiply 2 INT8 vectors, needs requant | `vmul.vv` -> INT16 -> shift -> clamp |
-| **Logistic** | Medium | Sigmoid using 256-byte LUT on TCDM | `vluxei8.v` (indexed load) |
+| **Logistic** | Medium | Sigmoid using 256-byte LUT on TCDM | Prefer AFU LUT; Spatz indexed-load fallback is acceptable |
 | **MaxPool2D** | Medium | 5x5 sliding window finding max | `vmax.vv` looped multiple times |
 | **Upsample** | Medium | Nearest 2x: duplicate pixels | `vrgather` or iDMA 2D copy |
-| **Softmax** | **Hard** | findmax -> sub -> exp(LUT) -> sum -> div | Needs INT16/INT32 scratch buffer |
+| **Softmax / DFL** | **Hard** | findmax -> sub -> exp(LUT) -> sum -> div | Future postprocess; not required for first raw-head E2E |
 | **Concat** | Easy | Copy 2 memory regions into 1 contiguous | `spatz_vec_copy_i8` or iDMA |
 | **Transpose** | Medium | NCHW->NHWC: iDMA 2D stride copy | `idma_L2ToL1_2d()` already available |
 
@@ -64,18 +75,22 @@ MaxPool2D, Upsample, Concat, Transpose, Reshape, Softmax + Requant (fused).
 
 | Op | Method |
 |---|---|
-| **StridedSlice** | Firmware only needs to recalculate `base_addr` and `channel_count` of the tensor. No data copy. |
+| **Identity/Slice** | Zero-cost only when the downstream operator can consume the same packed layout/stride. Channel compaction is a real copy. |
 | **Reshape** | Firmware changes the `shape[]` field in the tensor struct. No data copy. |
 
 ---
 
 ## 3. Key Architectural Issues
 
-### 3.1 OC > 32: Multi-OC Tiling
+### 3.1 OC Policy: First E2E Uses OC=32 Everywhere
 
 The `npu_conv2d_packed_run_oc32()` function currently only handles a **fixed OC = 32**.
-In Micro-YOLOv8, the `Conv_Down` layer has OC=32 (just enough), but if OC=64
-or larger (like full YOLO), an outer OC loop needs to be added:
+The first Micro-YOLOv8 integration topology therefore sets every Conv2D output
+channel count to exactly `32`. This avoids `OC<32` masked-store work and
+`OC>32` multi-tile work while still exercising realistic `IC`, `K`, stride,
+padding, concat, and activation patterns.
+
+Later, if OC=64 or larger is needed, an outer OC loop will be added:
 
 ```
 for (oc_tile = 0; oc_tile < OC; oc_tile += 32) {
@@ -85,22 +100,19 @@ for (oc_tile = 0; oc_tile < OC; oc_tile += 32) {
 }
 ```
 
-**In this test:** All OC <= 32, so multi-OC tiling is NOT needed.
-Recorded to implement later.
+**In this test:** all Conv2D layers produce exactly `OC=32`, so multi-OC tiling
+and partial-OC masking are both deferred.
 
-### 3.2 Add with mismatched shapes (C2f residual)
+### 3.2 Add Shape Policy
 
-Layer 6 (`C2f_Add`) adds 2 tensors with different channel counts:
-- L4_branch0: 1x8x48x48 (first half of L3 after Split)
-- L5: 1x16x48x48 (output of C2f_Conv)
+Layer 6 (`C2f_Add`) must add two tensors with identical shape. The first E2E
+topology therefore uses:
 
-This **CANNOT** be added directly. Two options:
-- **(A)** Zero-pad the 8-channel branch to 16 channels before adding. Simple but
-  wastes memory.
-- **(B)** Change topology: make C2f_Conv output 8 channels (OC=8) to match the
-  branch. Then the Add is 8+8 => no issue.
+- L4 residual route: `1x32x48x48`
+- L5 C2f Conv output: `1x32x48x48`
 
-**Recommendation:** Choose (B) to simplify the test. Change L5 to OC=8.
+No zero-padding or broadcast semantics are required for the first raw-head E2E
+test.
 
 ### 3.3 Sigmoid/Softmax on INT8 - Quantization concern
 
@@ -109,24 +121,26 @@ When the input is quantized INT8 (scale + zero_point), we need:
 
 1. **Sigmoid LUT:** Pre-calculate 256 `sigmoid(dequant(i))` values then re-quantize
    back to INT8. The whole LUT is only 256 bytes.
-2. **Softmax:** More complex because it needs `exp()` and `sum()`. Must be done on
+2. **Softmax / DFL:** More complex because it needs `exp()` and `sum()`. Must be done on
    higher precision (INT16 or INT32) then requantized back to INT8 at the last step.
-   **Should be the last operator implemented.**
+   **This remains in the roadmap but is implemented after raw-head INT8 E2E passes.**
 
 ### 3.4 Memory budget for 96x96
 
 | Tensor | Size | Bytes |
 |---|---|---|
 | Input 96x96x3 | | 27,648 |
-| L1 Conv_Stem 48x48x16 | | 36,864 |
+| L1 Conv_Stem 48x48x32 | | 73,728 |
 | L7 Conv_Down 24x24x32 | | 18,432 |
-| L10 Concat 48x48x48 | | 110,592 |
+| L9 Upsample 48x48x32 | | 73,728 |
+| L10 Concat 48x48x64 | | 147,456 |
 | L11 Head_Conv 48x48x32 | | 73,728 |
-| **Total (concurrent)** | | ~267 KB |
-| **TCDM capacity** | | 128-256 KB |
+| **Total if naively concurrent** | | ~415 KB |
+| **Shared Data TCDM capacity** | | 512 KB logical; O-TCDM accumulator window is smaller |
 
-Tensors L10 (Concat) and L11 (Head_Conv) **CANNOT** reside simultaneously in
-TCDM. Must use the **L2-Centric + Tiling** strategy:
+The naive tensor total is close to the full Shared Data TCDM and does not
+include packed `M x 32` tiles, weights, or INT32 psum scratch. Therefore the
+test must use the **L2-Centric + Tiling** strategy:
 - Store all intermediate tensors in L2.
 - Only pull small tiles into L1 to compute, then push results back to L2.
 
@@ -142,10 +156,10 @@ Objective: Write and unit-test each new operator in `spatz_ops`.
 |---|---|---|
 | 1a | `spatz_add_i8()` | `sw/lib/spatz_ops.c` |
 | 1b | `spatz_mul_i8()` | `sw/lib/spatz_ops.c` |
-| 1c | `spatz_logistic_i8()` + LUT | `sw/lib/spatz_ops.c` |
+| 1c | `npu_logistic_i8()` using AFU LUT, with optional Spatz fallback | `sw/lib/hal_afu.h`, `sw/lib/spatz_ops.c` |
 | 1d | `spatz_maxpool2d_i8()` | `sw/lib/spatz_ops.c` |
 | 1e | `spatz_upsample_nearest_i8()` | `sw/lib/spatz_ops.c` |
-| 1f | `spatz_softmax_i8()` | `sw/lib/spatz_ops.c` |
+| 1f | `spatz_softmax_i8()` / DFL postprocess | Future phase after raw-head E2E |
 | 1g | Unit test for all | `sw/test/spatz_ops/main.c` (expand) |
 
 **Verify:** Expand the existing `test_spatz_operator_library` test. Every operator
@@ -153,7 +167,9 @@ is tested with Python golden data, compared byte-by-byte.
 
 ### Phase 2: Graph Scheduler Firmware
 
-Objective: Write firmware to run the 16 steps of the graph sequentially.
+Objective: Write firmware to run the raw-head graph sequentially through
+`Raw_Head_Out`. Keep DFL/Softmax/decode table entries reserved but disabled
+until the raw-head INT8 output is bit-exact.
 
 | Step | Task | File |
 |---|---|---|
@@ -167,7 +183,7 @@ Objective: Write firmware to run the 16 steps of the graph sequentially.
 |---|---|
 | 3a | Python script: define network, quantize INT8, export `.bin` |
 | 3b | Cocotb testbench: load `.bin` into L2, run firmware, read results |
-| 3c | Compare output vs golden. Allowed error: **0 bytes** |
+| 3c | Compare raw head INT8 output vs golden. Allowed error: **0 bytes** |
 
 ---
 
@@ -176,11 +192,11 @@ Objective: Write firmware to run the 16 steps of the graph sequentially.
 1. **Golden Model (Python/PyTorch):**
    - Write a Python script using PyTorch defining the Micro-YOLOv8 network.
    - Assign random weights and quantize everything to INT8.
-   - Export: `input_image.bin`, `weights_layer_N.bin`, `golden_output.bin`.
+   - Export: `input_image.bin`, `weights_layer_N.bin`, `golden_raw_head_int8.bin`.
 2. **RTL Simulation:**
    - Create a new cocotb testbench: `sw/test/micro_yolo/`
    - Load the `.bin` files into the simulated L2 memory.
    - Compile Firmware Scheduler and run Cocotb/Verilator simulation.
 3. **Matching:**
-   - Python testbench reads `final_output` from L2 and compares byte-by-byte.
+   - Python testbench reads `raw_head_int8` from L2 and compares byte-by-byte.
    - Allowed error: 0 (since everything is INT8 deterministic).

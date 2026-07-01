@@ -32,7 +32,7 @@ L2_CONV1_C64_WEIGHT = 0x80068000
 L2_CONV1_C64_OUT = 0x80070000
 L2_CONV1_C64_STATS = 0x80078000
 L2_P3_BASE = 0x80080000
-P3_CASE_STRIDE = 0x00010000
+P3_CASE_STRIDE = 0x00040000
 P3_H = 4
 P3_W = 4
 CONV1_H = 4
@@ -61,6 +61,14 @@ P3_CASE_3X3_S2_C3 = 12
 P3_CASE_3X3_C1 = 13
 P3_CASE_3X3_C5 = 14
 P3_CASE_REQUANT = 15
+P3_CASE_YOLO_RGB_TCDM_SPATZ = 16
+
+YOLO_RGB_H = 64
+YOLO_RGB_W = 64
+YOLO_RGB_C = 3
+YOLO_RGB_OH = 32
+YOLO_RGB_OW = 32
+YOLO_RGB_TILE_OH = 8
 
 P3_CASES = {
     P3_CASE_IC1: ("conv1x1 IC1", 4, 4, 1, 4, 4, 1, 1, 1, 1, 0, 0, 32, 1, 1, 0, False),
@@ -79,6 +87,25 @@ P3_CASES = {
     P3_CASE_3X3_C1: ("conv3x3 IC1 K9", 4, 4, 1, 4, 4, 3, 3, 1, 1, 1, 1, 32, 1, 0, 1, False),
     P3_CASE_3X3_C5: ("conv3x3 IC5 K45", 4, 4, 5, 4, 4, 3, 3, 1, 1, 1, 1, 32, 2, 0, 2, False),
     P3_CASE_REQUANT: ("conv1x1 IC64 requant", 4, 4, 64, 4, 4, 1, 1, 1, 1, 0, 0, 32, 2, 2, 0, True),
+    P3_CASE_YOLO_RGB_TCDM_SPATZ: (
+        "yolo RGB 3x3 s2 p1 TCDM Spatz tiled",
+        YOLO_RGB_H,
+        YOLO_RGB_W,
+        YOLO_RGB_C,
+        YOLO_RGB_OH,
+        YOLO_RGB_OW,
+        3,
+        3,
+        2,
+        2,
+        1,
+        1,
+        32,
+        YOLO_RGB_OH // YOLO_RGB_TILE_OH,
+        0,
+        YOLO_RGB_OH // YOLO_RGB_TILE_OH,
+        False,
+    ),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -87,6 +114,7 @@ CONV_PERF_GROUP_ALL = 0
 CONV_PERF_GROUP_POINTWISE = 1
 CONV_PERF_GROUP_KERNELS = 2
 CONV_PERF_GROUP_REQUANT = 3
+CONV_PERF_GROUP_YOLO = 4
 
 
 def legacy_enabled():
@@ -106,6 +134,8 @@ def p3_case_enabled(case_id):
         return P3_CASE_3X3_P0_C32 <= case_id <= P3_CASE_3X3_C5
     if CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT:
         return case_id == P3_CASE_REQUANT
+    if CONV_PERF_GROUP == CONV_PERF_GROUP_YOLO:
+        return case_id == P3_CASE_YOLO_RGB_TCDM_SPATZ
     return False
 
 
@@ -231,7 +261,7 @@ def p3_out_addr(case_id):
 
 
 def p3_stats_addr(case_id):
-    return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0xE000
+    return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3E000
 
 
 def p3_input_value(h, w, c):
