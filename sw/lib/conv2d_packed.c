@@ -38,6 +38,8 @@ typedef struct {
     uint32_t overflow;
 } npu_conv2d_prepare_plan_t;
 
+static uint32_t input_c_stride(const npu_conv2d_packed_cfg_t *cfg);
+
 static uint32_t ceil_div_u32(uint32_t value, uint32_t divisor) {
     return (value + divisor - 1u) / divisor;
 }
@@ -69,11 +71,28 @@ static uint32_t validate_cfg(const npu_conv2d_packed_cfg_t *cfg) {
         return NPU_CONV2D_PACKED_ERR_DILATION;
     }
 
+    uint32_t stride_c = input_c_stride(cfg);
+    if (cfg->input_c_base + cfg->input_c > stride_c) {
+        return NPU_CONV2D_PACKED_ERR_BAD_SHAPE;
+    }
+
     return NPU_CONV2D_PACKED_OK;
 }
 
 static uint32_t min_u32(uint32_t a, uint32_t b) {
     return (a < b) ? a : b;
+}
+
+static uint32_t input_c_stride(const npu_conv2d_packed_cfg_t *cfg) {
+    return cfg->input_c_stride ? cfg->input_c_stride : cfg->input_c;
+}
+
+static uint32_t input_pixel_addr(const npu_conv2d_packed_cfg_t *cfg,
+                                 uint32_t ih,
+                                 uint32_t iw,
+                                 uint32_t local_ic) {
+    uint32_t stride_c = input_c_stride(cfg);
+    return cfg->input_addr + ((((ih * cfg->input_w) + iw) * stride_c) + cfg->input_c_base + local_ic);
 }
 
 static uint32_t is_contiguous_conv1x1(const npu_conv2d_packed_cfg_t *cfg) {
@@ -140,17 +159,18 @@ static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const npu_conv2d_
                                                                uint32_t *idma_transfers) {
     uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
     uint32_t valid = (k_base < cfg->input_c) ? min_u32(NPU_CONV2D_PACKED_K_TILE, cfg->input_c - k_base) : 0u;
+    uint32_t stride_c = input_c_stride(cfg);
 
     zero_im2col_tile(cfg, rows);
     if (valid == 0u) {
         return NPU_CONV2D_PREPARE_SPATZ;
     }
 
-    uint32_t src = cfg->input_addr + k_base;
+    uint32_t src = cfg->input_addr + cfg->input_c_base + k_base;
     uint32_t dst = cfg->im2col_addr;
 
     if (!is_l1_addr(src)) {
-        int tx_id = idma_L2ToL1_2d(src, dst, valid, cfg->input_c, NPU_CONV2D_PACKED_K_TILE, rows);
+        int tx_id = idma_L2ToL1_2d(src, dst, valid, stride_c, NPU_CONV2D_PACKED_K_TILE, rows);
         if (wait_idma_or_fail(IDMA_DIR_L2_TO_L1, tx_id)) {
             *idma_transfers = 1u;
             return NPU_CONV2D_PREPARE_IDMA;
@@ -158,7 +178,7 @@ static npu_conv2d_prepare_backend_t prepare_conv1x1_contiguous(const npu_conv2d_
     }
 
     for (uint32_t row = 0; row < rows; row++) {
-        const int8_t *row_src = (const int8_t *)(src + (row * cfg->input_c));
+        const int8_t *row_src = (const int8_t *)(src + (row * stride_c));
         int8_t *row_dst = (int8_t *)(dst + (row * NPU_CONV2D_PACKED_K_TILE));
         spatz_vec_copy_i8(row_src, row_dst, valid);
     }
@@ -209,6 +229,7 @@ static void build_prepare_plan(const npu_conv2d_packed_cfg_t *cfg,
 
     uint32_t kernel_spatial = cfg->kernel_h * cfg->kernel_w;
     uint32_t k_total = kernel_spatial * cfg->input_c;
+    uint32_t stride_c = input_c_stride(cfg);
 
     for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
         uint32_t k_base = k_block * NPU_CONV2D_PACKED_K_TILE;
@@ -249,14 +270,14 @@ static void build_prepare_plan(const npu_conv2d_packed_cfg_t *cfg,
                 int32_t iw = signed_coord(first_ow * cfg->stride_w, kw * cfg->dilation_w, cfg->pad_w);
                 npu_conv2d_prepare_cmd_t *cmd = &plan->cmds[plan->count++];
                 cmd->k_block = k_block;
-                cmd->src_base = cfg->input_addr + ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + channel_base);
+                cmd->src_base = input_pixel_addr(cfg, (uint32_t)ih, (uint32_t)iw, channel_base);
                 cmd->dst_base = cfg->im2col_addr + (((first_oh * cfg->output_w) + first_ow) * NPU_CONV2D_PACKED_K_TILE) + lane;
                 cmd->channels = valid;
                 cmd->valid_oh = valid_oh;
                 cmd->valid_ow = valid_ow;
-                cmd->src_row_stride = cfg->stride_h * cfg->input_w * cfg->input_c;
+                cmd->src_row_stride = cfg->stride_h * cfg->input_w * stride_c;
                 cmd->dst_row_stride = cfg->output_w * NPU_CONV2D_PACKED_K_TILE;
-                cmd->src_col_stride = (int32_t)(cfg->stride_w * cfg->input_c);
+                cmd->src_col_stride = (int32_t)(cfg->stride_w * stride_c);
                 cmd->dst_col_stride = (int32_t)NPU_CONV2D_PACKED_K_TILE;
             }
 
@@ -343,7 +364,7 @@ static void prepare_spatz_segmented(const npu_conv2d_packed_cfg_t *cfg,
             }
 
             if (ih >= 0 && iw >= 0 && (uint32_t)ih < cfg->input_h && (uint32_t)iw < cfg->input_w) {
-                uint32_t src = cfg->input_addr + ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + ic);
+                uint32_t src = input_pixel_addr(cfg, (uint32_t)ih, (uint32_t)iw, ic);
                 uint32_t dst = cfg->im2col_addr + (row * NPU_CONV2D_PACKED_K_TILE) + lane;
                 spatz_vec_copy_i8((const int8_t *)src, (int8_t *)dst, run);
             }
@@ -447,7 +468,7 @@ uint32_t npu_conv2d_packed_run_oc32(const npu_conv2d_packed_cfg_t *cfg,
         uint32_t prepare_cycles = spatz_rt_read_cycle() - prepare_start;
 
         uint32_t gemm_start = spatz_rt_read_cycle();
-        if (k_block == 0u) {
+        if (k_block == 0u && !cfg->accumulate) {
             systolic_gemm32(weight_addr, cfg->im2col_addr, cfg->output_addr, rows);
         } else {
             systolic_gemm32_accumulate(weight_addr, cfg->im2col_addr, cfg->output_addr, cfg->output_addr, rows);
@@ -577,8 +598,9 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
 
     if (is_linebuf_coalesce_supported(cfg, spatial_rows, k_total)) {
         systolic_linebuf_cfg_t linebuf_cfg;
-        uint32_t row_stride_bytes = cfg->input_w * cfg->input_c;
-        linebuf_cfg.input_base = cfg->input_addr - (cfg->pad_h * row_stride_bytes);
+        uint32_t stride_c = input_c_stride(cfg);
+        uint32_t row_stride_bytes = cfg->input_w * stride_c;
+        linebuf_cfg.input_base = cfg->input_addr + cfg->input_c_base - (cfg->pad_h * row_stride_bytes);
         linebuf_cfg.input_h = (uint16_t)cfg->input_h;
         linebuf_cfg.input_w = (uint16_t)cfg->input_w;
         linebuf_cfg.input_c = (uint16_t)cfg->input_c;
@@ -588,9 +610,9 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         linebuf_cfg.pad_h = (uint16_t)cfg->pad_h;
         linebuf_cfg.pad_w = (uint16_t)cfg->pad_w;
         linebuf_cfg.row_stride_bytes = row_stride_bytes;
-        linebuf_cfg.pixel_stride_bytes = cfg->input_c;
-        linebuf_cfg.ow_step_bytes = cfg->stride_w * cfg->input_c;
-        linebuf_cfg.oh_step_bytes = cfg->stride_h * cfg->input_w * cfg->input_c;
+        linebuf_cfg.pixel_stride_bytes = stride_c;
+        linebuf_cfg.ow_step_bytes = cfg->stride_w * stride_c;
+        linebuf_cfg.oh_step_bytes = cfg->stride_h * cfg->input_w * stride_c;
         linebuf_cfg.kernel_h = (uint16_t)cfg->kernel_h;
         linebuf_cfg.kernel_w = (uint16_t)cfg->kernel_w;
         linebuf_cfg.c_base = 0u;
@@ -604,7 +626,11 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         linebuf_cfg.spatial_m = spatial_rows;
 
         systolic_linebuf_config(&linebuf_cfg);
-        systolic_gemm32_linebuf(cfg->weight_addr, cfg->output_addr, spatial_rows);
+        if (cfg->accumulate) {
+            systolic_gemm32_linebuf_accumulate(cfg->weight_addr, cfg->output_addr, cfg->output_addr, spatial_rows);
+        } else {
+            systolic_gemm32_linebuf(cfg->weight_addr, cfg->output_addr, spatial_rows);
+        }
 
         uint32_t gemm_cycles = spatz_rt_read_cycle() - gemm_start;
         if (stats) {
@@ -623,8 +649,9 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
 
     if (is_linebuf_kgen_supported(cfg, spatial_rows, k_total)) {
         systolic_linebuf_cfg_t linebuf_cfg;
-        uint32_t row_stride_bytes = cfg->input_w * cfg->input_c;
-        linebuf_cfg.input_base = cfg->input_addr - (cfg->pad_h * row_stride_bytes);
+        uint32_t stride_c = input_c_stride(cfg);
+        uint32_t row_stride_bytes = cfg->input_w * stride_c;
+        linebuf_cfg.input_base = cfg->input_addr + cfg->input_c_base - (cfg->pad_h * row_stride_bytes);
         linebuf_cfg.input_h = (uint16_t)cfg->input_h;
         linebuf_cfg.input_w = (uint16_t)cfg->input_w;
         linebuf_cfg.input_c = (uint16_t)cfg->input_c;
@@ -634,9 +661,9 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         linebuf_cfg.pad_h = (uint16_t)cfg->pad_h;
         linebuf_cfg.pad_w = (uint16_t)cfg->pad_w;
         linebuf_cfg.row_stride_bytes = row_stride_bytes;
-        linebuf_cfg.pixel_stride_bytes = cfg->input_c;
-        linebuf_cfg.ow_step_bytes = cfg->stride_w * cfg->input_c;
-        linebuf_cfg.oh_step_bytes = cfg->stride_h * cfg->input_w * cfg->input_c;
+        linebuf_cfg.pixel_stride_bytes = stride_c;
+        linebuf_cfg.ow_step_bytes = cfg->stride_w * stride_c;
+        linebuf_cfg.oh_step_bytes = cfg->stride_h * cfg->input_w * stride_c;
         linebuf_cfg.kernel_h = (uint16_t)cfg->kernel_h;
         linebuf_cfg.kernel_w = (uint16_t)cfg->kernel_w;
         linebuf_cfg.c_base = 0u;
@@ -650,7 +677,11 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         linebuf_cfg.spatial_m = spatial_rows;
 
         systolic_linebuf_config(&linebuf_cfg);
-        systolic_gemm32_linebuf_ktiles(cfg->weight_addr, cfg->output_addr, cfg->output_addr, spatial_rows);
+        if (cfg->accumulate) {
+            systolic_gemm32_linebuf_ktiles_accumulate(cfg->weight_addr, cfg->output_addr, cfg->output_addr, spatial_rows);
+        } else {
+            systolic_gemm32_linebuf_ktiles(cfg->weight_addr, cfg->output_addr, cfg->output_addr, spatial_rows);
+        }
 
         uint32_t gemm_cycles = spatz_rt_read_cycle() - gemm_start;
         if (stats) {
@@ -667,11 +698,14 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         return NPU_CONV2D_PACKED_OK;
     }
 
-    spatz_vec_zero_i32((uint32_t *)cfg->output_addr, spatial_rows * NPU_CONV2D_PACKED_OC_TILE);
+    if (!cfg->accumulate) {
+        spatz_vec_zero_i32((uint32_t *)cfg->output_addr, spatial_rows * NPU_CONV2D_PACKED_OC_TILE);
+    }
 
     for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
         uint32_t lane = 0;
         uint32_t weight_addr = cfg->weight_addr + (k_block * NPU_CONV2D_PACKED_K_TILE * NPU_CONV2D_PACKED_OC_TILE);
+        uint32_t stride_c = input_c_stride(cfg);
 
         while (lane < NPU_CONV2D_PACKED_K_TILE) {
             uint32_t k_index = (k_block * NPU_CONV2D_PACKED_K_TILE) + lane;
@@ -710,8 +744,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
 
                     uint32_t ow = first_ow + ow_done;
                     int32_t iw = signed_coord(ow * cfg->stride_w, kw * cfg->dilation_w, cfg->pad_w);
-                    uint32_t input_base = cfg->input_addr +
-                                          ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + c_base);
+                    uint32_t input_base = input_pixel_addr(cfg, (uint32_t)ih, (uint32_t)iw, c_base);
                     uint32_t output_base = cfg->output_addr +
                                            (((oh * cfg->output_w) + ow) * NPU_CONV2D_PACKED_OC_TILE * 4u);
                     uint32_t local_input_w = ((chunk_ow - 1u) * cfg->stride_w) + 1u;
@@ -726,10 +759,10 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
                     linebuf_cfg.stride_w = (uint16_t)cfg->stride_w;
                     linebuf_cfg.pad_h = 0u;
                     linebuf_cfg.pad_w = 0u;
-                    linebuf_cfg.row_stride_bytes = cfg->input_w * cfg->input_c;
-                    linebuf_cfg.pixel_stride_bytes = cfg->input_c;
-                    linebuf_cfg.ow_step_bytes = cfg->stride_w * cfg->input_c;
-                    linebuf_cfg.oh_step_bytes = cfg->input_w * cfg->input_c;
+                    linebuf_cfg.row_stride_bytes = cfg->input_w * stride_c;
+                    linebuf_cfg.pixel_stride_bytes = stride_c;
+                    linebuf_cfg.ow_step_bytes = cfg->stride_w * stride_c;
+                    linebuf_cfg.oh_step_bytes = cfg->input_w * stride_c;
                     linebuf_cfg.kernel_h = 1u;
                     linebuf_cfg.kernel_w = 1u;
                     linebuf_cfg.c_base = 0u;

@@ -43,6 +43,10 @@ void systolic_gemm32_linebuf_ktiles(uint32_t weight_addr,
                                     uint32_t psum_addr,
                                     uint32_t ofm_addr,
                                     uint32_t dim_m);
+void systolic_gemm32_linebuf_ktiles_accumulate(uint32_t weight_addr,
+                                               uint32_t psum_addr,
+                                               uint32_t ofm_addr,
+                                               uint32_t dim_m);
 void systolic_gemm32_linebuf_accumulate(uint32_t weight_addr,
                                         uint32_t psum_addr,
                                         uint32_t ofm_addr,

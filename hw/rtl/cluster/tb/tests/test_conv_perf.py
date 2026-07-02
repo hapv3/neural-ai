@@ -2,7 +2,10 @@ import os
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
+
+from systolic_independent_common import signal_to_int
 
 from npu_test_utils import (
     firmware_path,
@@ -64,6 +67,8 @@ P3_CASE_REQUANT = 15
 P3_CASE_YOLO_RGB_TCDM_SPATZ = 16
 P3_CASE_LINEBUF_3X3_C3 = 17
 P3_CASE_LINEBUF_KGEN_3X3_C32 = 18
+P3_CASE_LINEBUF_KGEN_3X3_C96 = 19
+P3_CASE_LINEBUF_3X3_C120 = 20
 
 YOLO_RGB_H = 64
 YOLO_RGB_W = 64
@@ -71,6 +76,44 @@ YOLO_RGB_C = 3
 YOLO_RGB_OH = 32
 YOLO_RGB_OW = 32
 YOLO_RGB_TILE_OH = 8
+
+SYSTOLIC_STATE_NAMES = {
+    0: "IDLE",
+    1: "LOAD_WEIGHTS",
+    2: "COMPUTE",
+    3: "WAIT_DRAIN",
+    4: "DONE",
+}
+
+DRAIN_STATE_NAMES = {
+    0: "DRAIN_IDLE",
+    1: "DRAIN_ACCUM_READ",
+    2: "DRAIN_ACCUM_WRITE",
+    3: "DRAIN_ACCUM_REQUANT",
+}
+
+LINEBUF_STATE_NAMES = {
+    0: "CH_IDLE",
+    1: "CH_ENSURE",
+    2: "CH_FILL_REQ0",
+    3: "CH_FILL_WAIT0",
+    4: "CH_FILL_REQ1",
+    5: "CH_FILL_WAIT1",
+    6: "CH_FILL_WRITE",
+    7: "CH_EMIT_PREP",
+    8: "CH_READ_REQ",
+    9: "CH_READ_WAIT",
+    10: "CH_EMIT",
+    11: "CH_BYPASS_PREP",
+    12: "CH_BYPASS_REQ0",
+    13: "CH_BYPASS_WAIT0",
+    14: "CH_BYPASS_REQ1",
+    15: "CH_BYPASS_WAIT1",
+    16: "CH_COAL_PREP",
+    17: "CH_COAL_READ_REQ",
+    18: "CH_COAL_READ_WAIT",
+    19: "CH_COAL_EMIT",
+}
 
 P3_CASES = {
     P3_CASE_IC1: ("conv1x1 IC1", 4, 4, 1, 4, 4, 1, 1, 1, 1, 0, 0, 32, 1, 1, 0, False),
@@ -128,6 +171,44 @@ P3_CASES = {
         0,
         False,
     ),
+    P3_CASE_LINEBUF_KGEN_3X3_C96: (
+        "linebuffer KGEN conv3x3 IC96",
+        4,
+        4,
+        96,
+        4,
+        4,
+        3,
+        3,
+        1,
+        1,
+        1,
+        1,
+        32,
+        27,
+        0,
+        0,
+        False,
+    ),
+    P3_CASE_LINEBUF_3X3_C120: (
+        "linebuffer split conv3x3 IC120",
+        4,
+        4,
+        120,
+        4,
+        4,
+        3,
+        3,
+        1,
+        1,
+        1,
+        1,
+        32,
+        34,
+        0,
+        0,
+        False,
+    ),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -153,7 +234,10 @@ def p3_case_enabled(case_id):
     if CONV_PERF_GROUP == CONV_PERF_GROUP_POINTWISE:
         return case_id <= P3_CASE_OC64
     if CONV_PERF_GROUP == CONV_PERF_GROUP_KERNELS:
-        return P3_CASE_3X3_P0_C32 <= case_id <= P3_CASE_3X3_C5
+        return (P3_CASE_3X3_P0_C32 <= case_id <= P3_CASE_3X3_C5) or (
+            case_id == P3_CASE_LINEBUF_KGEN_3X3_C96
+            or case_id == P3_CASE_LINEBUF_3X3_C120
+        )
     if CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT:
         return case_id == P3_CASE_REQUANT
     if CONV_PERF_GROUP == CONV_PERF_GROUP_YOLO:
@@ -174,6 +258,8 @@ def p3_case_is_linebuf(case_id):
         P3_CASE_YOLO_RGB_TCDM_SPATZ,
         P3_CASE_LINEBUF_3X3_C3,
         P3_CASE_LINEBUF_KGEN_3X3_C32,
+        P3_CASE_LINEBUF_KGEN_3X3_C96,
+        P3_CASE_LINEBUF_3X3_C120,
     }
 
 
@@ -295,7 +381,7 @@ def p3_weight_addr(case_id):
 
 
 def p3_out_addr(case_id):
-    return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x6000
+    return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x10000
 
 
 def p3_stats_addr(case_id):
@@ -407,6 +493,41 @@ def make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count):
     return packed
 
 
+def make_p3_weight_packed_channel_slice(input_c_total, kernel_h, kernel_w, oc_count, c_base, c_count):
+    packed = []
+    k_total = c_count * kernel_h * kernel_w
+    k_blocks = (k_total + K_TILE - 1) // K_TILE
+    oc_tiles = (oc_count + OC - 1) // OC
+    for oc_tile in range(oc_tiles):
+        oc_base = oc_tile * OC
+        for block in range(k_blocks):
+            for lane in range(K_TILE):
+                k_index = block * K_TILE + lane
+                if k_index < k_total:
+                    spatial = k_index // c_count
+                    local_c = k_index - spatial * c_count
+                    kh = spatial // kernel_w
+                    kw = spatial - kh * kernel_w
+                    c = c_base + local_c
+                for oc_lane in range(OC):
+                    oc = oc_base + oc_lane
+                    value = (
+                        p3_weight_value(kh, kw, c, oc)
+                        if k_index < k_total and c < input_c_total and oc < oc_count
+                        else 0
+                    )
+                    packed.append(to_u8(value))
+    return packed
+
+
+def make_p3_weight_packed_for_case(case_id, input_c, kernel_h, kernel_w, oc_count):
+    if case_id == P3_CASE_LINEBUF_3X3_C120:
+        return make_p3_weight_packed_channel_slice(input_c, kernel_h, kernel_w, oc_count, 0, 96) + (
+            make_p3_weight_packed_channel_slice(input_c, kernel_h, kernel_w, oc_count, 96, input_c - 96)
+        )
+    return make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count)
+
+
 def golden_p3_case(case_id):
     (
         _name,
@@ -444,6 +565,111 @@ def golden_p3_case(case_id):
                 else:
                     out.extend(s32_to_bytes(acc & 0xFFFFFFFF))
     return out
+
+
+def bump_counter(counters, names, value):
+    name = names.get(value, f"UNKNOWN_{value}")
+    counters[name] = counters.get(name, 0) + 1
+
+
+def safe_signal_to_int(signal_getter):
+    try:
+        return signal_to_int(signal_getter())
+    except AttributeError:
+        return None
+
+
+def first_signal_value(*signal_getters):
+    for signal_getter in signal_getters:
+        value = safe_signal_to_int(signal_getter)
+        if value is not None:
+            return value
+    return None
+
+
+def format_state_counts(title, counts, total, idle_name=None, limit=None):
+    active_total = total - counts.get(idle_name, 0) if idle_name else total
+    lines = [f"{title}: total={total} active={active_total}"]
+    items = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+    if limit is not None:
+        items = items[:limit]
+    for name, cycles in items:
+        pct_total = (100.0 * cycles / total) if total else 0.0
+        if idle_name and name == idle_name:
+            lines.append(f"  {name}: cycles={cycles} total={pct_total:.2f}% active=-")
+        else:
+            pct_active = (100.0 * cycles / active_total) if active_total else 0.0
+            lines.append(f"  {name}: cycles={cycles} total={pct_total:.2f}% active={pct_active:.2f}%")
+    return "\n".join(lines)
+
+
+async def monitor_conv_perf_states(dut, stats):
+    ctrl = dut.u_npu_cluster.u_sys_ctrl
+    linebuf = ctrl.i_conv_channel_linebuf_packer
+    cluster = dut.u_npu_cluster
+
+    while not stats["done"]:
+        await RisingEdge(dut.clk_i)
+        stats["cycles"] += 1
+
+        systolic_state = first_signal_value(lambda: dut.debug_sys_state_o, lambda: ctrl.debug_state_o, lambda: cluster.sys_debug_state)
+        drain_state = first_signal_value(
+            lambda: dut.debug_sys_drain_state_o,
+            lambda: ctrl.debug_drain_state_o,
+            lambda: cluster.sys_debug_drain_state,
+        )
+        linebuf_state = first_signal_value(
+            lambda: dut.debug_linebuf_state_o,
+            lambda: ctrl.debug_linebuf_state_o,
+            lambda: cluster.sys_debug_linebuf_state,
+        )
+
+        if systolic_state is not None:
+            bump_counter(stats["systolic"], SYSTOLIC_STATE_NAMES, systolic_state)
+        if drain_state is not None:
+            bump_counter(stats["drain"], DRAIN_STATE_NAMES, drain_state)
+        if linebuf_state is not None:
+            bump_counter(stats["linebuf"], LINEBUF_STATE_NAMES, linebuf_state)
+
+        if safe_signal_to_int(lambda: cluster.sys_compute_en) == 1:
+            stats["events"]["compute"] += 1
+        if safe_signal_to_int(lambda: cluster.sys_weight_load_en) == 1:
+            stats["events"]["weight_load"] += 1
+        if safe_signal_to_int(lambda: cluster.sys_ofm_valid) == 1:
+            stats["events"]["ofm_valid"] += 1
+        if safe_signal_to_int(lambda: ctrl.linebuf_row_valid) == 1:
+            stats["events"]["linebuf_row_valid"] += 1
+        if safe_signal_to_int(lambda: ctrl.linebuf_row_ready) == 1:
+            stats["events"]["linebuf_row_ready"] += 1
+        if safe_signal_to_int(lambda: linebuf.obi_req_o) == 1:
+            stats["events"]["linebuf_obi_req"] += 1
+        if safe_signal_to_int(lambda: linebuf.obi_req_o) == 1 and safe_signal_to_int(lambda: linebuf.obi_gnt_i) != 1:
+            stats["events"]["linebuf_obi_stall"] += 1
+        if safe_signal_to_int(lambda: ctrl.ofm_fifo_empty) == 1:
+            stats["events"]["ofm_fifo_empty"] += 1
+        if safe_signal_to_int(lambda: ctrl.ofm_fifo_full) == 1:
+            stats["events"]["ofm_fifo_full"] += 1
+
+
+def log_conv_perf_state_report(dut, stats):
+    dut._log.info(
+        "conv_perf state monitor events: cycles=%d compute=%d weight_load=%d ofm_valid=%d "
+        "linebuf_row_valid=%d linebuf_row_ready=%d linebuf_obi_req=%d linebuf_obi_stall=%d "
+        "ofm_fifo_empty=%d ofm_fifo_full=%d",
+        stats["cycles"],
+        stats["events"].get("compute", 0),
+        stats["events"].get("weight_load", 0),
+        stats["events"].get("ofm_valid", 0),
+        stats["events"].get("linebuf_row_valid", 0),
+        stats["events"].get("linebuf_row_ready", 0),
+        stats["events"].get("linebuf_obi_req", 0),
+        stats["events"].get("linebuf_obi_stall", 0),
+        stats["events"].get("ofm_fifo_empty", 0),
+        stats["events"].get("ofm_fifo_full", 0),
+    )
+    dut._log.info("%s", format_state_counts("systolic state cycles", stats["systolic"], stats["cycles"], "IDLE"))
+    dut._log.info("%s", format_state_counts("drain state cycles", stats["drain"], stats["cycles"], None))
+    dut._log.info("%s", format_state_counts("linebuffer state cycles", stats["linebuf"], stats["cycles"], "CH_IDLE"))
 
 
 async def boot_and_run(dut, test_file):
@@ -488,7 +714,30 @@ async def boot_and_run(dut, test_file):
             _requant_output,
         ) = case
         await write_l2_bytes(dut, p3_input_addr(case_id), make_p3_input(input_h, input_w, input_c))
-        await write_l2_bytes(dut, p3_weight_addr(case_id), make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count))
+        await write_l2_bytes(
+            dut,
+            p3_weight_addr(case_id),
+            make_p3_weight_packed_for_case(case_id, input_c, kernel_h, kernel_w, oc_count),
+        )
+    monitor_stats = {
+        "done": False,
+        "cycles": 0,
+        "systolic": {},
+        "drain": {},
+        "linebuf": {},
+        "events": {
+            "compute": 0,
+            "weight_load": 0,
+            "ofm_valid": 0,
+            "linebuf_row_valid": 0,
+            "linebuf_row_ready": 0,
+            "linebuf_obi_req": 0,
+            "linebuf_obi_stall": 0,
+            "ofm_fifo_empty": 0,
+            "ofm_fifo_full": 0,
+        },
+    }
+    monitor_task = cocotb.start_soon(monitor_conv_perf_states(dut, monitor_stats))
     await release_fetch(dut, axi_master=axi_master)
     try:
         await wait_for_host_irq(dut, timeout_cycles=1600000, axi_master=axi_master, report_name="test_conv_perf")
@@ -500,6 +749,11 @@ async def boot_and_run(dut, test_file):
         raise AssertionError(
             f"{exc}: status=0x{status:08x} pass_count={pass_count} phase={phase} op={op}"
         ) from exc
+    finally:
+        monitor_stats["done"] = True
+        await RisingEdge(dut.clk_i)
+        monitor_task.kill()
+        log_conv_perf_state_report(dut, monitor_stats)
 
 
 async def check_output(dut, name, addr, expected):

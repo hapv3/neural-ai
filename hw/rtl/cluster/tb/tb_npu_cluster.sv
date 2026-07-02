@@ -37,6 +37,9 @@ module tb_npu_cluster #(
     input  logic [31:0] backdoor_addr_i,
     input  logic [7:0]  backdoor_data_i,
     output logic [7:0]  backdoor_rdata_o,
+    output logic [2:0]  debug_sys_state_o,
+    output logic [1:0]  debug_sys_drain_state_o,
+    output logic [4:0]  debug_linebuf_state_o,
     output logic        irq_o
 );
 
@@ -127,6 +130,9 @@ module tb_npu_cluster #(
         .s_axi_r_ready_i  (s_axi_rready),
 
         // Interrupts
+        .debug_sys_state_o(debug_sys_state_o),
+        .debug_sys_drain_state_o(debug_sys_drain_state_o),
+        .debug_linebuf_state_o(debug_linebuf_state_o),
         .irq_o            (irq_o)
     );
 

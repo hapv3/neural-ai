@@ -80,6 +80,9 @@ module npu_cluster #(
     //---------------------------------------------------------
     // Interrupts
     //---------------------------------------------------------
+    output logic [2:0]                      debug_sys_state_o,
+    output logic [1:0]                      debug_sys_drain_state_o,
+    output logic [4:0]                      debug_linebuf_state_o,
     output logic                            irq_o
 );
 
@@ -1242,6 +1245,13 @@ module npu_cluster #(
     logic [3:0][OBI_DATA_WIDTH-1:0]  sys_obi_o_rdata;
     logic                            sys_otcdm_stall_active;
     logic [31:0]                     sys_otcdm_stall_ctr_q;
+    logic [2:0]                      sys_debug_state;
+    logic [1:0]                      sys_debug_drain_state;
+    logic [4:0]                      sys_debug_linebuf_state;
+
+    assign debug_sys_state_o = sys_debug_state;
+    assign debug_sys_drain_state_o = sys_debug_drain_state;
+    assign debug_linebuf_state_o = sys_debug_linebuf_state;
 
     systolic_controller #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -1287,7 +1297,10 @@ module npu_cluster #(
         .perf_weight_load_en_o(sys_weight_load_en),
         .perf_compute_en_o  (sys_compute_en),
         .perf_ofm_valid_o   (sys_ofm_valid),
-        .perf_ofm_ready_o   (sys_ofm_ready)
+        .perf_ofm_ready_o   (sys_ofm_ready),
+        .debug_state_o      (sys_debug_state),
+        .debug_drain_state_o(sys_debug_drain_state),
+        .debug_linebuf_state_o(sys_debug_linebuf_state)
     );
 
     // Master 3: Systolic Controller Read Port (I-TCDM)

@@ -51,7 +51,10 @@ module systolic_controller #(
     output logic                      perf_weight_load_en_o,
     output logic                      perf_compute_en_o,
     output logic                      perf_ofm_valid_o,
-    output logic                      perf_ofm_ready_o
+    output logic                      perf_ofm_ready_o,
+    output logic [2:0]                debug_state_o,
+    output logic [1:0]                debug_drain_state_o,
+    output logic [4:0]                debug_linebuf_state_o
 );
 
     typedef enum logic [2:0] {
@@ -62,7 +65,8 @@ module systolic_controller #(
         DONE
     } state_e;
 
-    state_e state_q, state_d;
+    state_e state_q;
+    state_e state_d;
 
     typedef enum logic [1:0] {
         DRAIN_IDLE,
@@ -71,7 +75,8 @@ module systolic_controller #(
         DRAIN_ACCUM_REQUANT
     } drain_state_e;
 
-    drain_state_e drain_state_q, drain_state_d;
+    drain_state_e drain_state_q;
+    drain_state_e drain_state_d;
 
     logic [31:0] w_ptr_q, w_ptr_d;
     logic [31:0] i_ptr_q, i_ptr_d;
@@ -202,6 +207,7 @@ module systolic_controller #(
     logic [31:0]   linebuf_emitted_vectors;
     logic [31:0]   linebuf_fetch_beats;
     logic [31:0]   linebuf_bypass_vectors;
+    logic [4:0]    linebuf_debug_state;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -215,6 +221,9 @@ module systolic_controller #(
     assign perf_compute_en_o = compute_en;
     assign perf_ofm_valid_o = ofm_valid;
     assign perf_ofm_ready_o = ofm_ready;
+    assign debug_state_o = state_q;
+    assign debug_drain_state_o = drain_state_q;
+    assign debug_linebuf_state_o = linebuf_debug_state;
     assign linebuf_spatial_m = (cfg_linebuf_spatial_m_i != 32'd0) ? cfg_linebuf_spatial_m_i : cfg_sys_dim_m_i;
     assign linebuf_kgen_multi = cfg_linebuf_en_i && cfg_linebuf_coalesce_i && cfg_linebuf_kgen_i &&
                                 (cfg_linebuf_k_tiles_i > 32'd1);
@@ -470,7 +479,8 @@ module systolic_controller #(
         .done_o                  (linebuf_done),
         .emitted_vectors_o       (linebuf_emitted_vectors),
         .fetch_beats_o           (linebuf_fetch_beats),
-        .bypass_vectors_o        (linebuf_bypass_vectors)
+        .bypass_vectors_o        (linebuf_bypass_vectors),
+        .debug_state_o           (linebuf_debug_state)
     );
 
     assign obi_i_we_o = 1'b0;
