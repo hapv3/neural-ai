@@ -31,6 +31,7 @@ module systolic_ctrl_regs #(
     output logic [31:0]               cfg_requant_clamp_min_o,
     output logic [31:0]               cfg_requant_clamp_max_o,
     output logic                      cfg_linebuf_en_o,
+    output logic                      cfg_linebuf_coalesce_o,
     output logic [31:0]               cfg_linebuf_input_base_o,
     output logic [15:0]               cfg_linebuf_input_h_o,
     output logic [15:0]               cfg_linebuf_input_w_o,
@@ -40,12 +41,20 @@ module systolic_ctrl_regs #(
     output logic [15:0]               cfg_linebuf_stride_w_o,
     output logic [15:0]               cfg_linebuf_pad_h_o,
     output logic [15:0]               cfg_linebuf_pad_w_o,
-    output logic [15:0]               cfg_linebuf_tile_oh_base_o,
-    output logic [15:0]               cfg_linebuf_tile_ow_base_o,
-    output logic [31:0]               cfg_linebuf_lane_valid_o,
-    output logic [31:0][7:0]          cfg_linebuf_lane_kh_o,
-    output logic [31:0][7:0]          cfg_linebuf_lane_kw_o,
-    output logic [31:0][15:0]         cfg_linebuf_lane_ic_o,
+    output logic [31:0]               cfg_linebuf_row_stride_bytes_o,
+    output logic [31:0]               cfg_linebuf_pixel_stride_bytes_o,
+    output logic [31:0]               cfg_linebuf_ow_step_bytes_o,
+    output logic [31:0]               cfg_linebuf_oh_step_bytes_o,
+    output logic [15:0]               cfg_linebuf_kernel_h_o,
+    output logic [15:0]               cfg_linebuf_kernel_w_o,
+    output logic [15:0]               cfg_linebuf_c_base_o,
+    output logic [5:0]                cfg_linebuf_lane_base_o,
+    output logic                      cfg_linebuf_kgen_o,
+    output logic [31:0]               cfg_linebuf_k_tiles_o,
+    output logic [15:0]               cfg_linebuf_k_seed_ic_o,
+    output logic [7:0]                cfg_linebuf_k_seed_kw_o,
+    output logic [7:0]                cfg_linebuf_k_seed_kh_o,
+    output logic [31:0]               cfg_linebuf_spatial_m_o,
     input  logic                      cfg_sys_done_i
 );
 
@@ -74,9 +83,16 @@ module systolic_ctrl_regs #(
     localparam logic [ADDR_WIDTH-1:0] REG_LB_OUTPUT_W = 32'h0414;
     localparam logic [ADDR_WIDTH-1:0] REG_LB_STRIDE = 32'h0418;
     localparam logic [ADDR_WIDTH-1:0] REG_LB_PAD = 32'h041C;
-    localparam logic [ADDR_WIDTH-1:0] REG_LB_TILE_BASE = 32'h0420;
-    localparam logic [ADDR_WIDTH-1:0] REG_LB_LANE_VALID = 32'h0424;
-    localparam logic [ADDR_WIDTH-1:0] REG_LB_LANE_BASE = 32'h0500;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_ROW_STRIDE = 32'h0428;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_PIXEL_STRIDE = 32'h042C;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_OW_STEP = 32'h0430;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_OH_STEP = 32'h0434;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_KERNEL = 32'h0438;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_C_BASE = 32'h043C;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_SPATIAL_M = 32'h0440;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_LANE_BASE = 32'h0444;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_K_TILES = 32'h0448;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_K_SEED = 32'h044C;
 
     logic [31:0] r_sys_w_ptr;
     logic [31:0] r_sys_i_ptr;
@@ -94,6 +110,8 @@ module systolic_ctrl_regs #(
     logic [31:0]       r_requant_clamp_min;
     logic [31:0]       r_requant_clamp_max;
     logic              r_linebuf_en;
+    logic              r_linebuf_coalesce;
+    logic              r_linebuf_kgen;
     logic [31:0]       r_linebuf_input_base;
     logic [15:0]       r_linebuf_input_h;
     logic [15:0]       r_linebuf_input_w;
@@ -103,12 +121,19 @@ module systolic_ctrl_regs #(
     logic [15:0]       r_linebuf_stride_w;
     logic [15:0]       r_linebuf_pad_h;
     logic [15:0]       r_linebuf_pad_w;
-    logic [15:0]       r_linebuf_tile_oh_base;
-    logic [15:0]       r_linebuf_tile_ow_base;
-    logic [31:0]       r_linebuf_lane_valid;
-    logic [31:0][7:0]  r_linebuf_lane_kh;
-    logic [31:0][7:0]  r_linebuf_lane_kw;
-    logic [31:0][15:0] r_linebuf_lane_ic;
+    logic [31:0]       r_linebuf_row_stride_bytes;
+    logic [31:0]       r_linebuf_pixel_stride_bytes;
+    logic [31:0]       r_linebuf_ow_step_bytes;
+    logic [31:0]       r_linebuf_oh_step_bytes;
+    logic [15:0]       r_linebuf_kernel_h;
+    logic [15:0]       r_linebuf_kernel_w;
+    logic [15:0]       r_linebuf_c_base;
+    logic [5:0]        r_linebuf_lane_base;
+    logic [31:0]       r_linebuf_k_tiles;
+    logic [15:0]       r_linebuf_k_seed_ic;
+    logic [7:0]        r_linebuf_k_seed_kw;
+    logic [7:0]        r_linebuf_k_seed_kh;
+    logic [31:0]       r_linebuf_spatial_m;
     logic [ADDR_WIDTH-1:0] r_addr_q;
 
     assign gnt_o = 1'b1;
@@ -127,6 +152,8 @@ module systolic_ctrl_regs #(
             r_requant_clamp_min <= 32'hFFFF_FF80;
             r_requant_clamp_max <= 32'h0000_007F;
             r_linebuf_en <= 1'b0;
+            r_linebuf_coalesce <= 1'b0;
+            r_linebuf_kgen <= 1'b0;
             r_linebuf_input_base <= '0;
             r_linebuf_input_h <= '0;
             r_linebuf_input_w <= '0;
@@ -136,17 +163,24 @@ module systolic_ctrl_regs #(
             r_linebuf_stride_w <= 16'd1;
             r_linebuf_pad_h <= '0;
             r_linebuf_pad_w <= '0;
-            r_linebuf_tile_oh_base <= '0;
-            r_linebuf_tile_ow_base <= '0;
-            r_linebuf_lane_valid <= '0;
+            r_linebuf_row_stride_bytes <= '0;
+            r_linebuf_pixel_stride_bytes <= '0;
+            r_linebuf_ow_step_bytes <= '0;
+            r_linebuf_oh_step_bytes <= '0;
+            r_linebuf_kernel_h <= 16'd3;
+            r_linebuf_kernel_w <= 16'd3;
+            r_linebuf_c_base <= '0;
+            r_linebuf_lane_base <= '0;
+            r_linebuf_k_tiles <= '0;
+            r_linebuf_k_seed_ic <= '0;
+            r_linebuf_k_seed_kw <= '0;
+            r_linebuf_k_seed_kh <= '0;
+            r_linebuf_spatial_m <= '0;
             for (int unsigned ch = 0; ch < 32; ch++) begin
                 r_requant_bias[ch] <= '0;
                 r_requant_multiplier[ch] <= 32'd1;
                 r_requant_shift[ch] <= '0;
                 r_requant_zero_point[ch] <= '0;
-                r_linebuf_lane_kh[ch] <= '0;
-                r_linebuf_lane_kw[ch] <= '0;
-                r_linebuf_lane_ic[ch] <= '0;
             end
             r_addr_q <= '0;
             rvalid_o <= 1'b0;
@@ -180,7 +214,11 @@ module systolic_ctrl_regs #(
                                 REG_RQ_CTRL:   r_requant_en <= wdata_word[0];
                                 REG_RQ_CMIN:   r_requant_clamp_min <= wdata_word;
                                 REG_RQ_CMAX:   r_requant_clamp_max <= wdata_word;
-                                REG_LB_CTRL: r_linebuf_en <= wdata_word[0];
+                                REG_LB_CTRL: begin
+                                    r_linebuf_en <= wdata_word[0];
+                                    r_linebuf_coalesce <= wdata_word[1];
+                                    r_linebuf_kgen <= wdata_word[2];
+                                end
                                 REG_LB_INPUT_BASE: r_linebuf_input_base <= wdata_word;
                                 REG_LB_INPUT_H: r_linebuf_input_h <= wdata_word[15:0];
                                 REG_LB_INPUT_W: r_linebuf_input_w <= wdata_word[15:0];
@@ -194,11 +232,23 @@ module systolic_ctrl_regs #(
                                     r_linebuf_pad_h <= wdata_word[15:0];
                                     r_linebuf_pad_w <= wdata_word[31:16];
                                 end
-                                REG_LB_TILE_BASE: begin
-                                    r_linebuf_tile_oh_base <= wdata_word[15:0];
-                                    r_linebuf_tile_ow_base <= wdata_word[31:16];
+                                REG_LB_ROW_STRIDE: r_linebuf_row_stride_bytes <= wdata_word;
+                                REG_LB_PIXEL_STRIDE: r_linebuf_pixel_stride_bytes <= wdata_word;
+                                REG_LB_OW_STEP: r_linebuf_ow_step_bytes <= wdata_word;
+                                REG_LB_OH_STEP: r_linebuf_oh_step_bytes <= wdata_word;
+                                REG_LB_KERNEL: begin
+                                    r_linebuf_kernel_h <= wdata_word[15:0];
+                                    r_linebuf_kernel_w <= wdata_word[31:16];
                                 end
-                                REG_LB_LANE_VALID: r_linebuf_lane_valid <= wdata_word;
+                                REG_LB_C_BASE: r_linebuf_c_base <= wdata_word[15:0];
+                                REG_LB_SPATIAL_M: r_linebuf_spatial_m <= wdata_word;
+                                REG_LB_LANE_BASE: r_linebuf_lane_base <= wdata_word[5:0];
+                                REG_LB_K_TILES: r_linebuf_k_tiles <= wdata_word;
+                                REG_LB_K_SEED: begin
+                                    r_linebuf_k_seed_ic <= wdata_word[15:0];
+                                    r_linebuf_k_seed_kw <= wdata_word[23:16];
+                                    r_linebuf_k_seed_kh <= wdata_word[31:24];
+                                end
                                 default: begin
                                     if ((local_addr & 32'hFF80) == REG_RQ_BIAS_BASE) begin
                                         r_requant_bias[(local_addr - REG_RQ_BIAS_BASE) >> 2] <= wdata_word;
@@ -208,10 +258,6 @@ module systolic_ctrl_regs #(
                                         r_requant_shift[(local_addr - REG_RQ_SHIFT_BASE) >> 2] <= wdata_word[7:0];
                                     end else if ((local_addr & 32'hFF80) == REG_RQ_ZP_BASE) begin
                                         r_requant_zero_point[(local_addr - REG_RQ_ZP_BASE) >> 2] <= wdata_word;
-                                    end else if ((local_addr & 32'hFF80) == REG_LB_LANE_BASE) begin
-                                        r_linebuf_lane_kh[(local_addr - REG_LB_LANE_BASE) >> 2] <= wdata_word[31:24];
-                                        r_linebuf_lane_kw[(local_addr - REG_LB_LANE_BASE) >> 2] <= wdata_word[23:16];
-                                        r_linebuf_lane_ic[(local_addr - REG_LB_LANE_BASE) >> 2] <= wdata_word[15:0];
                                     end
                                 end
                             endcase
@@ -248,7 +294,7 @@ module systolic_ctrl_regs #(
                     REG_RQ_CTRL:   rdata_word = {31'd0, r_requant_en};
                     REG_RQ_CMIN:   rdata_word = r_requant_clamp_min;
                     REG_RQ_CMAX:   rdata_word = r_requant_clamp_max;
-                    REG_LB_CTRL: rdata_word = {31'd0, r_linebuf_en};
+                    REG_LB_CTRL: rdata_word = {29'd0, r_linebuf_kgen, r_linebuf_coalesce, r_linebuf_en};
                     REG_LB_INPUT_BASE: rdata_word = r_linebuf_input_base;
                     REG_LB_INPUT_H: rdata_word = {16'd0, r_linebuf_input_h};
                     REG_LB_INPUT_W: rdata_word = {16'd0, r_linebuf_input_w};
@@ -256,8 +302,16 @@ module systolic_ctrl_regs #(
                     REG_LB_OUTPUT_W: rdata_word = {16'd0, r_linebuf_output_w};
                     REG_LB_STRIDE: rdata_word = {r_linebuf_stride_w, r_linebuf_stride_h};
                     REG_LB_PAD: rdata_word = {r_linebuf_pad_w, r_linebuf_pad_h};
-                    REG_LB_TILE_BASE: rdata_word = {r_linebuf_tile_ow_base, r_linebuf_tile_oh_base};
-                    REG_LB_LANE_VALID: rdata_word = r_linebuf_lane_valid;
+                    REG_LB_ROW_STRIDE: rdata_word = r_linebuf_row_stride_bytes;
+                    REG_LB_PIXEL_STRIDE: rdata_word = r_linebuf_pixel_stride_bytes;
+                    REG_LB_OW_STEP: rdata_word = r_linebuf_ow_step_bytes;
+                    REG_LB_OH_STEP: rdata_word = r_linebuf_oh_step_bytes;
+                    REG_LB_KERNEL: rdata_word = {r_linebuf_kernel_w, r_linebuf_kernel_h};
+                    REG_LB_C_BASE: rdata_word = {16'd0, r_linebuf_c_base};
+                    REG_LB_SPATIAL_M: rdata_word = r_linebuf_spatial_m;
+                    REG_LB_LANE_BASE: rdata_word = {26'd0, r_linebuf_lane_base};
+                    REG_LB_K_TILES: rdata_word = r_linebuf_k_tiles;
+                    REG_LB_K_SEED: rdata_word = {r_linebuf_k_seed_kh, r_linebuf_k_seed_kw, r_linebuf_k_seed_ic};
                     default: begin
                         if ((exact_addr & 32'hFF80) == REG_RQ_BIAS_BASE) begin
                             rdata_word = r_requant_bias[(exact_addr - REG_RQ_BIAS_BASE) >> 2];
@@ -267,10 +321,6 @@ module systolic_ctrl_regs #(
                             rdata_word = {24'd0, r_requant_shift[(exact_addr - REG_RQ_SHIFT_BASE) >> 2]};
                         end else if ((exact_addr & 32'hFF80) == REG_RQ_ZP_BASE) begin
                             rdata_word = r_requant_zero_point[(exact_addr - REG_RQ_ZP_BASE) >> 2];
-                        end else if ((exact_addr & 32'hFF80) == REG_LB_LANE_BASE) begin
-                            rdata_word = {r_linebuf_lane_kh[(exact_addr - REG_LB_LANE_BASE) >> 2],
-                                          r_linebuf_lane_kw[(exact_addr - REG_LB_LANE_BASE) >> 2],
-                                          r_linebuf_lane_ic[(exact_addr - REG_LB_LANE_BASE) >> 2]};
                         end
                     end
                 endcase
@@ -294,6 +344,8 @@ module systolic_ctrl_regs #(
     assign cfg_requant_clamp_min_o = r_requant_clamp_min;
     assign cfg_requant_clamp_max_o = r_requant_clamp_max;
     assign cfg_linebuf_en_o = r_linebuf_en;
+    assign cfg_linebuf_coalesce_o = r_linebuf_coalesce;
+    assign cfg_linebuf_kgen_o = r_linebuf_kgen;
     assign cfg_linebuf_input_base_o = r_linebuf_input_base;
     assign cfg_linebuf_input_h_o = r_linebuf_input_h;
     assign cfg_linebuf_input_w_o = r_linebuf_input_w;
@@ -303,11 +355,18 @@ module systolic_ctrl_regs #(
     assign cfg_linebuf_stride_w_o = r_linebuf_stride_w;
     assign cfg_linebuf_pad_h_o = r_linebuf_pad_h;
     assign cfg_linebuf_pad_w_o = r_linebuf_pad_w;
-    assign cfg_linebuf_tile_oh_base_o = r_linebuf_tile_oh_base;
-    assign cfg_linebuf_tile_ow_base_o = r_linebuf_tile_ow_base;
-    assign cfg_linebuf_lane_valid_o = r_linebuf_lane_valid;
-    assign cfg_linebuf_lane_kh_o = r_linebuf_lane_kh;
-    assign cfg_linebuf_lane_kw_o = r_linebuf_lane_kw;
-    assign cfg_linebuf_lane_ic_o = r_linebuf_lane_ic;
+    assign cfg_linebuf_row_stride_bytes_o = r_linebuf_row_stride_bytes;
+    assign cfg_linebuf_pixel_stride_bytes_o = r_linebuf_pixel_stride_bytes;
+    assign cfg_linebuf_ow_step_bytes_o = r_linebuf_ow_step_bytes;
+    assign cfg_linebuf_oh_step_bytes_o = r_linebuf_oh_step_bytes;
+    assign cfg_linebuf_kernel_h_o = r_linebuf_kernel_h;
+    assign cfg_linebuf_kernel_w_o = r_linebuf_kernel_w;
+    assign cfg_linebuf_c_base_o = r_linebuf_c_base;
+    assign cfg_linebuf_lane_base_o = r_linebuf_lane_base;
+    assign cfg_linebuf_k_tiles_o = r_linebuf_k_tiles;
+    assign cfg_linebuf_k_seed_ic_o = r_linebuf_k_seed_ic;
+    assign cfg_linebuf_k_seed_kw_o = r_linebuf_k_seed_kw;
+    assign cfg_linebuf_k_seed_kh_o = r_linebuf_k_seed_kh;
+    assign cfg_linebuf_spatial_m_o = r_linebuf_spatial_m;
 
 endmodule

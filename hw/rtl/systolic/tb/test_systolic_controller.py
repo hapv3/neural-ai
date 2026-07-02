@@ -20,9 +20,16 @@ REG_LB_INPUT_C = 0x0410
 REG_LB_OUTPUT_W = 0x0414
 REG_LB_STRIDE = 0x0418
 REG_LB_PAD = 0x041C
-REG_LB_TILE_BASE = 0x0420
-REG_LB_LANE_VALID = 0x0424
-REG_LB_LANE_BASE = 0x0500
+REG_LB_ROW_STRIDE = 0x0428
+REG_LB_PIXEL_STRIDE = 0x042C
+REG_LB_OW_STEP = 0x0430
+REG_LB_OH_STEP = 0x0434
+REG_LB_KERNEL = 0x0438
+REG_LB_C_BASE = 0x043C
+REG_LB_SPATIAL_M = 0x0440
+REG_LB_LANE_BASE = 0x0444
+REG_LB_K_TILES = 0x0448
+REG_LB_K_SEED = 0x044C
 
 WEIGHT_ADDR = 0x00001000
 IFM_ADDR = 0x00003000
@@ -62,31 +69,24 @@ def write_bytes(dut, base_addr, values):
         dut.tcdm_mem[mem_index(base_addr) + beat_index].value = pack_u8(padded)
 
 
-def make_lane_desc(input_c):
-    lane_valid = 0
-    lanes = []
-    for kh in range(3):
-        for kw in range(3):
-            for channel in range(input_c):
-                if len(lanes) < ARRAY_DIM:
-                    lane_valid |= 1 << len(lanes)
-                    lanes.append((kh, kw, channel))
-    return lane_valid, lanes
-
-
-def golden_conv_rows(input_data, input_h, input_w, input_c, output_h, output_w, stride_h, stride_w, pad_h, pad_w):
-    _, lanes = make_lane_desc(input_c)
+def golden_channel_linebuf_rows(input_data, input_h, input_w, input_c,
+                                output_h, output_w, kernel_h, kernel_w,
+                                stride_h, stride_w, pad_h, pad_w, c_base):
     rows = []
     for oh in range(output_h):
         for ow in range(output_w):
-            row = [0] * ARRAY_DIM
-            for lane, (kh, kw, channel) in enumerate(lanes):
-                ih = oh * stride_h + kh - pad_h
-                iw = ow * stride_w + kw - pad_w
-                if 0 <= ih < input_h and 0 <= iw < input_w:
-                    index = ((ih * input_w) + iw) * input_c + channel
-                    row[lane] = signed_i8(input_data[index])
-            rows.append(row)
+            for kh in range(kernel_h):
+                for kw in range(kernel_w):
+                    row = [0] * ARRAY_DIM
+                    ih = oh * stride_h + kh - pad_h
+                    iw = ow * stride_w + kw - pad_w
+                    if 0 <= ih < input_h and 0 <= iw < input_w:
+                        for lane in range(ARRAY_DIM):
+                            channel = c_base + lane
+                            if channel < input_c:
+                                index = ((ih * input_w) + iw) * input_c + channel
+                                row[lane] = signed_i8(input_data[index])
+                    rows.append(row)
     return rows
 
 
@@ -177,31 +177,33 @@ async def systolic_controller_gemm32_all_ones(dut):
 
 
 @cocotb.test()
-async def systolic_controller_conv3x3_linebuf_rgb_stride2(dut):
+async def systolic_controller_channel_linebuf_1x1_c32(dut):
     """
-    Scenario: configure the controller line-buffer path for Conv3x3 RGB
-    pad1/stride2, feed rows directly into the integrated systolic array, and
-    write full INT32 OFM rows.
-    Target: verifies MMIO line-buffer descriptors, TCDM reads through the
-    shared input port, line-buffer row packing, array compute, and O-TCDM
-    writeback against a Python golden model.
+    Scenario: configure the controller channel linebuffer for a 1x1 C=32
+    packed tile. The packer emits one full IFM row per output pixel, the
+    controller feeds those rows into the local array, and writeback stores
+    one INT32 OFM row per spatial position.
     """
     clock = Clock(dut.clk_i, 10, unit="ns")
     cocotb.start_soon(clock.start())
     await reset(dut)
 
-    input_h = 5
-    input_w = 5
-    input_c = 3
-    output_h = 3
+    input_h = 4
+    input_w = 3
+    input_c = 32
+    output_h = 4
     output_w = 3
-    stride_h = 2
-    stride_w = 2
-    pad_h = 1
-    pad_w = 1
-    dim_m = output_h * output_w
+    kernel_h = 1
+    kernel_w = 1
+    stride_h = 1
+    stride_w = 1
+    pad_h = 0
+    pad_w = 0
+    c_base = 0
+    spatial_m = output_h * output_w
+    dim_m = spatial_m * kernel_h * kernel_w
 
-    input_data = [((index * 3 + 1) & 0x7F) for index in range(input_h * input_w * input_c)]
+    input_data = [1] * (input_h * input_w * input_c)
     write_bytes(dut, IFM_ADDR, input_data)
 
     one_beat = pack_u8([1] * BEAT_BYTES)
@@ -210,7 +212,6 @@ async def systolic_controller_conv3x3_linebuf_rgb_stride2(dut):
     for beat in range(dim_m * 4):
         dut.tcdm_mem[mem_index(OFM_ADDR) + beat].value = 0
 
-    lane_valid, lanes = make_lane_desc(input_c)
     await mmio_write(dut, REG_RQ_CTRL, 0)
     await mmio_write(dut, REG_SYS_ACCUM_CTRL, 0)
     await mmio_write(dut, REG_SYS_W_PTR, WEIGHT_ADDR)
@@ -219,17 +220,21 @@ async def systolic_controller_conv3x3_linebuf_rgb_stride2(dut):
     await mmio_write(dut, REG_SYS_PSUM_PTR, 0)
     await mmio_write(dut, REG_SYS_DIM_M, dim_m)
     await mmio_write(dut, REG_SYS_DONE, 0)
-    await mmio_write(dut, REG_LB_INPUT_BASE, IFM_ADDR)
+    await mmio_write(dut, REG_LB_INPUT_BASE, IFM_ADDR - pad_h * input_w * input_c)
     await mmio_write(dut, REG_LB_INPUT_H, input_h)
     await mmio_write(dut, REG_LB_INPUT_W, input_w)
     await mmio_write(dut, REG_LB_INPUT_C, input_c)
     await mmio_write(dut, REG_LB_OUTPUT_W, output_w)
     await mmio_write(dut, REG_LB_STRIDE, (stride_w << 16) | stride_h)
     await mmio_write(dut, REG_LB_PAD, (pad_w << 16) | pad_h)
-    await mmio_write(dut, REG_LB_TILE_BASE, 0)
-    await mmio_write(dut, REG_LB_LANE_VALID, lane_valid)
-    for lane, (kh, kw, channel) in enumerate(lanes):
-        await mmio_write(dut, REG_LB_LANE_BASE + lane * 4, (kh << 24) | (kw << 16) | channel)
+    await mmio_write(dut, REG_LB_ROW_STRIDE, input_w * input_c)
+    await mmio_write(dut, REG_LB_PIXEL_STRIDE, input_c)
+    await mmio_write(dut, REG_LB_OW_STEP, stride_w * input_c)
+    await mmio_write(dut, REG_LB_OH_STEP, stride_h * input_w * input_c)
+    await mmio_write(dut, REG_LB_KERNEL, (kernel_w << 16) | kernel_h)
+    await mmio_write(dut, REG_LB_C_BASE, c_base)
+    await mmio_write(dut, REG_LB_SPATIAL_M, spatial_m)
+    await mmio_write(dut, REG_LB_LANE_BASE, 0)
     await mmio_write(dut, REG_LB_CTRL, 1)
     await mmio_write(dut, REG_SYS_START, 1)
 
@@ -243,26 +248,222 @@ async def systolic_controller_conv3x3_linebuf_rgb_stride2(dut):
             done_seen = True
             break
 
-    assert done_seen, "line-buffer conv did not complete before timeout"
+    assert done_seen, "channel line-buffer 1x1 run did not complete before timeout"
     assert compute_pulses == dim_m, f"compute pulses={compute_pulses}, expected={dim_m}"
 
-    golden_rows = golden_conv_rows(
-        input_data,
-        input_h,
-        input_w,
-        input_c,
-        output_h,
-        output_w,
-        stride_h,
-        stride_w,
-        pad_h,
-        pad_w,
-    )
-    expected_sums = [sum(row) for row in golden_rows]
-    for row, expected_sum in enumerate(expected_sums):
+    expected = [ARRAY_DIM] * ARRAY_DIM
+    for row in range(dim_m):
         got = []
         for beat in range(4):
             value = int(dut.tcdm_mem[mem_index(OFM_ADDR) + row * 4 + beat].value)
             got.extend(unpack_s32_beat(value))
-        expected = [expected_sum] * ARRAY_DIM
-        assert got == expected, f"line-buffer conv OFM row {row} mismatch: got={got}, expected={expected}"
+        assert got == expected, f"line-buffer 1x1 OFM row {row} mismatch: got={got}, expected={expected}"
+
+
+@cocotb.test()
+async def systolic_controller_channel_linebuf_coalesced_3x3_c3(dut):
+    """
+    Scenario: configure coalesced line-buffer mode for a small Conv2D K tile
+    where KH*KW*IC fits in one 32-lane systolic row.
+    Target: controller receives exactly one IFM row per output pixel and the
+    array accumulates all valid 3x3/C3 lanes against one packed weight tile.
+    """
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset(dut)
+
+    input_h = 2
+    input_w = 4
+    input_c = 3
+    output_h = 2
+    output_w = 4
+    kernel_h = 3
+    kernel_w = 3
+    stride_h = 1
+    stride_w = 1
+    pad_h = 1
+    pad_w = 1
+    spatial_m = output_h * output_w
+
+    input_data = [1] * (input_h * input_w * input_c)
+    write_bytes(dut, IFM_ADDR, input_data)
+
+    one_beat = pack_u8([1] * BEAT_BYTES)
+    for beat in range(ARRAY_DIM):
+        dut.tcdm_mem[mem_index(WEIGHT_ADDR) + beat].value = one_beat
+    for beat in range(spatial_m * 4):
+        dut.tcdm_mem[mem_index(OFM_ADDR) + beat].value = 0
+
+    await mmio_write(dut, REG_RQ_CTRL, 0)
+    await mmio_write(dut, REG_SYS_ACCUM_CTRL, 0)
+    await mmio_write(dut, REG_SYS_W_PTR, WEIGHT_ADDR)
+    await mmio_write(dut, REG_SYS_I_PTR, 0)
+    await mmio_write(dut, REG_SYS_O_PTR, OFM_ADDR)
+    await mmio_write(dut, REG_SYS_PSUM_PTR, 0)
+    await mmio_write(dut, REG_SYS_DIM_M, spatial_m)
+    await mmio_write(dut, REG_SYS_DONE, 0)
+    await mmio_write(dut, REG_LB_INPUT_BASE, IFM_ADDR - pad_h * input_w * input_c)
+    await mmio_write(dut, REG_LB_INPUT_H, input_h)
+    await mmio_write(dut, REG_LB_INPUT_W, input_w)
+    await mmio_write(dut, REG_LB_INPUT_C, input_c)
+    await mmio_write(dut, REG_LB_OUTPUT_W, output_w)
+    await mmio_write(dut, REG_LB_STRIDE, (stride_w << 16) | stride_h)
+    await mmio_write(dut, REG_LB_PAD, (pad_w << 16) | pad_h)
+    await mmio_write(dut, REG_LB_ROW_STRIDE, input_w * input_c)
+    await mmio_write(dut, REG_LB_PIXEL_STRIDE, input_c)
+    await mmio_write(dut, REG_LB_OW_STEP, stride_w * input_c)
+    await mmio_write(dut, REG_LB_OH_STEP, stride_h * input_w * input_c)
+    await mmio_write(dut, REG_LB_KERNEL, (kernel_w << 16) | kernel_h)
+    await mmio_write(dut, REG_LB_C_BASE, 0)
+    await mmio_write(dut, REG_LB_SPATIAL_M, spatial_m)
+    await mmio_write(dut, REG_LB_LANE_BASE, 0)
+    await mmio_write(dut, REG_LB_CTRL, 0x3)
+    await mmio_write(dut, REG_SYS_START, 1)
+
+    compute_pulses = 0
+    done_seen = False
+    for _ in range(3000):
+        await RisingEdge(dut.clk_i)
+        if int(dut.perf_compute_en_o.value) == 1:
+            compute_pulses += 1
+        if int(dut.cfg_sys_done_o.value) == 1:
+            done_seen = True
+            break
+
+    assert done_seen, "coalesced line-buffer 3x3 run did not complete before timeout"
+    assert compute_pulses == spatial_m, f"compute pulses={compute_pulses}, expected={spatial_m}"
+
+    for oh in range(output_h):
+        for ow in range(output_w):
+            valid_taps = 0
+            for kh in range(kernel_h):
+                ih = oh * stride_h + kh - pad_h
+                for kw in range(kernel_w):
+                    iw = ow * stride_w + kw - pad_w
+                    if 0 <= ih < input_h and 0 <= iw < input_w:
+                        valid_taps += 1
+            expected = [valid_taps * input_c] * ARRAY_DIM
+            row = oh * output_w + ow
+            got = []
+            for beat in range(4):
+                value = int(dut.tcdm_mem[mem_index(OFM_ADDR) + row * 4 + beat].value)
+                got.extend(unpack_s32_beat(value))
+            assert got == expected, f"coalesced line-buffer OFM row {row} mismatch: got={got}, expected={expected}"
+
+
+@cocotb.test()
+async def systolic_controller_channel_linebuf_kgen_3x3_c32(dut):
+    """
+    Scenario: run Conv2D 3x3/C32 as nine internal K tiles with one MMIO start.
+    Target: RTL advances the {kh,kw,ic} seed by 32 lanes per tile, reloads the
+    next weight tile, accumulates against the previous output, and reports one
+    final done pulse for the whole layer tile.
+    """
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset(dut)
+
+    input_h = 4
+    input_w = 4
+    input_c = 32
+    output_h = 4
+    output_w = 4
+    kernel_h = 3
+    kernel_w = 3
+    stride_h = 1
+    stride_w = 1
+    pad_h = 1
+    pad_w = 1
+    spatial_m = output_h * output_w
+    k_tiles = kernel_h * kernel_w
+
+    input_data = [1] * (input_h * input_w * input_c)
+    write_bytes(dut, IFM_ADDR, input_data)
+
+    one_beat = pack_u8([1] * BEAT_BYTES)
+    for tile in range(k_tiles):
+        for beat in range(ARRAY_DIM):
+            dut.tcdm_mem[mem_index(WEIGHT_ADDR) + tile * ARRAY_DIM + beat].value = one_beat
+    for beat in range(spatial_m * 4):
+        dut.tcdm_mem[mem_index(OFM_ADDR) + beat].value = 0
+
+    await mmio_write(dut, REG_RQ_CTRL, 0)
+    await mmio_write(dut, REG_SYS_ACCUM_CTRL, 0)
+    await mmio_write(dut, REG_SYS_W_PTR, WEIGHT_ADDR)
+    await mmio_write(dut, REG_SYS_I_PTR, 0)
+    await mmio_write(dut, REG_SYS_O_PTR, OFM_ADDR)
+    await mmio_write(dut, REG_SYS_PSUM_PTR, OFM_ADDR)
+    await mmio_write(dut, REG_SYS_DIM_M, spatial_m)
+    await mmio_write(dut, REG_SYS_DONE, 0)
+    await mmio_write(dut, REG_LB_INPUT_BASE, IFM_ADDR - pad_h * input_w * input_c)
+    await mmio_write(dut, REG_LB_INPUT_H, input_h)
+    await mmio_write(dut, REG_LB_INPUT_W, input_w)
+    await mmio_write(dut, REG_LB_INPUT_C, input_c)
+    await mmio_write(dut, REG_LB_OUTPUT_W, output_w)
+    await mmio_write(dut, REG_LB_STRIDE, (stride_w << 16) | stride_h)
+    await mmio_write(dut, REG_LB_PAD, (pad_w << 16) | pad_h)
+    await mmio_write(dut, REG_LB_ROW_STRIDE, input_w * input_c)
+    await mmio_write(dut, REG_LB_PIXEL_STRIDE, input_c)
+    await mmio_write(dut, REG_LB_OW_STEP, stride_w * input_c)
+    await mmio_write(dut, REG_LB_OH_STEP, stride_h * input_w * input_c)
+    await mmio_write(dut, REG_LB_KERNEL, (kernel_w << 16) | kernel_h)
+    await mmio_write(dut, REG_LB_C_BASE, 0)
+    await mmio_write(dut, REG_LB_SPATIAL_M, spatial_m)
+    await mmio_write(dut, REG_LB_LANE_BASE, 0)
+    await mmio_write(dut, REG_LB_K_TILES, k_tiles)
+    await mmio_write(dut, REG_LB_K_SEED, 0)
+    await mmio_write(dut, REG_LB_CTRL, 0x7)
+    await mmio_write(dut, REG_SYS_START, 1)
+
+    compute_pulses = 0
+    done_seen = False
+    for _ in range(40000):
+        await RisingEdge(dut.clk_i)
+        if int(dut.perf_compute_en_o.value) == 1:
+            compute_pulses += 1
+        if int(dut.cfg_sys_done_o.value) == 1:
+            done_seen = True
+            break
+
+    if not done_seen:
+        dut._log.warning(
+            "kgen timeout: state=%s ktile=%s seed=(%s,%s,%s) req=%s rsp=%s drain=%s linebuf_state=%s done=%s emitted=%s ow=%s kh=%s kw=%s valid=%s ready=%s ofm_empty=%s",
+            dut.dut.state_q.value,
+            dut.dut.k_tile_idx_q.value,
+            dut.dut.k_seed_kh_q.value,
+            dut.dut.k_seed_kw_q.value,
+            dut.dut.k_seed_ic_q.value,
+            dut.dut.req_cnt_q.value,
+            dut.dut.rsp_cnt_q.value,
+            dut.dut.drain_cnt_q.value,
+            dut.dut.i_conv_channel_linebuf_packer.state_q.value,
+            dut.dut.linebuf_done.value,
+            dut.dut.linebuf_emitted_vectors.value,
+            dut.dut.i_conv_channel_linebuf_packer.ow_q.value,
+            dut.dut.i_conv_channel_linebuf_packer.kh_q.value,
+            dut.dut.i_conv_channel_linebuf_packer.kw_q.value,
+            dut.dut.linebuf_row_valid.value,
+            dut.dut.linebuf_row_ready.value,
+            dut.dut.ofm_fifo_empty.value,
+        )
+    assert done_seen, "kgen line-buffer 3x3/C32 run did not complete before timeout"
+    assert compute_pulses == spatial_m * k_tiles, (
+        f"compute pulses={compute_pulses}, expected={spatial_m * k_tiles}"
+    )
+
+    for oh in range(output_h):
+        for ow in range(output_w):
+            valid_taps = 0
+            for kh in range(kernel_h):
+                ih = oh * stride_h + kh - pad_h
+                for kw in range(kernel_w):
+                    iw = ow * stride_w + kw - pad_w
+                    if 0 <= ih < input_h and 0 <= iw < input_w:
+                        valid_taps += 1
+            expected = [valid_taps * input_c] * ARRAY_DIM
+            row = oh * output_w + ow
+            got = []
+            for beat in range(4):
+                value = int(dut.tcdm_mem[mem_index(OFM_ADDR) + row * 4 + beat].value)
+                got.extend(unpack_s32_beat(value))
+            assert got == expected, f"kgen line-buffer OFM row {row} mismatch: got={got}, expected={expected}"

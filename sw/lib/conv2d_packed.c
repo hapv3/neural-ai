@@ -9,6 +9,9 @@
 #endif
 
 #define NPU_CONV2D_MAX_PREPARE_CMDS 256u
+#define NPU_CONV2D_LINEBUF_K_MAX 5u
+#define NPU_CONV2D_LINEBUF_MAX_INPUT_W 640u
+#define NPU_CONV2D_LINEBUF_KGEN_MAX_M SYSTOLIC_GEMM32_ACCUM_TILE_M
 
 typedef enum {
     NPU_CONV2D_PREPARE_SCALAR = 0,
@@ -86,6 +89,33 @@ static uint32_t is_contiguous_conv1x1(const npu_conv2d_packed_cfg_t *cfg) {
 
 static uint32_t is_l1_addr(uint32_t addr) {
     return idma_mm_is_l1_addr(addr);
+}
+
+static uint32_t is_linebuf_supported(const npu_conv2d_packed_cfg_t *cfg) {
+    return is_l1_addr(cfg->input_addr) &&
+           is_l1_addr(cfg->weight_addr) &&
+           is_l1_addr(cfg->output_addr) &&
+           cfg->kernel_h <= NPU_CONV2D_LINEBUF_K_MAX &&
+           cfg->kernel_w <= NPU_CONV2D_LINEBUF_K_MAX &&
+           cfg->input_w <= NPU_CONV2D_LINEBUF_MAX_INPUT_W;
+}
+
+static uint32_t is_linebuf_coalesce_supported(const npu_conv2d_packed_cfg_t *cfg,
+                                              uint32_t spatial_rows,
+                                              uint32_t k_total) {
+    return is_linebuf_supported(cfg) &&
+           k_total <= NPU_CONV2D_PACKED_K_TILE &&
+           spatial_rows <= SYSTOLIC_GEMM32_TILE_M;
+}
+
+static uint32_t is_linebuf_kgen_supported(const npu_conv2d_packed_cfg_t *cfg,
+                                          uint32_t spatial_rows,
+                                          uint32_t k_total) {
+    return is_linebuf_supported(cfg) &&
+           k_total > NPU_CONV2D_PACKED_K_TILE &&
+           spatial_rows <= NPU_CONV2D_LINEBUF_KGEN_MAX_M &&
+           ((cfg->input_c <= NPU_CONV2D_PACKED_K_TILE) ||
+            ((cfg->input_c & (NPU_CONV2D_PACKED_K_TILE - 1u)) == 0u));
 }
 
 static void zero_im2col_tile(const npu_conv2d_packed_cfg_t *cfg, uint32_t rows) {
@@ -391,6 +421,10 @@ uint32_t npu_conv2d_packed_run_oc32(const npu_conv2d_packed_cfg_t *cfg,
         return status;
     }
 
+    if (is_linebuf_supported(cfg)) {
+        return npu_conv2d_packed_run_oc32_linebuf(cfg, stats);
+    }
+
     uint32_t rows = cfg->output_h * cfg->output_w;
     uint32_t k_total = cfg->kernel_h * cfg->kernel_w * cfg->input_c;
     uint32_t k_tiles = ceil_div_u32(k_total, NPU_CONV2D_PACKED_K_TILE);
@@ -527,55 +561,203 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         return status;
     }
 
-    uint32_t rows = cfg->output_h * cfg->output_w;
+    uint32_t spatial_rows = cfg->output_h * cfg->output_w;
     uint32_t k_total = cfg->kernel_h * cfg->kernel_w * cfg->input_c;
-    if (k_total > NPU_CONV2D_PACKED_K_TILE) {
+    uint32_t k_tiles = ceil_div_u32(k_total, NPU_CONV2D_PACKED_K_TILE);
+
+    if (!is_linebuf_supported(cfg)) {
         if (stats) {
             stats->status = NPU_CONV2D_PACKED_ERR_LINEBUF_K_TILES;
         }
         return NPU_CONV2D_PACKED_ERR_LINEBUF_K_TILES;
     }
 
-    systolic_linebuf_cfg_t linebuf_cfg;
-    linebuf_cfg.input_base = cfg->input_addr;
-    linebuf_cfg.input_h = (uint16_t)cfg->input_h;
-    linebuf_cfg.input_w = (uint16_t)cfg->input_w;
-    linebuf_cfg.input_c = (uint16_t)cfg->input_c;
-    linebuf_cfg.output_w = (uint16_t)cfg->output_w;
-    linebuf_cfg.stride_h = (uint16_t)cfg->stride_h;
-    linebuf_cfg.stride_w = (uint16_t)cfg->stride_w;
-    linebuf_cfg.pad_h = (uint16_t)cfg->pad_h;
-    linebuf_cfg.pad_w = (uint16_t)cfg->pad_w;
-    linebuf_cfg.tile_oh_base = 0u;
-    linebuf_cfg.tile_ow_base = 0u;
-    linebuf_cfg.lane_valid = 0u;
+    uint32_t total_start = spatz_rt_read_cycle();
+    uint32_t gemm_start = spatz_rt_read_cycle();
 
-    for (uint32_t lane = 0; lane < NPU_CONV2D_PACKED_K_TILE; lane++) {
-        linebuf_cfg.lane_kh[lane] = 0u;
-        linebuf_cfg.lane_kw[lane] = 0u;
-        linebuf_cfg.lane_ic[lane] = 0u;
-        if (lane < k_total) {
-            uint32_t spatial = lane / cfg->input_c;
-            uint32_t ic = lane - (spatial * cfg->input_c);
-            uint32_t kh = spatial / cfg->kernel_w;
-            uint32_t kw = spatial - (kh * cfg->kernel_w);
-            linebuf_cfg.lane_kh[lane] = (uint8_t)kh;
-            linebuf_cfg.lane_kw[lane] = (uint8_t)kw;
-            linebuf_cfg.lane_ic[lane] = (uint16_t)ic;
-            linebuf_cfg.lane_valid |= 1u << lane;
+    if (is_linebuf_coalesce_supported(cfg, spatial_rows, k_total)) {
+        systolic_linebuf_cfg_t linebuf_cfg;
+        uint32_t row_stride_bytes = cfg->input_w * cfg->input_c;
+        linebuf_cfg.input_base = cfg->input_addr - (cfg->pad_h * row_stride_bytes);
+        linebuf_cfg.input_h = (uint16_t)cfg->input_h;
+        linebuf_cfg.input_w = (uint16_t)cfg->input_w;
+        linebuf_cfg.input_c = (uint16_t)cfg->input_c;
+        linebuf_cfg.output_w = (uint16_t)cfg->output_w;
+        linebuf_cfg.stride_h = (uint16_t)cfg->stride_h;
+        linebuf_cfg.stride_w = (uint16_t)cfg->stride_w;
+        linebuf_cfg.pad_h = (uint16_t)cfg->pad_h;
+        linebuf_cfg.pad_w = (uint16_t)cfg->pad_w;
+        linebuf_cfg.row_stride_bytes = row_stride_bytes;
+        linebuf_cfg.pixel_stride_bytes = cfg->input_c;
+        linebuf_cfg.ow_step_bytes = cfg->stride_w * cfg->input_c;
+        linebuf_cfg.oh_step_bytes = cfg->stride_h * cfg->input_w * cfg->input_c;
+        linebuf_cfg.kernel_h = (uint16_t)cfg->kernel_h;
+        linebuf_cfg.kernel_w = (uint16_t)cfg->kernel_w;
+        linebuf_cfg.c_base = 0u;
+        linebuf_cfg.lane_base = 0u;
+        linebuf_cfg.coalesce = 1u;
+        linebuf_cfg.kgen = 0u;
+        linebuf_cfg.k_seed_kh = 0u;
+        linebuf_cfg.k_seed_kw = 0u;
+        linebuf_cfg.k_seed_ic = 0u;
+        linebuf_cfg.k_tiles = 0u;
+        linebuf_cfg.spatial_m = spatial_rows;
+
+        systolic_linebuf_config(&linebuf_cfg);
+        systolic_gemm32_linebuf(cfg->weight_addr, cfg->output_addr, spatial_rows);
+
+        uint32_t gemm_cycles = spatz_rt_read_cycle() - gemm_start;
+        if (stats) {
+            stats->rows = spatial_rows;
+            stats->k_tiles = 1u;
+            stats->prepare_cycles = 0u;
+            stats->gemm_cycles = gemm_cycles;
+            stats->last_prepare_cycles = 0u;
+            stats->last_gemm_cycles = gemm_cycles;
+            stats->total_cycles = spatz_rt_read_cycle() - total_start;
+            stats->status = NPU_CONV2D_PACKED_OK;
+        }
+
+        return NPU_CONV2D_PACKED_OK;
+    }
+
+    if (is_linebuf_kgen_supported(cfg, spatial_rows, k_total)) {
+        systolic_linebuf_cfg_t linebuf_cfg;
+        uint32_t row_stride_bytes = cfg->input_w * cfg->input_c;
+        linebuf_cfg.input_base = cfg->input_addr - (cfg->pad_h * row_stride_bytes);
+        linebuf_cfg.input_h = (uint16_t)cfg->input_h;
+        linebuf_cfg.input_w = (uint16_t)cfg->input_w;
+        linebuf_cfg.input_c = (uint16_t)cfg->input_c;
+        linebuf_cfg.output_w = (uint16_t)cfg->output_w;
+        linebuf_cfg.stride_h = (uint16_t)cfg->stride_h;
+        linebuf_cfg.stride_w = (uint16_t)cfg->stride_w;
+        linebuf_cfg.pad_h = (uint16_t)cfg->pad_h;
+        linebuf_cfg.pad_w = (uint16_t)cfg->pad_w;
+        linebuf_cfg.row_stride_bytes = row_stride_bytes;
+        linebuf_cfg.pixel_stride_bytes = cfg->input_c;
+        linebuf_cfg.ow_step_bytes = cfg->stride_w * cfg->input_c;
+        linebuf_cfg.oh_step_bytes = cfg->stride_h * cfg->input_w * cfg->input_c;
+        linebuf_cfg.kernel_h = (uint16_t)cfg->kernel_h;
+        linebuf_cfg.kernel_w = (uint16_t)cfg->kernel_w;
+        linebuf_cfg.c_base = 0u;
+        linebuf_cfg.lane_base = 0u;
+        linebuf_cfg.coalesce = 1u;
+        linebuf_cfg.kgen = 1u;
+        linebuf_cfg.k_seed_kh = 0u;
+        linebuf_cfg.k_seed_kw = 0u;
+        linebuf_cfg.k_seed_ic = 0u;
+        linebuf_cfg.k_tiles = k_tiles;
+        linebuf_cfg.spatial_m = spatial_rows;
+
+        systolic_linebuf_config(&linebuf_cfg);
+        systolic_gemm32_linebuf_ktiles(cfg->weight_addr, cfg->output_addr, cfg->output_addr, spatial_rows);
+
+        uint32_t gemm_cycles = spatz_rt_read_cycle() - gemm_start;
+        if (stats) {
+            stats->rows = spatial_rows;
+            stats->k_tiles = k_tiles;
+            stats->prepare_cycles = 0u;
+            stats->gemm_cycles = gemm_cycles;
+            stats->last_prepare_cycles = 0u;
+            stats->last_gemm_cycles = gemm_cycles;
+            stats->total_cycles = spatz_rt_read_cycle() - total_start;
+            stats->status = NPU_CONV2D_PACKED_OK;
+        }
+
+        return NPU_CONV2D_PACKED_OK;
+    }
+
+    spatz_vec_zero_i32((uint32_t *)cfg->output_addr, spatial_rows * NPU_CONV2D_PACKED_OC_TILE);
+
+    for (uint32_t k_block = 0; k_block < k_tiles; k_block++) {
+        uint32_t lane = 0;
+        uint32_t weight_addr = cfg->weight_addr + (k_block * NPU_CONV2D_PACKED_K_TILE * NPU_CONV2D_PACKED_OC_TILE);
+
+        while (lane < NPU_CONV2D_PACKED_K_TILE) {
+            uint32_t k_index = (k_block * NPU_CONV2D_PACKED_K_TILE) + lane;
+            if (k_index >= k_total) {
+                break;
+            }
+
+            uint32_t spatial_index = k_index / cfg->input_c;
+            uint32_t c_base = k_index - (spatial_index * cfg->input_c);
+            uint32_t kh = spatial_index / cfg->kernel_w;
+            uint32_t kw = spatial_index - (kh * cfg->kernel_w);
+            uint32_t valid_lanes = min_u32(NPU_CONV2D_PACKED_K_TILE - lane, cfg->input_c - c_base);
+            if (k_index + valid_lanes > k_total) {
+                valid_lanes = k_total - k_index;
+            }
+
+            for (uint32_t oh = 0; oh < cfg->output_h; oh++) {
+                int32_t ih = signed_coord(oh * cfg->stride_h, kh * cfg->dilation_h, cfg->pad_h);
+                if (ih < 0 || (uint32_t)ih >= cfg->input_h) {
+                    continue;
+                }
+
+                uint32_t first_ow;
+                uint32_t valid_ow;
+                if (!output_valid_range(cfg->output_w, cfg->stride_w, kw * cfg->dilation_w,
+                                        cfg->pad_w, cfg->input_w, &first_ow, &valid_ow)) {
+                    continue;
+                }
+
+                uint32_t ow_done = 0;
+                while (ow_done < valid_ow) {
+                    uint32_t chunk_ow = valid_ow - ow_done;
+                    if (chunk_ow > SYSTOLIC_GEMM32_ACCUM_TILE_M) {
+                        chunk_ow = SYSTOLIC_GEMM32_ACCUM_TILE_M;
+                    }
+
+                    uint32_t ow = first_ow + ow_done;
+                    int32_t iw = signed_coord(ow * cfg->stride_w, kw * cfg->dilation_w, cfg->pad_w);
+                    uint32_t input_base = cfg->input_addr +
+                                          ((((uint32_t)ih * cfg->input_w + (uint32_t)iw) * cfg->input_c) + c_base);
+                    uint32_t output_base = cfg->output_addr +
+                                           (((oh * cfg->output_w) + ow) * NPU_CONV2D_PACKED_OC_TILE * 4u);
+                    uint32_t local_input_w = ((chunk_ow - 1u) * cfg->stride_w) + 1u;
+                    systolic_linebuf_cfg_t linebuf_cfg;
+
+                    linebuf_cfg.input_base = input_base;
+                    linebuf_cfg.input_h = 1u;
+                    linebuf_cfg.input_w = (uint16_t)local_input_w;
+                    linebuf_cfg.input_c = (uint16_t)valid_lanes;
+                    linebuf_cfg.output_w = (uint16_t)chunk_ow;
+                    linebuf_cfg.stride_h = 1u;
+                    linebuf_cfg.stride_w = (uint16_t)cfg->stride_w;
+                    linebuf_cfg.pad_h = 0u;
+                    linebuf_cfg.pad_w = 0u;
+                    linebuf_cfg.row_stride_bytes = cfg->input_w * cfg->input_c;
+                    linebuf_cfg.pixel_stride_bytes = cfg->input_c;
+                    linebuf_cfg.ow_step_bytes = cfg->stride_w * cfg->input_c;
+                    linebuf_cfg.oh_step_bytes = cfg->input_w * cfg->input_c;
+                    linebuf_cfg.kernel_h = 1u;
+                    linebuf_cfg.kernel_w = 1u;
+                    linebuf_cfg.c_base = 0u;
+                    linebuf_cfg.lane_base = (uint16_t)lane;
+                    linebuf_cfg.coalesce = 0u;
+                    linebuf_cfg.kgen = 0u;
+                    linebuf_cfg.k_seed_kh = 0u;
+                    linebuf_cfg.k_seed_kw = 0u;
+                    linebuf_cfg.k_seed_ic = 0u;
+                    linebuf_cfg.k_tiles = 0u;
+                    linebuf_cfg.spatial_m = chunk_ow;
+
+                    systolic_linebuf_config(&linebuf_cfg);
+                    systolic_gemm32_linebuf_accumulate(weight_addr, output_base, output_base, chunk_ow);
+
+                    ow_done += chunk_ow;
+                }
+            }
+
+            lane += valid_lanes;
         }
     }
 
-    uint32_t total_start = spatz_rt_read_cycle();
-    systolic_linebuf_config(&linebuf_cfg);
-
-    uint32_t gemm_start = spatz_rt_read_cycle();
-    systolic_gemm32_linebuf(cfg->weight_addr, cfg->output_addr, rows);
     uint32_t gemm_cycles = spatz_rt_read_cycle() - gemm_start;
 
     if (stats) {
-        stats->rows = rows;
-        stats->k_tiles = 1u;
+        stats->rows = spatial_rows;
+        stats->k_tiles = k_tiles;
         stats->prepare_cycles = 0u;
         stats->gemm_cycles = gemm_cycles;
         stats->last_prepare_cycles = 0u;

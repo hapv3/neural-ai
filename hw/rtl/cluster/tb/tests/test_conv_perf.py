@@ -63,6 +63,7 @@ P3_CASE_3X3_C5 = 14
 P3_CASE_REQUANT = 15
 P3_CASE_YOLO_RGB_TCDM_SPATZ = 16
 P3_CASE_LINEBUF_3X3_C3 = 17
+P3_CASE_LINEBUF_KGEN_3X3_C32 = 18
 
 YOLO_RGB_H = 64
 YOLO_RGB_W = 64
@@ -107,7 +108,26 @@ P3_CASES = {
         YOLO_RGB_OH // YOLO_RGB_TILE_OH,
         False,
     ),
-    P3_CASE_LINEBUF_3X3_C3: ("linebuffer conv3x3 IC3", 4, 4, 3, 4, 4, 3, 3, 1, 1, 1, 1, 32, 1, 0, 0, False),
+    P3_CASE_LINEBUF_3X3_C3: ("default linebuffer conv3x3 IC3", 4, 4, 3, 4, 4, 3, 3, 1, 1, 1, 1, 32, 1, 0, 0, False),
+    P3_CASE_LINEBUF_KGEN_3X3_C32: (
+        "linebuffer KGEN conv3x3 IC32",
+        4,
+        4,
+        32,
+        4,
+        4,
+        3,
+        3,
+        1,
+        1,
+        1,
+        1,
+        32,
+        9,
+        0,
+        0,
+        False,
+    ),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -142,7 +162,19 @@ def p3_case_enabled(case_id):
 
 
 def p3_case_is_linebuf(case_id):
-    return case_id == P3_CASE_LINEBUF_3X3_C3
+    return case_id in {
+        P3_CASE_5X5_P2_C3,
+        P3_CASE_1X3_C3,
+        P3_CASE_3X1_C3,
+        P3_CASE_1X5_C3,
+        P3_CASE_5X1_C3,
+        P3_CASE_3X3_S2_C3,
+        P3_CASE_3X3_C1,
+        P3_CASE_3X3_C5,
+        P3_CASE_YOLO_RGB_TCDM_SPATZ,
+        P3_CASE_LINEBUF_3X3_C3,
+        P3_CASE_LINEBUF_KGEN_3X3_C32,
+    }
 
 
 def read_dtcm_word(dut, addr):
@@ -554,7 +586,16 @@ async def check_stats(
     )
 
 
-async def check_stats_pair(dut, name, addr, expected_rows, expected_k_tiles, expected_idma_tiles, expected_spatz_tiles):
+async def check_stats_pair(
+    dut,
+    name,
+    addr,
+    expected_rows,
+    expected_k_tiles,
+    expected_idma_tiles,
+    expected_spatz_tiles,
+    allow_linebuf=False,
+):
     stats = await read_l2_bytes(dut, addr, 96)
     for tile in range(2):
         base = tile * 48
@@ -573,21 +614,31 @@ async def check_stats_pair(dut, name, addr, expected_rows, expected_k_tiles, exp
         assert status == 0, f"{name} tile {tile}: scheduler status=0x{status:08x}"
         assert rows == expected_rows, f"{name} tile {tile}: rows={rows} expected={expected_rows}"
         assert k_tiles == expected_k_tiles, f"{name} tile {tile}: k_tiles={k_tiles} expected={expected_k_tiles}"
-        assert prepare_cycles > 0, f"{name} tile {tile}: prepare_cycles must be non-zero"
+        if allow_linebuf:
+            assert prepare_cycles == 0, f"{name} tile {tile}: linebuffer prepare_cycles={prepare_cycles} expected=0"
+            assert last_prepare_cycles == 0, f"{name} tile {tile}: linebuffer last_prepare_cycles={last_prepare_cycles} expected=0"
+        else:
+            assert prepare_cycles > 0, f"{name} tile {tile}: prepare_cycles must be non-zero"
+            assert last_prepare_cycles > 0, f"{name} tile {tile}: last_prepare_cycles must be non-zero"
         assert gemm_cycles > 0, f"{name} tile {tile}: gemm_cycles must be non-zero"
         assert total_cycles >= prepare_cycles + gemm_cycles, (
             f"{name} tile {tile}: total_cycles={total_cycles} prepare={prepare_cycles} gemm={gemm_cycles}"
         )
-        assert last_prepare_cycles > 0, f"{name} tile {tile}: last_prepare_cycles must be non-zero"
         assert last_gemm_cycles > 0, f"{name} tile {tile}: last_gemm_cycles must be non-zero"
-        assert idma_tiles == expected_idma_tiles, f"{name} tile {tile}: idma={idma_tiles} expected={expected_idma_tiles}"
-        if expected_idma_tiles:
-            assert idma_transfers >= idma_tiles, (
-                f"{name} tile {tile}: idma_transfers={idma_transfers} must cover idma_tiles={idma_tiles}"
+        if allow_linebuf:
+            assert idma_tiles + spatz_tiles + scalar_tiles == 0, (
+                f"{name} tile {tile}: linebuffer backend counters idma={idma_tiles} spatz={spatz_tiles} "
+                f"scalar={scalar_tiles} expected=0"
             )
         else:
-            assert idma_transfers == 0, f"{name} tile {tile}: idma_transfers={idma_transfers} expected=0"
-        assert spatz_tiles == expected_spatz_tiles, f"{name} tile {tile}: spatz={spatz_tiles} expected={expected_spatz_tiles}"
+            assert idma_tiles == expected_idma_tiles, f"{name} tile {tile}: idma={idma_tiles} expected={expected_idma_tiles}"
+            if expected_idma_tiles:
+                assert idma_transfers >= idma_tiles, (
+                    f"{name} tile {tile}: idma_transfers={idma_transfers} must cover idma_tiles={idma_tiles}"
+                )
+            else:
+                assert idma_transfers == 0, f"{name} tile {tile}: idma_transfers={idma_transfers} expected=0"
+            assert spatz_tiles == expected_spatz_tiles, f"{name} tile {tile}: spatz={spatz_tiles} expected={expected_spatz_tiles}"
         assert scalar_tiles == 0, f"{name} tile {tile}: scalar prepare backend must not be used"
         dut._log.info(
             "%s tile %d stats: rows=%d k_tiles=%d prepare=%d gemm=%d total=%d idma=%d idma_tx=%d spatz=%d scalar=%d",

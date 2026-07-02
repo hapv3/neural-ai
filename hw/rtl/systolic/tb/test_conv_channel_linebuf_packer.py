@@ -41,7 +41,7 @@ def output_dim(input_size, kernel_size, pad, stride):
 
 
 def golden_vectors(input_data, *, input_h, input_w, input_c, output_h, output_w,
-                   kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, c_base):
+                   kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w, c_base, lane_base=0):
     vectors = []
     for oh in range(output_h):
         for ow in range(output_w):
@@ -51,12 +51,39 @@ def golden_vectors(input_data, *, input_h, input_w, input_c, output_h, output_w,
                     iw = ow * stride_w + kw - pad_w
                     row = [0] * ARRAY_DIM
                     if 0 <= ih < input_h and 0 <= iw < input_w:
-                        for lane in range(ARRAY_DIM):
+                        for lane in range(ARRAY_DIM - lane_base):
                             channel = c_base + lane
                             if channel < input_c:
                                 index = ((ih * input_w) + iw) * input_c + channel
-                                row[lane] = input_data[index]
+                                row[lane_base + lane] = input_data[index]
                     vectors.append(row)
+    return vectors
+
+
+def golden_coalesced_vectors(input_data, *, input_h, input_w, input_c, output_h, output_w,
+                             kernel_h, kernel_w, stride_h, stride_w, pad_h, pad_w,
+                             c_base, lane_base=0):
+    vectors = []
+    for oh in range(output_h):
+        for ow in range(output_w):
+            row = [0] * ARRAY_DIM
+            lane_base_cur = lane_base
+            for kh in range(kernel_h):
+                for kw in range(kernel_w):
+                    ih = oh * stride_h + kh - pad_h
+                    iw = ow * stride_w + kw - pad_w
+                    for channel in range(c_base, input_c):
+                        if lane_base_cur >= ARRAY_DIM:
+                            break
+                        if 0 <= ih < input_h and 0 <= iw < input_w:
+                            index = ((ih * input_w) + iw) * input_c + channel
+                            row[lane_base_cur] = input_data[index]
+                        lane_base_cur += 1
+                    if lane_base_cur >= ARRAY_DIM:
+                        break
+                if lane_base_cur >= ARRAY_DIM:
+                    break
+            vectors.append(row)
     return vectors
 
 
@@ -80,6 +107,12 @@ async def reset(dut):
     dut.cfg_pad_h_i.value = 0
     dut.cfg_pad_w_i.value = 0
     dut.cfg_c_base_i.value = 0
+    dut.cfg_lane_base_i.value = 0
+    dut.cfg_coalesce_i.value = 0
+    dut.cfg_kgen_i.value = 0
+    dut.cfg_k_seed_kh_i.value = 0
+    dut.cfg_k_seed_kw_i.value = 0
+    dut.cfg_k_seed_ic_i.value = 0
     dut.obi_gnt_i.value = 1
     dut.obi_rvalid_i.value = 0
     dut.obi_rdata_i.value = 0
@@ -102,7 +135,7 @@ async def memory_responder(dut, memory):
 
 async def run_case(dut, *, name, input_h, input_w, input_c, kernel_h, kernel_w,
                    stride_h, stride_w, pad_h, pad_w, c_base, stall_ready,
-                   expect_bypass=False, log_result=True):
+                   lane_base=0, coalesce=False, expect_bypass=False, log_result=True):
     output_h = output_dim(input_h, kernel_h, pad_h, stride_h)
     output_w = output_dim(input_w, kernel_w, pad_w, stride_w)
     assert output_h > 0 and output_w > 0
@@ -118,7 +151,8 @@ async def run_case(dut, *, name, input_h, input_w, input_c, kernel_h, kernel_w,
         row_stride = input_w * input_c
         pixel_stride = input_c
         origin_base = (INPUT_BASE - pad_h * row_stride) & 0xFFFFFFFF
-        expected = golden_vectors(
+        golden_fn = golden_coalesced_vectors if coalesce else golden_vectors
+        expected = golden_fn(
             input_data,
             input_h=input_h,
             input_w=input_w,
@@ -132,6 +166,7 @@ async def run_case(dut, *, name, input_h, input_w, input_c, kernel_h, kernel_w,
             pad_h=pad_h,
             pad_w=pad_w,
             c_base=c_base,
+            lane_base=lane_base,
         )
 
         dut.dim_m_i.value = output_h * output_w
@@ -151,6 +186,8 @@ async def run_case(dut, *, name, input_h, input_w, input_c, kernel_h, kernel_w,
         dut.cfg_pad_h_i.value = pad_h
         dut.cfg_pad_w_i.value = pad_w
         dut.cfg_c_base_i.value = c_base
+        dut.cfg_lane_base_i.value = lane_base
+        dut.cfg_coalesce_i.value = 1 if coalesce else 0
 
         await RisingEdge(dut.clk_i)
         dut.start_i.value = 1
@@ -214,6 +251,51 @@ async def run_case(dut, *, name, input_h, input_w, input_c, kernel_h, kernel_w,
             )
     finally:
         responder.cancel()
+
+
+async def run_rejected_case(dut, *, name, input_h, input_w, input_c,
+                            kernel_h, kernel_w, stride_h, stride_w,
+                            pad_h, pad_w, c_base):
+    await reset(dut)
+
+    row_stride = input_w * input_c
+    pixel_stride = input_c
+    output_h = max(1, output_dim(input_h, kernel_h, pad_h, stride_h))
+    output_w = max(1, output_dim(input_w, kernel_w, pad_w, stride_w))
+
+    dut.dim_m_i.value = output_h * output_w
+    dut.cfg_origin_base_i.value = (INPUT_BASE - pad_h * row_stride) & 0xFFFFFFFF
+    dut.cfg_row_stride_bytes_i.value = row_stride
+    dut.cfg_pixel_stride_bytes_i.value = pixel_stride
+    dut.cfg_ow_step_bytes_i.value = stride_w * pixel_stride
+    dut.cfg_oh_step_bytes_i.value = stride_h * row_stride
+    dut.cfg_input_h_i.value = input_h
+    dut.cfg_input_w_i.value = input_w
+    dut.cfg_input_c_i.value = input_c
+    dut.cfg_output_w_i.value = output_w
+    dut.cfg_kernel_h_i.value = kernel_h
+    dut.cfg_kernel_w_i.value = kernel_w
+    dut.cfg_stride_h_i.value = stride_h
+    dut.cfg_stride_w_i.value = stride_w
+    dut.cfg_pad_h_i.value = pad_h
+    dut.cfg_pad_w_i.value = pad_w
+    dut.cfg_c_base_i.value = c_base
+    dut.cfg_lane_base_i.value = 0
+
+    await RisingEdge(dut.clk_i)
+    dut.start_i.value = 1
+    await RisingEdge(dut.clk_i)
+    dut.start_i.value = 0
+
+    for _ in range(8):
+        await RisingEdge(dut.clk_i)
+        assert int(dut.row_valid_o.value) == 0, f"{name}: emitted row for rejected config"
+        if int(dut.done_o.value) == 1:
+            assert int(dut.busy_o.value) == 0, f"{name}: busy after reject"
+            dut._log.info("%s: rejected as expected", name)
+            return
+
+    raise AssertionError(f"{name}: did not reject unsupported config")
 
 
 @cocotb.test()
@@ -345,6 +427,28 @@ async def conv_channel_linebuf_c80_1x1_stride2_crossing(dut):
 
 
 @cocotb.test()
+async def conv_channel_linebuf_c33_1x1_width640_boundary(dut):
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    await run_case(
+        dut,
+        name="C33 1x1 width640 boundary",
+        input_h=1,
+        input_w=640,
+        input_c=33,
+        kernel_h=1,
+        kernel_w=1,
+        stride_h=1,
+        stride_w=1,
+        pad_h=0,
+        pad_w=0,
+        c_base=32,
+        stall_ready=False,
+        expect_bypass=True,
+    )
+
+
+@cocotb.test()
 async def conv_channel_linebuf_c40_1x1_padded_uses_ring(dut):
     clock = Clock(dut.clk_i, 10, unit="ns")
     cocotb.start_soon(clock.start())
@@ -367,7 +471,54 @@ async def conv_channel_linebuf_c40_1x1_padded_uses_ring(dut):
 
 
 @cocotb.test()
-async def conv_channel_linebuf_kernel_1_to_9_sweep(dut):
+async def conv_channel_linebuf_lane_base_shift(dut):
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    await run_case(
+        dut,
+        name="C8 1x1 lane_base5",
+        input_h=2,
+        input_w=4,
+        input_c=8,
+        kernel_h=1,
+        kernel_w=1,
+        stride_h=1,
+        stride_w=1,
+        pad_h=0,
+        pad_w=0,
+        c_base=0,
+        lane_base=5,
+        stall_ready=False,
+        expect_bypass=True,
+    )
+
+
+@cocotb.test()
+async def conv_channel_linebuf_coalesced_3x3_c3(dut):
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    await run_case(
+        dut,
+        name="coalesced 3x3 C3 K27",
+        input_h=4,
+        input_w=4,
+        input_c=3,
+        kernel_h=3,
+        kernel_w=3,
+        stride_h=1,
+        stride_w=1,
+        pad_h=1,
+        pad_w=1,
+        c_base=0,
+        lane_base=0,
+        coalesce=True,
+        stall_ready=True,
+        expect_bypass=False,
+    )
+
+
+@cocotb.test()
+async def conv_channel_linebuf_kernel_1_to_5_sweep(dut):
     clock = Clock(dut.clk_i, 10, unit="ns")
     cocotb.start_soon(clock.start())
 
@@ -375,8 +526,8 @@ async def conv_channel_linebuf_kernel_1_to_9_sweep(dut):
     total_vectors = 0
     total_fetch_beats = 0
     total_bypass_vectors = 0
-    for kernel_h in range(1, 10):
-        for kernel_w in range(1, 10):
+    for kernel_h in range(1, 6):
+        for kernel_w in range(1, 6):
             input_h = 7 + (kernel_h & 1)
             input_w = 8 + (kernel_w & 1)
             input_c = 48 if ((kernel_h + kernel_w) & 1) == 0 else 80
@@ -417,4 +568,53 @@ async def conv_channel_linebuf_kernel_1_to_9_sweep(dut):
         total_vectors,
         total_fetch_beats,
         total_bypass_vectors,
+    )
+
+
+@cocotb.test()
+async def conv_channel_linebuf_rejects_over_limit_configs(dut):
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    await run_rejected_case(
+        dut,
+        name="reject 7x7 with K_MAX5",
+        input_h=8,
+        input_w=8,
+        input_c=48,
+        kernel_h=7,
+        kernel_w=7,
+        stride_h=1,
+        stride_w=1,
+        pad_h=3,
+        pad_w=3,
+        c_base=0,
+    )
+    await run_rejected_case(
+        dut,
+        name="reject 9x9 with K_MAX5",
+        input_h=10,
+        input_w=10,
+        input_c=80,
+        kernel_h=9,
+        kernel_w=9,
+        stride_h=1,
+        stride_w=1,
+        pad_h=4,
+        pad_w=4,
+        c_base=32,
+    )
+    await run_rejected_case(
+        dut,
+        name="reject input_w641 with MAX_INPUT_W640",
+        input_h=1,
+        input_w=641,
+        input_c=33,
+        kernel_h=1,
+        kernel_w=1,
+        stride_h=1,
+        stride_w=1,
+        pad_h=0,
+        pad_w=0,
+        c_base=32,
     )

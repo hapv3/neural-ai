@@ -55,22 +55,64 @@ OFM INT32 rows
 psum writeback or requant + activation + store
 ```
 
-## P5 Candidate: Shared Generic Max-9-Line Linebuffer
+## Default Path: Shared Generic Max-5-Line Linebuffer
 
-Status: architecture proposal only. P3/P4 continue to use the current
-software+iDMA+Spatz packed prepare path. This section defines the direct Conv2D
-feeder architecture to revisit if measured packed-prepare cost remains the
-dominant bottleneck.
+Status: implemented as the highest-priority Conv2D scheduler path for supported
+TCDM-resident tensors. P3/P4 software+iDMA+Spatz packed prepare remains as a
+backup for unsupported shapes, L2-only sources, wider kernels, and debug
+comparison.
+
+The current implementation is functionally complete for the bounded linebuffer
+envelope:
+
+- input activation is read as raw rows from Shared Data TCDM through
+  `conv_channel_linebuf_packer`;
+- linebuffer output feeds the systolic controller IFM stream directly;
+- for `KH*KW*IC <= 32`, coalesced window-pack mode emits one IFM row per output
+  spatial position and packs lanes in `{kh, kw, ic}` order;
+- for `K > 32`, the KGEN v0 frontend can run a small spatial micro-tile as
+  multiple internal K tiles from one MMIO start / one wait;
+- unsupported `K > 32` shapes fall back to per-slice linebuffer accumulation
+  into an INT32 psum/output tensor;
+- the scheduler zeroes the output psum tile before the first accumulated slice
+  in non-coalesced mode;
+- no `M x 32` im2col tile is materialized for supported linebuffer cases.
+
+Current focused regression results:
+
+- `CONV_PERF_CASE=17` (`4x4`, `3x3/s1/p1`, `IC=3`, `OC=32`,
+  TCDM input/weight/output): `rows=16`, `k_tiles=1`, `prepare=0`,
+  `gemm=828`, `total=868`, exact output match. This validates the small-K
+  coalesced first-layer path.
+- `CONV_PERF_CASE=18` (`4x4`, `3x3/s1/p1`, `IC=32`, `OC=32`):
+  `rows=16`, `k_tiles=9`, `prepare=0`, `gemm=5258`, `total=5298`, exact output
+  match. This validates KGEN v0: host/Python supplies seed `{0,0,0}` and
+  `k_tile_count=9`, Snitch starts once and waits once, RTL increments lane
+  descriptors internally.
+
+Important limitation: KGEN v0 is still tile-size gated. Firmware enables it for
+`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` (currently `16`) and `IC <= 32` or
+`IC % 32 == 0`. The old `M <= 8` OFM FIFO gate is removed: a parallel OFM drain
+engine now runs beside the main weight/IFM compute FSM. For accumulated K tiles,
+the drain engine reads the previous psum row from O-TCDM port 0, adds the new
+OFM FIFO row, writes the accumulated row back, and leaves compute running until
+normal FIFO backpressure is required. Larger M should only be enabled after a
+dedicated stress sweep raises the firmware gate.
 
 ### Requirement Envelope
 
-- Filter size: `1x1` through `9x9`, including asymmetric filters such as `1x9`
-  and `9x1`.
+- Native linebuffer filter size: `1x1` through `5x5`, including asymmetric
+  filters such as `1x5` and `5x1`.
+- Larger filters from the model/compiler requirement, such as `7x7` and `9x9`,
+  are handled by compiler/scheduler decomposition or fall back to the
+  software+iDMA+Spatz packed prepare path.
 - Stride modes: `1x1`, `2x2`, `2x1`, `1x2`.
 - `1x1` with stride `2x2` is explicitly unsupported.
-- Input tile width: `7..4096` for non-`1x1`; `1..4096` for `1x1`.
+- Native linebuffer input tile width: `1..640`.
+- Wider logical tiles are split into stripes before using linebuffer.
 - Input tile height: `1..4096`.
-- Output tile width: `5..4096` for non-`1x1`; `1..4096` for `1x1`.
+- Native linebuffer output tile width is derived from the `input_w <= 640`
+  stripe. Wider logical output tiles are decomposed into multiple commands.
 - Output tile height: `1..4096`.
 - Input/output maps: `1..4096`, processed as `IC` and `OC` tiles.
 - Internal output micro-tile shapes: `4x4`, `8x4`, `16x4`, `8x8`, `16x8`,
@@ -97,13 +139,14 @@ Shared Data TCDM
  └─ INT8/INT32 output tiles
         │
         ▼
-conv_linebuf_scheduler
+conv_channel_linebuf_packer
         │
         ├─ config/register block
         ├─ output micro-tile sequencer
-        ├─ row loader into shared 9-line ring buffer
+        ├─ row loader into shared max-5-line ring buffer
         ├─ window/tap extractor with pad-zero injection
-        ├─ K32 IFM row packer
+        ├─ C32 IFM row packer
+        ├─ dedicated 1x1 bypass
         └─ systolic feed adapter
                 │
                 ▼
@@ -155,9 +198,9 @@ treats the local TCDM table as immutable work items:
 - L2-to-TCDM input stripe copy ranges;
 - weight tile and psum/output addresses;
 - `OC` and `K` tile loop expansion;
-- pre-decoded K32 lane descriptors;
-- padding/zero-injection masks;
-- linebuffer register images;
+- C32 channel-block linebuffer descriptors;
+- padding/zero-injection metadata;
+- systolic/requant register images;
 - expected debug/golden metadata for test mode.
 
 Hot-path firmware must not perform division/modulo-heavy Conv2D coordinate
@@ -167,7 +210,7 @@ start accelerator, wait for completion/IRQ, record status, and advance.
 ```text
 Python host compiler
   -> layer graph + tensor shapes + addresses
-  -> tile descriptors + lane descriptors + DMA copy descriptors
+  -> tile descriptors + channel-block descriptors + DMA copy descriptors
   -> write command stream into L2/DRAM
   -> AXI-slave writes command control/status registers
   -> Snitch iDMA copy into fixed TCDM command region
@@ -279,8 +322,13 @@ Scheduler rules:
 - `1x1/s1`, contiguous `IC` blocks should bypass the linebuffer and use the
   cheapest direct C32 stream path.
 - `1x1/s2x2` must trap as unsupported.
-- `K > 32` is expanded by the host into multiple descriptors. The linebuffer
-  emits one `M x 32` logical block per linebuffer descriptor.
+- `K > 32` should use KGEN when inside the safe gate
+  (`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M`, `IC <= 32` or `IC % 32 == 0`). The
+  descriptor provides seed `{kh,kw,ic}` and tile count;
+  RTL generates the 32 lane descriptors and loops over K tiles internally.
+- `K > 32` outside the KGEN safe gate is expanded by the host into multiple
+  descriptors or falls back to packed prepare until the KGEN stress envelope is
+  expanded.
 - Intermediate K descriptors write/read INT32 psum. Only host-marked final K
   descriptors may enable fused requant/activation.
 - Firmware may validate descriptor version, bounds, and unsupported mode bits,
@@ -288,9 +336,12 @@ Scheduler rules:
 
 ### Layer 1: Config/Register Block
 
-The register block should live with the systolic controller/direct feeder, not
-inside the cluster-wide control register file. It exposes shape, tile, stride,
-padding, address, mode, and lane-descriptor registers.
+The register block lives with the systolic controller/direct feeder, not inside
+the cluster-wide control register file. The removed generic K-mapping
+interface is no longer part of the RTL. The active
+`conv_channel_linebuf_packer` interface is channel-block based: one descriptor
+selects a `c_base` C32 block and emits raw channel rows for `spatial_m` output
+positions.
 
 ```c
 enum npu_cmd_type {
@@ -307,30 +358,29 @@ struct npu_cmd_header {
   uint16_t flags;
 };
 
-struct lane_desc {
-  bool valid;
-  uint8_t kh;
-  uint8_t kw;
-  uint16_t ic;
-};
-
 struct linebuf_cfg {
   uint32_t input_base;
   uint32_t weight_base;
   uint32_t psum_base;
   uint32_t output_base;
 
-  uint16_t input_h, input_w, input_c;
-  uint16_t output_h, output_w, output_c;
-  uint8_t kernel_h, kernel_w;
-  uint8_t stride_h, stride_w;
-  int8_t pad_top, pad_left;
-  int8_t pad_bottom, pad_right;
+  uint16_t input_h;
+  uint16_t input_w;
+  uint16_t input_c;
+  uint16_t output_w;
+  uint16_t stride_h;
+  uint16_t stride_w;
+  uint16_t pad_h;
+  uint16_t pad_w;
+  uint16_t kernel_h;
+  uint16_t kernel_w;
+  uint16_t c_base;
+  uint32_t spatial_m;
 
-  uint16_t tile_oh, tile_ow;
-  uint16_t tile_oh_base, tile_ow_base;
-  uint16_t oc_base;
-  uint16_t k_base;
+  uint32_t row_stride_bytes;
+  uint32_t pixel_stride_bytes;
+  uint32_t ow_step_bytes;
+  uint32_t oh_step_bytes;
 
   bool first_k;
   bool last_k;
@@ -342,9 +392,6 @@ struct linebuf_cfg {
 struct linebuf_conv_cmd {
   struct npu_cmd_header header;
   struct linebuf_cfg cfg;
-  struct lane_desc lane[32];
-  uint32_t pad_zero_mask;
-  uint32_t k_tail_zero_mask;
   uint32_t debug_im2col_base;
 };
 ```
@@ -404,15 +451,17 @@ for oh = desc.tile.oh0; oh < desc.tile.oh1; oh++ {
 }
 ```
 
-For the worst supported `16x16`, `9x9`, `stride=2` micro-tile, the input span is
-`39x39`. The design still needs only a max-9-line ring because rows are streamed
-through the ring; it must not allocate a full `39`-row tile buffer.
+For the native `16x16`, `5x5`, `stride=2` micro-tile, the input span is
+`35x35`. The implemented channel linebuffer keeps only the active kernel-row
+window (`K_MAX=5`) and streams rows through the ring; it must not allocate a
+full `35`-row tile buffer.
 
-### Layer 3: Shared 9-Line Ring Buffer
+### Layer 3: Shared 5-Line Channel Ring Buffer
 
-The ring buffer stores at most nine input rows for the current channel/K slice.
-It should be banked around the native TCDM beat width so full-width reads are
-used when loading rows. The physical storage is shared across all kernel modes.
+The ring buffer stores at most five input rows for the current C32 channel
+block. It is capped by the current RTL contract: `K_MAX=5`,
+`MAX_INPUT_W=640`, `C_BLOCK=32`. The physical storage is shared across all
+native kernel modes.
 
 ```c
 struct row_slot {
@@ -421,11 +470,11 @@ struct row_slot {
   uint8_t data[MAX_SEGMENT_W][CHANNEL_SLICE_BYTES];
 };
 
-row_slot rows[9];
+row_slot rows[5];
 
 void ensure_row_resident(int32_t global_ih) {
   if (global_ih < 0 || global_ih >= input_h) return; // pad row
-  slot = global_ih % 9;
+  slot = global_ih % 5;
   if (rows[slot].valid && rows[slot].global_ih_tag == global_ih) return;
 
   rows[slot].valid = false;
@@ -440,73 +489,75 @@ void ensure_row_resident(int32_t global_ih) {
 
 Implementation notes:
 
-- The buffer should be segment-based, not full-image-width based. A full
-  `9 * 4096 * 32B` design is too large for the cluster SRAM budget.
-- The loader operates on the current `K_TILE=32` lane descriptor. For common
-  `IC >= 32` aligned chunks, the channel slice is a contiguous `C32` vector.
-- For small-IC first layers such as RGB, the row data can store only valid
-  channels and let the K32 packer zero-fill the remaining lanes.
+- The buffer is capped to the current native contract, `5 * 640 * 32B =
+  100 KiB`. Wider tiles and `7x7/9x9` kernels are decomposed or use the
+  software+iDMA+Spatz packed prepare fallback.
+- The loader operates on a contiguous `C32` channel block selected by `c_base`.
+- For tails or small-IC first layers, invalid channels are zero-filled by the
+  channel packer.
 
-### Layer 4: Lane Descriptor / K32 Mapping
+### Layer 4: Channel-Block Descriptor Mapping
 
-Each systolic IFM row is 32 bytes. The host pre-decodes each K-lane into
-`(kh, kw, ic)` and stores the result in the command descriptor.
+Each emitted systolic IFM row is 32 bytes: one contiguous C32 block for one
+spatial/kernel position. The host descriptor programs row/pixel strides and
+step sizes instead of per-lane `(kh, kw, ic)` fields.
 
 ```c
-// Host-side Python/C model.
-void build_lane_desc_on_host(desc[32], uint32_t k_base,
-                             uint32_t IC, uint32_t KH, uint32_t KW) {
-  for (lane = 0; lane < 32; lane++) {
-    k = k_base + lane;
-    if (k >= IC * KH * KW) {
-      desc[lane].valid = false;
-      continue;
-    }
-    desc[lane].kh = k / (KW * IC);
-    rem = k % (KW * IC);
-    desc[lane].kw = rem / IC;
-    desc[lane].ic = rem % IC;
-    desc[lane].valid = true;
-  }
+void build_channel_linebuf_desc(desc, tensor, tile, uint32_t c_base) {
+  desc.input_base = tensor.input_base + c_base;
+  desc.input_h = tensor.input_h;
+  desc.input_w = tensor.input_w;
+  desc.input_c = tensor.input_c;
+  desc.output_w = tile.output_w;
+  desc.stride_h = tile.stride_h;
+  desc.stride_w = tile.stride_w;
+  desc.pad_h = tile.pad_h;
+  desc.pad_w = tile.pad_w;
+  desc.kernel_h = tile.kernel_h;
+  desc.kernel_w = tile.kernel_w;
+  desc.c_base = c_base;
+  desc.spatial_m = tile.output_h * tile.output_w;
+  desc.row_stride_bytes = tensor.input_w * tensor.input_c;
+  desc.pixel_stride_bytes = tensor.input_c;
+  desc.ow_step_bytes = tile.stride_w * tensor.input_c;
+  desc.oh_step_bytes = tile.stride_h * tensor.input_w * tensor.input_c;
 }
 ```
 
-This mapping is the same contract currently used by the software packed prepare
-path, so the existing Python golden model can be reused.
-
-Hardware consumes the pre-decoded `lane_desc[32]` from the descriptor table. It
-must not divide by `IC` or `KW * IC` in the hot path.
+Hardware consumes the descriptor directly. It must not divide by `IC` or
+`KW * IC` in the hot path.
 
 ### Layer 5: Window Extractor and Pad-Zero Injection
 
-The extractor consumes output coordinates and lane descriptors, then emits one
-packed 32-byte IFM row. Pad and K-tail lanes are zero-injected in hardware.
+The extractor consumes output coordinates and the current C32 descriptor, then
+emits one packed 32-byte IFM row. Pad and channel-tail lanes are zero-injected
+in hardware.
 
 ```c
-uint8_t make_ifm_lane(uint32_t oh, uint32_t ow, lane_desc d) {
-  if (!d.valid) return 0;
+uint8_t make_ifm_lane(uint32_t oh, uint32_t ow,
+                      uint32_t kh, uint32_t kw, uint32_t lane) {
+  channel = c_base + lane;
+  if (channel >= input_c) return 0;
 
-  ih = oh * stride_h + d.kh - pad_top;
-  iw = ow * stride_w + d.kw - pad_left;
+  ih = oh * stride_h + kh - pad_h;
+  iw = ow * stride_w + kw - pad_w;
   if (ih < 0 || ih >= input_h || iw < 0 || iw >= input_w) return 0;
   if (!row_resident(ih)) return stall_until_row_loaded();
 
-  return linebuf_read(ih % 9, iw - input_x_min, d.ic);
+  return linebuf_read(ih % 5, iw - input_x_min, lane);
 }
 
-// Host may precompute descriptor-level masks. Hardware still keeps final
-// boundary checks for safety and for micro-tiles touching image borders.
-void emit_ifm_row(uint32_t oh, uint32_t ow) {
+void emit_ifm_row(uint32_t oh, uint32_t ow, uint32_t kh, uint32_t kw) {
   uint8_t ifm[32];
   for (lane = 0; lane < 32; lane++) {
-    ifm[lane] = make_ifm_lane(oh, ow, lane_desc[lane]);
+    ifm[lane] = make_ifm_lane(oh, ow, kh, kw, lane);
   }
   push_ifm_to_systolic(ifm);
 }
 ```
 
-ASIC note: a fully generic `32`-lane arbitrary byte gather is expensive. The
-first implementation should prioritize:
+ASIC note: a fully generic `32`-lane arbitrary byte gather was intentionally
+dropped from the current RTL. The current implementation prioritizes:
 
 - contiguous C32 lane groups for `IC >= 32`;
 - RGB/small-IC grouped taps for `3x3` first-layer style workloads;
@@ -611,11 +662,12 @@ for oc_tile in 0..OC step 32:
         store INT32 psum tile
 ```
 
-Phase 0 implements psum accumulation in the systolic output drain path. This is
-intentionally conservative: the array computes one `A*W` block, the controller
-reads the previous psum row from TCDM, adds it to the OFM row, then either
-writes the accumulated INT32 row back or feeds the accumulated row into the
-requant pipeline for the final K-block.
+Phase 0 implements psum accumulation in a parallel systolic output drain engine.
+The main FSM continues loading weights and feeding IFM rows while the drain
+engine consumes OFM FIFO rows, reads the previous psum row from TCDM, adds it,
+then either writes the accumulated INT32 row back or feeds the accumulated row
+into the requant pipeline for the final K-block. Compute only stalls through
+normal OFM FIFO backpressure if the drain engine cannot keep up.
 
 ## Packed Tile Contract
 
