@@ -55,28 +55,31 @@ OFM INT32 rows
 psum writeback or requant + activation + store
 ```
 
-## Default Path: Shared Generic Max-5-Line Linebuffer
+## Default Path: Stream Linebuffer Target
 
-Status: implemented as the highest-priority Conv2D scheduler path for supported
-TCDM-resident tensors. P3/P4 software+iDMA+Spatz packed prepare remains as a
-backup for unsupported shapes, L2-only sources, wider kernels, and debug
-comparison.
+Status: `conv_channel_linebuf_packer` proved functional but not performant
+enough for the default Conv2D path. It is now treated as a legacy/reference
+block. The replacement target is `conv_linebuf_stream_packer`: a window-cache
+and segment-prefetch linebuffer that emits one `256-bit` IFM vector per cycle to
+the systolic controller for supported steady-state regions.
 
-The current implementation is functionally complete for the bounded linebuffer
-envelope:
+Detailed measurement and the design decision are recorded in
+`docs/linebuffer_architecture.md`.
 
-- input activation is read as raw rows from Shared Data TCDM through
-  `conv_channel_linebuf_packer`;
-- linebuffer output feeds the systolic controller IFM stream directly;
+The target linebuffer envelope is:
+
+- input activation is read as raw rows/segments from Shared Data TCDM;
+- row SRAM banks are used as backing/prefetch storage, not as the per-output
+  tap source;
+- a `K_MAX x K_MAX x 32B` window cache feeds a 32-lane byte mux;
 - for `KH*KW*IC <= 32`, coalesced window-pack mode emits one IFM row per output
   spatial position and packs lanes in `{kh, kw, ic}` order;
-- for `K > 32`, the KGEN v0 frontend can run a small spatial micro-tile as
-  multiple internal K tiles from one MMIO start / one wait;
-- unsupported `K > 32` shapes fall back to per-slice linebuffer accumulation
-  into an INT32 psum/output tensor;
-- the scheduler zeroes the output psum tile before the first accumulated slice
-  in non-coalesced mode;
-- no `M x 32` im2col tile is materialized for supported linebuffer cases.
+- for `K > 32`, the KGEN frontend runs multiple internal K tiles from one
+  MMIO start / one wait, using RTL-generated lane descriptors from host seed
+  `{kh,kw,ic}`;
+- no `M x 32` im2col tile is materialized for supported linebuffer cases;
+- P3/P4 software+iDMA+Spatz packed prepare remains the backup for unsupported
+  shapes, L2-only sources, wider kernels, and debug comparison.
 
 Current focused regression results:
 
@@ -90,14 +93,14 @@ Current focused regression results:
   `k_tile_count=9`, Snitch starts once and waits once, RTL increments lane
   descriptors internally.
 
-Important limitation: KGEN v0 is still tile-size gated. Firmware enables it for
-`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` (currently `16`) and `IC <= 32` or
-`IC % 32 == 0`. The old `M <= 8` OFM FIFO gate is removed: a parallel OFM drain
-engine now runs beside the main weight/IFM compute FSM. For accumulated K tiles,
-the drain engine reads the previous psum row from O-TCDM port 0, adds the new
-OFM FIFO row, writes the accumulated row back, and leaves compute running until
-normal FIFO backpressure is required. Larger M should only be enabled after a
-dedicated stress sweep raises the firmware gate.
+Important limitation: the legacy linebuffer measurements below are correctness
+baselines, not performance sign-off. KGEN/accumulation semantics are kept, but
+the performance path moves to the stream linebuffer. The old `M <= 8` OFM FIFO
+gate is removed: a parallel OFM drain engine now runs beside the main
+weight/IFM compute FSM. For accumulated K tiles, the drain engine reads the
+previous psum row from O-TCDM port 0, adds the new OFM FIFO row, writes the
+accumulated row back, and leaves compute running until normal FIFO backpressure
+is required.
 
 ### Requirement Envelope
 
@@ -139,13 +142,14 @@ Shared Data TCDM
  └─ INT8/INT32 output tiles
         │
         ▼
-conv_channel_linebuf_packer
+conv_linebuf_stream_packer
         │
         ├─ config/register block
         ├─ output micro-tile sequencer
-        ├─ row loader into shared max-5-line ring buffer
-        ├─ window/tap extractor with pad-zero injection
-        ├─ C32 IFM row packer
+        ├─ row/segment prefetch into SRAM banks
+        ├─ K_MAX x K_MAX x 32B window cache
+        ├─ lane descriptor generator with pad-zero injection
+        ├─ C32 IFM stream packer
         ├─ dedicated 1x1 bypass
         └─ systolic feed adapter
                 │
@@ -337,11 +341,12 @@ Scheduler rules:
 ### Layer 1: Config/Register Block
 
 The register block lives with the systolic controller/direct feeder, not inside
-the cluster-wide control register file. The removed generic K-mapping
-interface is no longer part of the RTL. The active
-`conv_channel_linebuf_packer` interface is channel-block based: one descriptor
-selects a `c_base` C32 block and emits raw channel rows for `spatial_m` output
-positions.
+the cluster-wide control register file. The legacy
+`conv_channel_linebuf_packer` channel-block interface is retained only as a
+correctness reference. The target `conv_linebuf_stream_packer` interface accepts
+host-compiled descriptors with `c_base`, spatial micro-tile shape, optional
+coalesce mode, and optional KGEN seed/tile count. RTL emits C32 IFM vectors
+directly to the systolic controller.
 
 ```c
 enum npu_cmd_type {
