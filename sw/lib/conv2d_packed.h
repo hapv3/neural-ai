@@ -24,6 +24,9 @@ typedef struct {
     uint32_t pad_w;
     uint32_t dilation_h;
     uint32_t dilation_w;
+    uint32_t input_c_stride;
+    uint32_t input_c_base;
+    uint32_t accumulate;
 } npu_conv2d_packed_cfg_t;
 
 typedef struct {

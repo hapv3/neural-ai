@@ -127,6 +127,15 @@ void systolic_gemm32_linebuf_ktiles(uint32_t weight_addr,
     systolic_linebuf_disable();
 }
 
+void systolic_gemm32_linebuf_ktiles_accumulate(uint32_t weight_addr,
+                                               uint32_t psum_addr,
+                                               uint32_t ofm_addr,
+                                               uint32_t dim_m) {
+    systolic_requant_disable();
+    systolic_gemm32_tile_ex(weight_addr, 0u, psum_addr, ofm_addr, dim_m, 1u);
+    systolic_linebuf_disable();
+}
+
 void systolic_gemm32_linebuf_accumulate(uint32_t weight_addr,
                                         uint32_t psum_addr,
                                         uint32_t ofm_addr,

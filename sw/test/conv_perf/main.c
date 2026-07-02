@@ -32,7 +32,7 @@
 #define P3_CASE_STRIDE      0x00040000u
 #define P3_INPUT_ADDR(id)   (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u)
 #define P3_WEIGHT_ADDR(id)  (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u)
-#define P3_OUT_ADDR(id)     (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x6000u)
+#define P3_OUT_ADDR(id)     (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u)
 #define P3_STATS_ADDR(id)   (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u)
 
 #define T_INPUT          0x10100000u
@@ -88,6 +88,8 @@
 #define P3_CASE_YOLO_RGB_TCDM_SPATZ 16u
 #define P3_CASE_LINEBUF_3X3_C3 17u
 #define P3_CASE_LINEBUF_KGEN_3X3_C32 18u
+#define P3_CASE_LINEBUF_KGEN_3X3_C96 19u
+#define P3_CASE_LINEBUF_3X3_C120 20u
 
 #define YOLO_RGB_H          64u
 #define YOLO_RGB_W          64u
@@ -131,7 +133,9 @@ static uint32_t should_run_case(uint32_t case_id) {
         return case_id <= P3_CASE_OC64;
     }
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_KERNELS) {
-        return (case_id >= P3_CASE_3X3_P0_C32) && (case_id <= P3_CASE_3X3_C5);
+        return ((case_id >= P3_CASE_3X3_P0_C32) && (case_id <= P3_CASE_3X3_C5)) ||
+               (case_id == P3_CASE_LINEBUF_KGEN_3X3_C96) ||
+               (case_id == P3_CASE_LINEBUF_3X3_C120);
     }
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT) {
         return case_id == P3_CASE_REQUANT;
@@ -205,6 +209,9 @@ static void init_cfg(npu_conv2d_packed_cfg_t *cfg,
     cfg->pad_w = pad_w;
     cfg->dilation_h = 1u;
     cfg->dilation_w = 1u;
+    cfg->input_c_stride = input_c;
+    cfg->input_c_base = 0u;
+    cfg->accumulate = 0u;
 }
 
 static uint32_t k_tiles_for(uint32_t input_c, uint32_t kernel_h, uint32_t kernel_w) {
@@ -267,6 +274,79 @@ static void run_oc32_case(uint32_t case_id,
     spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_OUTPUT, out_bytes);
     spatz_rt_dma_wait_all();
     publish_stats(P3_STATS_ADDR(case_id), &stats);
+}
+
+static void merge_split_stats(npu_conv2d_packed_stats_t *total,
+                              const npu_conv2d_packed_stats_t *tail) {
+    total->k_tiles += tail->k_tiles;
+    total->prepare_cycles += tail->prepare_cycles;
+    total->gemm_cycles += tail->gemm_cycles;
+    total->total_cycles += tail->total_cycles;
+    total->last_prepare_cycles = tail->last_prepare_cycles;
+    total->last_gemm_cycles = tail->last_gemm_cycles;
+    total->status = tail->status;
+    total->prepare_idma_tiles += tail->prepare_idma_tiles;
+    total->prepare_idma_transfers += tail->prepare_idma_transfers;
+    total->prepare_spatz_tiles += tail->prepare_spatz_tiles;
+    total->prepare_scalar_tiles += tail->prepare_scalar_tiles;
+}
+
+static void run_oc32_case_split_ic120(uint32_t case_id) {
+    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_stats_t stats_main;
+    npu_conv2d_packed_stats_t stats_tail;
+    uint32_t rows = P3_H * P3_W;
+    uint32_t input_c_total = 120u;
+    uint32_t input_c_main = 96u;
+    uint32_t input_c_tail = input_c_total - input_c_main;
+    uint32_t main_weight_tiles = k_tiles_for(input_c_main, 3u, 3u);
+    uint32_t tail_weight_tiles = k_tiles_for(input_c_tail, 3u, 3u);
+    uint32_t main_weight_bytes = main_weight_tiles * 32u * 32u;
+    uint32_t total_weight_bytes = (main_weight_tiles + tail_weight_tiles) * 32u * 32u;
+    uint32_t input_bytes = P3_H * P3_W * input_c_total;
+    uint32_t out_bytes = rows * 32u * 4u;
+
+    spatz_rt_dma_1d(T_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
+    spatz_rt_dma_wait_all();
+    spatz_rt_dma_1d(T_WEIGHT, P3_WEIGHT_ADDR(case_id), total_weight_bytes);
+    spatz_rt_dma_wait_all();
+
+    init_cfg(&cfg,
+             T_INPUT,
+             T_WEIGHT,
+             T_OUTPUT,
+             P3_H,
+             P3_W,
+             input_c_main,
+             P3_H,
+             P3_W,
+             3u,
+             3u,
+             1u,
+             1u,
+             1u,
+             1u);
+    cfg.input_c_stride = input_c_total;
+
+    uint32_t status = npu_conv2d_packed_run_oc32(&cfg, &stats_main);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(0xC9E2u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
+    }
+
+    cfg.weight_addr = T_WEIGHT + main_weight_bytes;
+    cfg.input_c = input_c_tail;
+    cfg.input_c_base = input_c_main;
+    cfg.accumulate = 1u;
+
+    status = npu_conv2d_packed_run_oc32(&cfg, &stats_tail);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(0xC9E3u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
+    }
+
+    merge_split_stats(&stats_main, &stats_tail);
+    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_OUTPUT, out_bytes);
+    spatz_rt_dma_wait_all();
+    publish_stats(P3_STATS_ADDR(case_id), &stats_main);
 }
 
 static void copy_oc32_to_oc64_l2(uint32_t l2_addr, uint32_t src_addr, uint32_t rows, uint32_t oc_base) {
@@ -498,6 +578,9 @@ static void run_conv1x1_k33(void) {
     cfg.pad_w = 0u;
     cfg.dilation_h = 1u;
     cfg.dilation_w = 1u;
+    cfg.input_c_stride = CONV1_C;
+    cfg.input_c_base = 0u;
+    cfg.accumulate = 0u;
 
     spatz_rt_dma_1d(T_WEIGHT, L2_CONV1_WEIGHT, CONV1_WEIGHT_BYTES);
     spatz_rt_dma_wait_all();
@@ -533,6 +616,9 @@ static void run_conv3x3_pad1_c3(void) {
     cfg.pad_w = 1u;
     cfg.dilation_h = 1u;
     cfg.dilation_w = 1u;
+    cfg.input_c_stride = CONV3_C;
+    cfg.input_c_base = 0u;
+    cfg.accumulate = 0u;
 
     spatz_rt_dma_1d(T_WEIGHT, L2_CONV3_WEIGHT, CONV3_WEIGHT_BYTES);
     spatz_rt_dma_wait_all();
@@ -574,6 +660,9 @@ static void run_conv1x1_p3(uint32_t input_addr,
     cfg.pad_w = 0u;
     cfg.dilation_h = 1u;
     cfg.dilation_w = 1u;
+    cfg.input_c_stride = input_c;
+    cfg.input_c_base = 0u;
+    cfg.accumulate = 0u;
 
     spatz_rt_dma_1d(T_WEIGHT, weight_addr, weight_bytes);
     spatz_rt_dma_wait_all();
@@ -745,6 +834,31 @@ int main(void) {
                       1u,
                       1u,
                       0xC9E0u);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_KGEN_3X3_C96)) {
+        spatz_rt_set_phase(24, P3_CASE_LINEBUF_KGEN_3X3_C96);
+        run_oc32_case(P3_CASE_LINEBUF_KGEN_3X3_C96,
+                      0u,
+                      P3_H,
+                      P3_W,
+                      96u,
+                      P3_H,
+                      P3_W,
+                      3u,
+                      3u,
+                      1u,
+                      1u,
+                      1u,
+                      1u,
+                      0xC9E1u);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_3X3_C120)) {
+        spatz_rt_set_phase(25, P3_CASE_LINEBUF_3X3_C120);
+        run_oc32_case_split_ic120(P3_CASE_LINEBUF_3X3_C120);
         spatz_rt_pass_step();
     }
 

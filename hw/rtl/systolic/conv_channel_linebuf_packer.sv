@@ -50,7 +50,8 @@ module conv_channel_linebuf_packer #(
     output logic                      done_o,
     output logic [31:0]               emitted_vectors_o,
     output logic [31:0]               fetch_beats_o,
-    output logic [31:0]               bypass_vectors_o
+    output logic [31:0]               bypass_vectors_o,
+    output logic [4:0]                debug_state_o
 );
 
     localparam int unsigned BEAT_BYTES = DATA_WIDTH / 8;
@@ -165,6 +166,7 @@ module conv_channel_linebuf_packer #(
     assign emitted_vectors_o = emitted_vectors_q;
     assign fetch_beats_o = fetch_beats_q;
     assign bypass_vectors_o = bypass_vectors_q;
+    assign debug_state_o = state_q;
     assign ring_be = '1;
 
     for (genvar slot = 0; slot < K_MAX; slot++) begin : gen_line_ring

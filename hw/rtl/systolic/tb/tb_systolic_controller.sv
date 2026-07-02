@@ -42,6 +42,9 @@ module tb_systolic_controller;
     logic                          perf_compute_en_o;
     logic                          perf_ofm_valid_o;
     logic                          perf_ofm_ready_o;
+    logic [2:0]                    debug_state_o;
+    logic [1:0]                    debug_drain_state_o;
+    logic [4:0]                    debug_linebuf_state_o;
 
     logic [DATA_WIDTH-1:0]         tcdm_mem [TCDM_WORDS];
 
@@ -85,7 +88,10 @@ module tb_systolic_controller;
         .perf_weight_load_en_o (perf_weight_load_en_o),
         .perf_compute_en_o     (perf_compute_en_o),
         .perf_ofm_valid_o      (perf_ofm_valid_o),
-        .perf_ofm_ready_o      (perf_ofm_ready_o)
+        .perf_ofm_ready_o      (perf_ofm_ready_o),
+        .debug_state_o         (debug_state_o),
+        .debug_drain_state_o   (debug_drain_state_o),
+        .debug_linebuf_state_o (debug_linebuf_state_o)
     );
 
     initial begin
