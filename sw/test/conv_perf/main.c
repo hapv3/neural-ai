@@ -87,6 +87,7 @@
 #define P3_CASE_REQUANT    15u
 #define P3_CASE_YOLO_RGB_TCDM_SPATZ 16u
 #define P3_CASE_LINEBUF_3X3_C3 17u
+#define P3_CASE_LINEBUF_KGEN_3X3_C32 18u
 
 #define YOLO_RGB_H          64u
 #define YOLO_RGB_W          64u
@@ -725,6 +726,25 @@ int main(void) {
     if (should_run_case(P3_CASE_LINEBUF_3X3_C3)) {
         spatz_rt_set_phase(22, P3_CASE_LINEBUF_3X3_C3);
         run_linebuf_3x3_c3_case(P3_CASE_LINEBUF_3X3_C3);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_KGEN_3X3_C32)) {
+        spatz_rt_set_phase(23, P3_CASE_LINEBUF_KGEN_3X3_C32);
+        run_oc32_case(P3_CASE_LINEBUF_KGEN_3X3_C32,
+                  0u,
+                  P3_H,
+                  P3_W,
+                  32u,
+                  P3_H,
+                  P3_W,
+                      3u,
+                      3u,
+                      1u,
+                      1u,
+                      1u,
+                      1u,
+                      0xC9E0u);
         spatz_rt_pass_step();
     }
 

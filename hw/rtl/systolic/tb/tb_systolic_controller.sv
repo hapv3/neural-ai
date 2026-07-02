@@ -95,8 +95,6 @@ module tb_systolic_controller;
 
     assign obi_i_gnt_i = obi_i_req_o;
     assign obi_o_gnt_i = obi_o_req_o;
-    assign obi_o_rvalid_i = '0;
-    assign obi_o_rdata_i = '0;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -105,6 +103,22 @@ module tb_systolic_controller;
         end else begin
             obi_i_rvalid_i <= obi_i_req_o && obi_i_gnt_i && !obi_i_we_o;
             obi_i_rdata_i <= tcdm_mem[obi_i_addr_o[16:5]];
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            obi_o_rvalid_i <= '0;
+            obi_o_rdata_i <= '0;
+        end else begin
+            obi_o_rvalid_i <= '0;
+            obi_o_rdata_i <= '0;
+            for (int unsigned port = 0; port < 4; port++) begin
+                if (obi_o_req_o[port] && obi_o_gnt_i[port] && !obi_o_we_o[port]) begin
+                    obi_o_rvalid_i[port] <= 1'b1;
+                    obi_o_rdata_i[port] <= tcdm_mem[obi_o_addr_o[port][16:5]];
+                end
+            end
         end
     end
 

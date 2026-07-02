@@ -5,8 +5,8 @@ module conv_channel_linebuf_packer #(
     parameter int unsigned DATA_WIDTH = 256,
     parameter int unsigned ARRAY_DIM = 32,
     parameter int unsigned INPUT_ELEM_WIDTH = 8,
-    parameter int unsigned K_MAX = 9,
-    parameter int unsigned MAX_INPUT_W = 4096
+    parameter int unsigned K_MAX = 5,
+    parameter int unsigned MAX_INPUT_W = 640
 )(
     input  logic clk_i,
     input  logic rst_ni,
@@ -30,6 +30,12 @@ module conv_channel_linebuf_packer #(
     input  logic [15:0]               cfg_pad_h_i,
     input  logic [15:0]               cfg_pad_w_i,
     input  logic [15:0]               cfg_c_base_i,
+    input  logic [5:0]                cfg_lane_base_i,
+    input  logic                      cfg_coalesce_i,
+    input  logic                      cfg_kgen_i,
+    input  logic [7:0]                cfg_k_seed_kh_i,
+    input  logic [7:0]                cfg_k_seed_kw_i,
+    input  logic [15:0]               cfg_k_seed_ic_i,
 
     output logic                      obi_req_o,
     input  logic                      obi_gnt_i,
@@ -52,7 +58,7 @@ module conv_channel_linebuf_packer #(
     localparam int unsigned LINE_ADDR_WIDTH = $clog2(MAX_INPUT_W);
     localparam int unsigned K_SLOT_WIDTH = $clog2(K_MAX);
 
-    typedef enum logic [3:0] {
+    typedef enum logic [4:0] {
         CH_IDLE,
         CH_ENSURE,
         CH_FILL_REQ0,
@@ -68,7 +74,11 @@ module conv_channel_linebuf_packer #(
         CH_BYPASS_REQ0,
         CH_BYPASS_WAIT0,
         CH_BYPASS_REQ1,
-        CH_BYPASS_WAIT1
+        CH_BYPASS_WAIT1,
+        CH_COAL_PREP,
+        CH_COAL_READ_REQ,
+        CH_COAL_READ_WAIT,
+        CH_COAL_EMIT
     } state_e;
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
@@ -135,9 +145,14 @@ module conv_channel_linebuf_packer #(
     input_row_t row_data_q;
     logic row_valid_out_q;
     logic done_q;
+    logic [5:0] coalesce_lane_q;
 
     logic [15:0] remaining_c;
     logic [5:0] block_valid_bytes;
+    logic [31:0] coalesce_k_bytes;
+    logic [ARRAY_DIM-1:0][7:0] lane_kh;
+    logic [ARRAY_DIM-1:0][7:0] lane_kw;
+    logic [ARRAY_DIM-1:0][15:0] lane_ic;
     logic fill_crosses_current;
     logic emit_fire;
     logic last_kernel_vector;
@@ -179,15 +194,18 @@ module conv_channel_linebuf_packer #(
 
     function automatic logic [5:0] valid_c_bytes(
         input logic [15:0] input_c,
-        input logic [15:0] c_base
+        input logic [15:0] c_base,
+        input logic [5:0]  lane_base
     );
         logic [15:0] rem;
+        logic [6:0] lane_room;
         begin
+            lane_room = (lane_base >= 6'(ARRAY_DIM)) ? 7'd0 : (7'(ARRAY_DIM) - {1'b0, lane_base});
             rem = input_c - c_base;
-            if (c_base >= input_c) begin
+            if ((c_base >= input_c) || (lane_room == 7'd0)) begin
                 valid_c_bytes = 6'd0;
-            end else if (rem >= 16'(ARRAY_DIM)) begin
-                valid_c_bytes = 6'(ARRAY_DIM);
+            end else if (rem >= {9'd0, lane_room}) begin
+                valid_c_bytes = lane_room[5:0];
             end else begin
                 valid_c_bytes = {1'b0, rem[4:0]};
             end
@@ -220,23 +238,95 @@ module conv_channel_linebuf_packer #(
 
     function automatic input_row_t unpack_row(
         input logic [DATA_WIDTH-1:0] data,
-        input logic [5:0] valid_bytes
+        input logic [5:0] valid_bytes,
+        input logic [5:0] lane_base
     );
         input_row_t row;
+        logic [6:0] dst_lane;
         begin
             row = '0;
             for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                if (lane < valid_bytes) begin
-                    row[lane] = data[lane * 8 +: 8];
+                dst_lane = {1'b0, lane_base} + 7'(lane);
+                if ((lane < valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
+                    row[dst_lane[4:0]] = data[lane * 8 +: 8];
                 end
             end
             unpack_row = row;
         end
     endfunction
 
+    function automatic input_row_t merge_row_lanes(
+        input input_row_t old_row,
+        input logic [DATA_WIDTH-1:0] data,
+        input logic [5:0] valid_bytes,
+        input logic [5:0] lane_base
+    );
+        input_row_t row;
+        logic [6:0] dst_lane;
+        begin
+            row = old_row;
+            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
+                dst_lane = {1'b0, lane_base} + 7'(lane);
+                if ((lane < valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
+                    row[dst_lane[4:0]] = data[lane * 8 +: 8];
+                end
+            end
+            merge_row_lanes = row;
+        end
+    endfunction
+
+    function automatic input_row_t merge_kgen_lanes(
+        input input_row_t old_row,
+        input logic [DATA_WIDTH-1:0] data,
+        input logic [15:0] emit_kh_u,
+        input logic [15:0] emit_kw_u,
+        input logic [15:0] c_base
+    );
+        input_row_t row;
+        logic [15:0] src_lane;
+        begin
+            row = old_row;
+            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
+                if (({8'd0, lane_kh[lane]} == emit_kh_u) &&
+                    ({8'd0, lane_kw[lane]} == emit_kw_u) &&
+                    (lane_ic[lane] >= c_base) &&
+                    (lane_ic[lane] < (c_base + 16'(ARRAY_DIM)))) begin
+                    src_lane = lane_ic[lane] - c_base;
+                    row[lane] = data[src_lane[4:0] * 8 +: 8];
+                end
+            end
+            merge_kgen_lanes = row;
+        end
+    endfunction
+
     always_comb begin
+        logic [7:0] gen_kh;
+        logic [7:0] gen_kw;
+        logic [15:0] gen_ic;
+
         remaining_c = cfg_input_c_i - cfg_c_base_i;
-        block_valid_bytes = valid_c_bytes(cfg_input_c_i, cfg_c_base_i);
+        block_valid_bytes = valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i);
+        coalesce_k_bytes = 32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes);
+
+        gen_kh = cfg_k_seed_kh_i;
+        gen_kw = cfg_k_seed_kw_i;
+        gen_ic = cfg_k_seed_ic_i;
+        for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
+            lane_kh[lane] = gen_kh;
+            lane_kw[lane] = gen_kw;
+            lane_ic[lane] = gen_ic;
+            if ((gen_ic + 16'd1) == cfg_input_c_i) begin
+                gen_ic = '0;
+                if ((gen_kw + 8'd1) == cfg_kernel_w_i[7:0]) begin
+                    gen_kw = '0;
+                    gen_kh = gen_kh + 8'd1;
+                end else begin
+                    gen_kw = gen_kw + 8'd1;
+                end
+            end else begin
+                gen_ic = gen_ic + 16'd1;
+            end
+        end
 
         ensure_ih = output_base_ih_q + $signed({16'd0, ensure_kh_q});
         ensure_row_in_bounds = (ensure_ih >= 32'sd0) &&
@@ -297,7 +387,7 @@ module conv_channel_linebuf_packer #(
             ring_we[active_fill_slot_q] = 1'b1;
             ring_addr[active_fill_slot_q] = fill_x_q[LINE_ADDR_WIDTH-1:0];
             ring_wdata[active_fill_slot_q] = fill_data_q;
-        end else if (state_q == CH_READ_REQ && emit_in_bounds && emit_row_hit) begin
+        end else if ((state_q == CH_READ_REQ || state_q == CH_COAL_READ_REQ) && emit_in_bounds && emit_row_hit) begin
             ring_req[emit_hit_slot] = 1'b1;
             ring_addr[emit_hit_slot] = emit_iw[LINE_ADDR_WIDTH-1:0];
         end
@@ -347,6 +437,7 @@ module conv_channel_linebuf_packer #(
             row_data_q <= '0;
             row_valid_out_q <= 1'b0;
             done_q <= 1'b0;
+            coalesce_lane_q <= '0;
         end else begin
             done_q <= 1'b0;
 
@@ -364,6 +455,7 @@ module conv_channel_linebuf_packer #(
                         kh_q <= '0;
                         kw_q <= '0;
                         spatial_rows_q <= '0;
+                        coalesce_lane_q <= '0;
                         emitted_vectors_q <= '0;
                         fetch_beats_q <= '0;
                         bypass_vectors_q <= '0;
@@ -381,7 +473,8 @@ module conv_channel_linebuf_packer #(
                             (cfg_kernel_w_i > K_MAX[15:0]) ||
                             (cfg_input_w_i > MAX_INPUT_W[15:0]) ||
                             (cfg_stride_h_i == 16'd0) ||
-                            (cfg_stride_w_i == 16'd0)) begin
+                            (cfg_stride_w_i == 16'd0) ||
+                            (cfg_coalesce_i && !cfg_kgen_i && (coalesce_k_bytes > 32'(ARRAY_DIM)))) begin
                             done_q <= 1'b1;
                             state_q <= CH_IDLE;
                         end else if ((cfg_kernel_h_i == 16'd1) &&
@@ -430,7 +523,8 @@ module conv_channel_linebuf_packer #(
                                     bypass_addr_q[BYTE_SEL_BITS-1:0],
                                     bypass_valid_bytes_q
                                 ),
-                                bypass_valid_bytes_q
+                                bypass_valid_bytes_q,
+                                cfg_lane_base_i
                             );
                             row_valid_out_q <= 1'b1;
                             state_q <= CH_EMIT;
@@ -454,7 +548,8 @@ module conv_channel_linebuf_packer #(
                                 bypass_addr_q[BYTE_SEL_BITS-1:0],
                                 bypass_valid_bytes_q
                             ),
-                            bypass_valid_bytes_q
+                            bypass_valid_bytes_q,
+                            cfg_lane_base_i
                         );
                         row_valid_out_q <= 1'b1;
                         state_q <= CH_EMIT;
@@ -465,7 +560,13 @@ module conv_channel_linebuf_packer #(
                     if (ensure_kh_q == cfg_kernel_h_i) begin
                         kh_q <= '0;
                         kw_q <= '0;
-                        state_q <= CH_EMIT_PREP;
+                        coalesce_lane_q <= cfg_lane_base_i;
+                        if (cfg_coalesce_i) begin
+                            row_data_q <= '0;
+                            state_q <= CH_COAL_PREP;
+                        end else begin
+                            state_q <= CH_EMIT_PREP;
+                        end
                     end else if (!ensure_row_in_bounds || ensure_row_hit || (block_valid_bytes == 6'd0)) begin
                         ensure_kh_q <= ensure_kh_q + 16'd1;
                         ensure_kh_addr_q <= ensure_kh_addr_q + cfg_row_stride_bytes_i;
@@ -562,9 +663,93 @@ module conv_channel_linebuf_packer #(
 
                 CH_READ_WAIT: begin
                     emit_read_data_q <= ring_rdata[emit_hit_slot];
-                    row_data_q <= unpack_row(ring_rdata[emit_hit_slot], emit_valid_bytes);
+                    row_data_q <= unpack_row(ring_rdata[emit_hit_slot], emit_valid_bytes, cfg_lane_base_i);
                     row_valid_out_q <= 1'b1;
                     state_q <= CH_EMIT;
+                end
+
+                CH_COAL_PREP: begin
+                    if (!emit_in_bounds || !emit_row_hit) begin
+                        if (last_kernel_vector) begin
+                            row_valid_out_q <= 1'b1;
+                            state_q <= CH_COAL_EMIT;
+                        end else if ((kw_q + 16'd1) != cfg_kernel_w_i) begin
+                            kw_q <= kw_q + 16'd1;
+                            coalesce_lane_q <= coalesce_lane_q + block_valid_bytes;
+                            state_q <= CH_COAL_PREP;
+                        end else begin
+                            kw_q <= '0;
+                            kh_q <= kh_q + 16'd1;
+                            coalesce_lane_q <= coalesce_lane_q + block_valid_bytes;
+                            state_q <= CH_COAL_PREP;
+                        end
+                    end else begin
+                        state_q <= CH_COAL_READ_REQ;
+                    end
+                end
+
+                CH_COAL_READ_REQ: begin
+                    state_q <= CH_COAL_READ_WAIT;
+                end
+
+                CH_COAL_READ_WAIT: begin
+                    emit_read_data_q <= ring_rdata[emit_hit_slot];
+                    if (cfg_kgen_i) begin
+                        row_data_q <= merge_kgen_lanes(row_data_q,
+                                                       ring_rdata[emit_hit_slot],
+                                                       kh_q,
+                                                       kw_q,
+                                                       cfg_c_base_i);
+                    end else begin
+                        row_data_q <= merge_row_lanes(row_data_q, ring_rdata[emit_hit_slot], emit_valid_bytes, coalesce_lane_q);
+                    end
+                    if (last_kernel_vector) begin
+                        row_valid_out_q <= 1'b1;
+                        state_q <= CH_COAL_EMIT;
+                    end else if ((kw_q + 16'd1) != cfg_kernel_w_i) begin
+                        kw_q <= kw_q + 16'd1;
+                        coalesce_lane_q <= coalesce_lane_q + block_valid_bytes;
+                        state_q <= CH_COAL_PREP;
+                    end else begin
+                        kw_q <= '0;
+                        kh_q <= kh_q + 16'd1;
+                        coalesce_lane_q <= coalesce_lane_q + block_valid_bytes;
+                        state_q <= CH_COAL_PREP;
+                    end
+                end
+
+                CH_COAL_EMIT: begin
+                    if (emit_fire) begin
+                        row_valid_out_q <= 1'b0;
+                        emitted_vectors_q <= emitted_vectors_q + 32'd1;
+                        spatial_rows_q <= spatial_rows_q + 32'd1;
+                        if (last_spatial) begin
+                            done_q <= 1'b1;
+                            state_q <= CH_IDLE;
+                        end else if ((ow_q + 16'd1) == cfg_output_w_i) begin
+                            ow_q <= '0;
+                            kh_q <= '0;
+                            kw_q <= '0;
+                            coalesce_lane_q <= cfg_lane_base_i;
+                            output_base_iw_q <= -$signed({16'd0, cfg_pad_w_i});
+                            output_base_ih_q <= output_base_ih_q + $signed({16'd0, cfg_stride_h_i});
+                            output_row_base_addr_q <= output_row_base_addr_q + cfg_oh_step_bytes_i;
+                            output_spatial_addr_q <= output_row_base_addr_q + cfg_oh_step_bytes_i;
+                            ensure_kh_q <= '0;
+                            ensure_kh_addr_q <= '0;
+                            row_data_q <= '0;
+                            state_q <= CH_ENSURE;
+                        end else begin
+                            ow_q <= ow_q + 16'd1;
+                            kh_q <= '0;
+                            kw_q <= '0;
+                            coalesce_lane_q <= cfg_lane_base_i;
+                            output_base_iw_q <= output_base_iw_q + $signed({16'd0, cfg_stride_w_i});
+                            output_spatial_addr_q <= output_spatial_addr_q + cfg_ow_step_bytes_i;
+                            row_data_q <= '0;
+                            state_q <= CH_COAL_PREP;
+                        end
+                    end
                 end
 
                 CH_EMIT: begin

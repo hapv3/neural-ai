@@ -18,18 +18,35 @@ typedef struct {
     uint16_t stride_w;
     uint16_t pad_h;
     uint16_t pad_w;
-    uint16_t tile_oh_base;
-    uint16_t tile_ow_base;
-    uint32_t lane_valid;
-    uint8_t lane_kh[32];
-    uint8_t lane_kw[32];
-    uint16_t lane_ic[32];
+    uint32_t row_stride_bytes;
+    uint32_t pixel_stride_bytes;
+    uint32_t ow_step_bytes;
+    uint32_t oh_step_bytes;
+    uint16_t kernel_h;
+    uint16_t kernel_w;
+    uint16_t c_base;
+    uint16_t lane_base;
+    uint16_t coalesce;
+    uint16_t kgen;
+    uint16_t k_seed_kh;
+    uint16_t k_seed_kw;
+    uint16_t k_seed_ic;
+    uint32_t k_tiles;
+    uint32_t spatial_m;
 } systolic_linebuf_cfg_t;
 
 void systolic_linebuf_disable(void);
 void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg);
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);
+void systolic_gemm32_linebuf_ktiles(uint32_t weight_addr,
+                                    uint32_t psum_addr,
+                                    uint32_t ofm_addr,
+                                    uint32_t dim_m);
+void systolic_gemm32_linebuf_accumulate(uint32_t weight_addr,
+                                        uint32_t psum_addr,
+                                        uint32_t ofm_addr,
+                                        uint32_t dim_m);
 void systolic_gemm32_accumulate(uint32_t weight_addr,
                                 uint32_t ifm_addr,
                                 uint32_t psum_addr,

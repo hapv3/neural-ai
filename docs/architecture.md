@@ -280,25 +280,46 @@ Matrix Engine
 2. DMA copies weights and IFM from L2 into L1 I-TCDM.
 3. Firmware programs Systolic Controller CSR with weight, IFM, OFM pointers.
 4. Systolic Controller reads weights/IFM from I-TCDM and streams them into `npu_systolic_array`.
-5. Systolic Controller drains `M x 32` INT32 rows from the OFM FIFO.
-6. In raw mode, the controller writes each row as 32 INT32 values through 4 parallel OBI write ports.
-7. In requant mode, the controller applies per-channel bias/scale/shift/zero-point/clamp and writes one packed 32-byte INT8 row through output port 0.
-8. DMA copies OFM/activation buffers from O-TCDM back to L2.
+5. Systolic Controller drains `M x 32` INT32 rows from the OFM FIFO through a drain engine that runs independently from the main compute FSM.
+6. In raw mode, the drain engine writes each row as 32 INT32 values through 4 parallel OBI write ports.
+7. In accumulated mode, the drain engine reads the previous psum row from O-TCDM port 0, adds the new OFM row, writes back, and lets compute continue until normal OFM FIFO backpressure is required.
+8. In requant mode, the drain engine applies per-channel bias/scale/shift/zero-point/clamp and writes one packed 32-byte INT8 row through output port 0.
+9. DMA copies OFM/activation buffers from O-TCDM back to L2.
 
-### Future Direct Conv2D Linebuffer Path
+### Direct Conv2D Channel Linebuffer Path
 
-The active Conv2D path still materializes packed `M x 32` IFM tiles in TCDM
-through software+iDMA+Spatz prepare. A future direct Conv2D path may add one
-shared generic max-9-line linebuffer in front of the systolic controller. That
-linebuffer is shared across all output-channel filters for one systolic
-instance, emits K32 IFM rows directly to the existing systolic feed path, and
-keeps psum/requant/store on the current output side. To reduce Snitch workload,
-the host-side compiler/runtime computes tile descriptors, DMA stripe ranges,
-K32 lane descriptors, and linebuffer register images, writes the command stream
-to L2, and programs `npu_cmd_ctrl` through the cluster host AXI-slave path.
-Snitch refills the fixed 4 KB TCDM command staging window from L2, prefetches
-each descriptor into local scalar state before starting compute, then only
-dispatches precomputed descriptors and waits for iDMA/accelerator completion.
+The default full Conv2D path for supported TCDM-resident tensors is now the
+direct `conv_channel_linebuf_packer` path inside `systolic_controller`. Packed
+`M x 32` IFM materialization through software+iDMA+Spatz remains available only
+as a backup for unsupported shapes, L2-only inputs, wider kernels, or debug
+comparison.
+
+The linebuffer path supports `C_BLOCK=32`, native `1x1..5x5` window generation,
+`input_w <= 640`, padding zero-injection, and a dedicated `1x1` bypass. For
+small kernels where `KH*KW*IC <= 32`, firmware enables coalesced window-pack
+mode: the linebuffer emits one 32-byte IFM vector per output spatial position,
+with all kernel taps/channels packed into systolic lanes. This is the default
+fast path for YOLO/CNN first-layer style `3x3/C3` cases and avoids materializing
+im2col rows in TCDM.
+
+For larger `K`, the first RTL K-tile frontend is implemented for bounded
+micro-tiles: host/Python provides `{kh,kw,ic}` seed and `k_tile_count`, Snitch
+programs the linebuffer once, and `systolic_controller` loops over K tiles
+internally with one start / one wait. RTL increments the 32 lane descriptors in
+`{kh,kw,ic}` order without Snitch hot-path div/mod, and intermediate K tiles
+accumulate through the controller psum path. Current safe gate is
+`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` (currently `16`), `IC <= 32` or
+`IC % 32 == 0`. The controller now has a parallel drain/accumulate engine, so
+the gate is conservative firmware/test coverage rather than an OFM-FIFO-depth
+limitation. Unsupported larger tiles fall back to the per-slice linebuffer or
+packed prepare path until the KGEN stress envelope is expanded.
+
+To reduce Snitch workload, the host-side compiler/runtime computes descriptors,
+DMA stripe ranges, and register images, writes the command stream to L2, and
+programs `npu_cmd_ctrl` through the cluster host AXI-slave path. Snitch refills
+the fixed 4 KB TCDM command staging window from L2, prefetches each descriptor
+into local scalar state before starting compute, then only dispatches
+precomputed descriptors and waits for iDMA/accelerator completion.
 
 Detailed architecture, requirements, and pseudo-code are tracked in
 [`conv2d_packed_systolic_plan.md`](conv2d_packed_systolic_plan.md).

@@ -33,20 +33,11 @@ VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
 	$(PWD)/requant_pipeline.sv \
 	$(PWD)/npu_systolic_array.sv \
-	$(PWD)/conv_linebuf_packer.sv \
+	$(PWD)/conv_channel_linebuf_packer.sv \
 	$(PWD)/systolic_ctrl_regs.sv \
 	$(PWD)/systolic_controller.sv \
 	$(PWD)/tb/tb_systolic_controller.sv
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
-endif
-
-ifeq ($(MODULE),test_conv_linebuf_packer)
-TOPLEVEL = conv_linebuf_packer
-VERILOG_SOURCES = \
-	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_clk.sv \
-	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
-	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
-	$(PWD)/conv_linebuf_packer.sv
 endif
 
 ifeq ($(MODULE),test_conv_channel_linebuf_packer)
