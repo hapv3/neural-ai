@@ -90,7 +90,11 @@ def golden_coalesced_vectors(input_data, *, input_h, input_w, input_c, output_h,
 async def reset(dut):
     dut.rst_ni.value = 0
     dut.start_i.value = 0
+    if hasattr(dut, "next_tile_i"):
+        dut.next_tile_i.value = 0
     dut.dim_m_i.value = 0
+    if hasattr(dut, "cfg_k_tiles_i"):
+        dut.cfg_k_tiles_i.value = 1
     dut.cfg_origin_base_i.value = 0
     dut.cfg_row_stride_bytes_i.value = 0
     dut.cfg_pixel_stride_bytes_i.value = 0
