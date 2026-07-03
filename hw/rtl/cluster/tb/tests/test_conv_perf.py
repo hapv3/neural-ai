@@ -36,8 +36,14 @@ L2_CONV1_C64_OUT = 0x80070000
 L2_CONV1_C64_STATS = 0x80078000
 L2_P3_BASE = 0x80080000
 P3_CASE_STRIDE = 0x00040000
+P3_C120_INPUT_ADDR = 0x81000000
+P3_C120_WEIGHT_ADDR = 0x81110000
+P3_C120_OUT_ADDR = 0x81120000
+P3_C120_STATS_ADDR = 0x81240000
 P3_H = 4
 P3_W = 4
+P3_C120_H = 16
+P3_C120_W = 16
 CONV1_H = 4
 CONV1_W = 5
 CONV1_C = 33
@@ -100,19 +106,19 @@ LINEBUF_STATE_NAMES = {
     4: "CH_FILL_REQ1",
     5: "CH_FILL_WAIT1",
     6: "CH_FILL_WRITE",
-    7: "CH_EMIT_PREP",
-    8: "CH_READ_REQ",
-    9: "CH_READ_WAIT",
-    10: "CH_EMIT",
+    7: "CH_WINDOW_REQ",
+    8: "CH_WINDOW_WAIT",
+    9: "CH_STREAM_PRIME",
+    10: "CH_STREAM_EMIT",
     11: "CH_BYPASS_PREP",
     12: "CH_BYPASS_REQ0",
     13: "CH_BYPASS_WAIT0",
     14: "CH_BYPASS_REQ1",
     15: "CH_BYPASS_WAIT1",
-    16: "CH_COAL_PREP",
-    17: "CH_COAL_READ_REQ",
-    18: "CH_COAL_READ_WAIT",
-    19: "CH_COAL_EMIT",
+    16: "CH_STREAM_REFILL",
+    17: "CH_STREAM_STALL",
+    18: "CH_STREAM_SLIDE",
+    19: "CH_STREAM_DONE",
 }
 
 P3_CASES = {
@@ -192,11 +198,11 @@ P3_CASES = {
     ),
     P3_CASE_LINEBUF_3X3_C120: (
         "linebuffer split conv3x3 IC120",
-        4,
-        4,
+        P3_C120_H,
+        P3_C120_W,
         120,
-        4,
-        4,
+        P3_C120_H,
+        P3_C120_W,
         3,
         3,
         1,
@@ -204,7 +210,7 @@ P3_CASES = {
         1,
         1,
         32,
-        34,
+        204,
         0,
         0,
         False,
@@ -373,18 +379,26 @@ def golden_conv3():
 
 
 def p3_input_addr(case_id):
+    if case_id == P3_CASE_LINEBUF_3X3_C120:
+        return P3_C120_INPUT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x0000
 
 
 def p3_weight_addr(case_id):
+    if case_id == P3_CASE_LINEBUF_3X3_C120:
+        return P3_C120_WEIGHT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3000
 
 
 def p3_out_addr(case_id):
+    if case_id == P3_CASE_LINEBUF_3X3_C120:
+        return P3_C120_OUT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x10000
 
 
 def p3_stats_addr(case_id):
+    if case_id == P3_CASE_LINEBUF_3X3_C120:
+        return P3_C120_STATS_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3E000
 
 
@@ -463,6 +477,14 @@ def p3_requant(acc, channel):
 
 
 def make_p3_input(input_h, input_w, input_c):
+    if input_h == P3_C120_H and input_w == P3_C120_W and input_c == 120:
+        import numpy as np
+
+        h = np.arange(input_h, dtype=np.int32)[:, None, None]
+        w = np.arange(input_w, dtype=np.int32)[None, :, None]
+        c = np.arange(input_c, dtype=np.int32)[None, None, :]
+        values = ((h * 13 + w * 7 + c * 5) % 19) - 9
+        return values.astype(np.int8).tobytes()
     return [
         to_u8(p3_input_value(h, w, c))
         for h in range(input_h)
@@ -548,6 +570,40 @@ def golden_p3_case(case_id):
         _spatz,
         requant_output,
     ) = P3_CASES[case_id]
+    if case_id == P3_CASE_LINEBUF_3X3_C120:
+        import numpy as np
+
+        h = np.arange(input_h, dtype=np.int32)[:, None, None]
+        w = np.arange(input_w, dtype=np.int32)[None, :, None]
+        c = np.arange(input_c, dtype=np.int32)[None, None, :]
+        input_data = ((h * 13 + w * 7 + c * 5) % 19) - 9
+
+        kh_axis = np.arange(kernel_h, dtype=np.int32)[:, None, None, None]
+        kw_axis = np.arange(kernel_w, dtype=np.int32)[None, :, None, None]
+        c_axis = np.arange(input_c, dtype=np.int32)[None, None, :, None]
+        oc_axis = np.arange(oc_count, dtype=np.int32)[None, None, None, :]
+        weight = ((kh_axis * 17 + kw_axis * 11 + c_axis * 7 + oc_axis * 3) % 17) - 8
+
+        out_arr = np.zeros((output_h, output_w, oc_count), dtype=np.int32)
+        for kh in range(kernel_h):
+            oh0 = max(0, pad_h - kh)
+            oh1 = min(output_h, input_h + pad_h - kh)
+            if oh0 >= oh1:
+                continue
+            ih0 = oh0 + kh - pad_h
+            ih1 = oh1 + kh - pad_h
+            for kw in range(kernel_w):
+                ow0 = max(0, pad_w - kw)
+                ow1 = min(output_w, input_w + pad_w - kw)
+                if ow0 >= ow1:
+                    continue
+                iw0 = ow0 + kw - pad_w
+                iw1 = ow1 + kw - pad_w
+                tile = input_data[ih0:ih1, iw0:iw1, :].reshape(-1, input_c)
+                prod = tile @ weight[kh, kw, :, :]
+                out_arr[oh0:oh1, ow0:ow1, :] += prod.reshape(oh1 - oh0, ow1 - ow0, oc_count)
+        return out_arr.astype("<i4", copy=False).tobytes()
+
     out = []
     for oh in range(output_h):
         for ow in range(output_w):
@@ -740,7 +796,8 @@ async def boot_and_run(dut, test_file):
     monitor_task = cocotb.start_soon(monitor_conv_perf_states(dut, monitor_stats))
     await release_fetch(dut, axi_master=axi_master)
     try:
-        await wait_for_host_irq(dut, timeout_cycles=1600000, axi_master=axi_master, report_name="test_conv_perf")
+        timeout_cycles = 50000000 if CONV_PERF_CASE == P3_CASE_LINEBUF_3X3_C120 else 1600000
+        await wait_for_host_irq(dut, timeout_cycles=timeout_cycles, axi_master=axi_master, report_name="test_conv_perf")
     except AssertionError as exc:
         status = read_dtcm_word(dut, STATUS_BASE + 0x00)
         pass_count = read_dtcm_word(dut, STATUS_BASE + 0x04)
