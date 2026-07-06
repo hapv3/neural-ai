@@ -14,6 +14,7 @@ module conv_linebuf_stream_packer #(
 
     input  logic                      start_i,
     input  logic                      next_tile_i,
+    input  logic                      prefetch_i,
     input  logic [31:0]               dim_m_i,
     input  logic [31:0]               cfg_k_tiles_i,
 
@@ -51,6 +52,7 @@ module conv_linebuf_stream_packer #(
     input  logic                      row_ready_i,
     output logic                      busy_o,
     output logic                      done_o,
+    output logic                      prefetch_busy_o,
     output logic [31:0]               emitted_vectors_o,
     output logic [31:0]               fetch_beats_o,
     output logic [31:0]               bypass_vectors_o,
@@ -136,6 +138,9 @@ module conv_linebuf_stream_packer #(
     input_row_t row_data_q;
     logic row_valid_out_q;
     logic done_q;
+    logic prefetch_active_q;
+    logic prefetch_ready_q;
+    logic [15:0] prefetched_c_base_q;
 
     logic [5:0] block_valid_bytes;
     logic [31:0] coalesce_k_bytes;
@@ -170,6 +175,7 @@ module conv_linebuf_stream_packer #(
     assign row_valid_o = row_valid_out_q;
     assign busy_o = state_q != CH_IDLE;
     assign done_o = done_q;
+    assign prefetch_busy_o = prefetch_active_q;
     assign emitted_vectors_o = emitted_vectors_q;
     assign fetch_beats_o = fetch_beats_q;
     assign bypass_vectors_o = bypass_vectors_q;
@@ -557,6 +563,9 @@ module conv_linebuf_stream_packer #(
             row_data_q <= '0;
             row_valid_out_q <= 1'b0;
             done_q <= 1'b0;
+            prefetch_active_q <= 1'b0;
+            prefetch_ready_q <= 1'b0;
+            prefetched_c_base_q <= '0;
         end else begin
             done_q <= 1'b0;
 
@@ -579,6 +588,9 @@ module conv_linebuf_stream_packer #(
                         k_tile_idx_q <= '0;
                         row_cache_full_q <= row_cache_full_mode;
                         cached_c_base_q <= cfg_c_base_i;
+                        prefetch_active_q <= 1'b0;
+                        prefetch_ready_q <= 1'b0;
+                        prefetched_c_base_q <= '0;
                         fill_kh_q <= '0;
                         fill_x_q <= '0;
                         window_kw_q <= '0;
@@ -667,8 +679,15 @@ module conv_linebuf_stream_packer #(
                 CH_ENSURE: begin
                     window_q <= '0;
                     if (fill_kh_q == fill_done_rows) begin
-                        window_kw_q <= '0;
-                        state_q <= CH_WINDOW_REQ;
+                        if (prefetch_active_q) begin
+                            prefetch_active_q <= 1'b0;
+                            prefetch_ready_q <= 1'b1;
+                            prefetched_c_base_q <= cfg_c_base_i;
+                            state_q <= CH_STREAM_DONE;
+                        end else begin
+                            window_kw_q <= '0;
+                            state_q <= CH_WINDOW_REQ;
+                        end
                     end else if (!fill_row_in_bounds || (block_valid_bytes == 6'd0)) begin
                         fill_kh_q <= fill_kh_q + 16'd1;
                     end else begin
@@ -855,12 +874,32 @@ module conv_linebuf_stream_packer #(
                         fill_kh_q <= '0;
                         fill_x_q <= '0;
                         window_kw_q <= '0;
-                        if (row_cache_reuse) begin
+                        prefetch_active_q <= 1'b0;
+                        prefetch_ready_q <= 1'b0;
+                        if (row_cache_reuse ||
+                            (prefetch_ready_q && (prefetched_c_base_q == cfg_c_base_i))) begin
                             state_q <= CH_WINDOW_REQ;
                         end else begin
                             cached_c_base_q <= cfg_c_base_i;
                             state_q <= CH_ENSURE;
                         end
+                    end else if (prefetch_i && !prefetch_active_q && !prefetch_ready_q &&
+                                 !row_cache_reuse) begin
+                        window_q <= '0;
+                        output_row_base_addr_q <= cfg_origin_base_i;
+                        output_spatial_addr_q <= cfg_origin_base_i;
+                        output_base_ih_q <= -$signed({16'd0, cfg_pad_h_i});
+                        output_base_iw_q <= -$signed({16'd0, cfg_pad_w_i});
+                        ow_q <= '0;
+                        kh_q <= '0;
+                        kw_q <= '0;
+                        spatial_rows_q <= '0;
+                        fill_kh_q <= '0;
+                        fill_x_q <= '0;
+                        window_kw_q <= '0;
+                        cached_c_base_q <= cfg_c_base_i;
+                        prefetch_active_q <= 1'b1;
+                        state_q <= CH_ENSURE;
                     end
                 end
 
