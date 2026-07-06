@@ -325,6 +325,44 @@ Vai trò từng khối:
 - Lane mux chọn byte từ window cache hoặc zero padding.
 - Skid FIFO tách timing giữa mux lớn và systolic ready/valid.
 
+## 8. Target `conv_linebuf_stream_packer`
+
+Feature bắt buộc:
+
+- Non-KGEN/non-coalesce: phát vector theo descriptor `{oh, ow, kh, kw, c_base}`.
+- Coalesce non-KGEN: khi `KH*KW*valid_channels <= 32`, phát một vector chứa
+  toàn bộ window theo lane order `{kh, kw, ic}`.
+- KGEN mixed tap: host/Python chỉ đưa seed `{kh,kw,ic}` và `k_tile_count`; RTL
+  tự sinh lane descriptor 32 bước mỗi K tile.
+- Padding: zero-injection, không materialize padding vào SRAM.
+- `1x1` pad0: bypass path riêng, không đi qua window cache.
+- Native stride: `1`, `2`, `3`.
+
+Performance contract:
+
+- Với window cache hit và systolic ready, emit path phải phát `1 x 256-bit`
+  vector/cycle.
+- Refill/prefetch không được nằm nối tiếp trên critical emit path trong steady
+  state.
+- Counter/PMU phải đo riêng `window_refill`, `emit_valid`, `emit_ready`,
+  `emit_stall`, `k_tile_transition`, và `padding_zero`.
+
+Storage estimate:
+
+- `K_MAX=5`, `C_BLOCK=32B` tạo window cache `5*5*32B = 800B = 6.4Kb`.
+- Dung lượng này không lớn cho ASIC; rủi ro chính là mux/timing của
+  `25 x 32B` vào 32 lanes, nên cần pipeline hoặc chia mux theo lane group.
+
+Stride policy:
+
+- `stride=1`: với 5 row banks, mỗi bank đọc một column/cycle là đủ để cập nhật
+  window `5x5` khi trượt sang output kế tiếp.
+- `stride=2` và `stride=3`: không implement bằng scan stride-1 rồi bỏ output.
+  Cần prefetch segment rộng hơn hoặc x-banking để window cache có sẵn các
+  column kế tiếp trước khi emit.
+- `stride>3`: không là native performance target trong phase này. Compiler
+  phải decompose/rewrite hoặc dùng packed prepare backup.
+
 ## 9. Verification Cho Linebuffer Mới
 
 Unit tests bắt buộc trước khi nối cluster:
