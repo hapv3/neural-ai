@@ -116,8 +116,17 @@ module systolic_controller #(
     logic          ifm_fifo_full;
     logic          ifm_fifo_empty;
 
-    ofm_row_t      ofm_fifo_data;
-    ofm_row_t      ofm_fifo_out;
+    typedef struct packed {
+        ofm_row_t    row;
+        logic [31:0] row_idx;
+        logic [31:0] k_tile_idx;
+        logic        psum_buf_active;
+        logic        needs_external_psum;
+        logic        final_tile;
+    } ofm_fifo_entry_t;
+
+    ofm_fifo_entry_t ofm_fifo_data;
+    ofm_fifo_entry_t ofm_fifo_out;
     ofm_row_t      accum_row_q, accum_row_d;
     ofm_row_t      accum_sum;
     ofm_row_t      psum_buf_old;
@@ -228,12 +237,15 @@ module systolic_controller #(
     logic          psum_buf_needs_external;
     logic          accum_uses_tcdm_psum;
     logic          psum_buf_final_tile;
+    logic          psum_buf_overlap_active;
+    logic          psum_buf_drain_entry;
     logic          psum_buf_sel_q, psum_buf_sel_d;
     logic          psum_buf_we;
     logic [PSUM_BUF_ADDR_WIDTH-1:0] psum_buf_addr;
     ofm_row_t      psum_buf_wdata;
     ofm_row_t      psum_buf_rdata;
     ofm_row_t      psum_buf_q [2][PSUM_BUF_M];
+    logic [31:0]   ofm_push_row_idx_q, ofm_push_row_idx_d;
 
     logic          linebuf_start;
     logic          linebuf_next_tile;
@@ -255,7 +267,6 @@ module systolic_controller #(
 
     assign weight_fifo_data = obi_i_rdata_i;
     assign ifm_fifo_data    = obi_i_rdata_i;
-    assign ofm_fifo_data    = ofm_data;
     assign ofm_ready = !ofm_fifo_full;
     assign array_pipe_ready = !ofm_valid || ofm_ready;
     assign psum_data = '0;
@@ -276,13 +287,14 @@ module systolic_controller #(
     assign psum_buf_needs_external = psum_buf_active && cfg_sys_accum_en_i && (k_tile_idx_q == 32'd0);
     assign accum_uses_tcdm_psum = accum_active && (!psum_buf_active || psum_buf_needs_external);
     assign psum_buf_final_tile = psum_buf_active && !linebuf_has_next_k_tile;
-    assign drain_enabled = (state_q == COMPUTE) || (state_q == WAIT_DRAIN);
+    assign psum_buf_overlap_active = psum_buf_active && linebuf_kgen_multi && !cfg_requant_en_i;
+    assign psum_buf_drain_entry = !ofm_fifo_empty && ofm_fifo_out.psum_buf_active;
+    assign drain_enabled = (state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN);
     assign weight_preload_fetch_done = weight_preload_done_q ||
                                        (weight_preload_active_q &&
                                         (weight_preload_req_cnt_q == 32'd0) &&
                                         (weight_preload_obi_rsp_cnt_q == 32'd0));
-    assign linebuf_use_next_cfg = (state_q == WAIT_DRAIN) && linebuf_has_next_k_tile &&
-                                  weight_preload_fetch_done;
+    assign linebuf_use_next_cfg = (state_q == WAIT_DRAIN) && linebuf_has_next_k_tile;
     assign linebuf_c_base_eff = cfg_linebuf_kgen_i ? {linebuf_seed_ic_eff[15:5], 5'b0} : cfg_linebuf_c_base_i;
     assign linebuf_seed_ic_eff = cfg_linebuf_kgen_i ? (linebuf_use_next_cfg ? k_seed_ic_next : k_seed_ic_q) :
                                                        cfg_linebuf_k_seed_ic_i;
@@ -293,12 +305,12 @@ module systolic_controller #(
 
     always_comb begin
         for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
-            accum_sum[ch] = ofm_fifo_out[ch] + psum_fifo_out[ch];
-            psum_buf_sum[ch] = ofm_fifo_out[ch] + psum_buf_old[ch];
+            accum_sum[ch] = ofm_fifo_out.row[ch] + psum_fifo_out[ch];
+            psum_buf_sum[ch] = ofm_fifo_out.row[ch] + psum_buf_old[ch];
         end
     end
 
-    assign requant_acc = (drain_state_q == DRAIN_ACCUM_REQUANT) ? accum_sum : ofm_fifo_out;
+    assign requant_acc = (drain_state_q == DRAIN_ACCUM_REQUANT) ? accum_sum : ofm_fifo_out.row;
 
     function automatic void advance_k_seed32(
         input  logic [7:0]  kh_i,
@@ -431,7 +443,7 @@ module systolic_controller #(
     fifo_v3 #(
         .FALL_THROUGH (1'b1),
         .DEPTH        (OFM_FIFO_DEPTH),
-        .dtype        (ofm_row_t)
+        .dtype        (ofm_fifo_entry_t)
     ) i_ofm_fifo (
         .clk_i      (clk_i),
         .rst_ni     (rst_ni),
@@ -609,18 +621,22 @@ module systolic_controller #(
         weight_preload_rsp_cnt_d = weight_preload_rsp_cnt_q;
         weight_preload_obi_rsp_cnt_d = weight_preload_obi_rsp_cnt_q;
         weight_preload_ptr_d = weight_preload_ptr_q;
+        ofm_push_row_idx_d = ofm_push_row_idx_q;
         psum_buf_sel_d = psum_buf_sel_q;
         psum_buf_we = 1'b0;
         psum_buf_addr = '0;
         psum_buf_wdata = '0;
         psum_buf_old = '0;
-        if ((drain_cnt_q != 32'd0) && (drain_cnt_q <= cfg_sys_dim_m_i)) begin
+        if (psum_buf_drain_entry) begin
+            psum_buf_addr = PSUM_BUF_ADDR_WIDTH'(ofm_fifo_out.row_idx);
+        end else if ((drain_cnt_q != 32'd0) && (drain_cnt_q <= cfg_sys_dim_m_i)) begin
             psum_buf_addr = PSUM_BUF_ADDR_WIDTH'(cfg_sys_dim_m_i - drain_cnt_q);
         end
         psum_buf_rdata = psum_buf_q[psum_buf_sel_q][psum_buf_addr];
-        if (psum_buf_needs_external) begin
+        if (psum_buf_drain_entry && ofm_fifo_out.needs_external_psum) begin
             psum_buf_old = psum_fifo_out;
-        end else if ((k_tile_idx_q != 32'd0) || cfg_sys_accum_en_i) begin
+        end else if (psum_buf_drain_entry &&
+                     ((ofm_fifo_out.k_tile_idx != 32'd0) || cfg_sys_accum_en_i)) begin
             psum_buf_old = psum_buf_rdata;
         end
         linebuf_start = 1'b0;
@@ -642,6 +658,13 @@ module systolic_controller #(
         weight_fifo_pop = 1'b0;
         ifm_fifo_push = 1'b0;
         ifm_fifo_pop = 1'b0;
+        ofm_fifo_data = '0;
+        ofm_fifo_data.row = ofm_data;
+        ofm_fifo_data.row_idx = ofm_push_row_idx_q;
+        ofm_fifo_data.k_tile_idx = k_tile_idx_q;
+        ofm_fifo_data.psum_buf_active = psum_buf_active;
+        ofm_fifo_data.needs_external_psum = psum_buf_needs_external;
+        ofm_fifo_data.final_tile = psum_buf_final_tile;
         ofm_fifo_pop = 1'b0;
         psum_fifo_push = 1'b0;
         psum_fifo_pop = 1'b0;
@@ -649,6 +672,9 @@ module systolic_controller #(
         requant_in_valid = 1'b0;
         requant_out_ready = 1'b0;
         ofm_fifo_push = drain_enabled && ofm_valid && ofm_ready;
+        if (ofm_fifo_push) begin
+            ofm_push_row_idx_d = ofm_push_row_idx_q + 32'd1;
+        end
 
         obi_o_req_o = '0;
         obi_o_we_o = '1;
@@ -657,13 +683,13 @@ module systolic_controller #(
         obi_o_addr_o[1] = o_ptr_q + OFM_BEAT_BYTES;
         obi_o_addr_o[2] = o_ptr_q + (2 * OFM_BEAT_BYTES);
         obi_o_addr_o[3] = o_ptr_q + (3 * OFM_BEAT_BYTES);
-        obi_o_wdata_o[0] = ofm_fifo_out[OFM_ELEMS_PER_OBI-1:0];
-        obi_o_wdata_o[1] = ofm_fifo_out[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
-        obi_o_wdata_o[2] = ofm_fifo_out[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
-        obi_o_wdata_o[3] = ofm_fifo_out[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
+        obi_o_wdata_o[0] = ofm_fifo_out.row[OFM_ELEMS_PER_OBI-1:0];
+        obi_o_wdata_o[1] = ofm_fifo_out.row[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
+        obi_o_wdata_o[2] = ofm_fifo_out.row[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
+        obi_o_wdata_o[3] = ofm_fifo_out.row[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
 
         if (drain_enabled) begin
-            if (psum_buf_active) begin
+            if (psum_buf_active || psum_buf_drain_entry) begin
                 drain_state_d = DRAIN_IDLE;
 
                 if (psum_read_active_q) begin
@@ -685,9 +711,10 @@ module systolic_controller #(
                     end
                 end
 
-                if (!ofm_fifo_empty && (!psum_buf_needs_external || !psum_fifo_empty)) begin
+                if (!ofm_fifo_empty &&
+                    (!ofm_fifo_out.needs_external_psum || !psum_fifo_empty)) begin
                     drain_state_d = DRAIN_ACCUM_WRITE;
-                    if (psum_buf_final_tile) begin
+                    if (ofm_fifo_out.final_tile) begin
                         obi_o_we_o = '1;
                         obi_o_wdata_o[0] = psum_buf_sum[OFM_ELEMS_PER_OBI-1:0];
                         obi_o_wdata_o[1] = psum_buf_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
@@ -696,7 +723,7 @@ module systolic_controller #(
                         obi_o_req_o = 4'b1111;
                         if (obi_o_gnt_i == 4'b1111) begin
                             ofm_fifo_pop = 1'b1;
-                            psum_fifo_pop = psum_buf_needs_external;
+                            psum_fifo_pop = ofm_fifo_out.needs_external_psum;
                             o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
                             drain_cnt_d = drain_cnt_q - 1;
                         end
@@ -704,7 +731,7 @@ module systolic_controller #(
                         psum_buf_we = 1'b1;
                         psum_buf_wdata = psum_buf_sum;
                         ofm_fifo_pop = 1'b1;
-                        psum_fifo_pop = psum_buf_needs_external;
+                        psum_fifo_pop = ofm_fifo_out.needs_external_psum;
                         drain_cnt_d = drain_cnt_q - 1;
                     end
                 end
@@ -863,6 +890,7 @@ module systolic_controller #(
                     k_seed_ic_d = cfg_linebuf_k_seed_ic_i;
                     k_seed_kw_d = cfg_linebuf_k_seed_kw_i;
                     k_seed_kh_d = cfg_linebuf_k_seed_kh_i;
+                    ofm_push_row_idx_d = '0;
                     if (psum_buf_active) begin
                         psum_buf_sel_d = ~psum_buf_sel_q;
                     end
@@ -894,6 +922,9 @@ module systolic_controller #(
                     psum_read_resp_mask_d = '0;
                     psum_prefetch_rows_d = accum_uses_tcdm_psum ? cfg_sys_dim_m_i : '0;
                     array_flush_cnt_d = '0;
+                    drain_cnt_d = (psum_buf_overlap_active && (k_tile_idx_q != 32'd0)) ?
+                                  (drain_cnt_q + cfg_sys_dim_m_i) : cfg_sys_dim_m_i;
+                    ofm_push_row_idx_d = '0;
                     weight_preload_done_d = 1'b0;
                     if (cfg_linebuf_en_i) begin
                         linebuf_next_tile = 1'b1;
@@ -927,6 +958,9 @@ module systolic_controller #(
                     psum_read_active_d = 1'b0;
                     psum_read_resp_mask_d = '0;
                     psum_prefetch_rows_d = accum_uses_tcdm_psum ? cfg_sys_dim_m_i : '0;
+                    drain_cnt_d = (psum_buf_overlap_active && (k_tile_idx_q != 32'd0)) ?
+                                  (drain_cnt_q + cfg_sys_dim_m_i) : cfg_sys_dim_m_i;
+                    ofm_push_row_idx_d = '0;
                     if (cfg_linebuf_en_i) begin
                         if (linebuf_kgen_multi && (k_tile_idx_q != 32'd0)) begin
                             linebuf_next_tile = 1'b1;
@@ -984,7 +1018,8 @@ module systolic_controller #(
                 end
 
                 if (linebuf_has_next_k_tile && !weight_preload_active_q &&
-                    !weight_preload_done_q && (array_flush_cnt_q == '0)) begin
+                    !weight_preload_done_q && (array_flush_cnt_q == '0) &&
+                    !linebuf_prefetch_busy) begin
                     weight_preload_active_d = 1'b1;
                     weight_preload_req_cnt_d = ARRAY_DIM;
                     weight_preload_rsp_cnt_d = ARRAY_DIM;
@@ -1022,15 +1057,36 @@ module systolic_controller #(
                     end
                 end
 
-                linebuf_prefetch = linebuf_has_next_k_tile && weight_preload_fetch_done &&
-                                   ((drain_cnt_q != 0) || !ofm_fifo_empty);
+                linebuf_prefetch = linebuf_has_next_k_tile &&
+                                   !weight_preload_active_q &&
+                                   !weight_preload_done_q &&
+                                   (linebuf_prefetch_busy ||
+                                    (array_flush_cnt_q != '0) ||
+                                    (drain_cnt_q != 0) ||
+                                    !ofm_fifo_empty);
                 if (linebuf_prefetch) begin
                     obi_i_req_o = linebuf_obi_req;
                     obi_i_addr_o = linebuf_obi_addr;
                 end
 
                 if (accum_active) begin
-                    if (drain_cnt_q == 0 && ofm_fifo_empty) begin
+                    if (psum_buf_overlap_active && linebuf_has_next_k_tile &&
+                        !psum_buf_needs_external && weight_preload_done_q &&
+                        !linebuf_prefetch_busy && (array_flush_cnt_q == '0)) begin
+                        advance_k_seed32(k_seed_kh_q,
+                                         k_seed_kw_q,
+                                         k_seed_ic_q,
+                                         cfg_linebuf_input_c_i,
+                                         cfg_linebuf_kernel_w_i,
+                                         k_seed_kh_d,
+                                         k_seed_kw_d,
+                                         k_seed_ic_d);
+                        k_tile_idx_d = k_tile_idx_q + 32'd1;
+                        i_ptr_d = cfg_sys_ifm_ptr_i;
+                        o_ptr_d = cfg_sys_ofm_ptr_i;
+                        a_ptr_d = cfg_sys_psum_ptr_i;
+                        state_d = LOAD_WEIGHTS;
+                    end else if (drain_cnt_q == 0 && ofm_fifo_empty) begin
                         if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
                             advance_k_seed32(k_seed_kh_q,
                                              k_seed_kw_q,
@@ -1052,7 +1108,23 @@ module systolic_controller #(
                         end
                     end
                 end else begin
-                    if (drain_cnt_q == 0 && ofm_fifo_empty) begin
+                    if (psum_buf_overlap_active && linebuf_has_next_k_tile &&
+                        weight_preload_done_q && !linebuf_prefetch_busy &&
+                        (array_flush_cnt_q == '0)) begin
+                        advance_k_seed32(k_seed_kh_q,
+                                         k_seed_kw_q,
+                                         k_seed_ic_q,
+                                         cfg_linebuf_input_c_i,
+                                         cfg_linebuf_kernel_w_i,
+                                         k_seed_kh_d,
+                                         k_seed_kw_d,
+                                         k_seed_ic_d);
+                        k_tile_idx_d = k_tile_idx_q + 32'd1;
+                        i_ptr_d = cfg_sys_ifm_ptr_i;
+                        o_ptr_d = cfg_sys_ofm_ptr_i;
+                        a_ptr_d = cfg_sys_psum_ptr_i;
+                        state_d = LOAD_WEIGHTS;
+                    end else if (drain_cnt_q == 0 && ofm_fifo_empty) begin
                         if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
                             advance_k_seed32(k_seed_kh_q,
                                              k_seed_kw_q,
@@ -1117,6 +1189,7 @@ module systolic_controller #(
             weight_preload_rsp_cnt_q <= '0;
             weight_preload_obi_rsp_cnt_q <= '0;
             weight_preload_ptr_q <= '0;
+            ofm_push_row_idx_q <= '0;
             psum_buf_sel_q <= 1'b0;
         end else begin
             state_q     <= state_d;
@@ -1147,6 +1220,7 @@ module systolic_controller #(
             weight_preload_rsp_cnt_q <= weight_preload_rsp_cnt_d;
             weight_preload_obi_rsp_cnt_q <= weight_preload_obi_rsp_cnt_d;
             weight_preload_ptr_q <= weight_preload_ptr_d;
+            ofm_push_row_idx_q <= ofm_push_row_idx_d;
             psum_buf_sel_q <= psum_buf_sel_d;
             if (psum_buf_we) begin
                 psum_buf_q[psum_buf_sel_q][psum_buf_addr] <= psum_buf_wdata;
