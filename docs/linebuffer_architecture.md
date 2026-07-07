@@ -13,7 +13,7 @@ Quyết định hiện tại:
   + segment prefetch để phát IFM vector trực tiếp cho systolic.
 - Mục tiêu steady-state của linebuffer mới là `1 x 256-bit vector/cycle` vào
   systolic IFM stream cho các shape được support.
-- Native stride tập trung vào `stride=1`, `stride=2`, `stride=3`. Stride lớn hơn
+- Native stride tập trung vào `stride=1`, `stride=2`. Stride lớn hơn
   phải do compiler/scheduler decompose hoặc đi qua packed prepare backup.
 
 ## 1. Contract RTL Legacy Đã Đo
@@ -336,7 +336,7 @@ Feature bắt buộc:
   tự sinh lane descriptor 32 bước mỗi K tile.
 - Padding: zero-injection, không materialize padding vào SRAM.
 - `1x1` pad0: bypass path riêng, không đi qua window cache.
-- Native stride: `1`, `2`, `3`.
+- Native stride: `1`, `2`.
 
 Performance contract:
 
@@ -357,10 +357,10 @@ Stride policy:
 
 - `stride=1`: với 5 row banks, mỗi bank đọc một column/cycle là đủ để cập nhật
   window `5x5` khi trượt sang output kế tiếp.
-- `stride=2` và `stride=3`: không implement bằng scan stride-1 rồi bỏ output.
-  Cần prefetch segment rộng hơn hoặc x-banking để window cache có sẵn các
-  column kế tiếp trước khi emit.
-- `stride>3`: không là native performance target trong phase này. Compiler
+- `stride=2`: không implement bằng scan stride-1 rồi bỏ output. Cần prefetch
+  segment rộng hơn hoặc x-banking để window cache có sẵn các column kế tiếp
+  trước khi emit.
+- `stride>=3`: không là native performance target trong phase này. Compiler
   phải decompose/rewrite hoặc dùng packed prepare backup.
 
 ## 9. Verification Cho Linebuffer Mới
@@ -368,7 +368,7 @@ Stride policy:
 Unit tests bắt buộc trước khi nối cluster:
 
 - `1x1` bypass: pad0, stride1, tail width, unaligned address.
-- Non-KGEN single tap: `3x3`, `5x5`, pad0/pad1, stride1/2/3.
+- Non-KGEN single tap: `3x3`, `5x5`, pad0/pad1, stride1/2.
 - Coalesce: `3x3 IC=3`, `5x5 IC=1`, tail lanes zero.
 - KGEN mixed tap: `3x3 IC=32`, `3x3 IC=96`, `3x3 IC=120`, `5x5 IC=32`.
 - Padding: top/bottom/left/right/asymmetric.
