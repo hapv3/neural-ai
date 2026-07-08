@@ -70,7 +70,7 @@
 #define P3_ROWS          (P3_H * P3_W)
 #define P3_C120_H        16u
 #define P3_C120_W        16u
-#define P3_C120_TILE_OH  3u
+#define P3_C120_TILE_OH  16u
 #define P3_C32           32u
 #define P3_C64           64u
 #define P3_C32_INPUT_BYTES  (P3_ROWS * P3_C32)
@@ -318,8 +318,8 @@ static void merge_split_stats(npu_conv2d_packed_stats_t *total,
 
 static void run_oc32_case_split_ic120(uint32_t case_id) {
     npu_conv2d_packed_cfg_t cfg;
-    npu_conv2d_packed_stats_t stats_main_total;
-    npu_conv2d_packed_stats_t stats_tail_total;
+    npu_conv2d_packed_stats_t stats_main;
+    npu_conv2d_packed_stats_t stats_tail;
     uint32_t input_c_total = 120u;
     uint32_t input_c_main = 96u;
     uint32_t input_c_tail = input_c_total - input_c_main;
@@ -327,76 +327,52 @@ static void run_oc32_case_split_ic120(uint32_t case_id) {
     uint32_t tail_weight_tiles = k_tiles_for(input_c_tail, 3u, 3u);
     uint32_t main_weight_bytes = main_weight_tiles * 32u * 32u;
     uint32_t total_weight_bytes = (main_weight_tiles + tail_weight_tiles) * 32u * 32u;
+    uint32_t input_bytes = P3_C120_H * P3_C120_W * input_c_total;
+    uint32_t output_bytes = P3_C120_H * P3_C120_W * 32u * 4u;
 
-    reset_stats(&stats_main_total);
-    reset_stats(&stats_tail_total);
+    reset_stats(&stats_main);
+    reset_stats(&stats_tail);
 
+    spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
     spatz_rt_dma_1d(T_C120_WEIGHT, P3_WEIGHT_ADDR(case_id), total_weight_bytes);
     spatz_rt_dma_wait_all();
 
-    for (uint32_t oh_base = 0; oh_base < P3_C120_H; oh_base += P3_C120_TILE_OH) {
-        npu_conv2d_packed_stats_t stats_main;
-        npu_conv2d_packed_stats_t stats_tail;
-        uint32_t tile_oh = P3_C120_TILE_OH;
-        if ((oh_base + tile_oh) > P3_C120_H) {
-            tile_oh = P3_C120_H - oh_base;
-        }
+    init_cfg(&cfg,
+             T_C120_INPUT,
+             T_C120_WEIGHT,
+             T_C120_OUTPUT,
+             P3_C120_H,
+             P3_C120_W,
+             input_c_main,
+             P3_C120_H,
+             P3_C120_W,
+             3u,
+             3u,
+             1u,
+             1u,
+             1u,
+             1u);
+    cfg.input_c_stride = input_c_total;
 
-        uint32_t input_y_start = (oh_base == 0u) ? 0u : (oh_base - 1u);
-        uint32_t input_y_end = oh_base + tile_oh;
-        if (input_y_end >= P3_C120_H) {
-            input_y_end = P3_C120_H - 1u;
-        }
-        uint32_t local_input_h = input_y_end - input_y_start + 1u;
-        uint32_t local_pad_h = (oh_base == 0u) ? 1u : 0u;
-        uint32_t input_offset = input_y_start * P3_C120_W * input_c_total;
-        uint32_t input_bytes = local_input_h * P3_C120_W * input_c_total;
-        uint32_t output_offset = oh_base * P3_C120_W * 32u * 4u;
-        uint32_t output_bytes = tile_oh * P3_C120_W * 32u * 4u;
-
-        spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id) + input_offset, input_bytes);
-        spatz_rt_dma_wait_all();
-
-        init_cfg(&cfg,
-                 T_C120_INPUT,
-                 T_C120_WEIGHT,
-                 T_C120_OUTPUT,
-                 local_input_h,
-                 P3_C120_W,
-                 input_c_main,
-                 tile_oh,
-                 P3_C120_W,
-                 3u,
-                 3u,
-                 1u,
-                 1u,
-                 local_pad_h,
-                 1u);
-        cfg.input_c_stride = input_c_total;
-
-        uint32_t status = npu_conv2d_packed_run_oc32(&cfg, &stats_main);
-        if (status != NPU_CONV2D_PACKED_OK) {
-            spatz_rt_fail_at(0xC9E2u, oh_base, (int32_t)status, NPU_CONV2D_PACKED_OK);
-        }
-        accumulate_stats(&stats_main_total, &stats_main);
-
-        cfg.weight_addr = T_C120_WEIGHT + main_weight_bytes;
-        cfg.input_c = input_c_tail;
-        cfg.input_c_base = input_c_main;
-        cfg.accumulate = 1u;
-
-        status = npu_conv2d_packed_run_oc32(&cfg, &stats_tail);
-        if (status != NPU_CONV2D_PACKED_OK) {
-            spatz_rt_fail_at(0xC9E3u, oh_base, (int32_t)status, NPU_CONV2D_PACKED_OK);
-        }
-        accumulate_stats(&stats_tail_total, &stats_tail);
-
-        spatz_rt_dma_1d(P3_OUT_ADDR(case_id) + output_offset, T_C120_OUTPUT, output_bytes);
-        spatz_rt_dma_wait_all();
+    uint32_t status = npu_conv2d_packed_run_oc32(&cfg, &stats_main);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(0xC9E2u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
     }
 
-    merge_split_stats(&stats_main_total, &stats_tail_total);
-    publish_stats(P3_STATS_ADDR(case_id), &stats_main_total);
+    cfg.weight_addr = T_C120_WEIGHT + main_weight_bytes;
+    cfg.input_c = input_c_tail;
+    cfg.input_c_base = input_c_main;
+    cfg.accumulate = 1u;
+
+    status = npu_conv2d_packed_run_oc32(&cfg, &stats_tail);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(0xC9E3u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
+    }
+
+    merge_split_stats(&stats_main, &stats_tail);
+    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_C120_OUTPUT, output_bytes);
+    spatz_rt_dma_wait_all();
+    publish_stats(P3_STATS_ADDR(case_id), &stats_main);
 }
 
 static void copy_oc32_to_oc64_l2(uint32_t l2_addr, uint32_t src_addr, uint32_t rows, uint32_t oc_base) {
