@@ -105,7 +105,7 @@ LINEBUF_STATE_NAMES = {
     3: "CH_FILL_WAIT0",
     4: "CH_FILL_REQ1",
     5: "CH_FILL_WAIT1",
-    6: "CH_FILL_WRITE",
+    6: "CH_FILL_DRAIN",
     7: "CH_WINDOW_REQ",
     8: "CH_WINDOW_WAIT",
     9: "CH_STREAM_PRIME",
@@ -118,7 +118,12 @@ LINEBUF_STATE_NAMES = {
     16: "CH_STREAM_REFILL",
     17: "CH_STREAM_STALL",
     18: "CH_STREAM_SLIDE",
-    19: "CH_STREAM_DONE",
+    19: "CH_SS_FILL_PREP",
+    20: "CH_SS_FILL_REQ0",
+    21: "CH_SS_FILL_WAIT0",
+    22: "CH_SS_FILL_REQ1",
+    23: "CH_SS_FILL_WAIT1",
+    24: "CH_STREAM_DONE",
 }
 
 P3_CASES = {
@@ -197,7 +202,7 @@ P3_CASES = {
         False,
     ),
     P3_CASE_LINEBUF_3X3_C120: (
-        "linebuffer split conv3x3 IC120",
+        "linebuffer full-height split conv3x3 IC120",
         P3_C120_H,
         P3_C120_W,
         120,
@@ -210,7 +215,7 @@ P3_CASES = {
         1,
         1,
         32,
-        204,
+        34,
         0,
         0,
         False,

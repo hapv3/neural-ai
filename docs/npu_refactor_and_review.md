@@ -56,22 +56,26 @@ là emit trong window, mà là chuyển tile + refill/prefetch + drain.
 ### Case 20: split conv3x3 IC120, 16x16
 
 - PASS.
-- PMU cycles: 81528.
+- PMU cycles: 68968 sau commit `b074a68`.
 - K tiles: 204.
 - `linebuf_row_valid = linebuf_row_ready = 8704`.
 - `CH_STREAM_EMIT = 8704`.
 - Systolic states:
-  - `COMPUTE = 35846`
-  - `WAIT_DRAIN = 22067`
+  - `COMPUTE = 14236`
+  - `WAIT_DRAIN = 31101`
+  - `IDLE = 23297`
+  - `LOAD_WEIGHTS = 600`
 - Linebuffer states:
-  - `CH_STREAM_DONE = 21407`
-  - `CH_FILL_REQ0 = 11810`
-  - `CH_FILL_REQ1 = 8968`
+  - `CH_IDLE = 24485`
+  - `CH_FILL_REQ0 = 11648`
+  - `CH_STREAM_DONE = 9617`
   - `CH_STREAM_EMIT = 8704`
-- `ofm_fifo_full = 2145`.
+- `linebuf_obi_req = 20280`, `linebuf_obi_stall = 0`.
+- `ofm_fifo_full = 25`.
 
 Nhận xét: đây là bằng chứng rõ nhất rằng linebuffer emit đã không còn là điểm
-nghẽn chính. Điểm nghẽn hiện tại là controller/drain và tile boundary.
+nghẽn chính. Điểm nghẽn hiện tại là controller/drain, firmware spatial tiling,
+và linebuffer refill theo từng `c_base`.
 
 ## 3. Đánh giá kiến trúc
 
@@ -95,7 +99,7 @@ nghẽn chính. Điểm nghẽn hiện tại là controller/drain và tile bound
   `LOAD_WEIGHTS -> COMPUTE -> WAIT_DRAIN -> LOAD_WEIGHTS -> COMPUTE`.
   Tile kế tiếp chỉ bắt đầu khi `drain_cnt_q == 0 && ofm_fifo_empty`.
 - `CH_STREAM_DONE` đang là proxy cho tile-boundary wait. Case 20 có
-  `CH_STREAM_DONE=21407`, gần bằng `WAIT_DRAIN=22067`.
+  `CH_STREAM_DONE=9617`, còn `WAIT_DRAIN=31101` và `IDLE=23297`.
 - Accumulation vẫn read psum cũ từ TCDM rồi write lại cho nhiều K tile. Với nhiều
   K tile, traffic này tăng tuyến tính và đẩy ngược backpressure lên array.
 - `ofm_fifo_full` xuất hiện trong case 20, nghĩa là drain path chưa đủ nhanh để
@@ -270,6 +274,63 @@ và IFM/linebuffer read thành 2 master/port sẽ đơn giản hoá overlap. N�
 - linebuffer prefetch tranh thủ idle slot;
 - không để prefetch làm trễ weight critical path.
 
+### 6.4. Spatial/stripe-stationary linebuffer cho target 2x compute
+
+`Spatial/stripe-stationary` nghĩa là giữ một stripe không gian nhỏ của IFM
+resident trong linebuffer, rồi chạy hết các K tile cần cho stripe đó trước khi
+chuyển sang stripe kế tiếp. Dữ liệu đứng yên là spatial window, không phải một
+`c_base` đơn lẻ. Systolic vẫn weight-stationary trong từng K tile.
+
+Với case 20 (`16x16x120`, `3x3`, stride 1), target lý tưởng đang xét là:
+
+- Compute thật: `8 stripes * 34 K tiles * 32 M rows = 8704` cycles.
+- Weight load tối thiểu: `8 * 34 * 32 = 8704` cycles.
+- Tổng target gần đúng: `17408` cycles, tức `2 * compute`.
+
+Để đạt mô hình này, stripe nên là `tile_oh=2`:
+
+- `M = tile_oh * output_w = 2 * 16 = 32`, khớp đúng một systolic M tile.
+- Mỗi stripe cần input rows resident là `tile_oh + K - 1 = 4` rows.
+- Cần giữ toàn bộ `ceil(120/32)=4` cblocks để không refill khi KGEN quay vòng
+  qua `kh/kw/ic`.
+- IFM data per context:
+  `4 rows * 16 cols * 4 cblocks * 32B = 8192B`.
+- Ping-pong hai stripe context đúng `16 KiB` IFM data.
+
+Điều này khác full-row-cache. Full-row-cache giữ 16 row cho một cbase nên vẫn
+thất bại khi KGEN quay lại cbase cũ sau khi đã đổi `kh/kw`; còn
+stripe-stationary giữ ít row hơn nhưng giữ đủ các cblock của stripe hiện tại.
+
+Dataflow mong muốn:
+
+```text
+context A resident stripe 0     context B filling stripe 1
+        │                               ▲
+        ▼                               │
+KGEN lane descriptor {kh,kw,ic}         │
+        │                               │
+per-lane cblock/row/col mux             │
+        │                               │
+1 x 256-bit IFM vector/cycle ──► systolic compute
+```
+
+Các thay đổi cần có:
+
+- Firmware không tách `IC=96 + 24` cho path này; chạy `IC=120` như một KGEN job
+  34 tile, với tail lane zero-injection ở tile cuối.
+- Linebuffer có hai resident contexts, mỗi context giữ `ROWS=4`, `W=16`,
+  `CBLOCKS=4`, `32B` mỗi pixel-block.
+- Lane mux không dùng một `cfg_c_base_i` duy nhất; mỗi lane tự tính
+  `cblock = lane_ic / 32`, `lane = lane_ic % 32`.
+- Scheduler chạy hết 34 K tiles cho cùng stripe trước khi chuyển stripe, và fill
+  context kế tiếp dưới compute/drain của context hiện tại.
+- Controller chỉ nên thấy 8 stripe jobs lớn, không phải 6 vòng `oh_base` nhân
+  hai pass `96 + 24`.
+
+Nếu chỉ thêm IFM FIFO hoặc tăng depth SRAM mà vẫn giữ `cfg_c_base_i` một giá trị,
+thiết kế vẫn refill khi KGEN đổi cblock. Đó là lý do hướng này cần multi-cblock
+resident cache và lane mux, không chỉ thêm prefetch.
+
 ## 7. Kết luận
 
 Linebuffer refactor gần đây đã giải quyết đúng vấn đề ban đầu: `CH_STREAM_EMIT`
@@ -279,10 +340,11 @@ là "thiếu SRAM bank" đơn thuần, mà là tile scheduler + accumulation/dra
 Thứ tự làm tiếp nên là:
 
 1. Cleanup instrumentation và timing-risk nhỏ.
-2. Refactor linebuffer theo package/bank/window engine để giảm critical path.
-3. Tách drain/input engine trong controller.
-4. Sau đó mới đổi scheduler để overlap tile kế tiếp hoặc giữ psum on-chip qua
-   nhiều K tiles.
+2. Implement mode `tile_oh=2` spatial/stripe-stationary cho case 20: resident
+   4-row x 16-col x 4-cblock ping-pong cache và lane mux theo `lane_ic`.
+3. Cho firmware chạy `IC=120` một job KGEN 34 tile thay vì split `96 + 24`.
+4. Tách drain/input engine trong controller nếu sau đó `WAIT_DRAIN` vẫn còn
+   vượt phần không thể overlap.
 
 Nếu mục tiêu là YOLO 640x640, phase 4 mới là phần tạo khác biệt lớn nhất về
 performance tổng thể.
