@@ -100,6 +100,7 @@
 #define P3_CASE_LINEBUF_KGEN_3X3_C32 18u
 #define P3_CASE_LINEBUF_KGEN_3X3_C96 19u
 #define P3_CASE_LINEBUF_3X3_C120 20u
+#define P3_CASE_LINEBUF_KGEN_3X3_C65 21u
 
 #define YOLO_RGB_H          64u
 #define YOLO_RGB_W          64u
@@ -145,7 +146,8 @@ static uint32_t should_run_case(uint32_t case_id) {
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_KERNELS) {
         return ((case_id >= P3_CASE_3X3_P0_C32) && (case_id <= P3_CASE_3X3_C5)) ||
                (case_id == P3_CASE_LINEBUF_KGEN_3X3_C96) ||
-               (case_id == P3_CASE_LINEBUF_3X3_C120);
+               (case_id == P3_CASE_LINEBUF_3X3_C120) ||
+               (case_id == P3_CASE_LINEBUF_KGEN_3X3_C65);
     }
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT) {
         return case_id == P3_CASE_REQUANT;
@@ -885,6 +887,25 @@ int main(void) {
     if (should_run_case(P3_CASE_LINEBUF_3X3_C120)) {
         spatz_rt_set_phase(25, P3_CASE_LINEBUF_3X3_C120);
         run_oc32_case_split_ic120(P3_CASE_LINEBUF_3X3_C120);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_KGEN_3X3_C65)) {
+        spatz_rt_set_phase(26, P3_CASE_LINEBUF_KGEN_3X3_C65);
+        run_oc32_case(P3_CASE_LINEBUF_KGEN_3X3_C65,
+                      0u,
+                      P3_H,
+                      P3_W,
+                      65u,
+                      P3_H,
+                      P3_W,
+                      3u,
+                      3u,
+                      1u,
+                      1u,
+                      1u,
+                      1u,
+                      0xC9E4u);
         spatz_rt_pass_step();
     }
 

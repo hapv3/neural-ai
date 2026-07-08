@@ -75,6 +75,7 @@ P3_CASE_LINEBUF_3X3_C3 = 17
 P3_CASE_LINEBUF_KGEN_3X3_C32 = 18
 P3_CASE_LINEBUF_KGEN_3X3_C96 = 19
 P3_CASE_LINEBUF_3X3_C120 = 20
+P3_CASE_LINEBUF_KGEN_3X3_C65 = 21
 
 YOLO_RGB_H = 64
 YOLO_RGB_W = 64
@@ -220,6 +221,25 @@ P3_CASES = {
         0,
         False,
     ),
+    P3_CASE_LINEBUF_KGEN_3X3_C65: (
+        "linebuffer KGEN small-cache conv3x3 IC65",
+        4,
+        4,
+        65,
+        4,
+        4,
+        3,
+        3,
+        1,
+        1,
+        1,
+        1,
+        32,
+        19,
+        0,
+        0,
+        False,
+    ),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -248,6 +268,7 @@ def p3_case_enabled(case_id):
         return (P3_CASE_3X3_P0_C32 <= case_id <= P3_CASE_3X3_C5) or (
             case_id == P3_CASE_LINEBUF_KGEN_3X3_C96
             or case_id == P3_CASE_LINEBUF_3X3_C120
+            or case_id == P3_CASE_LINEBUF_KGEN_3X3_C65
         )
     if CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT:
         return case_id == P3_CASE_REQUANT
@@ -271,6 +292,7 @@ def p3_case_is_linebuf(case_id):
         P3_CASE_LINEBUF_KGEN_3X3_C32,
         P3_CASE_LINEBUF_KGEN_3X3_C96,
         P3_CASE_LINEBUF_3X3_C120,
+        P3_CASE_LINEBUF_KGEN_3X3_C65,
     }
 
 

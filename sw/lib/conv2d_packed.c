@@ -130,34 +130,15 @@ static uint32_t is_linebuf_coalesce_supported(const npu_conv2d_packed_cfg_t *cfg
 static uint32_t is_linebuf_kgen_supported(const npu_conv2d_packed_cfg_t *cfg,
                                           uint32_t spatial_rows,
                                           uint32_t k_total) {
-    uint32_t stripe_stationary_ic120 =
-        (cfg->kernel_h == 3u) &&
-        (cfg->kernel_w == 3u) &&
-        (cfg->stride_h == 1u) &&
-        (cfg->stride_w == 1u) &&
-        (cfg->dilation_h == 1u) &&
-        (cfg->dilation_w == 1u) &&
-        (cfg->input_w == 16u) &&
-        (cfg->output_w == 16u) &&
-        (cfg->output_h == 2u) &&
-        (cfg->input_h <= 4u) &&
-        (cfg->input_c == 120u) &&
-        (spatial_rows == 32u);
-
     return is_linebuf_supported(cfg) &&
            k_total > NPU_CONV2D_PACKED_K_TILE &&
-           spatial_rows <= NPU_CONV2D_LINEBUF_KGEN_MAX_M &&
-           (stripe_stationary_ic120 ||
-            (cfg->input_c <= NPU_CONV2D_PACKED_K_TILE) ||
-            ((cfg->input_c & (NPU_CONV2D_PACKED_K_TILE - 1u)) == 0u));
+           spatial_rows <= NPU_CONV2D_LINEBUF_KGEN_MAX_M;
 }
 
 static uint32_t is_linebuf_kgen_shape_supported(const npu_conv2d_packed_cfg_t *cfg,
                                                 uint32_t k_total) {
     return is_linebuf_supported(cfg) &&
-           k_total > NPU_CONV2D_PACKED_K_TILE &&
-           ((cfg->input_c <= NPU_CONV2D_PACKED_K_TILE) ||
-            ((cfg->input_c & (NPU_CONV2D_PACKED_K_TILE - 1u)) == 0u));
+           k_total > NPU_CONV2D_PACKED_K_TILE;
 }
 
 static void accumulate_conv_stats(npu_conv2d_packed_stats_t *accum,

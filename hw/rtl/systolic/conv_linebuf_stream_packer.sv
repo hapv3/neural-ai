@@ -95,7 +95,7 @@ module conv_linebuf_stream_packer #(
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
     typedef logic [K_MAX-1:0][K_MAX-1:0][DATA_WIDTH-1:0] window_t;
-    localparam int unsigned SS_ROWS = 4;
+    localparam int unsigned SS_ROWS = K_MAX;
     localparam int unsigned SS_COLS = 16;
     localparam int unsigned SS_CBLOCKS = 4;
     localparam int unsigned SS_ROW_BITS = $clog2(SS_ROWS);
@@ -911,7 +911,7 @@ module conv_linebuf_stream_packer #(
                             ss_cache_q[ss_fill_row_q[SS_ROW_BITS-1:0]][ss_fill_x_q][ss_fill_cb_q] <= '0;
                             if (ss_fill_cb_q == SS_CB_BITS'(SS_CBLOCKS - 1)) begin
                                 ss_fill_cb_q <= '0;
-                                if (ss_fill_x_q == SS_COL_BITS'(SS_COLS - 1)) begin
+                                if (({12'd0, ss_fill_x_q} + 16'd1) >= cfg_input_w_i) begin
                                     ss_fill_x_q <= '0;
                                     ss_fill_row_q <= ss_fill_row_q + 1'b1;
                                 end else begin
@@ -944,7 +944,7 @@ module conv_linebuf_stream_packer #(
                                 merge_beats(obi_rdata_i, '0, ss_fill_addr_q[BYTE_SEL_BITS-1:0], ss_fill_valid_bytes_q);
                             if (ss_fill_cb_q == SS_CB_BITS'(SS_CBLOCKS - 1)) begin
                                 ss_fill_cb_q <= '0;
-                                if (ss_fill_x_q == SS_COL_BITS'(SS_COLS - 1)) begin
+                                if (({12'd0, ss_fill_x_q} + 16'd1) >= cfg_input_w_i) begin
                                     ss_fill_x_q <= '0;
                                     ss_fill_row_q <= ss_fill_row_q + 1'b1;
                                 end else begin
@@ -971,7 +971,7 @@ module conv_linebuf_stream_packer #(
                             merge_beats(ss_fill_beat0_q, obi_rdata_i, ss_fill_addr_q[BYTE_SEL_BITS-1:0], ss_fill_valid_bytes_q);
                         if (ss_fill_cb_q == SS_CB_BITS'(SS_CBLOCKS - 1)) begin
                             ss_fill_cb_q <= '0;
-                            if (ss_fill_x_q == SS_COL_BITS'(SS_COLS - 1)) begin
+                            if (({12'd0, ss_fill_x_q} + 16'd1) >= cfg_input_w_i) begin
                                 ss_fill_x_q <= '0;
                                 ss_fill_row_q <= ss_fill_row_q + 1'b1;
                             end else begin
