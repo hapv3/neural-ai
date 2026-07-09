@@ -26,7 +26,7 @@ module systolic_controller #(
     // Completion pulse to cluster interrupt controller.
     output logic                      cfg_sys_done_o,
 
-    // 1x OBI Master for I-TCDM (Read Weights & IFM)
+    // OBI Master for I-TCDM IFM/linebuffer reads.
     output logic                      obi_i_req_o,
     input  logic                      obi_i_gnt_i,
     output logic [ADDR_WIDTH-1:0]     obi_i_addr_o,
@@ -35,6 +35,18 @@ module systolic_controller #(
     output logic [DATA_WIDTH-1:0]     obi_i_wdata_o,
     input  logic                      obi_i_rvalid_i,
     input  logic [DATA_WIDTH-1:0]     obi_i_rdata_i,
+
+    // OBI Master for I-TCDM weight reads. This lets linebuffer prefetch run
+    // concurrently with weight preload; TCDM bank conflicts are still handled
+    // by the shared interconnect.
+    output logic                      obi_w_req_o,
+    input  logic                      obi_w_gnt_i,
+    output logic [ADDR_WIDTH-1:0]     obi_w_addr_o,
+    output logic                      obi_w_we_o,
+    output logic [(DATA_WIDTH/8)-1:0] obi_w_be_o,
+    output logic [DATA_WIDTH-1:0]     obi_w_wdata_o,
+    input  logic                      obi_w_rvalid_i,
+    input  logic [DATA_WIDTH-1:0]     obi_w_rdata_i,
 
 
     // 4x OBI Masters for O-TCDM (Write OFM)
@@ -92,7 +104,7 @@ module systolic_controller #(
     localparam int unsigned OFM_ELEMS_PER_OBI = DATA_WIDTH / OFM_ELEM_WIDTH;
     localparam int unsigned OFM_ROW_BEATS = OFM_ROW_BYTES / OFM_BEAT_BYTES;
     localparam int unsigned OFM_ROW_BEAT_COUNT_W = (OFM_ROW_BEATS > 1) ? $clog2(OFM_ROW_BEATS + 1) : 1;
-    localparam int unsigned ARRAY_FLUSH_CYCLES = 2 * ARRAY_DIM;
+    localparam int unsigned ARRAY_FLUSH_CYCLES = (2 * ARRAY_DIM) - 1;
     localparam int unsigned ARRAY_FLUSH_COUNT_W = $clog2(ARRAY_FLUSH_CYCLES + 1);
     localparam int unsigned PSUM_BUF_M = 256;
     localparam int unsigned PSUM_BUF_ADDR_WIDTH = $clog2(PSUM_BUF_M);
@@ -238,6 +250,8 @@ module systolic_controller #(
     logic          accum_uses_tcdm_psum;
     logic          psum_buf_final_tile;
     logic          psum_buf_overlap_active;
+    logic          psum_buf_overlap_next_ready;
+    logic          psum_buf_overlap_next_safe;
     logic          psum_buf_drain_entry;
     logic          psum_buf_sel_q, psum_buf_sel_d;
     logic          psum_buf_we;
@@ -265,7 +279,7 @@ module systolic_controller #(
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
-    assign weight_fifo_data = obi_i_rdata_i;
+    assign weight_fifo_data = obi_w_rdata_i;
     assign ifm_fifo_data    = obi_i_rdata_i;
     assign ofm_ready = !ofm_fifo_full;
     assign array_pipe_ready = !ofm_valid || ofm_ready;
@@ -288,6 +302,14 @@ module systolic_controller #(
     assign accum_uses_tcdm_psum = accum_active && (!psum_buf_active || psum_buf_needs_external);
     assign psum_buf_final_tile = psum_buf_active && !linebuf_has_next_k_tile;
     assign psum_buf_overlap_active = psum_buf_active && linebuf_kgen_multi && !cfg_requant_en_i;
+    assign psum_buf_overlap_next_ready = psum_buf_overlap_active && linebuf_has_next_k_tile &&
+                                         weight_preload_done_q && !linebuf_prefetch_busy &&
+                                         (array_flush_cnt_q == '0);
+    // Direct WAIT_DRAIN->COMPUTE overlap preserves the current drain/prefetch
+    // state. OFM FIFO ordering keeps an external-psum first tile ahead of later
+    // on-chip psum-buffer tiles, so the next tile cannot consume a row before
+    // the external accumulation wrote that row into the psum buffer.
+    assign psum_buf_overlap_next_safe = psum_buf_overlap_next_ready;
     assign psum_buf_drain_entry = !ofm_fifo_empty && ofm_fifo_out.psum_buf_active;
     assign drain_enabled = (state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN);
     assign weight_preload_fetch_done = weight_preload_done_q ||
@@ -590,6 +612,9 @@ module systolic_controller #(
     assign obi_i_we_o = 1'b0;
     assign obi_i_be_o = '1;
     assign obi_i_wdata_o = '0;
+    assign obi_w_we_o = 1'b0;
+    assign obi_w_be_o = '1;
+    assign obi_w_wdata_o = '0;
 
     // FSM
     always_comb begin
@@ -648,6 +673,8 @@ module systolic_controller #(
 
         obi_i_req_o = 1'b0;
         obi_i_addr_o = '0;
+        obi_w_req_o = 1'b0;
+        obi_w_addr_o = '0;
 
         weight_load_en = 1'b0;
         compute_en = 1'b0;
@@ -931,14 +958,14 @@ module systolic_controller #(
                     end
                     state_d = COMPUTE;
                 end else if (req_cnt_q > 0) begin
-                    obi_i_req_o = !weight_fifo_full;
-                    obi_i_addr_o = w_ptr_q;
-                    if (obi_i_req_o && obi_i_gnt_i) begin
+                    obi_w_req_o = !weight_fifo_full;
+                    obi_w_addr_o = w_ptr_q;
+                    if (obi_w_req_o && obi_w_gnt_i) begin
                         w_ptr_d = w_ptr_q - 32;
                         req_cnt_d   = req_cnt_q - 1;
                     end
                 end
-                weight_fifo_push = obi_i_rvalid_i && !weight_fifo_full;
+                weight_fifo_push = obi_w_rvalid_i && !weight_fifo_full;
                 if (!weight_fifo_empty) begin
                     weight_load_en = 1'b1;
                     weight_fifo_pop  = 1'b1;
@@ -1031,15 +1058,15 @@ module systolic_controller #(
 
                 if (weight_preload_active_q) begin
                     if (weight_preload_req_cnt_q > 0) begin
-                        obi_i_req_o = !weight_fifo_full;
-                        obi_i_addr_o = weight_preload_ptr_q;
-                        if (obi_i_req_o && obi_i_gnt_i) begin
+                        obi_w_req_o = !weight_fifo_full;
+                        obi_w_addr_o = weight_preload_ptr_q;
+                        if (obi_w_req_o && obi_w_gnt_i) begin
                             weight_preload_ptr_d = weight_preload_ptr_q - 32;
                             weight_preload_req_cnt_d = weight_preload_req_cnt_q - 1;
                         end
                     end
                     weight_fifo_push = (weight_preload_obi_rsp_cnt_q != 32'd0) &&
-                                       obi_i_rvalid_i && !weight_fifo_full;
+                                       obi_w_rvalid_i && !weight_fifo_full;
                     if (weight_fifo_push) begin
                         weight_preload_obi_rsp_cnt_d = weight_preload_obi_rsp_cnt_q - 1'b1;
                     end
@@ -1058,8 +1085,6 @@ module systolic_controller #(
                 end
 
                 linebuf_prefetch = linebuf_has_next_k_tile &&
-                                   !weight_preload_active_q &&
-                                   !weight_preload_done_q &&
                                    (linebuf_prefetch_busy ||
                                     (array_flush_cnt_q != '0) ||
                                     (drain_cnt_q != 0) ||
@@ -1070,9 +1095,7 @@ module systolic_controller #(
                 end
 
                 if (accum_active) begin
-                    if (psum_buf_overlap_active && linebuf_has_next_k_tile &&
-                        !psum_buf_needs_external && weight_preload_done_q &&
-                        !linebuf_prefetch_busy && (array_flush_cnt_q == '0)) begin
+                    if (psum_buf_overlap_next_safe) begin
                         advance_k_seed32(k_seed_kh_q,
                                          k_seed_kw_q,
                                          k_seed_ic_q,
@@ -1085,7 +1108,13 @@ module systolic_controller #(
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
                         a_ptr_d = cfg_sys_psum_ptr_i;
-                        state_d = LOAD_WEIGHTS;
+                        req_cnt_d = cfg_sys_dim_m_i;
+                        rsp_cnt_d = cfg_sys_dim_m_i;
+                        drain_cnt_d = drain_cnt_q + cfg_sys_dim_m_i;
+                        ofm_push_row_idx_d = '0;
+                        weight_preload_done_d = 1'b0;
+                        linebuf_next_tile = 1'b1;
+                        state_d = COMPUTE;
                     end else if (drain_cnt_q == 0 && ofm_fifo_empty) begin
                         if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
                             advance_k_seed32(k_seed_kh_q,
@@ -1108,9 +1137,7 @@ module systolic_controller #(
                         end
                     end
                 end else begin
-                    if (psum_buf_overlap_active && linebuf_has_next_k_tile &&
-                        weight_preload_done_q && !linebuf_prefetch_busy &&
-                        (array_flush_cnt_q == '0)) begin
+                    if (psum_buf_overlap_next_safe) begin
                         advance_k_seed32(k_seed_kh_q,
                                          k_seed_kw_q,
                                          k_seed_ic_q,
@@ -1123,7 +1150,13 @@ module systolic_controller #(
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
                         a_ptr_d = cfg_sys_psum_ptr_i;
-                        state_d = LOAD_WEIGHTS;
+                        req_cnt_d = cfg_sys_dim_m_i;
+                        rsp_cnt_d = cfg_sys_dim_m_i;
+                        drain_cnt_d = drain_cnt_q + cfg_sys_dim_m_i;
+                        ofm_push_row_idx_d = '0;
+                        weight_preload_done_d = 1'b0;
+                        linebuf_next_tile = 1'b1;
+                        state_d = COMPUTE;
                     end else if (drain_cnt_q == 0 && ofm_fifo_empty) begin
                         if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
                             advance_k_seed32(k_seed_kh_q,

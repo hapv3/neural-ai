@@ -28,6 +28,14 @@ module tb_systolic_controller;
     logic [DATA_WIDTH-1:0]         obi_i_wdata_o;
     logic                          obi_i_rvalid_i;
     logic [DATA_WIDTH-1:0]         obi_i_rdata_i;
+    logic                          obi_w_req_o;
+    logic                          obi_w_gnt_i;
+    logic [ADDR_WIDTH-1:0]         obi_w_addr_o;
+    logic                          obi_w_we_o;
+    logic [(DATA_WIDTH/8)-1:0]     obi_w_be_o;
+    logic [DATA_WIDTH-1:0]         obi_w_wdata_o;
+    logic                          obi_w_rvalid_i;
+    logic [DATA_WIDTH-1:0]         obi_w_rdata_i;
 
     logic [3:0]                    obi_o_req_o;
     logic [3:0]                    obi_o_gnt_i;
@@ -77,6 +85,14 @@ module tb_systolic_controller;
         .obi_i_wdata_o         (obi_i_wdata_o),
         .obi_i_rvalid_i        (obi_i_rvalid_i),
         .obi_i_rdata_i         (obi_i_rdata_i),
+        .obi_w_req_o           (obi_w_req_o),
+        .obi_w_gnt_i           (obi_w_gnt_i),
+        .obi_w_addr_o          (obi_w_addr_o),
+        .obi_w_we_o            (obi_w_we_o),
+        .obi_w_be_o            (obi_w_be_o),
+        .obi_w_wdata_o         (obi_w_wdata_o),
+        .obi_w_rvalid_i        (obi_w_rvalid_i),
+        .obi_w_rdata_i         (obi_w_rdata_i),
         .obi_o_req_o           (obi_o_req_o),
         .obi_o_gnt_i           (obi_o_gnt_i),
         .obi_o_addr_o          (obi_o_addr_o),
@@ -100,15 +116,20 @@ module tb_systolic_controller;
     end
 
     assign obi_i_gnt_i = obi_i_req_o;
+    assign obi_w_gnt_i = obi_w_req_o;
     assign obi_o_gnt_i = obi_o_req_o;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             obi_i_rvalid_i <= 1'b0;
             obi_i_rdata_i <= '0;
+            obi_w_rvalid_i <= 1'b0;
+            obi_w_rdata_i <= '0;
         end else begin
             obi_i_rvalid_i <= obi_i_req_o && obi_i_gnt_i && !obi_i_we_o;
             obi_i_rdata_i <= tcdm_mem[obi_i_addr_o[16:5]];
+            obi_w_rvalid_i <= obi_w_req_o && obi_w_gnt_i && !obi_w_we_o;
+            obi_w_rdata_i <= tcdm_mem[obi_w_addr_o[16:5]];
         end
     end
 
