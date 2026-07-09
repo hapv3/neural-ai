@@ -127,10 +127,16 @@ static uint32_t is_linebuf_coalesce_supported(const npu_conv2d_packed_cfg_t *cfg
            spatial_rows <= SYSTOLIC_GEMM32_TILE_M;
 }
 
+static uint32_t is_linebuf_kgen_channel_block_safe(const npu_conv2d_packed_cfg_t *cfg) {
+    return cfg->input_c <= NPU_CONV2D_PACKED_K_TILE ||
+           (cfg->input_c % NPU_CONV2D_PACKED_K_TILE) == 0u;
+}
+
 static uint32_t is_linebuf_kgen_supported(const npu_conv2d_packed_cfg_t *cfg,
                                           uint32_t spatial_rows,
                                           uint32_t k_total) {
     return is_linebuf_supported(cfg) &&
+           is_linebuf_kgen_channel_block_safe(cfg) &&
            k_total > NPU_CONV2D_PACKED_K_TILE &&
            spatial_rows <= NPU_CONV2D_LINEBUF_KGEN_MAX_M;
 }
@@ -138,6 +144,7 @@ static uint32_t is_linebuf_kgen_supported(const npu_conv2d_packed_cfg_t *cfg,
 static uint32_t is_linebuf_kgen_shape_supported(const npu_conv2d_packed_cfg_t *cfg,
                                                 uint32_t k_total) {
     return is_linebuf_supported(cfg) &&
+           is_linebuf_kgen_channel_block_safe(cfg) &&
            k_total > NPU_CONV2D_PACKED_K_TILE;
 }
 
