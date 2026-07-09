@@ -318,63 +318,119 @@ static void merge_split_stats(npu_conv2d_packed_stats_t *total,
     total->prepare_scalar_tiles += tail->prepare_scalar_tiles;
 }
 
-static void run_oc32_case_split_ic120(uint32_t case_id) {
+static void copy_stats(npu_conv2d_packed_stats_t *dst,
+                       const npu_conv2d_packed_stats_t *src) {
+    dst->rows = src->rows;
+    dst->k_tiles = src->k_tiles;
+    dst->prepare_cycles = src->prepare_cycles;
+    dst->gemm_cycles = src->gemm_cycles;
+    dst->total_cycles = src->total_cycles;
+    dst->last_prepare_cycles = src->last_prepare_cycles;
+    dst->last_gemm_cycles = src->last_gemm_cycles;
+    dst->status = src->status;
+    dst->prepare_idma_tiles = src->prepare_idma_tiles;
+    dst->prepare_idma_transfers = src->prepare_idma_transfers;
+    dst->prepare_spatz_tiles = src->prepare_spatz_tiles;
+    dst->prepare_scalar_tiles = src->prepare_scalar_tiles;
+}
+
+static void run_oc32_case_channel_slices(uint32_t case_id,
+                                         uint32_t input_in_l2,
+                                         uint32_t input_h,
+                                         uint32_t input_w,
+                                         uint32_t input_c_total,
+                                         uint32_t output_h,
+                                         uint32_t output_w,
+                                         uint32_t kernel_h,
+                                         uint32_t kernel_w,
+                                         uint32_t stride_h,
+                                         uint32_t stride_w,
+                                         uint32_t pad_h,
+                                         uint32_t pad_w,
+                                         uint32_t main_c,
+                                         uint32_t tail_c,
+                                         uint32_t fail_code) {
     npu_conv2d_packed_cfg_t cfg;
-    npu_conv2d_packed_stats_t stats_main;
-    npu_conv2d_packed_stats_t stats_tail;
-    uint32_t input_c_total = 120u;
-    uint32_t input_c_main = 96u;
-    uint32_t input_c_tail = input_c_total - input_c_main;
-    uint32_t main_weight_tiles = k_tiles_for(input_c_main, 3u, 3u);
-    uint32_t tail_weight_tiles = k_tiles_for(input_c_tail, 3u, 3u);
-    uint32_t main_weight_bytes = main_weight_tiles * 32u * 32u;
-    uint32_t total_weight_bytes = (main_weight_tiles + tail_weight_tiles) * 32u * 32u;
-    uint32_t input_bytes = P3_C120_H * P3_C120_W * input_c_total;
-    uint32_t output_bytes = P3_C120_H * P3_C120_W * 32u * 4u;
+    npu_conv2d_packed_stats_t total_stats;
+    uint32_t rows = output_h * output_w;
+    uint32_t input_bytes = input_h * input_w * input_c_total;
+    uint32_t output_bytes = rows * 32u * 4u;
+    uint32_t input_addr = P3_INPUT_ADDR(case_id);
+    uint32_t t_input = T_INPUT;
+    uint32_t t_weight = T_WEIGHT;
+    uint32_t t_output = T_OUTPUT;
+    uint32_t total_weight_bytes = 0u;
+    uint32_t weight_offset = 0u;
 
-    reset_stats(&stats_main);
-    reset_stats(&stats_tail);
+    if (case_id == 20u) {
+        t_input = T_C120_INPUT;
+        t_weight = T_C120_WEIGHT;
+        t_output = T_C120_OUTPUT;
+    }
 
-    spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
-    spatz_rt_dma_1d(T_C120_WEIGHT, P3_WEIGHT_ADDR(case_id), total_weight_bytes);
+    reset_stats(&total_stats);
+
+    total_weight_bytes = k_tiles_for(main_c, kernel_h, kernel_w) * 32u * 32u;
+    if (tail_c != 0u) {
+        total_weight_bytes += k_tiles_for(tail_c, kernel_h, kernel_w) * 32u * 32u;
+    }
+
+    if (!input_in_l2) {
+        spatz_rt_dma_1d(t_input, P3_INPUT_ADDR(case_id), input_bytes);
+        input_addr = t_input;
+    }
+
+    spatz_rt_dma_1d(t_weight, P3_WEIGHT_ADDR(case_id), total_weight_bytes);
     spatz_rt_dma_wait_all();
 
     init_cfg(&cfg,
-             T_C120_INPUT,
-             T_C120_WEIGHT,
-             T_C120_OUTPUT,
-             P3_C120_H,
-             P3_C120_W,
-             input_c_main,
-             P3_C120_H,
-             P3_C120_W,
-             3u,
-             3u,
-             1u,
-             1u,
-             1u,
-             1u);
+             input_addr,
+             t_weight,
+             t_output,
+             input_h,
+             input_w,
+             input_c_total,
+             output_h,
+             output_w,
+             kernel_h,
+             kernel_w,
+             stride_h,
+             stride_w,
+             pad_h,
+             pad_w);
     cfg.input_c_stride = input_c_total;
 
-    uint32_t status = npu_conv2d_packed_run_oc32(&cfg, &stats_main);
-    if (status != NPU_CONV2D_PACKED_OK) {
-        spatz_rt_fail_at(0xC9E2u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
+    for (uint32_t idx = 0; idx < 2u; idx++) {
+        npu_conv2d_packed_stats_t slice_stats;
+        uint32_t slice_c_base = (idx == 0u) ? 0u : main_c;
+        uint32_t slice_c_count = (idx == 0u) ? main_c : tail_c;
+        uint32_t status;
+
+        if (slice_c_count == 0u) {
+            break;
+        }
+
+        cfg.weight_addr = t_weight + weight_offset;
+        cfg.input_c = slice_c_count;
+        cfg.input_c_base = slice_c_base;
+        cfg.accumulate = (idx == 0u) ? 0u : 1u;
+
+        status = npu_conv2d_packed_run_oc32(&cfg, &slice_stats);
+        if (status != NPU_CONV2D_PACKED_OK) {
+            spatz_rt_fail_at(fail_code, idx, (int32_t)status, NPU_CONV2D_PACKED_OK);
+        }
+
+        if (idx == 0u) {
+            copy_stats(&total_stats, &slice_stats);
+        } else {
+            merge_split_stats(&total_stats, &slice_stats);
+        }
+        weight_offset += k_tiles_for(slice_c_count, kernel_h, kernel_w) * 32u * 32u;
     }
 
-    cfg.weight_addr = T_C120_WEIGHT + main_weight_bytes;
-    cfg.input_c = input_c_tail;
-    cfg.input_c_base = input_c_main;
-    cfg.accumulate = 1u;
-
-    status = npu_conv2d_packed_run_oc32(&cfg, &stats_tail);
-    if (status != NPU_CONV2D_PACKED_OK) {
-        spatz_rt_fail_at(0xC9E3u, 0u, (int32_t)status, NPU_CONV2D_PACKED_OK);
-    }
-
-    merge_split_stats(&stats_main, &stats_tail);
-    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_C120_OUTPUT, output_bytes);
+    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), t_output, output_bytes);
     spatz_rt_dma_wait_all();
-    publish_stats(P3_STATS_ADDR(case_id), &stats_main);
+    publish_stats(P3_STATS_ADDR(case_id), &total_stats);
 }
 
 static void copy_oc32_to_oc64_l2(uint32_t l2_addr, uint32_t src_addr, uint32_t rows, uint32_t oc_base) {
@@ -867,45 +923,64 @@ int main(void) {
 
     if (should_run_case(P3_CASE_LINEBUF_KGEN_3X3_C96)) {
         spatz_rt_set_phase(24, P3_CASE_LINEBUF_KGEN_3X3_C96);
-        run_oc32_case(P3_CASE_LINEBUF_KGEN_3X3_C96,
-                      0u,
-                      P3_H,
-                      P3_W,
-                      96u,
-                      P3_H,
-                      P3_W,
-                      3u,
-                      3u,
-                      1u,
-                      1u,
-                      1u,
-                      1u,
-                      0xC9E1u);
+        run_oc32_case_channel_slices(P3_CASE_LINEBUF_KGEN_3X3_C96,
+                                      0u,
+                                      P3_H,
+                                      P3_W,
+                                      96u,
+                                      P3_H,
+                                      P3_W,
+                                      3u,
+                                      3u,
+                                      1u,
+                                      1u,
+                                      1u,
+                                      1u,
+                                      96u,
+                                      0u,
+                                      0xC9E1u);
         spatz_rt_pass_step();
     }
 
     if (should_run_case(P3_CASE_LINEBUF_3X3_C120)) {
         spatz_rt_set_phase(25, P3_CASE_LINEBUF_3X3_C120);
-        run_oc32_case_split_ic120(P3_CASE_LINEBUF_3X3_C120);
+        run_oc32_case_channel_slices(P3_CASE_LINEBUF_3X3_C120,
+                                      0u,
+                                      P3_C120_H,
+                                      P3_C120_W,
+                                      120u,
+                                      P3_C120_H,
+                                      P3_C120_W,
+                                      3u,
+                                      3u,
+                                      1u,
+                                      1u,
+                                      1u,
+                                      1u,
+                                      96u,
+                                      24u,
+                                      0xC9E2u);
         spatz_rt_pass_step();
     }
 
     if (should_run_case(P3_CASE_LINEBUF_KGEN_3X3_C65)) {
         spatz_rt_set_phase(26, P3_CASE_LINEBUF_KGEN_3X3_C65);
-        run_oc32_case(P3_CASE_LINEBUF_KGEN_3X3_C65,
-                      0u,
-                      P3_H,
-                      P3_W,
-                      65u,
-                      P3_H,
-                      P3_W,
-                      3u,
-                      3u,
-                      1u,
-                      1u,
-                      1u,
-                      1u,
-                      0xC9E4u);
+        run_oc32_case_channel_slices(P3_CASE_LINEBUF_KGEN_3X3_C65,
+                                      0u,
+                                      P3_H,
+                                      P3_W,
+                                      65u,
+                                      P3_H,
+                                      P3_W,
+                                      3u,
+                                      3u,
+                                      1u,
+                                      1u,
+                                      1u,
+                                      1u,
+                                      64u,
+                                      1u,
+                                      0xC9E4u);
         spatz_rt_pass_step();
     }
 

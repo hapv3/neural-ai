@@ -569,11 +569,27 @@ def make_p3_weight_packed_channel_slice(input_c_total, kernel_h, kernel_w, oc_co
     return packed
 
 
+def linebuf_channel_slices(input_c):
+    if input_c > K_TILE and input_c % K_TILE:
+        aligned_c = (input_c // K_TILE) * K_TILE
+        return [(0, aligned_c), (aligned_c, input_c - aligned_c)]
+    return [(0, input_c)]
+
+
+def use_linebuf_channel_slice_plan(case_id):
+    return case_id in (
+        P3_CASE_LINEBUF_KGEN_3X3_C96,
+        P3_CASE_LINEBUF_3X3_C120,
+        P3_CASE_LINEBUF_KGEN_3X3_C65,
+    )
+
+
 def make_p3_weight_packed_for_case(case_id, input_c, kernel_h, kernel_w, oc_count):
-    if case_id == P3_CASE_LINEBUF_3X3_C120:
-        return make_p3_weight_packed_channel_slice(input_c, kernel_h, kernel_w, oc_count, 0, 96) + (
-            make_p3_weight_packed_channel_slice(input_c, kernel_h, kernel_w, oc_count, 96, input_c - 96)
-        )
+    if use_linebuf_channel_slice_plan(case_id):
+        packed = []
+        for c_base, c_count in linebuf_channel_slices(input_c):
+            packed += make_p3_weight_packed_channel_slice(input_c, kernel_h, kernel_w, oc_count, c_base, c_count)
+        return packed
     return make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count)
 
 
