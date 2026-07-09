@@ -777,13 +777,13 @@ module npu_cluster #(
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (11 Masters)
+    // 5. Shared Data TCDM Interconnect (12 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 11;
+    localparam int unsigned NUM_MASTERS = 12;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
-    // Master 3: Systolic Controller Read (I-TCDM)
+    // Master 3: Systolic Controller IFM/linebuffer read (I-TCDM)
     // Master 4: Systolic Controller Write Port 0 (O-TCDM)
     // Master 5: Systolic Controller Write Port 1 (O-TCDM)
     // Master 6: Systolic Controller Write Port 2 (O-TCDM)
@@ -791,6 +791,7 @@ module npu_cluster #(
     // Master 8: Spatz Vector Engine (VLSU port 1)
     // Master 9: PULP iDMA OBI2AXI read port
     // Master 10: AFU LUT processor
+    // Master 11: Systolic Controller weight read (I-TCDM)
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -840,9 +841,9 @@ module npu_cluster #(
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(11'h5FA), // M1, M3-M8, M10: Spatz + Systolic + AFU
-        .DMA_MASTER_MASK (11'h204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(11'h001)  // M0: Snitch D-Bus
+        .HWPE_MASTER_MASK(12'hDFA), // M1, M3-M8, M10-M11: Spatz + Systolic + AFU
+        .DMA_MASTER_MASK (12'h204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(12'h001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -1233,6 +1234,14 @@ module npu_cluster #(
     logic [OBI_DATA_WIDTH-1:0] sys_obi_i_wdata;
     logic                      sys_obi_i_rvalid;
     logic [OBI_DATA_WIDTH-1:0] sys_obi_i_rdata;
+    logic                      sys_obi_w_req;
+    logic                      sys_obi_w_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] sys_obi_w_addr;
+    logic                      sys_obi_w_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] sys_obi_w_be;
+    logic [OBI_DATA_WIDTH-1:0] sys_obi_w_wdata;
+    logic                      sys_obi_w_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] sys_obi_w_rdata;
 
     logic [3:0]                      sys_obi_o_req;
     logic [3:0]                      sys_obi_o_tcdm_req;
@@ -1285,6 +1294,15 @@ module npu_cluster #(
         .obi_i_rvalid_i     (sys_obi_i_rvalid),
         .obi_i_rdata_i      (sys_obi_i_rdata),
 
+        .obi_w_req_o        (sys_obi_w_req),
+        .obi_w_gnt_i        (sys_obi_w_gnt),
+        .obi_w_addr_o       (sys_obi_w_addr),
+        .obi_w_we_o         (sys_obi_w_we),
+        .obi_w_be_o         (sys_obi_w_be),
+        .obi_w_wdata_o      (sys_obi_w_wdata),
+        .obi_w_rvalid_i     (sys_obi_w_rvalid),
+        .obi_w_rdata_i      (sys_obi_w_rdata),
+
         .obi_o_req_o        (sys_obi_o_req),
         .obi_o_gnt_i        (sys_obi_o_gnt),
         .obi_o_addr_o       (sys_obi_o_addr),
@@ -1303,7 +1321,7 @@ module npu_cluster #(
         .debug_linebuf_state_o(sys_debug_linebuf_state)
     );
 
-    // Master 3: Systolic Controller Read Port (I-TCDM)
+    // Master 3: Systolic Controller IFM/linebuffer read port (I-TCDM)
     assign master_req[3].req   = sys_obi_i_req;
     assign master_req[3].we    = sys_obi_i_we;
     assign master_req[3].be    = sys_obi_i_be;
@@ -1313,6 +1331,17 @@ module npu_cluster #(
     assign sys_obi_i_gnt    = master_rsp[3].gnt;
     assign sys_obi_i_rvalid = master_rsp[3].rvalid;
     assign sys_obi_i_rdata  = master_rsp[3].rdata;
+
+    // Master 11: Systolic Controller weight read port (I-TCDM)
+    assign master_req[11].req   = sys_obi_w_req;
+    assign master_req[11].we    = sys_obi_w_we;
+    assign master_req[11].be    = sys_obi_w_be;
+    assign master_req[11].addr  = sys_obi_w_addr;
+    assign master_req[11].wdata = sys_obi_w_wdata;
+
+    assign sys_obi_w_gnt    = master_rsp[11].gnt;
+    assign sys_obi_w_rvalid = master_rsp[11].rvalid;
+    assign sys_obi_w_rdata  = master_rsp[11].rdata;
 
     if (SYSTOLIC_OTCDM_STALL_PERIOD == 0 || SYSTOLIC_OTCDM_STALL_HOLD == 0) begin : gen_no_sys_otcdm_stall
         assign sys_otcdm_stall_active = 1'b0;
@@ -1392,8 +1421,10 @@ module npu_cluster #(
         pmu_event_inc[19] = PMU_INC_WIDTH'(sys_compute_en);
         pmu_event_inc[20] = PMU_INC_WIDTH'(sys_weight_load_en);
         pmu_event_inc[21] = PMU_INC_WIDTH'(sys_ofm_valid);
-        pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req);
-        pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req & ~master_rsp[3].gnt);
+        pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req) +
+                            PMU_INC_WIDTH'(master_req[11].req);
+        pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req & ~master_rsp[3].gnt) +
+                            PMU_INC_WIDTH'(master_req[11].req & ~master_rsp[11].gnt);
         for (int port = 0; port < 4; port++) begin
             pmu_event_inc[24] += PMU_INC_WIDTH'(sys_obi_o_req[port]);
             pmu_event_inc[25] += PMU_INC_WIDTH'(sys_obi_o_req[port] & ~sys_obi_o_gnt[port]);
