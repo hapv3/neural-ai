@@ -69,9 +69,7 @@ module conv_linebuf_stream_packer #(
         CH_IDLE,
         CH_ENSURE,
         CH_FILL_REQ0,
-        CH_FILL_WAIT0,
         CH_FILL_REQ1,
-        CH_FILL_WAIT1,
         CH_FILL_DRAIN,
         CH_WINDOW_REQ,
         CH_WINDOW_WAIT,
@@ -82,27 +80,11 @@ module conv_linebuf_stream_packer #(
         CH_BYPASS_WAIT0,
         CH_BYPASS_REQ1,
         CH_BYPASS_WAIT1,
-        CH_STREAM_REFILL,
-        CH_STREAM_STALL,
-        CH_STREAM_SLIDE,
-        CH_SS_FILL_PREP,
-        CH_SS_FILL_REQ0,
-        CH_SS_FILL_WAIT0,
-        CH_SS_FILL_REQ1,
-        CH_SS_FILL_WAIT1,
         CH_STREAM_DONE
     } state_e;
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
     typedef logic [K_MAX-1:0][K_MAX-1:0][DATA_WIDTH-1:0] window_t;
-    localparam int unsigned SS_ROWS = K_MAX;
-    localparam int unsigned SS_COLS = 16;
-    localparam int unsigned SS_CBLOCKS = 4;
-    localparam int unsigned SS_ROW_BITS = $clog2(SS_ROWS);
-    localparam int unsigned SS_ROW_COUNT_BITS = $clog2(SS_ROWS + 1);
-    localparam int unsigned SS_COL_BITS = $clog2(SS_COLS);
-    localparam int unsigned SS_CB_BITS = $clog2(SS_CBLOCKS);
-    localparam int unsigned SS_CB_IDX_LSB = $clog2(ARRAY_DIM);  // = 5 for ARRAY_DIM=32
 
     state_e state_q;
 
@@ -159,16 +141,6 @@ module conv_linebuf_stream_packer #(
     logic [15:0] cached_c_base_q;
     logic [K_MAX-1:0] row_slot_valid_q;
     logic [K_MAX-1:0][15:0] row_slot_ih_q;
-    logic ss_active_q;
-    logic [SS_ROW_COUNT_BITS-1:0] ss_fill_row_q;
-    logic [SS_COL_BITS-1:0] ss_fill_x_q;
-    logic [SS_CB_BITS-1:0] ss_fill_cb_q;
-    logic [31:0] ss_fill_addr_q;
-    logic [31:0] ss_pending_addr_q;
-    logic [DATA_WIDTH-1:0] ss_fill_beat0_q;
-    logic [5:0] ss_fill_valid_bytes_q;
-    logic ss_fill_crosses_beat_q;
-    logic [SS_ROWS-1:0][SS_COLS-1:0][SS_CBLOCKS-1:0][DATA_WIDTH-1:0] ss_cache_q;
 
     logic [15:0] fill_kh_q;
     logic [15:0] fill_x_q;
@@ -180,6 +152,7 @@ module conv_linebuf_stream_packer #(
     logic fill_crosses_beat_q;
 
     logic [15:0] window_kw_q;
+    logic [15:0] window_req_kw;
 
     logic [31:0] bypass_addr_q;
     logic [31:0] bypass_candidate_addr;
@@ -217,7 +190,6 @@ module conv_linebuf_stream_packer #(
     logic more_k_tiles;
     logic row_cache_full_mode;
     logic row_cache_reuse;
-    logic ss_mode;
     logic row_ring_mode;
     logic [15:0] fill_row_slot;
     logic fill_row_cached;
@@ -408,40 +380,6 @@ module conv_linebuf_stream_packer #(
         end
     endfunction
 
-    function automatic input_row_t build_ss_emit_row(
-        input logic [ARRAY_DIM-1:0][7:0] l_kh,
-        input logic [ARRAY_DIM-1:0][7:0] l_kw,
-        input logic [ARRAY_DIM-1:0][15:0] l_ic
-    );
-        input_row_t row;
-        logic signed [31:0] cell_ih_ss;
-        logic signed [31:0] cell_iw_ss;
-        logic [SS_CB_BITS-1:0] cb;
-        logic [SS_CB_IDX_LSB-1:0] src_lane;
-        begin
-            row = '0;
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                cell_ih_ss = output_base_ih_q + $signed({24'd0, l_kh[lane]});
-                cell_iw_ss = output_base_iw_q + $signed({24'd0, l_kw[lane]});
-                cb = l_ic[lane][SS_CB_IDX_LSB +: SS_CB_BITS];
-                src_lane = l_ic[lane][SS_CB_IDX_LSB-1:0];
-                if (({8'd0, l_kh[lane]} < cfg_kernel_h_i) &&
-                    ({8'd0, l_kw[lane]} < cfg_kernel_w_i) &&
-                    (l_ic[lane] < cfg_input_c_i) &&
-                    (cell_ih_ss >= 32'sd0) &&
-                    (cell_iw_ss >= 32'sd0) &&
-                    (cell_ih_ss < $signed({16'd0, cfg_input_h_i})) &&
-                    (cell_iw_ss < $signed({16'd0, cfg_input_w_i})) &&
-                    ({30'd0, cb} < 32'(SS_CBLOCKS))) begin
-                    row[lane] = ss_cache_q[cell_ih_ss[SS_ROW_BITS-1:0]]
-                                          [cell_iw_ss[SS_COL_BITS-1:0]]
-                                          [cb][src_lane * 8 +: 8];
-                end
-            end
-            build_ss_emit_row = row;
-        end
-    endfunction
-
     always_comb begin
         logic [7:0] gen_kh;
         logic [7:0] gen_kw;
@@ -465,12 +403,6 @@ module conv_linebuf_stream_packer #(
 
         block_valid_bytes = valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i);
         coalesce_k_bytes = 32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes);
-
-        ss_mode = cfg_coalesce_i && cfg_kgen_i &&
-                  (cfg_k_tiles_i > 32'd1) &&
-                  (cfg_input_h_i <= 16'(SS_ROWS)) &&
-                  (cfg_input_w_i <= 16'(SS_COLS)) &&
-                  (({16'd0, cfg_input_c_i} + 32'd31) >> 5 <= 32'(SS_CBLOCKS));
 
         gen_kh = cfg_k_seed_kh_i;
         gen_kw = cfg_k_seed_kw_i;
@@ -563,6 +495,11 @@ module conv_linebuf_stream_packer #(
         if ((state_q == CH_STREAM_EMIT) && emit_fire && vector_last_for_spatial) begin
             slide_from_iw = output_base_iw_q + $signed({16'd0, cfg_stride_w_i});
         end
+        window_req_kw = window_kw_q;
+        if ((state_q == CH_WINDOW_WAIT) &&
+            ((window_kw_q + 16'd1) != cfg_kernel_w_i)) begin
+            window_req_kw = window_kw_q + 16'd1;
+        end
 
         bank_req = '0;
         bank_we = '0;
@@ -599,12 +536,14 @@ module conv_linebuf_stream_packer #(
             bank_we[idx] = 1'b1;
             bank_addr[idx] = resp_bank_addr;
             bank_wdata[idx] = resp_bank_wdata;
-        end else if (state_q == CH_WINDOW_REQ) begin
+        end else if ((state_q == CH_WINDOW_REQ) ||
+                     ((state_q == CH_WINDOW_WAIT) &&
+                      ((window_kw_q + 16'd1) != cfg_kernel_w_i))) begin
             for (int unsigned kh = 0; kh < K_MAX; kh++) begin
                 cell_ih = output_base_ih_q + $signed(32'(kh));
-                cell_iw = output_base_iw_q + $signed({16'd0, window_kw_q});
+                cell_iw = output_base_iw_q + $signed({16'd0, window_req_kw});
                 if ((kh < cfg_kernel_h_i) &&
-                    (window_kw_q < cfg_kernel_w_i) &&
+                    (window_req_kw < cfg_kernel_w_i) &&
                     (cell_ih >= 32'sd0) &&
                     (cell_iw >= 32'sd0) &&
                     (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
@@ -648,9 +587,6 @@ module conv_linebuf_stream_packer #(
             obi_req_o = 1'b1;
         end else if (state_q == CH_BYPASS_REQ0 || state_q == CH_BYPASS_REQ1) begin
             obi_req_o = 1'b1;
-        end else if (state_q == CH_SS_FILL_REQ0 || state_q == CH_SS_FILL_REQ1) begin
-            obi_req_o = 1'b1;
-            obi_addr_o = ss_pending_addr_q;
         end
 
         slide_window = window_q;
@@ -714,16 +650,6 @@ module conv_linebuf_stream_packer #(
             cached_c_base_q <= '0;
             row_slot_valid_q <= '0;
             row_slot_ih_q <= '0;
-            ss_active_q <= 1'b0;
-            ss_fill_row_q <= '0;
-            ss_fill_x_q <= '0;
-            ss_fill_cb_q <= '0;
-            ss_fill_addr_q <= '0;
-            ss_pending_addr_q <= '0;
-            ss_fill_beat0_q <= '0;
-            ss_fill_valid_bytes_q <= '0;
-            ss_fill_crosses_beat_q <= 1'b0;
-            ss_cache_q <= '0;
             fill_kh_q <= '0;
             fill_x_q <= '0;
             fill_addr_q <= '0;
@@ -790,10 +716,6 @@ module conv_linebuf_stream_packer #(
                         row_cache_full_q <= row_cache_full_mode;
                         cached_c_base_q <= cfg_c_base_i;
                         row_slot_valid_q <= '0;
-                        ss_active_q <= ss_mode;
-                        ss_fill_row_q <= '0;
-                        ss_fill_x_q <= '0;
-                        ss_fill_cb_q <= '0;
                         prefetch_active_q <= 1'b0;
                         prefetch_ready_q <= 1'b0;
                         prefetched_c_base_q <= '0;
@@ -819,8 +741,6 @@ module conv_linebuf_stream_packer #(
                                      (cfg_pad_h_i == 16'd0) &&
                                      (cfg_pad_w_i == 16'd0)) begin
                             state_q <= CH_BYPASS_PREP;
-                        end else if (ss_mode) begin
-                            state_q <= CH_SS_FILL_PREP;
                         end else begin
                             state_q <= CH_ENSURE;
                         end
@@ -882,105 +802,6 @@ module conv_linebuf_stream_packer #(
                         );
                         row_valid_out_q <= 1'b1;
                         state_q <= CH_STREAM_EMIT;
-                    end
-                end
-
-                CH_SS_FILL_PREP: begin
-                    if ({29'd0, ss_fill_row_q} >= 32'(cfg_input_h_i)) begin
-                        kh_q <= '0;
-                        kw_q <= '0;
-                        state_q <= CH_STREAM_PRIME;
-                    end else begin
-                        logic [15:0] ss_c_base;
-                        logic [5:0] ss_valid_bytes;
-                        logic [31:0] ss_addr;
-                        ss_c_base = {ss_fill_cb_q, {SS_CB_IDX_LSB{1'b0}}};
-                        ss_valid_bytes = valid_c_bytes(cfg_input_c_i, ss_c_base, 6'd0);
-                        ss_addr = cfg_origin_base_i +
-                                  (32'(cfg_pad_h_i + {14'd0, ss_fill_row_q}) *
-                                   cfg_row_stride_bytes_i) +
-                                  (32'({12'd0, ss_fill_x_q}) * cfg_pixel_stride_bytes_i) +
-                                  {16'd0, ss_c_base};
-                        ss_fill_addr_q <= ss_addr;
-                        ss_pending_addr_q <= beat_base(ss_addr);
-                        ss_fill_valid_bytes_q <= ss_valid_bytes;
-                        ss_fill_crosses_beat_q <=
-                            ({2'b00, ss_addr[BYTE_SEL_BITS-1:0]} + {1'b0, ss_valid_bytes}) >
-                            (BYTE_SEL_BITS+2)'(BEAT_BYTES);
-                        if (ss_valid_bytes == 6'd0) begin
-                            ss_cache_q[ss_fill_row_q[SS_ROW_BITS-1:0]][ss_fill_x_q][ss_fill_cb_q] <= '0;
-                            if (ss_fill_cb_q == SS_CB_BITS'(SS_CBLOCKS - 1)) begin
-                                ss_fill_cb_q <= '0;
-                                if (({12'd0, ss_fill_x_q} + 16'd1) >= cfg_input_w_i) begin
-                                    ss_fill_x_q <= '0;
-                                    ss_fill_row_q <= ss_fill_row_q + 1'b1;
-                                end else begin
-                                    ss_fill_x_q <= ss_fill_x_q + 1'b1;
-                                end
-                            end else begin
-                                ss_fill_cb_q <= ss_fill_cb_q + 1'b1;
-                            end
-                        end else begin
-                            state_q <= CH_SS_FILL_REQ0;
-                        end
-                    end
-                end
-
-                CH_SS_FILL_REQ0: begin
-                    if (obi_gnt_i) begin
-                        state_q <= CH_SS_FILL_WAIT0;
-                    end
-                end
-
-                CH_SS_FILL_WAIT0: begin
-                    if (obi_rvalid_i) begin
-                        fetch_beats_q <= fetch_beats_q + 32'd1;
-                        if (ss_fill_crosses_beat_q) begin
-                            ss_fill_beat0_q <= obi_rdata_i;
-                            ss_pending_addr_q <= beat_base(ss_fill_addr_q) + 32'(BEAT_BYTES);
-                            state_q <= CH_SS_FILL_REQ1;
-                        end else begin
-                            ss_cache_q[ss_fill_row_q[SS_ROW_BITS-1:0]][ss_fill_x_q][ss_fill_cb_q] <=
-                                merge_beats(obi_rdata_i, '0, ss_fill_addr_q[BYTE_SEL_BITS-1:0], ss_fill_valid_bytes_q);
-                            if (ss_fill_cb_q == SS_CB_BITS'(SS_CBLOCKS - 1)) begin
-                                ss_fill_cb_q <= '0;
-                                if (({12'd0, ss_fill_x_q} + 16'd1) >= cfg_input_w_i) begin
-                                    ss_fill_x_q <= '0;
-                                    ss_fill_row_q <= ss_fill_row_q + 1'b1;
-                                end else begin
-                                    ss_fill_x_q <= ss_fill_x_q + 1'b1;
-                                end
-                            end else begin
-                                ss_fill_cb_q <= ss_fill_cb_q + 1'b1;
-                            end
-                            state_q <= CH_SS_FILL_PREP;
-                        end
-                    end
-                end
-
-                CH_SS_FILL_REQ1: begin
-                    if (obi_gnt_i) begin
-                        state_q <= CH_SS_FILL_WAIT1;
-                    end
-                end
-
-                CH_SS_FILL_WAIT1: begin
-                    if (obi_rvalid_i) begin
-                        fetch_beats_q <= fetch_beats_q + 32'd1;
-                        ss_cache_q[ss_fill_row_q[SS_ROW_BITS-1:0]][ss_fill_x_q][ss_fill_cb_q] <=
-                            merge_beats(ss_fill_beat0_q, obi_rdata_i, ss_fill_addr_q[BYTE_SEL_BITS-1:0], ss_fill_valid_bytes_q);
-                        if (ss_fill_cb_q == SS_CB_BITS'(SS_CBLOCKS - 1)) begin
-                            ss_fill_cb_q <= '0;
-                            if (({12'd0, ss_fill_x_q} + 16'd1) >= cfg_input_w_i) begin
-                                ss_fill_x_q <= '0;
-                                ss_fill_row_q <= ss_fill_row_q + 1'b1;
-                            end else begin
-                                ss_fill_x_q <= ss_fill_x_q + 1'b1;
-                            end
-                        end else begin
-                            ss_fill_cb_q <= ss_fill_cb_q + 1'b1;
-                        end
-                        state_q <= CH_SS_FILL_PREP;
                     end
                 end
 
@@ -1120,7 +941,7 @@ module conv_linebuf_stream_packer #(
                         state_q <= CH_STREAM_PRIME;
                     end else begin
                         window_kw_q <= window_kw_q + 16'd1;
-                        state_q <= CH_WINDOW_REQ;
+                        state_q <= CH_WINDOW_WAIT;
                     end
                 end
 
@@ -1211,9 +1032,7 @@ module conv_linebuf_stream_packer #(
                                 end
                                 prefetch_active_q <= 1'b0;
                                 prefetch_ready_q <= 1'b0;
-                                if (ss_active_q) begin
-                                    state_q <= CH_STREAM_PRIME;
-                                end else if (row_cache_reuse ||
+                                if (row_cache_reuse ||
                                     (prefetch_ready_q && (prefetched_c_base_q == cfg_c_base_i))) begin
                                     state_q <= CH_WINDOW_REQ;
                                 end else begin
@@ -1258,9 +1077,8 @@ module conv_linebuf_stream_packer #(
             // Pipeline Stage 2: Output Update
             // -------------------------------------------------------------
             if (stg1_valid_q && stg2_ready) begin
-                row_data_q <= ss_active_q ?
-                              build_ss_emit_row(stg1_lane_kh_q, stg1_lane_kw_q, stg1_lane_ic_q) :
-                              build_emit_row(window_q, stg1_tap_kh_q, stg1_tap_kw_q, stg1_lane_kh_q, stg1_lane_kw_q, stg1_lane_ic_q);
+                row_data_q <= build_emit_row(window_q, stg1_tap_kh_q, stg1_tap_kw_q,
+                                             stg1_lane_kh_q, stg1_lane_kw_q, stg1_lane_ic_q);
                 row_valid_out_q <= 1'b1;
             end else if (!stg1_valid_q && stg2_ready && !bypass_active) begin
                 row_valid_out_q <= 1'b0;
