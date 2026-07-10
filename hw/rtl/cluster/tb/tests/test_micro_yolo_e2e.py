@@ -7,6 +7,7 @@ from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
     load_firmware_axi,
+    read_dtcm_word,
     read_l2_bytes,
     release_fetch,
     reset_dut,
@@ -23,6 +24,11 @@ L2_OUTPUT = 0x80010000
 INPUT_BYTES = 32 * 32 * 3
 WEIGHT_BYTES = 32 * 32
 OUTPUT_BYTES = 32 * 32 * 32
+DTCM_STATUS = 0x10008000
+DTCM_FAIL_CODE = 0x10008004
+DTCM_LAYER = 0x10008008
+DTCM_OP = 0x1000800C
+DTCM_EVENT = 0x10008010
 
 
 def safe_int(handle):
@@ -149,12 +155,21 @@ async def test_micro_yolo_e2e(dut):
     await load_firmware_axi(axi_master, fw_path)
     await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(
-        dut,
-        timeout_cycles=100000,
-        axi_master=axi_master,
-        report_name="test_micro_yolo_e2e",
-    )
+    try:
+        await wait_for_host_irq(
+            dut,
+            timeout_cycles=50000,
+            axi_master=axi_master,
+            report_name="test_micro_yolo_e2e",
+        )
+    except AssertionError as exc:
+        raise AssertionError(
+            f"{exc}: status=0x{read_dtcm_word(dut, DTCM_STATUS):08x} "
+            f"fail=0x{read_dtcm_word(dut, DTCM_FAIL_CODE):08x} "
+            f"layer={read_dtcm_word(dut, DTCM_LAYER)} "
+            f"op={read_dtcm_word(dut, DTCM_OP)} "
+            f"event={read_dtcm_word(dut, DTCM_EVENT)}"
+        ) from exc
 
     got = await read_l2_bytes(dut, L2_OUTPUT, OUTPUT_BYTES)
     for idx, (got_byte, exp_byte) in enumerate(zip(got, expected)):
