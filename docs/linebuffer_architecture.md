@@ -100,6 +100,35 @@ Unaligned vector được xử lý bằng `merge_beats`: nếu vector 32 byte c�
 - Halo retention/cascade giữa stripe chưa được implement; `start_i` hiện clear
   valid state của ring.
 
+### 4.1 Internal C32-Blocked Layout Contract
+
+Firmware/Python host cần tách rõ raw input layout và layout nội bộ của NPU:
+
+- Boundary input từ camera/model loader có thể là default NHWC/RGB. Layer đầu
+  được phép dùng path tail/raw hoặc DMA/repack riêng vì `IC=3` nhỏ.
+- Sau layer đầu, OFM của systolic nên được xem là tensor nội bộ
+  **C32-blocked/block-major**, không phải NHWC full-C interleaved:
+  `block[cblk][spatial][32C]`.
+- Khi layer sau đọc một C32 block, host phải cấu hình command như một tensor
+  view độc lập:
+  - `input_addr = base_of_cblk`
+  - `input_c = 32` cho block đủ, hoặc tail width cho block cuối
+  - `input_c_base = 0`
+  - `input_c_stride = 32`
+  - `row_stride_bytes = input_w * 32`
+  - `pixel_stride_bytes = 32`
+- Với `IC > 32`, Python planner split thành nhiều C32 views và accumulate vào
+  cùng OFM/psum. Firmware Snitch chỉ chạy command đã được planner generate đúng;
+  không cần tự gate lại layout.
+- Nếu host truyền `input_c = full_IC` và `input_c_base = 32/64/...` trên
+  C32-blocked storage, linebuffer sẽ cộng offset sai. Quy ước đúng là đổi
+  `input_addr` sang block base và giữ `input_c_base = 0`.
+
+`conv_linebuf_stream_packer` có fast handling cho view C32 aligned:
+`pixel_stride=32`, `row_stride=input_w*32`, `input_c_base=0`,
+`lane_base=0`, origin base 32B-aligned. Path raw NHWC/cross-beat vẫn là
+fallback correctness cho boundary và tail.
+
 ## 5. Verification Legacy
 
 Regression trực tiếp cho contract này nằm ở
@@ -383,3 +412,31 @@ Cluster tests:
 - Add large-shape first-layer YOLO case `3x3/s2/p1/IC=3`.
 - Collect PMU after every run and fail the perf test if linebuffer active
   cycles/vector exceeds the configured threshold.
+
+## 10. Đề Xuất Pipelining / Thiết Kế Decoupled FSM
+
+Để tối ưu hóa hiệu năng và triệt tiêu hoàn toàn thời gian chết (stall) của Systolic Array khi phải đợi Linebuffer nạp dữ liệu từ TCDM/OBI, cấu trúc FSM đơn tuần tự hiện tại của Linebuffer có thể được cải tiến thành kiến trúc Pipeline/Decoupled.
+
+### 10.1 Vấn đề của FSM đơn tuần tự
+Hiện tại, cả hai công đoạn **Nạp dữ liệu (Producer)** và **Phát dữ liệu (Consumer)** đều được quản lý bởi một FSM duy nhất (`state_q`).
+* Khi ở trạng thái nạp dữ liệu (`CH_FILL_*`), Linebuffer dừng toàn bộ hoạt động phát dữ liệu.
+* Điều này làm cho việc nạp và phát dữ liệu bị tuần tự hóa hoàn toàn, gây ra tổn thất lớn về mặt chu kỳ (cycle bubbles) khi chạy các case lớn hoặc unaligned.
+
+### 10.2 Giải pháp Decoupled FSM (Producer-Consumer)
+Tận dụng tài nguyên SRAM banks đa cổng (Dual-port SRAM với `BANK_PORTS = 2`), ta có thể thiết kế lại Linebuffer thành 2 FSM chạy song song và độc lập:
+
+1. **Fill FSM (Producer - Write Port 0):**
+   * Quản lý các trạng thái: `CH_IDLE`, `CH_ENSURE`, `CH_FILL_REQ0`, `CH_FILL_REQ1`, `CH_FILL_DRAIN`.
+   * Chức năng: Độc lập kéo dữ liệu từ OBI/TCDM về ghi vào SRAM. Khi hoàn thành một dòng, nó set cờ valid tương ứng trong `row_slot_valid_q` và lưu chỉ số dòng vào `row_slot_ih_q`.
+2. **Stream FSM (Consumer - Read Port 1):**
+   * Quản lý các trạng thái: `CH_IDLE`, `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`, `CH_STREAM_PRIME`, `CH_STREAM_EMIT`, `CH_STREAM_DONE`.
+   * Chức năng: Đọc SRAM để slide window và emit dữ liệu sang Systolic.
+   * Đồng bộ: Khi Stream FSM cần một dòng, nó chỉ cần kiểm tra cờ valid của dòng đó:
+     * Nếu dòng đã valid: Tiếp tục trượt window và phát dữ liệu không trễ.
+     * Nếu chưa valid: Tạm thời stall và đợi Fill FSM báo hoàn thành.
+
+### 10.3 Double Buffering cho C-Blocks (Ping-Pong Caching)
+Để che giấu hoàn toàn độ trễ nạp dữ liệu khi chuyển đổi giữa các K-tiles hoặc C-blocks:
+* Chia không gian Row SRAM thành 2 ngữ cảnh (Context 0 và Context 1) chạy theo mô hình Ping-Pong.
+* Trong khi **Stream FSM** đang đọc và tính toán dựa trên dữ liệu của Context 0, **Fill FSM** có thể song song nạp trước (prefetch) dữ liệu của Context 1 từ TCDM.
+* Khi kết thúc một tile, vai trò của 2 Context được hoán đổi ngay lập tức mà không tốn chu kỳ trống.

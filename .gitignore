@@ -28,3 +28,6 @@ Thumbs.db
 *.o
 *.map
 **/obj_dir/
+.superpowers/brainstorm/2319838-1783320015/state/server-instance-id
+.superpowers/brainstorm/2319838-1783320015/state/server.pid
+.agents/AGENTS.md
