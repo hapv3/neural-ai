@@ -160,3 +160,110 @@ The 17,408-cycle target (2× compute) is the practical lower bound for this work
 To reach below 2× compute would require either:
 - A second OBI read port for weights (separate from IFM/linebuffer)
 - Or pre-loading all weights into on-chip SRAM before compute begins (feasible for small K but not for 34 tiles × 32 rows × 32B = 34 KB per stripe)
+
+---
+
+## 6. Follow-up Pipeline Opportunities After C32-Blocked Group Mode
+
+Snapshot: `CONV_PERF_CASE=22`, `16x16x120`, C32-blocked input memory, channel split `96 + 24`.
+
+Measured after enabling C32-blocked group addressing:
+
+| Counter | Cycles / Count |
+|---|---:|
+| PMU cycles | 25,854 |
+| Monitor cycles | 26,132 |
+| Systolic useful compute | 8,704 |
+| `COMPUTE` state | 13,645 |
+| `WAIT_DRAIN` | 3,292 |
+| `LOAD_WEIGHTS` | 68 |
+| `linebuf_obi_req` | 8,750 |
+| `linebuf_obi_stall` | 46 |
+| `CH_ENSURE` | 2,176 |
+| `CH_WINDOW_WAIT` | 1,632 |
+| `CH_WINDOW_REQ` | 544 |
+| `CH_STREAM_PRIME` | 544 |
+| `CH_STREAM_DONE` | 1,913 |
+| `CH_STREAM_EMIT` | 8,771 |
+| `DRAIN_ACCUM_WRITE` | 8,693 |
+| `DRAIN_ACCUM_READ` | 284 |
+
+Compared with the previous C32-blocked `32 + 32 + 32 + 24` split, the `96 + 24` group mode reduced PMU cycles from 28,340 to 25,854. The improvement mainly comes from fewer controller invocations and less OFM/psum traffic, not from lower IFM fetch count: `linebuf_obi_req` stayed nearly flat (`8,820 -> 8,750`).
+
+### 6.1 Highest Priority: Pipeline Linebuffer Window Setup
+
+Remaining linebuffer overhead is still large:
+
+- `CH_ENSURE = 2,176`
+- `CH_WINDOW_WAIT = 1,632`
+- `CH_WINDOW_REQ = 544`
+- `CH_STREAM_PRIME = 544`
+- `CH_STREAM_DONE = 1,913`
+
+These states account for roughly 6.8k cycles of non-emit linebuffer activity.
+
+Recommended RTL work:
+
+- Merge or pipeline `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`, and `CH_STREAM_PRIME`. With 1-cycle SRAM read latency, the linebuffer should issue the next window or slide-column bank read while the current row vector is being emitted.
+- Convert `CH_ENSURE` into a row-ready scoreboard path. If the current output window rows are already resident, stream immediately and let missing future rows fill in the background.
+- Reduce `CH_STREAM_DONE` by arming the next K tile earlier. When the controller asserts `next_tile_i`, the linebuffer should already have preserved enough row/window state to enter `CH_WINDOW_REQ` or `CH_STREAM_PRIME`, not repeat a long reset/setup path.
+
+Estimated gain: 3k-5k cycles for case 22 if implemented correctly.
+
+### 6.2 Controller WAIT_DRAIN and K-Tile Transition
+
+Weight load is mostly hidden now: `LOAD_WEIGHTS = 68`, so weight preload is not the main problem. Remaining `WAIT_DRAIN = 3,292` cycles comes from drain/transition conditions.
+
+Current behavior:
+
+- Within one invocation, `psum_buf_overlap_active` can start the next K tile before final drain completes, but it still requires `weight_preload_done_q`, `!linebuf_prefetch_busy`, and `array_flush_cnt_q == 0`.
+- Across the `IC=96 -> IC=24` boundary, there is effectively no hardware overlap because firmware calls `npu_conv2d_packed_run_oc32()` twice. The first invocation must finish and drain before the tail invocation starts.
+
+Recommended work:
+
+- Allow next K-tile compute to start once the linebuffer has the first valid window, not only after full prefetch completes.
+- Keep the psum/window state across channel groups by adding a group-level command descriptor. A single logical command should contain:
+  - group 0: C32-blocked base block 0, `input_c=96`, `accumulate=0`
+  - group 1: C32-blocked base block 3, `input_c=24`, `accumulate=1`
+  - final drain only after the last group
+- Continue using the current `psum_buf_overlap_active` mechanism for intra-group K tiles.
+
+Estimated gain: 1k-3k cycles from better K-tile transition, plus roughly 2k cycles if the `96 -> 24` firmware boundary is removed.
+
+### 6.3 OFM/PSum Drain Path
+
+Current drain state distribution:
+
+- `DRAIN_ACCUM_WRITE = 8,693`
+- `DRAIN_ACCUM_READ = 284`
+
+The psum double buffer avoids most external psum reads. The remaining cost is mostly one row per cycle psum-buffer update or final output write. This is useful work, but it can still backpressure transitions and FIFO progress.
+
+Recommended work:
+
+- Add a small skid buffer between OFM FIFO and psum-buffer write so transient psum-buffer port conflicts do not stall OFM FIFO pop.
+- Batch or pipeline psum-buffer write arbitration so intermediate tiles do not force controller-visible bubbles.
+- Prioritize final output write once `final_tile=1`; avoid read-prefetch arbitration stealing cycles from final drain.
+
+Estimated gain: several hundred cycles to about 1k cycles.
+
+### 6.4 Requant Path
+
+Case 22 does not enable requant, so requant is not part of the current bottleneck.
+
+The current `requant_pipeline.sv` already has 3-stage ready/valid flow. For requant-enabled layers, the likely bottleneck is not the math pipeline but the output write path:
+
+- non-requant int32 output uses 4 OBI ports for 128 bytes per row
+- requant int8 output uses one 256-bit port for 32 bytes per row
+
+Because requant output is 4x smaller, one port is usually adequate. Optimize this only if a requant-enabled performance case shows `requant_out_valid` backpressure or high output-port stall.
+
+### 6.5 Updated Priority Order
+
+1. Pipeline linebuffer window setup: `WINDOW_REQ/WAIT/PRIME` plus rolling stream reads.
+2. Start next K tile when the first next-tile window is ready, instead of waiting for full linebuffer prefetch completion.
+3. Add a group-level scheduler so `96 + 24` channel groups execute as one logical command with a single final drain.
+4. Add light drain skid/batch buffering around psum-buffer writes and final output writes.
+5. Defer requant optimization until a requant-enabled layer proves it is limiting performance.
+
+Expected next target for case 22 after items 1-3: about 18k-21k monitor cycles. Getting close to the 8,704-cycle compute floor requires a deeper linebuffer/window pipeline that emits near one vector per cycle with minimal setup and drain bubbles.

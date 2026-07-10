@@ -34,10 +34,14 @@
 #define P3_C120_WEIGHT_ADDR 0x81110000u
 #define P3_C120_OUT_ADDR    0x81120000u
 #define P3_C120_STATS_ADDR  0x81240000u
-#define P3_INPUT_ADDR(id)   (((id) == 20u) ? P3_C120_INPUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u))
-#define P3_WEIGHT_ADDR(id)  (((id) == 20u) ? P3_C120_WEIGHT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u))
-#define P3_OUT_ADDR(id)     (((id) == 20u) ? P3_C120_OUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u))
-#define P3_STATS_ADDR(id)   (((id) == 20u) ? P3_C120_STATS_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u))
+#define P3_C120_C32B_INPUT_ADDR  0x81300000u
+#define P3_C120_C32B_WEIGHT_ADDR 0x81410000u
+#define P3_C120_C32B_OUT_ADDR    0x81420000u
+#define P3_C120_C32B_STATS_ADDR  0x81540000u
+#define P3_INPUT_ADDR(id)   (((id) == 20u) ? P3_C120_INPUT_ADDR : (((id) == 22u) ? P3_C120_C32B_INPUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u)))
+#define P3_WEIGHT_ADDR(id)  (((id) == 20u) ? P3_C120_WEIGHT_ADDR : (((id) == 22u) ? P3_C120_C32B_WEIGHT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u)))
+#define P3_OUT_ADDR(id)     (((id) == 20u) ? P3_C120_OUT_ADDR : (((id) == 22u) ? P3_C120_C32B_OUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u)))
+#define P3_STATS_ADDR(id)   (((id) == 20u) ? P3_C120_STATS_ADDR : (((id) == 22u) ? P3_C120_C32B_STATS_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u)))
 
 #define T_INPUT          0x10100000u
 #define T_WEIGHT         0x10102000u
@@ -101,6 +105,7 @@
 #define P3_CASE_LINEBUF_KGEN_3X3_C96 19u
 #define P3_CASE_LINEBUF_3X3_C120 20u
 #define P3_CASE_LINEBUF_KGEN_3X3_C65 21u
+#define P3_CASE_LINEBUF_3X3_C120_C32B 22u
 
 #define YOLO_RGB_H          64u
 #define YOLO_RGB_W          64u
@@ -429,6 +434,96 @@ static void run_oc32_case_channel_slices(uint32_t case_id,
     }
 
     spatz_rt_dma_1d(P3_OUT_ADDR(case_id), t_output, output_bytes);
+    spatz_rt_dma_wait_all();
+    publish_stats(P3_STATS_ADDR(case_id), &total_stats);
+}
+
+static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
+                                             uint32_t input_h,
+                                             uint32_t input_w,
+                                             uint32_t input_c_total,
+                                             uint32_t output_h,
+                                             uint32_t output_w,
+                                             uint32_t kernel_h,
+                                             uint32_t kernel_w,
+                                             uint32_t stride_h,
+                                             uint32_t stride_w,
+                                             uint32_t pad_h,
+                                             uint32_t pad_w,
+                                             uint32_t fail_code) {
+    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_stats_t total_stats;
+    uint32_t rows = output_h * output_w;
+    uint32_t c_blocks = (input_c_total + 31u) / 32u;
+    uint32_t c_block_bytes = input_h * input_w * 32u;
+    uint32_t input_bytes = c_blocks * c_block_bytes;
+    uint32_t output_bytes = rows * 32u * 4u;
+    uint32_t main_c = input_c_total;
+    uint32_t tail_c = 0u;
+    uint32_t weight_offset = 0u;
+
+    reset_stats(&total_stats);
+
+    if (input_c_total > 32u && ((input_c_total % 32u) != 0u)) {
+        main_c = (input_c_total / 32u) * 32u;
+        tail_c = input_c_total - main_c;
+    }
+
+    spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
+    spatz_rt_dma_wait_all();
+    spatz_rt_dma_1d(T_C120_WEIGHT,
+                    P3_WEIGHT_ADDR(case_id),
+                    k_tiles_for(input_c_total, kernel_h, kernel_w) * 32u * 32u);
+    spatz_rt_dma_wait_all();
+
+    init_cfg(&cfg,
+             T_C120_INPUT,
+             T_C120_WEIGHT,
+             T_C120_OUTPUT,
+             input_h,
+             input_w,
+             32u,
+             output_h,
+             output_w,
+             kernel_h,
+             kernel_w,
+             stride_h,
+             stride_w,
+             pad_h,
+             pad_w);
+    cfg.input_c_stride = 32u;
+    cfg.input_c_base = 0u;
+
+    for (uint32_t idx = 0u; idx < 2u; idx++) {
+        npu_conv2d_packed_stats_t slice_stats;
+        uint32_t c_base = (idx == 0u) ? 0u : main_c;
+        uint32_t c_count = (idx == 0u) ? main_c : tail_c;
+        uint32_t block_idx = c_base / 32u;
+        uint32_t status;
+
+        if (c_count == 0u) {
+            break;
+        }
+
+        cfg.input_addr = T_C120_INPUT + (block_idx * c_block_bytes);
+        cfg.weight_addr = T_C120_WEIGHT + weight_offset;
+        cfg.input_c = c_count;
+        cfg.accumulate = (idx == 0u) ? 0u : 1u;
+
+        status = npu_conv2d_packed_run_oc32(&cfg, &slice_stats);
+        if (status != NPU_CONV2D_PACKED_OK) {
+            spatz_rt_fail_at(fail_code, c_base, (int32_t)status, NPU_CONV2D_PACKED_OK);
+        }
+
+        if (idx == 0u) {
+            copy_stats(&total_stats, &slice_stats);
+        } else {
+            merge_split_stats(&total_stats, &slice_stats);
+        }
+        weight_offset += k_tiles_for(c_count, kernel_h, kernel_w) * 32u * 32u;
+    }
+
+    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_C120_OUTPUT, output_bytes);
     spatz_rt_dma_wait_all();
     publish_stats(P3_STATS_ADDR(case_id), &total_stats);
 }
@@ -981,6 +1076,24 @@ int main(void) {
                                       64u,
                                       1u,
                                       0xC9E4u);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_3X3_C120_C32B)) {
+        spatz_rt_set_phase(27, P3_CASE_LINEBUF_3X3_C120_C32B);
+        run_oc32_case_c32_blocked_slices(P3_CASE_LINEBUF_3X3_C120_C32B,
+                                          P3_C120_H,
+                                          P3_C120_W,
+                                          120u,
+                                          P3_C120_H,
+                                          P3_C120_W,
+                                          3u,
+                                          3u,
+                                          1u,
+                                          1u,
+                                          1u,
+                                          1u,
+                                          0xC9E5u);
         spatz_rt_pass_step();
     }
 

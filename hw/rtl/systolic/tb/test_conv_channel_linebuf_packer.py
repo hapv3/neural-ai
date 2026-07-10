@@ -139,22 +139,25 @@ async def memory_responder(dut, memory):
 
 async def run_case(dut, *, name, input_h, input_w, input_c, kernel_h, kernel_w,
                    stride_h, stride_w, pad_h, pad_w, c_base, stall_ready,
-                   lane_base=0, coalesce=False, expect_bypass=False, log_result=True):
+                   lane_base=0, coalesce=False, expect_bypass=False, log_result=True,
+                   input_base=INPUT_BASE, input_data_override=None, memory_override=None,
+                   row_stride_override=None, pixel_stride_override=None):
     output_h = output_dim(input_h, kernel_h, pad_h, stride_h)
     output_w = output_dim(input_w, kernel_w, pad_w, stride_w)
     assert output_h > 0 and output_w > 0
 
-    input_data = build_input(input_h, input_w, input_c)
-    memory = {}
-    for offset, value in enumerate(input_data):
-        memory[INPUT_BASE + offset] = value
+    input_data = input_data_override if input_data_override is not None else build_input(input_h, input_w, input_c)
+    memory = {} if memory_override is None else dict(memory_override)
+    if memory_override is None:
+        for offset, value in enumerate(input_data):
+            memory[input_base + offset] = value
 
     await reset(dut)
     responder = cocotb.start_soon(memory_responder(dut, memory))
     try:
-        row_stride = input_w * input_c
-        pixel_stride = input_c
-        origin_base = (INPUT_BASE - pad_h * row_stride) & 0xFFFFFFFF
+        row_stride = row_stride_override if row_stride_override is not None else input_w * input_c
+        pixel_stride = pixel_stride_override if pixel_stride_override is not None else input_c
+        origin_base = (input_base - pad_h * row_stride) & 0xFFFFFFFF
         golden_fn = golden_coalesced_vectors if coalesce else golden_vectors
         expected = golden_fn(
             input_data,
@@ -341,6 +344,52 @@ async def conv_channel_linebuf_c48_3x3_tail_stride2(dut):
         pad_w=1,
         c_base=32,
         stall_ready=True,
+    )
+
+
+@cocotb.test()
+async def conv_channel_linebuf_c32_blocked_second_block(dut):
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+
+    input_h = 4
+    input_w = 6
+    c_block = ARRAY_DIM
+    block_span = input_h * input_w * c_block
+    block0_base = INPUT_BASE
+    block1_base = INPUT_BASE + block_span
+
+    block1_data = [
+        input_value(height, width, c_block + lane)
+        for height in range(input_h)
+        for width in range(input_w)
+        for lane in range(c_block)
+    ]
+    memory = {}
+    for offset in range(block_span):
+        memory[block0_base + offset] = (0xA0 + offset) & 0xFF
+    for offset, value in enumerate(block1_data):
+        memory[block1_base + offset] = value
+
+    await run_case(
+        dut,
+        name="C32-blocked second block 3x3",
+        input_h=input_h,
+        input_w=input_w,
+        input_c=c_block,
+        kernel_h=3,
+        kernel_w=3,
+        stride_h=1,
+        stride_w=1,
+        pad_h=1,
+        pad_w=1,
+        c_base=0,
+        stall_ready=True,
+        input_base=block1_base,
+        input_data_override=block1_data,
+        memory_override=memory,
+        row_stride_override=input_w * c_block,
+        pixel_stride_override=c_block,
     )
 
 

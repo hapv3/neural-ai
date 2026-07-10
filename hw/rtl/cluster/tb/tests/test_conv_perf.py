@@ -40,6 +40,10 @@ P3_C120_INPUT_ADDR = 0x81000000
 P3_C120_WEIGHT_ADDR = 0x81110000
 P3_C120_OUT_ADDR = 0x81120000
 P3_C120_STATS_ADDR = 0x81240000
+P3_C120_C32B_INPUT_ADDR = 0x81300000
+P3_C120_C32B_WEIGHT_ADDR = 0x81410000
+P3_C120_C32B_OUT_ADDR = 0x81420000
+P3_C120_C32B_STATS_ADDR = 0x81540000
 P3_H = 4
 P3_W = 4
 P3_C120_H = 16
@@ -76,6 +80,7 @@ P3_CASE_LINEBUF_KGEN_3X3_C32 = 18
 P3_CASE_LINEBUF_KGEN_3X3_C96 = 19
 P3_CASE_LINEBUF_3X3_C120 = 20
 P3_CASE_LINEBUF_KGEN_3X3_C65 = 21
+P3_CASE_LINEBUF_3X3_C120_C32B = 22
 
 YOLO_RGB_H = 64
 YOLO_RGB_W = 64
@@ -230,6 +235,25 @@ P3_CASES = {
         0,
         False,
     ),
+    P3_CASE_LINEBUF_3X3_C120_C32B: (
+        "linebuffer C32-blocked full-height conv3x3 IC120",
+        P3_C120_H,
+        P3_C120_W,
+        120,
+        P3_C120_H,
+        P3_C120_W,
+        3,
+        3,
+        1,
+        1,
+        1,
+        1,
+        32,
+        34,
+        0,
+        0,
+        False,
+    ),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -259,6 +283,7 @@ def p3_case_enabled(case_id):
             case_id == P3_CASE_LINEBUF_KGEN_3X3_C96
             or case_id == P3_CASE_LINEBUF_3X3_C120
             or case_id == P3_CASE_LINEBUF_KGEN_3X3_C65
+            or case_id == P3_CASE_LINEBUF_3X3_C120_C32B
         )
     if CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT:
         return case_id == P3_CASE_REQUANT
@@ -283,6 +308,7 @@ def p3_case_is_linebuf(case_id):
         P3_CASE_LINEBUF_KGEN_3X3_C96,
         P3_CASE_LINEBUF_3X3_C120,
         P3_CASE_LINEBUF_KGEN_3X3_C65,
+        P3_CASE_LINEBUF_3X3_C120_C32B,
     }
 
 
@@ -398,24 +424,32 @@ def golden_conv3():
 def p3_input_addr(case_id):
     if case_id == P3_CASE_LINEBUF_3X3_C120:
         return P3_C120_INPUT_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
+        return P3_C120_C32B_INPUT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x0000
 
 
 def p3_weight_addr(case_id):
     if case_id == P3_CASE_LINEBUF_3X3_C120:
         return P3_C120_WEIGHT_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
+        return P3_C120_C32B_WEIGHT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3000
 
 
 def p3_out_addr(case_id):
     if case_id == P3_CASE_LINEBUF_3X3_C120:
         return P3_C120_OUT_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
+        return P3_C120_C32B_OUT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x10000
 
 
 def p3_stats_addr(case_id):
     if case_id == P3_CASE_LINEBUF_3X3_C120:
         return P3_C120_STATS_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
+        return P3_C120_C32B_STATS_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3E000
 
 
@@ -510,6 +544,26 @@ def make_p3_input(input_h, input_w, input_c):
     ]
 
 
+def make_p3_input_c32_blocked(input_h, input_w, input_c):
+    c_blocks = (input_c + K_TILE - 1) // K_TILE
+    data = []
+    for c_block in range(c_blocks):
+        c_base = c_block * K_TILE
+        for h in range(input_h):
+            for w in range(input_w):
+                for lane in range(K_TILE):
+                    c = c_base + lane
+                    value = p3_input_value(h, w, c) if c < input_c else 0
+                    data.append(to_u8(value))
+    return data
+
+
+def make_p3_input_for_case(case_id, input_h, input_w, input_c):
+    if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
+        return make_p3_input_c32_blocked(input_h, input_w, input_c)
+    return make_p3_input(input_h, input_w, input_c)
+
+
 def make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count):
     packed = []
     k_total = input_c * kernel_h * kernel_w
@@ -566,18 +620,28 @@ def linebuf_channel_slices(input_c):
     return [(0, input_c)]
 
 
+def c32_blocked_channel_slices(input_c):
+    return linebuf_channel_slices(input_c)
+
+
 def use_linebuf_channel_slice_plan(case_id):
     return case_id in (
         P3_CASE_LINEBUF_KGEN_3X3_C96,
         P3_CASE_LINEBUF_3X3_C120,
         P3_CASE_LINEBUF_KGEN_3X3_C65,
+        P3_CASE_LINEBUF_3X3_C120_C32B,
     )
 
 
 def make_p3_weight_packed_for_case(case_id, input_c, kernel_h, kernel_w, oc_count):
     if use_linebuf_channel_slice_plan(case_id):
         packed = []
-        for c_base, c_count in linebuf_channel_slices(input_c):
+        channel_slices = (
+            c32_blocked_channel_slices(input_c)
+            if case_id == P3_CASE_LINEBUF_3X3_C120_C32B
+            else linebuf_channel_slices(input_c)
+        )
+        for c_base, c_count in channel_slices:
             packed += make_p3_weight_packed_channel_slice(input_c, kernel_h, kernel_w, oc_count, c_base, c_count)
         return packed
     return make_p3_weight_packed(input_c, kernel_h, kernel_w, oc_count)
@@ -802,7 +866,7 @@ async def boot_and_run(dut, test_file):
             _spatz,
             _requant_output,
         ) = case
-        await write_l2_bytes(dut, p3_input_addr(case_id), make_p3_input(input_h, input_w, input_c))
+        await write_l2_bytes(dut, p3_input_addr(case_id), make_p3_input_for_case(case_id, input_h, input_w, input_c))
         await write_l2_bytes(
             dut,
             p3_weight_addr(case_id),

@@ -73,7 +73,14 @@ static uint32_t validate_cfg(const npu_conv2d_packed_cfg_t *cfg) {
 
     uint32_t stride_c = input_c_stride(cfg);
     if (cfg->input_c_base + cfg->input_c > stride_c) {
-        return NPU_CONV2D_PACKED_ERR_BAD_SHAPE;
+        uint32_t c32_blocked_group =
+            (cfg->input_c_stride == NPU_CONV2D_PACKED_K_TILE) &&
+            (cfg->input_c_base == 0u) &&
+            (cfg->input_c > NPU_CONV2D_PACKED_K_TILE) &&
+            ((cfg->input_c % NPU_CONV2D_PACKED_K_TILE) == 0u);
+        if (!c32_blocked_group) {
+            return NPU_CONV2D_PACKED_ERR_BAD_SHAPE;
+        }
     }
 
     return NPU_CONV2D_PACKED_OK;
