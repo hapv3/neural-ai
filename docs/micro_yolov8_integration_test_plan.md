@@ -148,42 +148,103 @@ test must use the **L2-Centric + Tiling** strategy:
 
 ## 4. Implementation Phase Breakdown
 
-### Phase 1: Operator Library (priority, tested individually)
+The implementation is staged so each milestone has one dominant failure mode.
+Operator unit tests prove the kernels, then graph integration starts from a
+minimal Conv-only graph and adds data movement, layout, and scheduler lifetime
+one step at a time.
 
-Objective: Write and unit-test each new operator in `spatz_ops`.
+### Phase 1: Operator Library Unit Tests
+
+Objective: implement each missing non-Conv operator independently before it is
+allowed into the full graph scheduler.
 
 | Step | Task | File |
 |---|---|---|
-| 1a | `spatz_add_i8()` | `sw/lib/spatz_ops.c` |
-| 1b | `spatz_mul_i8()` | `sw/lib/spatz_ops.c` |
+| 1a | `spatz_add_i8()` saturated add | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
+| 1b | `spatz_mul_i8()` INT8 multiply with requant/clamp | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
 | 1c | `npu_logistic_i8()` using AFU LUT, with optional Spatz fallback | `sw/lib/hal_afu.h`, `sw/lib/spatz_ops.c` |
-| 1d | `spatz_maxpool2d_i8()` | `sw/lib/spatz_ops.c` |
-| 1e | `spatz_upsample_nearest_i8()` | `sw/lib/spatz_ops.c` |
-| 1f | `spatz_softmax_i8()` / DFL postprocess | Future phase after raw-head E2E |
-| 1g | Unit test for all | `sw/test/spatz_ops/main.c` (expand) |
+| 1d | `spatz_maxpool2d_i8()` for K=5, S=1, Pad=2 | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
+| 1e | `spatz_upsample_nearest_i8()` 2x nearest | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
+| 1f | `spatz_concat_c32_i8()` or equivalent C32-blocked concat helper | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
+| 1g | `spatz_softmax_i8()` / DFL postprocess | Future phase after raw-head E2E |
+| 1h | Unit tests for all implemented operators | `sw/test/spatz_ops/main.c`, `test_spatz_operator_library.py` |
 
-**Verify:** Expand the existing `test_spatz_operator_library` test. Every operator
-is tested with Python golden data, compared byte-by-byte.
+Acceptance: each operator has a deterministic Python golden and byte-exact RTL
+cluster test coverage. Softmax/DFL remains disabled until after raw-head INT8
+passes.
 
-### Phase 2: Graph Scheduler Firmware
+### Phase 2: Tensor Layout and Graph Runtime Contract
 
-Objective: Write firmware to run the raw-head graph sequentially through
-`Raw_Head_Out`. Keep DFL/Softmax/decode table entries reserved but disabled
-until the raw-head INT8 output is bit-exact.
+Objective: define layout and lifetime rules before introducing the full
+96x96 topology. This prevents graph bugs from being hidden inside ad hoc copies.
+
+Required decisions:
+
+- Activation tensors with `C <= 32`: store as one C32 block with zero-padded tail.
+- Activation tensors with `C > 32`: store as C32-blocked blocks, not compact NCHW.
+- Concat along C: produce C32-blocked output blocks directly.
+- Conv consumers: use the C32-blocked descriptor path for `IC=64` and larger.
+- L2 is the owner of full intermediate tensors; TCDM only holds working tiles.
 
 | Step | Task | File |
 |---|---|---|
-| 2a | Define `tensor_t` struct (addr, shape, scale, zp) | `sw/lib/npu_tensor.h` |
-| 2b | Write scheduler `micro_yolo_run()` calling operators sequentially | `sw/test/micro_yolo/main.c` |
-| 2c | iDMA tiling logic for tensors exceeding TCDM | `sw/test/micro_yolo/main.c` |
+| 2a | Define `tensor_t` with addr, H/W/C, layout, scale, zero point | `sw/lib/npu_tensor.h` |
+| 2b | Define C32-blocked tensor helpers and address math | `sw/lib/npu_tensor.h` or `sw/lib/npu_graph.h` |
+| 2c | Add graph scratch allocator for TCDM tile buffers | `sw/test/micro_yolo/main.c` or `sw/lib/npu_graph.c` |
+| 2d | Document qparam propagation for Requant/SiLU/Add/Mul | `docs/micro_yolov8_integration_test_plan.md` |
 
-### Phase 3: Golden Model + End-to-End Verify
+Acceptance: the minimal graph in Phase 3a can run using the same tensor
+descriptors and layout rules that the full 96x96 graph will use.
+
+### Phase 3: Incremental Graph Integration
+
+Objective: grow the graph one operator at a time, with a byte-exact checkpoint
+after each addition.
+
+| Step | Graph Added | Expected Output |
+|---|---|---|
+| 3a | Minimal graph: `32x32x3 -> Conv3x3 -> Requant/Clamp -> Conv1x1 -> Requant/Clamp` | `32x32x32` INT8 |
+| 3b | Conv_Stem only for 96x96 input | L1 `48x48x32` INT8 |
+| 3c | Conv_Stem + SiLU | L3 `48x48x32` INT8 |
+| 3d | Add C2f_Conv | L5 `48x48x32` INT8 |
+| 3e | Add residual Add | L6 `48x48x32` INT8 |
+| 3f | Add Conv_Down | L7 `24x24x32` INT8 |
+| 3g | Add SPPF MaxPool | L8 `24x24x32` INT8 |
+| 3h | Add Upsample | L9 `48x48x32` INT8 |
+| 3i | Add Concat to C64 C32-blocked layout | L10 `48x48x64` INT8 |
+| 3j | Add Head_Conv IC64 OC32 | Raw head `48x48x32` INT8 |
+
+Acceptance: every step writes its checkpoint tensor to L2 and compares against
+the Python golden before the next operator is enabled. Step 3a also creates the
+`sw/test/micro_yolo/` firmware, Makefile, linker/start files, and makes the
+existing `test_micro_yolo_e2e.py` style test pass.
+
+### Phase 4: Full 96x96 Raw-Head E2E
+
+Objective: run the complete raw-head topology through `Raw_Head_Out`.
+DFL/Softmax/decode table entries may exist in metadata but must remain disabled.
 
 | Step | Task |
 |---|---|
-| 3a | Python script: define network, quantize INT8, export `.bin` |
-| 3b | Cocotb testbench: load `.bin` into L2, run firmware, read results |
-| 3c | Compare raw head INT8 output vs golden. Allowed error: **0 bytes** |
+| 4a | Generate deterministic Python golden for the full raw-head topology |
+| 4b | Export input and weights as fixed `.bin` fixtures or generate them in cocotb |
+| 4c | Run firmware scheduler over L2-centric tiled tensors |
+| 4d | Compare raw head INT8 output byte-exactly |
+| 4e | Collect PMU counters per layer for performance triage |
+
+Acceptance: raw head `1x32x48x48` INT8 matches golden with 0 byte mismatch.
+
+### Phase 5: Future Postprocess
+
+Objective: extend beyond raw-head output after the Conv/activation path is stable.
+
+| Step | Task |
+|---|---|
+| 5a | Head split into Box/Class branches |
+| 5b | Transpose/reshape to flattened head layout |
+| 5c | DFL Softmax implementation and unit test |
+| 5d | Class sigmoid |
+| 5e | Decode/NMS roadmap |
 
 ---
 

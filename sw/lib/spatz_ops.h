@@ -25,5 +25,23 @@ void spatz_requant_i32_to_i32(const int32_t *src, int32_t *dst, uint32_t count,
 void spatz_requant_i32_to_i8(const int32_t *src, int8_t *dst, uint32_t count,
                              int32_t multiplier, uint32_t shift,
                              int32_t min_val, int32_t max_val);
+void spatz_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
+                  uint32_t count, int32_t min_val, int32_t max_val);
+void spatz_mul_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
+                  uint32_t count, int32_t multiplier, uint32_t shift,
+                  int32_t min_val, int32_t max_val);
+uint32_t npu_logistic_i8(const int8_t *src, int8_t *dst,
+                         uint32_t count, const uint8_t *lut);
+void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
+                        uint32_t input_h, uint32_t input_w, uint32_t channels,
+                        uint32_t kernel_h, uint32_t kernel_w,
+                        uint32_t stride_h, uint32_t stride_w,
+                        uint32_t pad_h, uint32_t pad_w);
+void spatz_upsample_nearest_i8(const int8_t *src, int8_t *dst,
+                               uint32_t input_h, uint32_t input_w, uint32_t channels,
+                               uint32_t scale_h, uint32_t scale_w);
+void spatz_concat_c32_i8(const int8_t *src0, uint32_t c0,
+                         const int8_t *src1, uint32_t c1,
+                         int8_t *dst, uint32_t height, uint32_t width);
 
 #endif
