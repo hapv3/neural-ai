@@ -36,6 +36,15 @@ module tb_afu;
     logic                          obi_m_rvalid;
     logic [MEM_DATA_WIDTH-1:0]     obi_m_rdata;
 
+    logic                          obi_rhs_req;
+    logic                          obi_rhs_gnt;
+    logic [ADDR_WIDTH-1:0]         obi_rhs_addr;
+    logic                          obi_rhs_we;
+    logic [(MEM_DATA_WIDTH/8)-1:0] obi_rhs_be;
+    logic [MEM_DATA_WIDTH-1:0]     obi_rhs_wdata;
+    logic                          obi_rhs_rvalid;
+    logic [MEM_DATA_WIDTH-1:0]     obi_rhs_rdata;
+
     logic done;
 
     afu #(
@@ -62,8 +71,20 @@ module tb_afu;
         .obi_m_wdata_o  (obi_m_wdata),
         .obi_m_rvalid_i (obi_m_rvalid),
         .obi_m_rdata_i  (obi_m_rdata),
+        .obi_rhs_req_o  (obi_rhs_req),
+        .obi_rhs_gnt_i  (obi_rhs_gnt),
+        .obi_rhs_addr_o (obi_rhs_addr),
+        .obi_rhs_we_o   (obi_rhs_we),
+        .obi_rhs_be_o   (obi_rhs_be),
+        .obi_rhs_wdata_o(obi_rhs_wdata),
+        .obi_rhs_rvalid_i(obi_rhs_rvalid),
+        .obi_rhs_rdata_i(obi_rhs_rdata),
         .done_o         (done)
     );
+
+    assign obi_rhs_gnt = 1'b0;
+    assign obi_rhs_rvalid = 1'b0;
+    assign obi_rhs_rdata = '0;
 
     logic [7:0] tcdm_mem [0:MEM_SIZE-1];
     logic       read_pending_q;

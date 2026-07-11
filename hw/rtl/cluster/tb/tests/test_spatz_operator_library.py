@@ -35,6 +35,9 @@ POOL_DST = 0x10101200
 UP_DST = 0x10101500
 CONCAT_DST = 0x10101C00
 LOG_FULL_DST = 0x1011A000
+MUL_Q7_LHS = 0x10108000
+MUL_Q7_RHS = 0x1011A000
+MUL_Q7_DST = 0x1012C000
 
 VL = 32
 LOG_FULL_H = 48
@@ -241,6 +244,37 @@ def check_logistic_full(dut):
         expected = as_i8(logistic_full_lut_byte(src_byte))
         got = as_i8(read_tcdm_byte(dut, LOG_FULL_DST + idx))
         assert got == expected, f"logistic_full[{idx}] got={got} expected={expected}"
+
+
+def mul_q7_lhs_value(index):
+    return as_i8((index * 19 + 7) & 0xFF)
+
+
+def mul_q7_rhs_value(index):
+    return as_i8((index * 23 + 11) & 0x7F)
+
+
+async def preload_mul_q7_full_tcdm(dut):
+    lhs = [(mul_q7_lhs_value(idx) & 0xFF) for idx in range(LOG_FULL_BYTES)]
+    rhs = [(mul_q7_rhs_value(idx) & 0xFF) for idx in range(LOG_FULL_BYTES)]
+    write_tcdm_bytes_aligned32(dut, MUL_Q7_LHS, lhs)
+    write_tcdm_bytes_aligned32(dut, MUL_Q7_RHS, rhs)
+    write_tcdm_bytes_aligned32(dut, MUL_Q7_DST, [0] * LOG_FULL_BYTES)
+    await Timer(1, "ps")
+    for idx in (0, 31, 32, 63, 64, 95, 96):
+        got_lhs = as_i8(read_tcdm_byte(dut, MUL_Q7_LHS + idx))
+        got_rhs = as_i8(read_tcdm_byte(dut, MUL_Q7_RHS + idx))
+        assert got_lhs == mul_q7_lhs_value(idx)
+        assert got_rhs == mul_q7_rhs_value(idx)
+
+
+def check_mul_q7_full(dut):
+    for idx in range(LOG_FULL_BYTES):
+        lhs = mul_q7_lhs_value(idx)
+        rhs = mul_q7_rhs_value(idx)
+        expected = max(-128, min(127, (lhs * rhs) >> 7))
+        got = as_i8(read_tcdm_byte(dut, MUL_Q7_DST + idx))
+        assert got == expected, f"mul_q7_full[{idx}] got={got} expected={expected}"
 
 
 def check_maxpool(dut):
@@ -463,6 +497,19 @@ async def test_spatz_op_add(dut):
 @cocotb.test()
 async def test_spatz_op_mul(dut):
     await run_firmware_case(dut, "spatz_ops_mul.bin", "test_spatz_op_mul", 1, check_mul)
+
+
+@cocotb.test()
+async def test_spatz_op_mul_q7_full(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_mul_q7_full.bin",
+        "test_spatz_op_mul_q7_full",
+        1,
+        check_mul_q7_full,
+        timeout_cycles=900000,
+        pre_release=preload_mul_q7_full_tcdm,
+    )
 
 
 @cocotb.test()

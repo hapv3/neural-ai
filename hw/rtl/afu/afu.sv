@@ -29,6 +29,16 @@ module afu #(
     output logic [MEM_DATA_WIDTH-1:0]     obi_m_wdata_o,
     input  logic                          obi_m_rvalid_i,
     input  logic [MEM_DATA_WIDTH-1:0]     obi_m_rdata_i,
+
+    // OBI initiator interface (RHS read-only memory access for binary modes)
+    output logic                          obi_rhs_req_o,
+    input  logic                          obi_rhs_gnt_i,
+    output logic [ADDR_WIDTH-1:0]         obi_rhs_addr_o,
+    output logic                          obi_rhs_we_o,
+    output logic [(MEM_DATA_WIDTH/8)-1:0] obi_rhs_be_o,
+    output logic [MEM_DATA_WIDTH-1:0]     obi_rhs_wdata_o,
+    input  logic                          obi_rhs_rvalid_i,
+    input  logic [MEM_DATA_WIDTH-1:0]     obi_rhs_rdata_i,
     
     // Interrupt / Status
     output logic                          done_o
@@ -36,6 +46,7 @@ module afu #(
 
     // CSRs
     logic [31:0] cfg_src_ptr;
+    logic [31:0] cfg_src2_ptr;
     logic [31:0] cfg_dst_ptr;
     logic [31:0] cfg_length;
     logic [1:0]  cfg_mode;
@@ -51,6 +62,11 @@ module afu #(
     logic rfifo_full, rfifo_almost_full, rfifo_empty;
     logic rfifo_push, rfifo_pop;
     logic [255:0] rfifo_wdata, rfifo_rdata;
+
+    // RHS read FIFO interface
+    logic rhs_rfifo_full, rhs_rfifo_almost_full, rhs_rfifo_empty;
+    logic rhs_rfifo_push, rhs_rfifo_pop;
+    logic [255:0] rhs_rfifo_wdata, rhs_rfifo_rdata;
     
     // Write FIFO interface
     logic wfifo_full, wfifo_almost_full, wfifo_empty, wfifo_all_empty;
@@ -79,6 +95,7 @@ module afu #(
         .obi_s_rvalid_o (obi_s_rvalid_o),
         .obi_s_rdata_o  (obi_s_rdata_o),
         .cfg_src_ptr_o  (cfg_src_ptr),
+        .cfg_src2_ptr_o (cfg_src2_ptr),
         .cfg_dst_ptr_o  (cfg_dst_ptr),
         .cfg_length_o   (cfg_length),
         .cfg_mode_o     (cfg_mode),
@@ -100,6 +117,7 @@ module afu #(
         .clk_i          (clk_i),
         .rst_ni         (rst_ni),
         .cfg_src_ptr_i  (cfg_src_ptr),
+        .cfg_src2_ptr_i (cfg_src2_ptr),
         .cfg_dst_ptr_i  (cfg_dst_ptr),
         .cfg_length_i   (cfg_length),
         .cfg_mode_i     (cfg_mode),
@@ -113,9 +131,20 @@ module afu #(
         .obi_m_wdata_o  (obi_m_wdata_o),
         .obi_m_rvalid_i (obi_m_rvalid_i),
         .obi_m_rdata_i  (obi_m_rdata_i),
+        .obi_rhs_req_o  (obi_rhs_req_o),
+        .obi_rhs_gnt_i  (obi_rhs_gnt_i),
+        .obi_rhs_addr_o (obi_rhs_addr_o),
+        .obi_rhs_we_o   (obi_rhs_we_o),
+        .obi_rhs_be_o   (obi_rhs_be_o),
+        .obi_rhs_wdata_o(obi_rhs_wdata_o),
+        .obi_rhs_rvalid_i(obi_rhs_rvalid_i),
+        .obi_rhs_rdata_i(obi_rhs_rdata_i),
         .rfifo_almost_full_i (rfifo_almost_full),
         .rfifo_push_o   (rfifo_push),
         .rfifo_data_o   (rfifo_wdata),
+        .rhs_rfifo_almost_full_i(rhs_rfifo_almost_full),
+        .rhs_rfifo_push_o(rhs_rfifo_push),
+        .rhs_rfifo_data_o(rhs_rfifo_wdata),
         .wfifo_empty_i  (wfifo_empty),
         .wfifo_pop_o    (wfifo_pop),
         .wfifo_data_i   (wfifo_rdata),
@@ -130,6 +159,7 @@ module afu #(
         .clk_i          (clk_i),
         .rst_ni         (rst_ni),
         .cfg_src_ptr_i  (cfg_src_ptr),
+        .cfg_src2_ptr_i (cfg_src2_ptr),
         .cfg_dst_ptr_i  (cfg_dst_ptr),
         .cfg_length_i   (cfg_length),
         .cfg_mode_i     (cfg_mode),
@@ -141,6 +171,9 @@ module afu #(
         .rfifo_empty_i  (rfifo_empty),
         .rfifo_pop_o    (rfifo_pop),
         .rfifo_data_i   (rfifo_rdata),
+        .rhs_rfifo_empty_i(rhs_rfifo_empty),
+        .rhs_rfifo_pop_o(rhs_rfifo_pop),
+        .rhs_rfifo_data_i(rhs_rfifo_rdata),
         .wfifo_full_i   (wfifo_full),
         .wfifo_push_o   (wfifo_push),
         .wfifo_data_o   (wfifo_wdata),
@@ -164,6 +197,24 @@ module afu #(
         .push_i         (rfifo_push),
         .data_o         (rfifo_rdata),
         .pop_i          (rfifo_pop)
+    );
+
+    afu_fifo_ff #(
+        .NAME("RHS_RFIFO"),
+        .DATA_WIDTH(256),
+        .DEPTH(2)
+    ) i_rhs_rfifo (
+        .clk_i          (clk_i),
+        .rst_ni         (rst_ni),
+        .flush_i        (cfg_start),
+        .full_o         (rhs_rfifo_full),
+        .almost_full_o  (rhs_rfifo_almost_full),
+        .empty_o        (rhs_rfifo_empty),
+        .all_empty_o    (),
+        .data_i         (rhs_rfifo_wdata),
+        .push_i         (rhs_rfifo_push),
+        .data_o         (rhs_rfifo_rdata),
+        .pop_i          (rhs_rfifo_pop)
     );
     
     afu_fifo_ff #(
