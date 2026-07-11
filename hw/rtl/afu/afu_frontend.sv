@@ -20,6 +20,7 @@ module afu_frontend #(
 
     // CSR Outputs
     output logic [31:0]             cfg_src_ptr_o,
+    output logic [31:0]             cfg_src2_ptr_o,
     output logic [31:0]             cfg_dst_ptr_o,
     output logic [31:0]             cfg_length_o,
     output logic [1:0]              cfg_mode_o,
@@ -36,6 +37,7 @@ module afu_frontend #(
 );
 
     logic [31:0] cfg_src_ptr_q,  cfg_src_ptr_n;
+    logic [31:0] cfg_src2_ptr_q, cfg_src2_ptr_n;
     logic [31:0] cfg_dst_ptr_q,  cfg_dst_ptr_n;
     logic [31:0] cfg_length_q,   cfg_length_n;
     logic [1:0]  cfg_mode_q,     cfg_mode_n;
@@ -51,6 +53,7 @@ module afu_frontend #(
     assign obi_s_rdata_o  = obi_s_rdata_q;
 
     assign cfg_src_ptr_o = cfg_src_ptr_q;
+    assign cfg_src2_ptr_o = cfg_src2_ptr_q;
     assign cfg_dst_ptr_o = cfg_dst_ptr_q;
     assign cfg_length_o  = cfg_length_q;
     assign cfg_mode_o    = cfg_mode_q;
@@ -74,6 +77,7 @@ module afu_frontend #(
 
     always_comb begin
         cfg_src_ptr_n = cfg_src_ptr_q;
+        cfg_src2_ptr_n = cfg_src2_ptr_q;
         cfg_dst_ptr_n = cfg_dst_ptr_q;
         cfg_length_n  = cfg_length_q;
         cfg_mode_n    = cfg_mode_q;
@@ -95,6 +99,7 @@ module afu_frontend #(
                         6'h08: cfg_dst_ptr_n = apply_cfg_be(cfg_dst_ptr_q, obi_s_wdata_i, obi_s_be_i);
                         6'h0c: cfg_length_n  = apply_cfg_be(cfg_length_q, obi_s_wdata_i, obi_s_be_i);
                         6'h10: cfg_mode_n    = apply_cfg_be({30'd0, cfg_mode_q}, obi_s_wdata_i, obi_s_be_i)[1:0];
+                        6'h14: cfg_src2_ptr_n = apply_cfg_be(cfg_src2_ptr_q, obi_s_wdata_i, obi_s_be_i);
                         default: ;
                     endcase
                 end
@@ -107,6 +112,7 @@ module afu_frontend #(
             obi_s_rvalid_q <= 1'b0;
             obi_s_rdata_q  <= '0;
             cfg_src_ptr_q  <= '0;
+            cfg_src2_ptr_q <= '0;
             cfg_dst_ptr_q  <= '0;
             cfg_length_q   <= '0;
             cfg_mode_q     <= '0;
@@ -123,12 +129,14 @@ module afu_frontend #(
                         6'h08: obi_s_rdata_q <= cfg_dst_ptr_q;
                         6'h0c: obi_s_rdata_q <= cfg_length_q;
                         6'h10: obi_s_rdata_q <= {30'd0, cfg_mode_q};
+                        6'h14: obi_s_rdata_q <= cfg_src2_ptr_q;
                         default: obi_s_rdata_q <= '0;
                     endcase
                 end
             end
 
             cfg_src_ptr_q <= cfg_src_ptr_n;
+            cfg_src2_ptr_q <= cfg_src2_ptr_n;
             cfg_dst_ptr_q <= cfg_dst_ptr_n;
             cfg_length_q  <= cfg_length_n;
             cfg_mode_q    <= cfg_mode_n;

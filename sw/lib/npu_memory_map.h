@@ -138,6 +138,7 @@
 #define NPU_AFU_DST_PTR       (NPU_AFU_BASE + 0x408)
 #define NPU_AFU_LENGTH        (NPU_AFU_BASE + 0x40C)
 #define NPU_AFU_MODE          (NPU_AFU_BASE + 0x410)
+#define NPU_AFU_SRC2_PTR      (NPU_AFU_BASE + 0x414)
 
 #define NPU_AFU_STATUS_DONE   0x00000001u
 #define NPU_AFU_STATUS_BUSY   0x00000002u
@@ -146,6 +147,7 @@
 #define NPU_AFU_MODE_E8       0u
 #define NPU_AFU_MODE_E16      1u
 #define NPU_AFU_MODE_E32      2u
+#define NPU_AFU_MODE_MUL_Q7   3u
 
 // Host command-control bootstrap/status registers.
 #define NPU_CMD_L2_BASE       (NPU_CMD_CTRL_BASE + 0x00)

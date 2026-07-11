@@ -490,6 +490,14 @@ module npu_cluster #(
     logic [OBI_DATA_WIDTH-1:0] afu_obi_wdata;
     logic                      afu_obi_rvalid;
     logic [OBI_DATA_WIDTH-1:0] afu_obi_rdata;
+    logic                      afu_rhs_obi_req;
+    logic                      afu_rhs_obi_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] afu_rhs_obi_addr;
+    logic                      afu_rhs_obi_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] afu_rhs_obi_be;
+    logic [OBI_DATA_WIDTH-1:0] afu_rhs_obi_wdata;
+    logic                      afu_rhs_obi_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] afu_rhs_obi_rdata;
     logic                      afu_done;
 
     obi_demux_1to4 #(
@@ -773,13 +781,21 @@ module npu_cluster #(
         .obi_m_wdata_o  (afu_obi_wdata),
         .obi_m_rvalid_i (afu_obi_rvalid),
         .obi_m_rdata_i  (afu_obi_rdata),
+        .obi_rhs_req_o  (afu_rhs_obi_req),
+        .obi_rhs_gnt_i  (afu_rhs_obi_gnt),
+        .obi_rhs_addr_o (afu_rhs_obi_addr),
+        .obi_rhs_we_o   (afu_rhs_obi_we),
+        .obi_rhs_be_o   (afu_rhs_obi_be),
+        .obi_rhs_wdata_o(afu_rhs_obi_wdata),
+        .obi_rhs_rvalid_i(afu_rhs_obi_rvalid),
+        .obi_rhs_rdata_i(afu_rhs_obi_rdata),
         .done_o         (afu_done)
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (12 Masters)
+    // 5. Shared Data TCDM Interconnect (13 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 12;
+    localparam int unsigned NUM_MASTERS = 13;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
@@ -792,6 +808,7 @@ module npu_cluster #(
     // Master 9: PULP iDMA OBI2AXI read port
     // Master 10: AFU LUT processor
     // Master 11: Systolic Controller weight read (I-TCDM)
+    // Master 12: AFU RHS read port
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -841,9 +858,9 @@ module npu_cluster #(
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(12'hDFA), // M1, M3-M8, M10-M11: Spatz + Systolic + AFU
-        .DMA_MASTER_MASK (12'h204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(12'h001)  // M0: Snitch D-Bus
+        .HWPE_MASTER_MASK(13'h1DFA), // M1, M3-M8, M10-M12: Spatz + Systolic + AFU
+        .DMA_MASTER_MASK (13'h0204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(13'h0001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -1215,6 +1232,16 @@ module npu_cluster #(
     assign afu_obi_rvalid = master_rsp[10].rvalid;
     assign afu_obi_rdata  = master_rsp[10].rdata;
 
+    assign master_req[12].req   = afu_rhs_obi_req;
+    assign master_req[12].we    = afu_rhs_obi_we;
+    assign master_req[12].be    = afu_rhs_obi_be;
+    assign master_req[12].addr  = afu_rhs_obi_addr;
+    assign master_req[12].wdata = afu_rhs_obi_wdata;
+
+    assign afu_rhs_obi_gnt    = master_rsp[12].gnt;
+    assign afu_rhs_obi_rvalid = master_rsp[12].rvalid;
+    assign afu_rhs_obi_rdata  = master_rsp[12].rdata;
+
     //=========================================================
     // 7. Systolic Array (Matrix Engine)
     //=========================================================
@@ -1414,8 +1441,10 @@ module npu_cluster #(
 
         // 16-18: AFU completion and TCDM traffic.
         pmu_event_inc[16] = PMU_INC_WIDTH'(afu_done);
-        pmu_event_inc[17] = PMU_INC_WIDTH'(master_req[10].req);
-        pmu_event_inc[18] = PMU_INC_WIDTH'(master_req[10].req & ~master_rsp[10].gnt);
+        pmu_event_inc[17] = PMU_INC_WIDTH'(master_req[10].req) +
+                            PMU_INC_WIDTH'(master_req[12].req);
+        pmu_event_inc[18] = PMU_INC_WIDTH'(master_req[10].req & ~master_rsp[10].gnt) +
+                            PMU_INC_WIDTH'(master_req[12].req & ~master_rsp[12].gnt);
 
         // 19-25: Systolic control and TCDM traffic.
         pmu_event_inc[19] = PMU_INC_WIDTH'(sys_compute_en);

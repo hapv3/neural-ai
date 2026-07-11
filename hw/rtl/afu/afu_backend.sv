@@ -11,6 +11,7 @@ module afu_backend #(
     
     // CSRs
     input  logic [31:0] cfg_src_ptr_i,
+    input  logic [31:0] cfg_src2_ptr_i,
     input  logic [31:0] cfg_dst_ptr_i,
     input  logic [31:0] cfg_length_i,
     input  logic [1:0]  cfg_mode_i,
@@ -26,11 +27,26 @@ module afu_backend #(
     output logic [DATA_WIDTH-1:0]   obi_m_wdata_o,
     input  logic                    obi_m_rvalid_i,
     input  logic [DATA_WIDTH-1:0]   obi_m_rdata_i,
+
+    // OBI Read-only Master Interface for RHS/binary source
+    output logic                    obi_rhs_req_o,
+    input  logic                    obi_rhs_gnt_i,
+    output logic [ADDR_WIDTH-1:0]   obi_rhs_addr_o,
+    output logic                    obi_rhs_we_o,
+    output logic [BE_WIDTH-1:0]     obi_rhs_be_o,
+    output logic [DATA_WIDTH-1:0]   obi_rhs_wdata_o,
+    input  logic                    obi_rhs_rvalid_i,
+    input  logic [DATA_WIDTH-1:0]   obi_rhs_rdata_i,
     
     // Read FIFO Interface
     input  logic                    rfifo_almost_full_i,
     output logic                    rfifo_push_o,
     output logic [DATA_WIDTH-1:0]   rfifo_data_o,
+
+    // RHS Read FIFO Interface
+    input  logic                    rhs_rfifo_almost_full_i,
+    output logic                    rhs_rfifo_push_o,
+    output logic [DATA_WIDTH-1:0]   rhs_rfifo_data_o,
     
     // Write FIFO Interface
     input  logic                    wfifo_empty_i,
@@ -39,6 +55,8 @@ module afu_backend #(
 
     output logic                    idle_o
 );
+
+    localparam logic [1:0] MODE_MUL_Q7 = 2'd3;
 
     logic        we_req;
     logic [31:0] we_addr;
@@ -122,6 +140,7 @@ module afu_backend #(
     logic        re_active_q, re_active_n;
     logic        read_outstanding_q, read_outstanding_n;
     logic                   read_resp;
+    logic                   rhs_read_resp;
     
     assign re_addr = re_addr_q;
     
@@ -165,6 +184,56 @@ module afu_backend #(
     assign rfifo_push_o = read_resp && !read_stop_i;
     assign rfifo_data_o = obi_m_rdata_i;
 
+    // RHS Read Engine (second AFU TCDM read port, active only for binary modes).
+    logic [31:0] rhs_re_addr_q, rhs_re_addr_n;
+    logic [31:0] rhs_re_end_addr_q, rhs_re_end_addr_n;
+    logic        rhs_re_active_q, rhs_re_active_n;
+    logic        rhs_read_outstanding_q, rhs_read_outstanding_n;
+
+    always_comb begin
+        rhs_re_addr_n = rhs_re_addr_q;
+        rhs_re_end_addr_n = rhs_re_end_addr_q;
+        rhs_re_active_n = rhs_re_active_q;
+        rhs_read_outstanding_n = rhs_read_outstanding_q;
+
+        if (rhs_read_resp) begin
+            rhs_read_outstanding_n = 1'b0;
+        end
+
+        if (cfg_start_i && cfg_length_i > 0 && cfg_mode_i == MODE_MUL_Q7) begin
+            rhs_re_active_n = 1'b1;
+            rhs_re_addr_n = cfg_src2_ptr_i & ~32'h1F;
+            rhs_re_end_addr_n = (cfg_src2_ptr_i + cfg_length_i - 1) & ~32'h1F;
+            rhs_read_outstanding_n = 1'b0;
+        end else if (cfg_start_i) begin
+            rhs_re_active_n = 1'b0;
+            rhs_read_outstanding_n = 1'b0;
+        end else if (read_stop_i) begin
+            rhs_re_active_n = 1'b0;
+        end else if (rhs_re_active_q) begin
+            if (obi_rhs_req_o && obi_rhs_gnt_i) begin
+                rhs_read_outstanding_n = 1'b1;
+                rhs_re_addr_n = rhs_re_addr_q + 32;
+                if (rhs_re_addr_n > rhs_re_end_addr_q) begin
+                    rhs_re_active_n = 1'b0;
+                end
+            end
+        end
+    end
+
+    assign obi_rhs_req_o = rhs_re_active_q &&
+                           !rhs_rfifo_almost_full_i &&
+                           !rhs_read_outstanding_q &&
+                           !read_stop_i;
+    assign obi_rhs_addr_o = rhs_re_addr_q;
+    assign obi_rhs_we_o = 1'b0;
+    assign obi_rhs_be_o = {BE_WIDTH{1'b1}};
+    assign obi_rhs_wdata_o = '0;
+
+    assign rhs_read_resp = obi_rhs_rvalid_i && rhs_read_outstanding_q;
+    assign rhs_rfifo_push_o = rhs_read_resp && !read_stop_i;
+    assign rhs_rfifo_data_o = obi_rhs_rdata_i;
+
     // Write Engine
     logic [31:0] we_addr_q, we_addr_n;
     
@@ -196,6 +265,10 @@ module afu_backend #(
             re_end_addr_q <= '0;
             re_active_q   <= 1'b0;
             read_outstanding_q <= 1'b0;
+            rhs_re_addr_q <= '0;
+            rhs_re_end_addr_q <= '0;
+            rhs_re_active_q <= 1'b0;
+            rhs_read_outstanding_q <= 1'b0;
             we_addr_q     <= '0;
             pending_valid_q <= 1'b0;
             pending_we_q    <= 1'b0;
@@ -207,6 +280,10 @@ module afu_backend #(
             re_end_addr_q <= re_end_addr_n;
             re_active_q   <= re_active_n;
             read_outstanding_q <= read_outstanding_n;
+            rhs_re_addr_q <= rhs_re_addr_n;
+            rhs_re_end_addr_q <= rhs_re_end_addr_n;
+            rhs_re_active_q <= rhs_re_active_n;
+            rhs_read_outstanding_q <= rhs_read_outstanding_n;
             we_addr_q     <= we_addr_n;
             pending_valid_q <= pending_valid_n;
             pending_we_q    <= pending_we_n;
@@ -217,9 +294,12 @@ module afu_backend #(
     end
 
     assign idle_o = !re_active_q &&
+                    !rhs_re_active_q &&
                     !read_outstanding_q &&
+                    !rhs_read_outstanding_q &&
                     !pending_valid_q &&
                     !obi_m_req_o &&
+                    !obi_rhs_req_o &&
                     wfifo_empty_i;
 
 endmodule
