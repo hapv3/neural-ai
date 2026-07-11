@@ -15,6 +15,7 @@ module afu_backend #(
     input  logic [31:0] cfg_length_i,
     input  logic [1:0]  cfg_mode_i,
     input  logic        cfg_start_i,
+    input  logic        read_stop_i,
     
     // OBI Master Interface
     output logic                    obi_m_req_o,
@@ -92,6 +93,10 @@ module afu_backend #(
             pending_valid_n = 1'b0;
         end
 
+        if (read_stop_i && pending_valid_q && !pending_we_q) begin
+            pending_valid_n = 1'b0;
+        end
+
         if (!pending_valid_q && start_txn && !obi_m_gnt_i) begin
             pending_valid_n = 1'b1;
             pending_we_n    = start_txn_we;
@@ -116,6 +121,7 @@ module afu_backend #(
     logic [31:0] re_end_addr_q, re_end_addr_n;
     logic        re_active_q, re_active_n;
     logic        read_outstanding_q, read_outstanding_n;
+    logic                   read_resp;
     
     assign re_addr = re_addr_q;
     
@@ -126,7 +132,7 @@ module afu_backend #(
         re_active_n   = re_active_q;
         read_outstanding_n = read_outstanding_q;
 
-        if (obi_m_rvalid_i) begin
+        if (read_resp) begin
             read_outstanding_n = 1'b0;
         end
         
@@ -135,6 +141,9 @@ module afu_backend #(
             re_addr_n     = cfg_src_ptr_i & ~32'h1F;
             re_end_addr_n = (cfg_src_ptr_i + cfg_length_i - 1) & ~32'h1F;
             read_outstanding_n = 1'b0;
+        end else if (read_stop_i) begin
+            re_active_n = 1'b0;
+            re_req      = 1'b0;
         end else begin
             if (re_active_q) begin
                 if (!rfifo_almost_full_i && !read_outstanding_q && !pending_valid_q) begin
@@ -152,7 +161,8 @@ module afu_backend #(
         end
     end
     
-    assign rfifo_push_o = obi_m_rvalid_i;
+    assign read_resp = obi_m_rvalid_i && read_outstanding_q;
+    assign rfifo_push_o = read_resp && !read_stop_i;
     assign rfifo_data_o = obi_m_rdata_i;
 
     // Write Engine
@@ -166,7 +176,7 @@ module afu_backend #(
         if (cfg_start_i) begin
             we_addr_n = cfg_dst_ptr_i & ~32'h1F;
         end else begin
-            if (!wfifo_empty_i && !pending_valid_q) begin
+            if (!wfifo_empty_i && !pending_valid_q && !read_outstanding_q) begin
                 we_req = 1'b1;
             end
             if (we_gnt) begin

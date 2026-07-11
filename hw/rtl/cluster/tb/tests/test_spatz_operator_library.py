@@ -1,5 +1,8 @@
+import logging
+
 import cocotb
 from cocotb.clock import Clock
+from cocotb.triggers import Timer, with_timeout
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
@@ -20,6 +23,7 @@ DTCM_FAIL_TEST = 0x10008008
 DTCM_FAIL_INDEX = 0x1000800C
 DTCM_FAIL_GOT = 0x10008010
 DTCM_FAIL_EXP = 0x10008014
+NPU_AFU_STATUS = 0x20003400
 
 DST_I8 = 0x10100100
 RELU_I8 = 0x10100200
@@ -30,8 +34,14 @@ LOG_DST = 0x10100D00
 POOL_DST = 0x10101200
 UP_DST = 0x10101500
 CONCAT_DST = 0x10101C00
+LOG_FULL_DST = 0x1011A000
 
 VL = 32
+LOG_FULL_H = 48
+LOG_FULL_W = 48
+LOG_FULL_C = 32
+LOG_FULL_PIXELS = LOG_FULL_H * LOG_FULL_W
+LOG_FULL_BYTES = LOG_FULL_PIXELS * LOG_FULL_C
 POOL_H = 4
 POOL_W = 5
 POOL_C = 2
@@ -49,6 +59,52 @@ CONCAT_PIXELS = CONCAT_H * CONCAT_W
 def as_i8(value):
     value &= 0xFF
     return value - 0x100 if value & 0x80 else value
+
+
+def safe_signal_int(getter):
+    try:
+        value = getter().value
+        return value.to_unsigned() if value.is_resolvable else None
+    except Exception:
+        return None
+
+
+def safe_signal_paths_int(dut, *paths):
+    for path in paths:
+        candidates = []
+        try:
+            obj = dut
+            for part in path.split("."):
+                obj = getattr(obj, part)
+            candidates.append(obj)
+        except Exception:
+            pass
+        for extended in (False, True):
+            try:
+                candidates.append(dut._id(path, extended=extended))
+            except Exception:
+                pass
+        for obj in candidates:
+            try:
+                value = obj.value
+                if value.is_resolvable:
+                    return value.to_unsigned()
+            except Exception:
+                pass
+    return None
+
+
+def fmt_opt_hex(value):
+    return "None" if value is None else f"0x{value:08x}"
+
+
+async def axi_read32_or_none(axi_master, addr):
+    try:
+        resp = await with_timeout(axi_master.read(addr, 4), 1000, "ns")
+        data = resp.data if hasattr(resp, "data") else resp
+        return int.from_bytes(bytes(data), "little")
+    except Exception:
+        return None
 
 
 def c32_index(pixel, channel, pixels=CONCAT_PIXELS):
@@ -79,12 +135,18 @@ def up_input_value(h, w, c):
 
 def check_status(dut, expected_pass_count):
     status = read_dtcm_word(dut, DTCM_STATUS)
+    afu_core_state = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_core.state_q)
+    afu_elem_cnt = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_core.elem_cnt_q)
+    rfifo_cnt = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_rfifo.cnt_q)
+    wfifo_cnt = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_wfifo.cnt_q)
     assert status == PASS_SIGNATURE, (
         f"firmware status=0x{status:08x} "
         f"test={read_dtcm_word(dut, DTCM_FAIL_TEST)} "
         f"index={read_dtcm_word(dut, DTCM_FAIL_INDEX)} "
         f"got=0x{read_dtcm_word(dut, DTCM_FAIL_GOT):08x} "
-        f"exp=0x{read_dtcm_word(dut, DTCM_FAIL_EXP):08x}"
+        f"exp=0x{read_dtcm_word(dut, DTCM_FAIL_EXP):08x} "
+        f"afu_state={afu_core_state} afu_elem_cnt={afu_elem_cnt} "
+        f"rfifo_cnt={rfifo_cnt} wfifo_cnt={wfifo_cnt}"
     )
     assert read_dtcm_word(dut, DTCM_PASS_COUNT) == expected_pass_count
 
@@ -137,6 +199,50 @@ def check_logistic(dut):
         assert got == expected, f"logistic_lut[{idx}] got={got} expected={expected}"
 
 
+def logistic_full_input_byte(pixel, channel):
+    return (pixel * 17 + channel * 13 + 5) & 0xFF
+
+
+def logistic_full_lut_byte(index):
+    return (index * 5 + 11) & 0x7F
+
+
+def write_tcdm_bytes_aligned32(dut, base_addr, data):
+    assert (base_addr & 31) == 0
+    assert (len(data) & 31) == 0
+    for offset in range(0, len(data), 32):
+        addr = base_addr + offset
+        bank_idx = (addr >> 5) % 16
+        word_index = ((addr >> 5) // 16) & (1024 - 1)
+        word = 0
+        for byte_idx, byte_val in enumerate(data[offset : offset + 32]):
+            word |= (byte_val & 0xFF) << (byte_idx * 8)
+        dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem[word_index].value = word
+
+
+async def preload_logistic_full_tcdm(dut):
+    src = [
+        logistic_full_input_byte(idx // LOG_FULL_C, idx % LOG_FULL_C)
+        for idx in range(LOG_FULL_BYTES)
+    ]
+    write_tcdm_bytes_aligned32(dut, 0x10108000, src)
+    await Timer(1, "ps")
+    for idx in (0, 31, 32, 63, 64, 95, 96):
+        got = read_tcdm_byte(dut, 0x10108000 + idx)
+        expected = src[idx]
+        assert got == expected, f"preload src[{idx}] got=0x{got:02x} expected=0x{expected:02x}"
+
+
+def check_logistic_full(dut):
+    for idx in range(LOG_FULL_BYTES):
+        pixel = idx // LOG_FULL_C
+        channel = idx % LOG_FULL_C
+        src_byte = logistic_full_input_byte(pixel, channel)
+        expected = as_i8(logistic_full_lut_byte(src_byte))
+        got = as_i8(read_tcdm_byte(dut, LOG_FULL_DST + idx))
+        assert got == expected, f"logistic_full[{idx}] got={got} expected={expected}"
+
+
 def check_maxpool(dut):
     for h in range(POOL_H):
         for w in range(POOL_W):
@@ -183,7 +289,17 @@ def check_all(dut):
     check_concat(dut)
 
 
-async def run_firmware_case(dut, fw_name, report_name, expected_pass_count, checker):
+async def run_firmware_case(
+    dut,
+    fw_name,
+    report_name,
+    expected_pass_count,
+    checker,
+    timeout_cycles=500000,
+    pre_release=None,
+):
+    logging.getLogger("cocotb.tb_npu_cluster.s_axi").setLevel(logging.WARNING)
+
     clock = Clock(dut.clk_i, 1, unit="ns")
     cocotb.start_soon(clock.start())
 
@@ -199,14 +315,118 @@ async def run_firmware_case(dut, fw_name, report_name, expected_pass_count, chec
         axi_master,
         firmware_path(__file__, f"sw/test/spatz_ops/{fw_name}"),
     )
+    if pre_release is not None:
+        await pre_release(dut)
     await release_fetch(dut, axi_master=axi_master)
 
-    await wait_for_host_irq(
-        dut,
-        timeout_cycles=500000,
-        axi_master=axi_master,
-        report_name=report_name,
-    )
+    try:
+        await wait_for_host_irq(
+            dut,
+            timeout_cycles=timeout_cycles,
+            axi_master=axi_master,
+            report_name=report_name,
+        )
+    except AssertionError as exc:
+        afu_core_state = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_core.state_q)
+        afu_elem_cnt = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_core.elem_cnt_q)
+        afu_core_done = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.core_done",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__core_done",
+        )
+        afu_done = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.done_o",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__done_o",
+        )
+        afu_backend_idle = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.backend_idle",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__backend_idle",
+        )
+        wfifo_empty = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.wfifo_empty",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__wfifo_empty",
+        )
+        wfifo_all_empty = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.wfifo_all_empty",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__wfifo_all_empty",
+        )
+        wfifo_push = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.wfifo_push",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__wfifo_push",
+        )
+        wfifo_pop = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.wfifo_pop",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__wfifo_pop",
+        )
+        wfifo_cnt = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_wfifo.cnt_q)
+        backend_re_active = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.i_backend.re_active_q",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__i_backend__DOT__re_active_q",
+        )
+        backend_read_outstanding = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.i_backend.read_outstanding_q",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__i_backend__DOT__read_outstanding_q",
+        )
+        backend_pending_valid = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.i_backend.pending_valid_q",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__i_backend__DOT__pending_valid_q",
+        )
+        backend_obi_req = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.obi_m_req_o",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__obi_m_req_o",
+        )
+        backend_obi_gnt = safe_signal_paths_int(
+            dut,
+            "u_npu_cluster.u_afu.obi_m_gnt_i",
+            "tb_npu_cluster__DOT__u_npu_cluster__DOT__u_afu__DOT__obi_m_gnt_i",
+        )
+        afu_mm_req = safe_signal_int(lambda: dut.u_npu_cluster.afu_mm_req)
+        afu_mm_gnt = safe_signal_int(lambda: dut.u_npu_cluster.afu_mm_gnt)
+        afu_mm_rvalid = safe_signal_int(lambda: dut.u_npu_cluster.afu_mm_rvalid)
+        afu_mm_rdata = safe_signal_int(lambda: dut.u_npu_cluster.afu_mm_rdata)
+        afu_s_req = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.obi_s_req_i)
+        afu_s_rvalid = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.obi_s_rvalid_o)
+        afu_s_rdata = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.obi_s_rdata_o)
+        frontend_s_req = safe_signal_int(
+            lambda: dut.u_npu_cluster.u_afu.i_frontend.obi_s_req_i
+        )
+        frontend_s_rvalid = safe_signal_int(
+            lambda: dut.u_npu_cluster.u_afu.i_frontend.obi_s_rvalid_o
+        )
+        frontend_s_rdata = safe_signal_int(
+            lambda: dut.u_npu_cluster.u_afu.i_frontend.obi_s_rdata_o
+        )
+        afu_status_axi = await axi_read32_or_none(axi_master, NPU_AFU_STATUS)
+        raise AssertionError(
+            f"{exc}: status=0x{read_dtcm_word(dut, DTCM_STATUS):08x} "
+            f"test={read_dtcm_word(dut, DTCM_FAIL_TEST)} "
+            f"index={read_dtcm_word(dut, DTCM_FAIL_INDEX)} "
+            f"got=0x{read_dtcm_word(dut, DTCM_FAIL_GOT):08x} "
+            f"exp=0x{read_dtcm_word(dut, DTCM_FAIL_EXP):08x} "
+            f"afu_state={afu_core_state} afu_elem_cnt={afu_elem_cnt} "
+            f"afu_core_done={afu_core_done} afu_done={afu_done} "
+            f"backend_idle={afu_backend_idle} wfifo_empty={wfifo_empty} "
+            f"wfifo_all_empty={wfifo_all_empty} wfifo_push={wfifo_push} "
+            f"wfifo_pop={wfifo_pop} wfifo_cnt={wfifo_cnt} "
+            f"re_active={backend_re_active} read_outstanding={backend_read_outstanding} "
+            f"pending_valid={backend_pending_valid} obi_req={backend_obi_req} obi_gnt={backend_obi_gnt} "
+            f"afu_mm_req={afu_mm_req} afu_mm_gnt={afu_mm_gnt} "
+            f"afu_mm_rvalid={afu_mm_rvalid} afu_mm_rdata={fmt_opt_hex(afu_mm_rdata)} "
+            f"afu_status_axi={fmt_opt_hex(afu_status_axi)} "
+            f"afu_s_req={afu_s_req} afu_s_rvalid={afu_s_rvalid} "
+            f"afu_s_rdata={fmt_opt_hex(afu_s_rdata)} frontend_s_req={frontend_s_req} "
+            f"frontend_s_rvalid={frontend_s_rvalid} frontend_s_rdata={fmt_opt_hex(frontend_s_rdata)}"
+        ) from exc
     check_status(dut, expected_pass_count)
     checker(dut)
 
@@ -249,6 +469,19 @@ async def test_spatz_op_mul(dut):
 async def test_spatz_op_logistic(dut):
     await run_firmware_case(
         dut, "spatz_ops_logistic.bin", "test_spatz_op_logistic", 1, check_logistic
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_logistic_full(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_logistic_full.bin",
+        "test_spatz_op_logistic_full",
+        1,
+        check_logistic_full,
+        timeout_cycles=180000,
+        pre_release=preload_logistic_full_tcdm,
     )
 
 

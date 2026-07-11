@@ -1,5 +1,6 @@
 #include "npu_types.h"
 #include "npu_memory_map.h"
+#include "hal_afu.h"
 #include "spatz_ops.h"
 
 /*
@@ -20,6 +21,7 @@
 #define SPATZ_OP_TEST_MAXPOOL  7u
 #define SPATZ_OP_TEST_UPSAMPLE 8u
 #define SPATZ_OP_TEST_CONCAT   9u
+#define SPATZ_OP_TEST_LOGISTIC_FULL 10u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -55,7 +57,16 @@
 #define CONCAT_SRC1  ((volatile int8_t *)0x10101A00u)
 #define CONCAT_DST   ((volatile int8_t *)0x10101C00u)
 
+#define LOG_FULL_LUT ((volatile uint8_t *)0x10106000u)
+#define LOG_FULL_SRC ((volatile int8_t *)0x10108000u)
+#define LOG_FULL_DST ((volatile int8_t *)0x1011A000u)
+
 #define VL 32u
+#define LOG_FULL_H 48u
+#define LOG_FULL_W 48u
+#define LOG_FULL_C 32u
+#define LOG_FULL_PIXELS (LOG_FULL_H * LOG_FULL_W)
+#define LOG_FULL_BYTES (LOG_FULL_PIXELS * LOG_FULL_C)
 #define POOL_H 4u
 #define POOL_W 5u
 #define POOL_C 2u
@@ -225,6 +236,57 @@ static void run_logistic(void) {
     mark_pass();
 }
 
+static int8_t logistic_full_input_value(uint32_t pixel, uint32_t channel) {
+    return (int8_t)(((pixel * 17u) + (channel * 13u) + 5u) & 0xffu);
+}
+
+static uint8_t logistic_full_lut_value(uint32_t index) {
+    return (uint8_t)(((index * 5u) + 11u) & 0x7fu);
+}
+
+static uint32_t run_logistic_full_afu(uint32_t timeout_cycles) {
+    for (uint32_t i = 0; i < 256u; i++) {
+        afu_load_lut_entry(i, (uint32_t)LOG_FULL_LUT[i]);
+    }
+
+    afu_start((uint32_t)LOG_FULL_SRC, (uint32_t)LOG_FULL_DST,
+              LOG_FULL_BYTES, NPU_AFU_MODE_E8);
+    for (uint32_t i = 0; i < timeout_cycles; i++) {
+        uint32_t status = afu_status();
+        SIG_FAIL_INDEX = i;
+        SIG_FAIL_GOT = status;
+        SIG_FAIL_EXP = NPU_AFU_STATUS_DONE;
+        if ((status & NPU_AFU_STATUS_ERROR) != 0u) {
+            return 0u;
+        }
+        if ((status & NPU_AFU_STATUS_DONE) != 0u) {
+            return 1u;
+        }
+        __asm__ volatile("nop");
+    }
+    return 0u;
+}
+
+static void run_logistic_full(void) {
+    SIG_STATUS = 0x30001001u;
+    for (uint32_t i = 0; i < 256u; i++) {
+        LOG_FULL_LUT[i] = logistic_full_lut_value(i);
+    }
+
+    SIG_STATUS = 0x30001002u;
+    // Source tensor is preloaded by cocotb backdoor to avoid measuring scalar seed time.
+
+    SIG_STATUS = 0x30001003u;
+    if (!run_logistic_full_afu(300000u)) {
+        fail(10, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
+    }
+
+    SIG_STATUS = 0x30001004u;
+    // Full tensor output is checked by cocotb backdoor.  Scalar verification on
+    // Snitch is too slow for this large AFU throughput regression.
+    mark_pass();
+}
+
 static void run_maxpool(void) {
     for (uint32_t h = 0; h < POOL_H; h++) {
         for (uint32_t w = 0; w < POOL_W; w++) {
@@ -332,6 +394,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_ALL || SPATZ_OP_TEST_ID == SPATZ_OP_TEST_CONCAT) {
         run_concat();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_LOGISTIC_FULL) {
+        run_logistic_full();
     }
 
     SIG_STATUS = PASS_SIGNATURE;
