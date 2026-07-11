@@ -104,6 +104,7 @@ module afu #(
         .cfg_length_i   (cfg_length),
         .cfg_mode_i     (cfg_mode),
         .cfg_start_i    (cfg_start),
+        .read_stop_i    (core_done),
         .obi_m_req_o    (obi_m_req_o),
         .obi_m_gnt_i    (obi_m_gnt_i),
         .obi_m_addr_o   (obi_m_addr_o),
