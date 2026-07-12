@@ -235,6 +235,7 @@ module systolic_controller #(
     logic          cfg_linebuf_en_i;
     logic          cfg_linebuf_coalesce_i;
     logic          cfg_linebuf_kgen_i;
+    logic          cfg_linebuf_pool_i;
     logic [31:0]   cfg_linebuf_input_base_i;
     logic [15:0]   cfg_linebuf_input_h_i;
     logic [15:0]   cfg_linebuf_input_w_i;
@@ -263,6 +264,7 @@ module systolic_controller #(
     logic [7:0]    linebuf_seed_kw_eff;
     logic [7:0]    linebuf_seed_kh_eff;
     logic          linebuf_kgen_multi;
+    logic          linebuf_pool_mode;
     logic          accum_active;
     logic          requant_active;
     logic          drain_enabled;
@@ -314,6 +316,12 @@ module systolic_controller #(
     logic [31:0]   linebuf_fetch_beats;
     logic [31:0]   linebuf_bypass_vectors;
     logic [4:0]    linebuf_debug_state;
+    input_row_t    pool_acc_q, pool_acc_d;
+    input_row_t    pool_out_q, pool_out_d;
+    input_row_t    pool_next_acc;
+    logic          pool_out_valid_q, pool_out_valid_d;
+    logic [7:0]    pool_tap_count_q, pool_tap_count_d;
+    logic [31:0]   pool_kernel_vectors;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -332,6 +340,7 @@ module systolic_controller #(
     assign linebuf_spatial_m = (cfg_linebuf_spatial_m_i != 32'd0) ? cfg_linebuf_spatial_m_i : cfg_sys_dim_m_i;
     assign linebuf_kgen_multi = cfg_linebuf_en_i && cfg_linebuf_coalesce_i && cfg_linebuf_kgen_i &&
                                 (cfg_linebuf_k_tiles_i > 32'd1);
+    assign linebuf_pool_mode = cfg_linebuf_en_i && cfg_linebuf_pool_i;
     assign linebuf_has_next_k_tile = linebuf_kgen_multi && ((k_tile_idx_q + 32'd1) < cfg_linebuf_k_tiles_i);
     assign accum_active = cfg_sys_accum_en_i || (linebuf_kgen_multi && (k_tile_idx_q != 32'd0));
     assign requant_active = cfg_requant_en_i && (!linebuf_kgen_multi || !linebuf_has_next_k_tile);
@@ -349,7 +358,8 @@ module systolic_controller #(
     // the external accumulation wrote that row into the psum buffer.
     assign psum_buf_overlap_next_safe = psum_buf_overlap_next_ready;
     assign psum_buf_drain_entry = !ofm_fifo_empty && ofm_fifo_out.psum_buf_active;
-    assign drain_enabled = (state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN);
+    assign drain_enabled = !linebuf_pool_mode &&
+                           ((state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN));
     assign weight_preload_fetch_done = weight_preload_done_q ||
                                        (weight_preload_active_q &&
                                         (weight_preload_req_cnt_q == 32'd0) &&
@@ -362,6 +372,20 @@ module systolic_controller #(
                                                        cfg_linebuf_k_seed_kw_i;
     assign linebuf_seed_kh_eff = cfg_linebuf_kgen_i ? (linebuf_use_next_cfg ? k_seed_kh_next : k_seed_kh_q) :
                                                        cfg_linebuf_k_seed_kh_i;
+    assign pool_kernel_vectors = 32'(cfg_linebuf_kernel_h_i) * 32'(cfg_linebuf_kernel_w_i);
+
+    function automatic input_row_t max_i8_row(
+        input input_row_t lhs,
+        input input_row_t rhs
+    );
+        input_row_t result;
+        begin
+            for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
+                result[ch] = ($signed(lhs[ch]) >= $signed(rhs[ch])) ? lhs[ch] : rhs[ch];
+            end
+            max_i8_row = result;
+        end
+    endfunction
 
     always_comb begin
         for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
@@ -570,6 +594,7 @@ module systolic_controller #(
         .cfg_requant_clamp_max_o(cfg_requant_clamp_max_i),
         .cfg_linebuf_en_o   (cfg_linebuf_en_i),
         .cfg_linebuf_coalesce_o(cfg_linebuf_coalesce_i),
+        .cfg_linebuf_pool_o (cfg_linebuf_pool_i),
         .cfg_linebuf_kgen_o (cfg_linebuf_kgen_i),
         .cfg_linebuf_input_base_o(cfg_linebuf_input_base_i),
         .cfg_linebuf_input_h_o(cfg_linebuf_input_h_i),
@@ -631,6 +656,7 @@ module systolic_controller #(
         .cfg_lane_base_i         (cfg_linebuf_lane_base_i),
         .cfg_coalesce_i          (cfg_linebuf_coalesce_i),
         .cfg_kgen_i              (cfg_linebuf_kgen_i),
+        .cfg_pool_i              (cfg_linebuf_pool_i),
         .cfg_k_seed_kh_i         (linebuf_seed_kh_eff),
         .cfg_k_seed_kw_i         (linebuf_seed_kw_eff),
         .cfg_k_seed_ic_i         (linebuf_seed_ic_eff),
@@ -692,6 +718,11 @@ module systolic_controller #(
         weight_preload_ptr_d = weight_preload_ptr_q;
         ofm_push_row_idx_d = ofm_push_row_idx_q;
         psum_buf_sel_d = psum_buf_sel_q;
+        pool_acc_d = pool_acc_q;
+        pool_out_d = pool_out_q;
+        pool_out_valid_d = pool_out_valid_q;
+        pool_tap_count_d = pool_tap_count_q;
+        pool_next_acc = pool_acc_q;
         psum_buf_we = 1'b0;
         psum_buf_addr = '0;
         psum_buf_wdata = '0;
@@ -1027,10 +1058,23 @@ module systolic_controller #(
                     k_seed_kw_d = cfg_linebuf_k_seed_kw_i;
                     k_seed_kh_d = cfg_linebuf_k_seed_kh_i;
                     ofm_push_row_idx_d = '0;
+                    pool_acc_d = '0;
+                    pool_out_d = '0;
+                    pool_out_valid_d = 1'b0;
+                    pool_tap_count_d = '0;
                     if (psum_buf_active) begin
                         psum_buf_sel_d = ~psum_buf_sel_q;
                     end
                     state_d = LOAD_WEIGHTS;
+
+                    if (linebuf_pool_mode) begin
+                        req_cnt_d = '0;
+                        rsp_cnt_d = '0;
+                        drain_cnt_d = linebuf_spatial_m;
+                        psum_prefetch_rows_d = '0;
+                        linebuf_start = 1'b1;
+                        state_d = COMPUTE;
+                    end
 
                     if (cfg_requant_en_i && requant_config_invalid) begin
                         w_ptr_d = cfg_sys_weight_ptr_i;
@@ -1109,7 +1153,48 @@ module systolic_controller #(
             end
 
             COMPUTE: begin
-                if (cfg_linebuf_en_i) begin
+                if (linebuf_pool_mode) begin
+                    obi_i_req_o = linebuf_obi_req;
+                    obi_i_addr_o = linebuf_obi_addr;
+
+                    if (pool_out_valid_q) begin
+                        obi_o_req_o[0] = 1'b1;
+                        obi_o_we_o[0] = 1'b1;
+                        obi_o_be_o[0] = '1;
+                        obi_o_addr_o[0] = o_ptr_q;
+                        obi_o_wdata_o[0] = pool_out_q;
+                        if (obi_o_gnt_i[0]) begin
+                            pool_out_valid_d = 1'b0;
+                            o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                       cfg_sys_ofm_row_stride_bytes_i,
+                                                       cfg_sys_ofm_tile_cols_i);
+                            o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
+                            drain_cnt_d = drain_cnt_q - 1'b1;
+                        end
+                    end
+
+                    if (linebuf_row_valid && !pool_out_valid_q) begin
+                        linebuf_row_ready = 1'b1;
+                        if (pool_tap_count_q == 8'd0) begin
+                            pool_next_acc = linebuf_row_data;
+                        end else begin
+                            pool_next_acc = max_i8_row(pool_acc_q, linebuf_row_data);
+                        end
+                        pool_acc_d = pool_next_acc;
+
+                        if ({24'd0, pool_tap_count_q} + 32'd1 == pool_kernel_vectors) begin
+                            pool_out_d = pool_next_acc;
+                            pool_out_valid_d = 1'b1;
+                            pool_tap_count_d = '0;
+                        end else begin
+                            pool_tap_count_d = pool_tap_count_q + 8'd1;
+                        end
+                    end
+
+                    if ((drain_cnt_q == 32'd0) && !pool_out_valid_q && !linebuf_busy) begin
+                        state_d = DONE;
+                    end
+                end else if (cfg_linebuf_en_i) begin
                     obi_i_req_o = linebuf_obi_req;
                     obi_i_addr_o = linebuf_obi_addr;
                     if (linebuf_row_valid && array_pipe_ready) begin
@@ -1343,6 +1428,10 @@ module systolic_controller #(
             weight_preload_ptr_q <= '0;
             ofm_push_row_idx_q <= '0;
             psum_buf_sel_q <= 1'b0;
+            pool_acc_q <= '0;
+            pool_out_q <= '0;
+            pool_out_valid_q <= 1'b0;
+            pool_tap_count_q <= '0;
         end else begin
             state_q     <= state_d;
             drain_state_q <= drain_state_d;
@@ -1376,6 +1465,10 @@ module systolic_controller #(
             weight_preload_ptr_q <= weight_preload_ptr_d;
             ofm_push_row_idx_q <= ofm_push_row_idx_d;
             psum_buf_sel_q <= psum_buf_sel_d;
+            pool_acc_q <= pool_acc_d;
+            pool_out_q <= pool_out_d;
+            pool_out_valid_q <= pool_out_valid_d;
+            pool_tap_count_q <= pool_tap_count_d;
             if (psum_buf_we) begin
                 psum_buf_q[psum_buf_sel_q][psum_buf_addr] <= psum_buf_wdata;
             end

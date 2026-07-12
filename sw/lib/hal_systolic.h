@@ -28,6 +28,7 @@ typedef struct {
     uint16_t lane_base;
     uint16_t coalesce;
     uint16_t kgen;
+    uint16_t pool;
     uint16_t k_seed_kh;
     uint16_t k_seed_kw;
     uint16_t k_seed_ic;
@@ -37,6 +38,10 @@ typedef struct {
 
 void systolic_linebuf_disable(void);
 void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg);
+void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
+                                         uint32_t output_addr,
+                                         uint32_t height,
+                                         uint32_t width);
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf_requant(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);

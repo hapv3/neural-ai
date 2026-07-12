@@ -236,3 +236,132 @@ spatz_mul_i8_q7:
     bnez a3, 1b
 3:
     ret
+
+    .global spatz_maxpool2d_5x5s1p2_c32_i8
+    .type spatz_maxpool2d_5x5s1p2_c32_i8, @function
+spatz_maxpool2d_5x5s1p2_c32_i8:
+    beqz a2, 9f
+    beqz a3, 9f
+    addi sp, sp, -48
+    sw s0, 0(sp)
+    sw s1, 4(sp)
+    sw s2, 8(sp)
+    sw s3, 12(sp)
+    sw s4, 16(sp)
+    sw s5, 20(sp)
+    sw s6, 24(sp)
+    sw s7, 28(sp)
+    sw s8, 32(sp)
+    sw s9, 36(sp)
+    sw s10, 40(sp)
+    sw s11, 44(sp)
+
+    mv s0, a0
+    mv s1, a1
+    mv s2, a2
+    mv s3, a3
+    slli s4, s3, 5
+    li t0, 32
+    vsetvli zero, t0, e8, m1, ta, ma
+    lui s11, 0x10140
+
+    mv s10, s11
+    li s5, 0
+1:
+    bgeu s5, s2, 8f
+    li s6, 0
+2:
+    bgeu s6, s3, 7f
+
+    li t0, -128
+    vmv.v.x v8, t0
+
+    li t0, 2
+    bgtu s6, t0, 3f
+    li s7, 0
+    j 4f
+3:
+    addi s7, s6, -2
+4:
+    addi s8, s6, 3
+    bleu s8, s3, 5f
+    mv s8, s3
+5:
+    mul t2, s5, s4
+    slli t3, s7, 5
+    add t2, t2, t3
+    add t2, s0, t2
+    mv t4, s7
+6:
+    bgeu t4, s8, 15f
+    vle8.v v9, (t2)
+    vmax.vv v8, v8, v9
+    addi t2, t2, 32
+    addi t4, t4, 1
+    j 6b
+15:
+    vse8.v v8, (s10)
+    addi s10, s10, 32
+    addi s6, s6, 1
+    j 2b
+7:
+    addi s5, s5, 1
+    j 1b
+8:
+    li s5, 0
+10:
+    bgeu s5, s2, 18f
+    li s6, 0
+11:
+    bgeu s6, s3, 17f
+
+    li t0, -128
+    vmv.v.x v8, t0
+
+    li t0, 2
+    bgtu s5, t0, 12f
+    li s7, 0
+    j 13f
+12:
+    addi s7, s5, -2
+13:
+    addi s8, s5, 3
+    bleu s8, s2, 14f
+    mv s8, s2
+14:
+    mul t2, s7, s4
+    slli t3, s6, 5
+    add t2, t2, t3
+    add t2, s11, t2
+    mv t4, s7
+16:
+    bgeu t4, s8, 19f
+    vle8.v v9, (t2)
+    vmax.vv v8, v8, v9
+    add t2, t2, s4
+    addi t4, t4, 1
+    j 16b
+19:
+    vse8.v v8, (s1)
+    addi s1, s1, 32
+    addi s6, s6, 1
+    j 11b
+17:
+    addi s5, s5, 1
+    j 10b
+18:
+    lw s0, 0(sp)
+    lw s1, 4(sp)
+    lw s2, 8(sp)
+    lw s3, 12(sp)
+    lw s4, 16(sp)
+    lw s5, 20(sp)
+    lw s6, 24(sp)
+    lw s7, 28(sp)
+    lw s8, 32(sp)
+    lw s9, 36(sp)
+    lw s10, 40(sp)
+    lw s11, 44(sp)
+    addi sp, sp, 48
+9:
+    ret

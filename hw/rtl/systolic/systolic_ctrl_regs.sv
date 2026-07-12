@@ -35,6 +35,7 @@ module systolic_ctrl_regs #(
     output logic [31:0]               cfg_requant_clamp_max_o,
     output logic                      cfg_linebuf_en_o,
     output logic                      cfg_linebuf_coalesce_o,
+    output logic                      cfg_linebuf_pool_o,
     output logic [31:0]               cfg_linebuf_input_base_o,
     output logic [15:0]               cfg_linebuf_input_h_o,
     output logic [15:0]               cfg_linebuf_input_w_o,
@@ -120,6 +121,7 @@ module systolic_ctrl_regs #(
     logic [31:0]       r_requant_clamp_max;
     logic              r_linebuf_en;
     logic              r_linebuf_coalesce;
+    logic              r_linebuf_pool;
     logic              r_linebuf_kgen;
     logic [31:0]       r_linebuf_input_base;
     logic [15:0]       r_linebuf_input_h;
@@ -165,6 +167,7 @@ module systolic_ctrl_regs #(
             r_requant_clamp_max <= 32'h0000_007F;
             r_linebuf_en <= 1'b0;
             r_linebuf_coalesce <= 1'b0;
+            r_linebuf_pool <= 1'b0;
             r_linebuf_kgen <= 1'b0;
             r_linebuf_input_base <= '0;
             r_linebuf_input_h <= '0;
@@ -233,6 +236,7 @@ module systolic_ctrl_regs #(
                                     r_linebuf_en <= wdata_word[0];
                                     r_linebuf_coalesce <= wdata_word[1];
                                     r_linebuf_kgen <= wdata_word[2];
+                                    r_linebuf_pool <= wdata_word[3];
                                 end
                                 REG_LB_INPUT_BASE: r_linebuf_input_base <= wdata_word;
                                 REG_LB_INPUT_H: r_linebuf_input_h <= wdata_word[15:0];
@@ -312,7 +316,8 @@ module systolic_ctrl_regs #(
                     REG_RQ_CTRL:   rdata_word = {31'd0, r_requant_en};
                     REG_RQ_CMIN:   rdata_word = r_requant_clamp_min;
                     REG_RQ_CMAX:   rdata_word = r_requant_clamp_max;
-                    REG_LB_CTRL: rdata_word = {29'd0, r_linebuf_kgen, r_linebuf_coalesce, r_linebuf_en};
+                    REG_LB_CTRL: rdata_word = {28'd0, r_linebuf_pool, r_linebuf_kgen,
+                                               r_linebuf_coalesce, r_linebuf_en};
                     REG_LB_INPUT_BASE: rdata_word = r_linebuf_input_base;
                     REG_LB_INPUT_H: rdata_word = {16'd0, r_linebuf_input_h};
                     REG_LB_INPUT_W: rdata_word = {16'd0, r_linebuf_input_w};
@@ -366,6 +371,7 @@ module systolic_ctrl_regs #(
     assign cfg_requant_clamp_max_o = r_requant_clamp_max;
     assign cfg_linebuf_en_o = r_linebuf_en;
     assign cfg_linebuf_coalesce_o = r_linebuf_coalesce;
+    assign cfg_linebuf_pool_o = r_linebuf_pool;
     assign cfg_linebuf_kgen_o = r_linebuf_kgen;
     assign cfg_linebuf_input_base_o = r_linebuf_input_base;
     assign cfg_linebuf_input_h_o = r_linebuf_input_h;

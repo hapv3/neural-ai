@@ -650,6 +650,7 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     linebuf_cfg->lane_base = 0u;
     linebuf_cfg->coalesce = (uint16_t)coalesce;
     linebuf_cfg->kgen = (uint16_t)kgen;
+    linebuf_cfg->pool = 0u;
     linebuf_cfg->k_seed_kh = 0u;
     linebuf_cfg->k_seed_kw = 0u;
     linebuf_cfg->k_seed_ic = 0u;
@@ -1066,6 +1067,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         linebuf_cfg.lane_base = 0u;
         linebuf_cfg.coalesce = 1u;
         linebuf_cfg.kgen = 0u;
+        linebuf_cfg.pool = 0u;
         linebuf_cfg.k_seed_kh = 0u;
         linebuf_cfg.k_seed_kw = 0u;
         linebuf_cfg.k_seed_ic = 0u;
@@ -1202,6 +1204,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
                     linebuf_cfg.lane_base = (uint16_t)lane;
                     linebuf_cfg.coalesce = 0u;
                     linebuf_cfg.kgen = 0u;
+                    linebuf_cfg.pool = 0u;
                     linebuf_cfg.k_seed_kh = 0u;
                     linebuf_cfg.k_seed_kw = 0u;
                     linebuf_cfg.k_seed_ic = 0u;
