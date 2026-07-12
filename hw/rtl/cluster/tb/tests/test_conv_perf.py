@@ -44,10 +44,16 @@ P3_C120_C32B_INPUT_ADDR = 0x81300000
 P3_C120_C32B_WEIGHT_ADDR = 0x81410000
 P3_C120_C32B_OUT_ADDR = 0x81420000
 P3_C120_C32B_STATS_ADDR = 0x81540000
+P3_C32T_INPUT_ADDR = 0x81600000
+P3_C32T_WEIGHT_ADDR = 0x81610000
+P3_C32T_OUT_ADDR = 0x81620000
+P3_C32T_STATS_ADDR = 0x81630000
 P3_H = 4
 P3_W = 4
 P3_C120_H = 16
 P3_C120_W = 16
+P3_C32T_H = 32
+P3_C32T_W = 32
 CONV1_H = 4
 CONV1_W = 5
 CONV1_C = 33
@@ -81,6 +87,7 @@ P3_CASE_LINEBUF_KGEN_3X3_C96 = 19
 P3_CASE_LINEBUF_3X3_C120 = 20
 P3_CASE_LINEBUF_KGEN_3X3_C65 = 21
 P3_CASE_LINEBUF_3X3_C120_C32B = 22
+P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT = 23
 
 YOLO_RGB_H = 64
 YOLO_RGB_W = 64
@@ -254,6 +261,25 @@ P3_CASES = {
         0,
         False,
     ),
+    P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT: (
+        "linebuffer 2D tiled conv3x3 IC32 requant",
+        P3_C32T_H,
+        P3_C32T_W,
+        32,
+        P3_C32T_H,
+        P3_C32T_W,
+        3,
+        3,
+        1,
+        1,
+        1,
+        1,
+        32,
+        36,
+        0,
+        0,
+        True,
+    ),
 }
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
@@ -284,6 +310,7 @@ def p3_case_enabled(case_id):
             or case_id == P3_CASE_LINEBUF_3X3_C120
             or case_id == P3_CASE_LINEBUF_KGEN_3X3_C65
             or case_id == P3_CASE_LINEBUF_3X3_C120_C32B
+            or case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT
         )
     if CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT:
         return case_id == P3_CASE_REQUANT
@@ -309,6 +336,7 @@ def p3_case_is_linebuf(case_id):
         P3_CASE_LINEBUF_3X3_C120,
         P3_CASE_LINEBUF_KGEN_3X3_C65,
         P3_CASE_LINEBUF_3X3_C120_C32B,
+        P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT,
     }
 
 
@@ -426,6 +454,8 @@ def p3_input_addr(case_id):
         return P3_C120_INPUT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_INPUT_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
+        return P3_C32T_INPUT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x0000
 
 
@@ -434,6 +464,8 @@ def p3_weight_addr(case_id):
         return P3_C120_WEIGHT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_WEIGHT_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
+        return P3_C32T_WEIGHT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3000
 
 
@@ -442,6 +474,8 @@ def p3_out_addr(case_id):
         return P3_C120_OUT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_OUT_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
+        return P3_C32T_OUT_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x10000
 
 
@@ -450,6 +484,8 @@ def p3_stats_addr(case_id):
         return P3_C120_STATS_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_STATS_ADDR
+    if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
+        return P3_C32T_STATS_ADDR
     return L2_P3_BASE + case_id * P3_CASE_STRIDE + 0x3E000
 
 

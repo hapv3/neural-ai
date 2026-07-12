@@ -175,3 +175,64 @@ spatz_requant_i32_to_i32:
     bnez a2, 1b
 3:
     ret
+
+    .global spatz_mul_i8_q7
+    .type spatz_mul_i8_q7, @function
+spatz_mul_i8_q7:
+    beqz a3, 3f
+    li t1, 0xff
+    li t2, 0xff00
+    li t3, 7
+1:
+    vsetvli t0, a3, e8, m4, ta, ma
+    vle8.v v8, (a0)
+    vle8.v v16, (a1)
+    vwmul.vv v24, v8, v16
+    vsetvli zero, t0, e16, m8, ta, ma
+    vsra.vx v24, v24, t3
+    li t4, -128
+    li t5, 127
+    vmax.vx v24, v24, t4
+    vmin.vx v24, v24, t5
+    lui t6, 0x10140
+    vse16.v v24, (t6)
+    mv a4, t6
+    mv a5, a2
+    srli a6, t0, 2
+    beqz a6, 4f
+2:
+    lw a7, 0(a4)
+    lw t6, 4(a4)
+    and t4, a7, t1
+    srli a7, a7, 8
+    and a7, a7, t2
+    or t4, t4, a7
+    and a7, t6, t1
+    srli t6, t6, 8
+    and t6, t6, t2
+    or a7, a7, t6
+    slli a7, a7, 16
+    or t4, t4, a7
+    sw t4, 0(a5)
+    addi a4, a4, 8
+    addi a5, a5, 4
+    addi a6, a6, -1
+    bnez a6, 2b
+4:
+    andi a6, t0, 3
+    beqz a6, 5f
+6:
+    lh a7, 0(a4)
+    sb a7, 0(a5)
+    addi a4, a4, 2
+    addi a5, a5, 1
+    addi a6, a6, -1
+    bnez a6, 6b
+5:
+    add a0, a0, t0
+    add a1, a1, t0
+    add a2, a2, t0
+    sub a3, a3, t0
+    bnez a3, 1b
+3:
+    ret

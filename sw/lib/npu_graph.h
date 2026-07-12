@@ -9,7 +9,14 @@ typedef enum {
     NPU_OP_DMA_OUT = 2,
     NPU_OP_IM2COL3X3S1P1_C3_PAD32 = 3,
     NPU_OP_SYSTOLIC_GEMM32 = 4,
-    NPU_OP_SPATZ_REQUANT = 5
+    NPU_OP_SPATZ_REQUANT = 5,
+    NPU_OP_SYSTOLIC_GEMM32_REQUANT = 6,
+    NPU_OP_IM2COL3X3S2P1_C3_PAD32 = 7,
+    NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT = 8,
+    NPU_OP_LOGISTIC_LUT_I8 = 9,
+    NPU_OP_MUL_I8 = 10,
+    NPU_OP_CONV2D3X3S1P1_C32_LINEBUF = 11,
+    NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT = 12
 } npu_op_type_t;
 
 typedef struct {
@@ -17,9 +24,11 @@ typedef struct {
     uint32_t src;
     uint32_t dst;
     uint32_t aux;
+    uint32_t aux2;
     uint32_t l2_addr;
     uint32_t bytes;
     uint32_t dim_m;
+    uint32_t dim_n;
     int32_t multiplier;
     uint32_t shift;
     int32_t min_val;
@@ -44,13 +53,16 @@ enum {
     NPU_GRAPH_ERR_BAD_OP = 0xBAD10001,
     NPU_GRAPH_ERR_BAD_TENSOR = 0xBAD10002,
     NPU_GRAPH_ERR_DMA = 0xBAD10003,
-    NPU_GRAPH_ERR_SCRATCH = 0xBAD10004
+    NPU_GRAPH_ERR_SCRATCH = 0xBAD10004,
+    NPU_GRAPH_ERR_ACCEL = 0xBAD10005
 };
 
 void npu_graph_scratch_init(npu_graph_scratch_t *scratch, uint32_t base, uint32_t size);
 uint32_t npu_graph_scratch_alloc(npu_graph_scratch_t *scratch, uint32_t bytes, uint32_t align);
 uint32_t npu_graph_run(const npu_graph_t *graph);
 void npu_im2col3x3s1p1_c3_pad32(const int8_t *input_hwc, int8_t *output_row32);
+void npu_im2col3x3s2p1_c3_pad32(const int8_t *input_hwc, uint32_t input_h, uint32_t input_w,
+                                int8_t *output_row32);
 void npu_graph_trace(uint32_t layer_index, npu_op_type_t op, uint32_t event);
 
 #endif

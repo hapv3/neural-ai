@@ -38,10 +38,14 @@
 #define P3_C120_C32B_WEIGHT_ADDR 0x81410000u
 #define P3_C120_C32B_OUT_ADDR    0x81420000u
 #define P3_C120_C32B_STATS_ADDR  0x81540000u
-#define P3_INPUT_ADDR(id)   (((id) == 20u) ? P3_C120_INPUT_ADDR : (((id) == 22u) ? P3_C120_C32B_INPUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u)))
-#define P3_WEIGHT_ADDR(id)  (((id) == 20u) ? P3_C120_WEIGHT_ADDR : (((id) == 22u) ? P3_C120_C32B_WEIGHT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u)))
-#define P3_OUT_ADDR(id)     (((id) == 20u) ? P3_C120_OUT_ADDR : (((id) == 22u) ? P3_C120_C32B_OUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u)))
-#define P3_STATS_ADDR(id)   (((id) == 20u) ? P3_C120_STATS_ADDR : (((id) == 22u) ? P3_C120_C32B_STATS_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u)))
+#define P3_C32T_INPUT_ADDR       0x81600000u
+#define P3_C32T_WEIGHT_ADDR      0x81610000u
+#define P3_C32T_OUT_ADDR         0x81620000u
+#define P3_C32T_STATS_ADDR       0x81630000u
+#define P3_INPUT_ADDR(id)   (((id) == 20u) ? P3_C120_INPUT_ADDR : (((id) == 22u) ? P3_C120_C32B_INPUT_ADDR : (((id) == 23u) ? P3_C32T_INPUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u))))
+#define P3_WEIGHT_ADDR(id)  (((id) == 20u) ? P3_C120_WEIGHT_ADDR : (((id) == 22u) ? P3_C120_C32B_WEIGHT_ADDR : (((id) == 23u) ? P3_C32T_WEIGHT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u))))
+#define P3_OUT_ADDR(id)     (((id) == 20u) ? P3_C120_OUT_ADDR : (((id) == 22u) ? P3_C120_C32B_OUT_ADDR : (((id) == 23u) ? P3_C32T_OUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u))))
+#define P3_STATS_ADDR(id)   (((id) == 20u) ? P3_C120_STATS_ADDR : (((id) == 22u) ? P3_C120_C32B_STATS_ADDR : (((id) == 23u) ? P3_C32T_STATS_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u))))
 
 #define T_INPUT          0x10100000u
 #define T_WEIGHT         0x10102000u
@@ -52,6 +56,7 @@
 #define T_C120_INPUT     0x10100000u
 #define T_C120_WEIGHT    0x10110000u
 #define T_C120_OUTPUT    0x10140000u
+#define T_C120_PSUM      0x10150000u
 
 #define CONV1_H          4u
 #define CONV1_W          5u
@@ -75,6 +80,9 @@
 #define P3_C120_H        16u
 #define P3_C120_W        16u
 #define P3_C120_TILE_OH  16u
+#define P3_C32T_H        32u
+#define P3_C32T_W        32u
+#define P3_C32T_TILE     16u
 #define P3_C32           32u
 #define P3_C64           64u
 #define P3_C32_INPUT_BYTES  (P3_ROWS * P3_C32)
@@ -106,6 +114,7 @@
 #define P3_CASE_LINEBUF_3X3_C120 20u
 #define P3_CASE_LINEBUF_KGEN_3X3_C65 21u
 #define P3_CASE_LINEBUF_3X3_C120_C32B 22u
+#define P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT 23u
 
 #define YOLO_RGB_H          64u
 #define YOLO_RGB_W          64u
@@ -152,7 +161,8 @@ static uint32_t should_run_case(uint32_t case_id) {
         return ((case_id >= P3_CASE_3X3_P0_C32) && (case_id <= P3_CASE_3X3_C5)) ||
                (case_id == P3_CASE_LINEBUF_KGEN_3X3_C96) ||
                (case_id == P3_CASE_LINEBUF_3X3_C120) ||
-               (case_id == P3_CASE_LINEBUF_KGEN_3X3_C65);
+               (case_id == P3_CASE_LINEBUF_KGEN_3X3_C65) ||
+               (case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT);
     }
     if (CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT) {
         return case_id == P3_CASE_REQUANT;
@@ -242,6 +252,7 @@ static void init_cfg(npu_conv2d_packed_cfg_t *cfg,
     cfg->dilation_h = 1u;
     cfg->dilation_w = 1u;
     cfg->input_c_stride = input_c;
+    cfg->input_row_stride_bytes = 0u;
     cfg->input_c_base = 0u;
     cfg->accumulate = 0u;
 }
@@ -265,7 +276,7 @@ static void run_oc32_case(uint32_t case_id,
                           uint32_t pad_h,
                           uint32_t pad_w,
                           uint32_t fail_code) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats;
     uint32_t rows = output_h * output_w;
     uint32_t input_bytes = input_h * input_w * input_c;
@@ -355,7 +366,7 @@ static void run_oc32_case_channel_slices(uint32_t case_id,
                                          uint32_t main_c,
                                          uint32_t tail_c,
                                          uint32_t fail_code) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t total_stats;
     uint32_t rows = output_h * output_w;
     uint32_t input_bytes = input_h * input_w * input_c_total;
@@ -451,7 +462,7 @@ static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
                                              uint32_t pad_h,
                                              uint32_t pad_w,
                                              uint32_t fail_code) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t total_stats;
     uint32_t rows = output_h * output_w;
     uint32_t c_blocks = (input_c_total + 31u) / 32u;
@@ -536,7 +547,7 @@ static void copy_oc32_to_oc64_l2(uint32_t l2_addr, uint32_t src_addr, uint32_t r
 }
 
 static void run_oc64_case(uint32_t case_id) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats0;
     npu_conv2d_packed_stats_t stats1;
     uint32_t rows = P3_ROWS;
@@ -595,7 +606,7 @@ static void init_qparams(void) {
 }
 
 static void run_requant_case(uint32_t case_id) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats;
     uint32_t rows = P3_ROWS;
     uint32_t weight_bytes = k_tiles_for(64u, 1u, 1u) * 32u * 32u;
@@ -631,6 +642,62 @@ static void run_requant_case(uint32_t case_id) {
     publish_stats(P3_STATS_ADDR(case_id), &stats);
 }
 
+static void run_linebuf_3x3_c32_tiled_requant_case(uint32_t case_id) {
+    npu_conv2d_packed_cfg_t cfg = {0};
+    npu_conv2d_packed_stats_t stats;
+    npu_conv2d_spatial_tile_t tiles[4];
+    uint32_t input_bytes = P3_C32T_H * P3_C32T_W * P3_C32;
+    uint32_t weight_bytes = 9u * 32u * 32u;
+    uint32_t out_bytes = P3_C32T_H * P3_C32T_W * 32u;
+    uint32_t tile_idx = 0u;
+
+    spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
+    spatz_rt_dma_wait_all();
+    spatz_rt_dma_1d(T_C120_WEIGHT, P3_WEIGHT_ADDR(case_id), weight_bytes);
+    spatz_rt_dma_wait_all();
+
+    init_cfg(&cfg,
+             T_C120_INPUT,
+             T_C120_WEIGHT,
+             T_C120_OUTPUT,
+             P3_C32T_H,
+             P3_C32T_W,
+             P3_C32,
+             P3_C32T_H,
+             P3_C32T_W,
+             3u,
+             3u,
+             1u,
+             1u,
+             1u,
+             1u);
+
+    for (uint32_t oh = 0u; oh < P3_C32T_H; oh += P3_C32T_TILE) {
+        for (uint32_t ow = 0u; ow < P3_C32T_W; ow += P3_C32T_TILE) {
+            tiles[tile_idx].oh_base = oh;
+            tiles[tile_idx].ow_base = ow;
+            tiles[tile_idx].tile_oh = P3_C32T_TILE;
+            tiles[tile_idx].tile_ow = P3_C32T_TILE;
+            tile_idx++;
+        }
+    }
+
+    init_qparams();
+    uint32_t status = npu_conv2d_packed_run_oc32_linebuf_tiles_requant(&cfg,
+                                                                       tiles,
+                                                                       tile_idx,
+                                                                       T_C120_PSUM,
+                                                                       &stats);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(0xC9E6u, tile_idx, (int32_t)status, NPU_CONV2D_PACKED_OK);
+    }
+    systolic_requant_disable();
+
+    spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_C120_OUTPUT, out_bytes);
+    spatz_rt_dma_wait_all();
+    publish_stats(P3_STATS_ADDR(case_id), &stats);
+}
+
 static void run_yolo_rgb_tcdm_spatz_case(uint32_t case_id) {
     npu_conv2d_packed_stats_t total_stats;
     uint32_t weight_addr = P3_WEIGHT_ADDR(case_id);
@@ -662,7 +729,7 @@ static void run_yolo_rgb_tcdm_spatz_case(uint32_t case_id) {
         uint32_t local_pad_h = 1u + first_ih - (oh_start * 2u);
         uint32_t input_offset = first_ih * YOLO_RGB_W * YOLO_RGB_C;
         uint32_t input_bytes = local_input_h * YOLO_RGB_W * YOLO_RGB_C;
-        npu_conv2d_packed_cfg_t cfg;
+        npu_conv2d_packed_cfg_t cfg = {0};
         npu_conv2d_packed_stats_t tile_stats;
 
         spatz_rt_dma_1d(T_INPUT, input_addr + input_offset, input_bytes);
@@ -700,7 +767,7 @@ static void run_yolo_rgb_tcdm_spatz_case(uint32_t case_id) {
 }
 
 static void run_linebuf_3x3_c3_case(uint32_t case_id) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats;
     uint32_t input_bytes = P3_H * P3_W * 3u;
     uint32_t weight_bytes = 32u * 32u;
@@ -737,7 +804,7 @@ static void run_linebuf_3x3_c3_case(uint32_t case_id) {
 }
 
 static void run_conv1x1_k33(void) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats;
 
     cfg.input_addr = L2_CONV1_INPUT;
@@ -775,7 +842,7 @@ static void run_conv1x1_k33(void) {
 }
 
 static void run_conv3x3_pad1_c3(void) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats;
 
     cfg.input_addr = L2_CONV3_INPUT;
@@ -819,7 +886,7 @@ static void run_conv1x1_p3(uint32_t input_addr,
                            uint32_t input_c,
                            uint32_t weight_bytes,
                            uint32_t fail_code) {
-    npu_conv2d_packed_cfg_t cfg;
+    npu_conv2d_packed_cfg_t cfg = {0};
     npu_conv2d_packed_stats_t stats;
 
     cfg.input_addr = input_addr;
@@ -1094,6 +1161,12 @@ int main(void) {
                                           1u,
                                           1u,
                                           0xC9E5u);
+        spatz_rt_pass_step();
+    }
+
+    if (should_run_case(P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT)) {
+        spatz_rt_set_phase(28, P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT);
+        run_linebuf_3x3_c32_tiled_requant_case(P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT);
         spatz_rt_pass_step();
     }
 

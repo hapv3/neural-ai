@@ -25,6 +25,7 @@ typedef struct {
     uint32_t dilation_h;
     uint32_t dilation_w;
     uint32_t input_c_stride;
+    uint32_t input_row_stride_bytes;
     uint32_t input_c_base;
     uint32_t accumulate;
 } npu_conv2d_packed_cfg_t;
@@ -44,6 +45,13 @@ typedef struct {
     uint32_t prepare_scalar_tiles;
 } npu_conv2d_packed_stats_t;
 
+typedef struct {
+    uint32_t oh_base;
+    uint32_t ow_base;
+    uint32_t tile_oh;
+    uint32_t tile_ow;
+} npu_conv2d_spatial_tile_t;
+
 enum {
     NPU_CONV2D_PACKED_OK = 0,
     NPU_CONV2D_PACKED_ERR_DILATION = 0xBAD20001u,
@@ -57,5 +65,18 @@ uint32_t npu_conv2d_packed_run_oc32_requant(const npu_conv2d_packed_cfg_t *cfg,
                                             npu_conv2d_packed_stats_t *stats);
 uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
                                             npu_conv2d_packed_stats_t *stats);
+uint32_t npu_conv2d_packed_run_oc32_linebuf_requant(const npu_conv2d_packed_cfg_t *cfg,
+                                                    npu_conv2d_packed_stats_t *stats);
+uint32_t npu_conv2d_packed_linebuf_default_tile_oh(const npu_conv2d_packed_cfg_t *cfg);
+uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles(const npu_conv2d_packed_cfg_t *cfg,
+                                                  const npu_conv2d_spatial_tile_t *tiles,
+                                                  uint32_t tile_count,
+                                                  uint32_t output_elem_bytes,
+                                                  npu_conv2d_packed_stats_t *stats);
+uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packed_cfg_t *cfg,
+                                                          const npu_conv2d_spatial_tile_t *tiles,
+                                                          uint32_t tile_count,
+                                                          uint32_t psum_addr,
+                                                          npu_conv2d_packed_stats_t *stats);
 
 #endif

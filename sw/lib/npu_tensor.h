@@ -58,7 +58,6 @@ static inline uint32_t npu_tensor_hwc_offset(uint32_t width, uint32_t channels,
 
 static inline uint32_t npu_tensor_c32_offset(uint32_t height, uint32_t width, uint32_t channels,
                                              uint32_t y, uint32_t x, uint32_t c) {
-    (void)height;
     (void)channels;
     uint32_t pixel = y * width + x;
     return (((c >> 5) * (height * width) + pixel) * 32u) + (c & 31u);

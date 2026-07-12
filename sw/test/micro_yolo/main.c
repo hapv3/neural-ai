@@ -2,9 +2,10 @@
 #include "npu_memory_map.h"
 
 /*
- * Phase 3a minimal graph:
- *   32x32x3 HWC -> im2col 3x3s1p1 pad32 -> GEMM32 -> clamp/requant
- *                -> GEMM32 1x1 -> clamp/requant -> L2 output.
+ * Phase 3d Conv_Stem + SiLU + C2f_Conv checkpoint:
+ *   96x96x3 HWC -> linebuffer 3x3s2p1 -> GEMM32 -> clamp/requant
+ *                -> Logistic LUT -> Mul -> fused linebuffer Conv3x3s1p1 C32
+ *                -> 48x48x32 INT8 L2 output.
  */
 #define PASS_SIGNATURE 0xDEADBEEFu
 #define FAIL_SIGNATURE 0xBAD30000u
@@ -16,29 +17,51 @@
 #define SIG_EVENT      (*(volatile uint32_t *)0x10008010u)
 
 #define L2_INPUT   0x80000000u
-#define L2_WEIGHT0 0x80002000u
-#define L2_WEIGHT1 0x80002400u
-#define L2_OUTPUT  0x80010000u
+#define L2_WEIGHT0 0x80008000u
+#define L2_SIG_LUT 0x80009000u
+#define L2_WEIGHT1 0x8000A000u
+#define L2_OUTPUT  0x80020000u
 
 #define SCRATCH_BASE 0x10100000u
 #define SCRATCH_SIZE (512u * 1024u)
 
-#define INPUT_H 32u
-#define INPUT_W 32u
+#define INPUT_H 96u
+#define INPUT_W 96u
 #define INPUT_C 3u
-#define ROWS    (INPUT_H * INPUT_W)
+#define OUTPUT_H ((INPUT_H + 1u) / 2u)
+#define OUTPUT_W ((INPUT_W + 1u) / 2u)
+#define ROWS    (OUTPUT_H * OUTPUT_W)
 #define WEIGHT_BYTES (32u * 32u)
+#define C2F_WEIGHT_BYTES (3u * 3u * 32u * 32u)
+#define LUT_BYTES    256u
 #define ACT_BYTES    (ROWS * 32u)
-#define PSUM_BYTES   (ROWS * 32u * 4u)
+#define C2F_PSUM_BYTES (ROWS * 32u * 4u)
+
+#ifndef MICRO_YOLO_C2F_TILE_OH
+#define MICRO_YOLO_C2F_TILE_OH 16u
+#endif
+
+#ifndef MICRO_YOLO_C2F_TILE_OW
+#define MICRO_YOLO_C2F_TILE_OW 16u
+#endif
+
+void *memset(void *dst, int value, uint32_t bytes) {
+    uint8_t *ptr = (uint8_t *)dst;
+    for (uint32_t i = 0; i < bytes; i++) {
+        ptr[i] = (uint8_t)value;
+    }
+    return dst;
+}
 
 enum {
     T_INPUT = 0,
     T_WEIGHT0,
     T_WEIGHT1,
-    T_IM2COL,
-    T_PSUM0,
-    T_ACT0,
-    T_PSUM1,
+    T_SIG_LUT,
+    T_STEM,
+    T_SIG,
+    T_SILU,
+    T_C2F_PSUM,
     T_OUT,
     TENSOR_COUNT
 };
@@ -82,9 +105,11 @@ static void clear_layer(npu_layer_t *layer) {
     layer->src = 0;
     layer->dst = 0;
     layer->aux = 0;
+    layer->aux2 = 0;
     layer->l2_addr = 0;
     layer->bytes = 0;
     layer->dim_m = 0;
+    layer->dim_n = 0;
     layer->multiplier = 0;
     layer->shift = 0;
     layer->min_val = 0;
@@ -109,35 +134,47 @@ static void init_layers(void) {
     layers[2].op = NPU_OP_DMA_IN;
     layers[2].dst = T_WEIGHT1;
     layers[2].l2_addr = L2_WEIGHT1;
-    layers[2].bytes = WEIGHT_BYTES;
+    layers[2].bytes = C2F_WEIGHT_BYTES;
 
-    layers[3].op = NPU_OP_IM2COL3X3S1P1_C3_PAD32;
-    layers[3].src = T_INPUT;
-    layers[3].dst = T_IM2COL;
+    layers[3].op = NPU_OP_DMA_IN;
+    layers[3].dst = T_SIG_LUT;
+    layers[3].l2_addr = L2_SIG_LUT;
+    layers[3].bytes = LUT_BYTES;
 
-    layers[4].op = NPU_OP_SYSTOLIC_GEMM32;
-    layers[4].src = T_IM2COL;
-    layers[4].dst = T_PSUM0;
+    layers[4].op = NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT;
+    layers[4].src = T_INPUT;
+    layers[4].dst = T_STEM;
     layers[4].aux = T_WEIGHT0;
     layers[4].dim_m = ROWS;
+    layers[4].multiplier = 1;
+    layers[4].shift = 0;
+    layers[4].min_val = -128;
+    layers[4].max_val = 127;
 
-    layers[5].op = NPU_OP_SPATZ_REQUANT;
-    layers[5].src = T_PSUM0;
-    layers[5].dst = T_ACT0;
-    layers[5].multiplier = 1;
-    layers[5].shift = 0;
-    layers[5].min_val = 0;
-    layers[5].max_val = 127;
+    layers[5].op = NPU_OP_LOGISTIC_LUT_I8;
+    layers[5].src = T_STEM;
+    layers[5].dst = T_SIG;
+    layers[5].aux = T_SIG_LUT;
+    layers[5].bytes = ACT_BYTES;
 
-    layers[6].op = NPU_OP_SYSTOLIC_GEMM32;
-    layers[6].src = T_ACT0;
-    layers[6].dst = T_PSUM1;
-    layers[6].aux = T_WEIGHT1;
-    layers[6].dim_m = ROWS;
+    layers[6].op = NPU_OP_MUL_I8;
+    layers[6].src = T_STEM;
+    layers[6].dst = T_SILU;
+    layers[6].aux = T_SIG;
+    layers[6].bytes = ACT_BYTES;
+    layers[6].multiplier = 1;
+    layers[6].shift = 7;
+    layers[6].min_val = -128;
+    layers[6].max_val = 127;
 
-    layers[7].op = NPU_OP_SPATZ_REQUANT;
-    layers[7].src = T_PSUM1;
+    layers[7].op = NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT;
+    layers[7].src = T_SILU;
     layers[7].dst = T_OUT;
+    layers[7].aux = T_WEIGHT1;
+    layers[7].aux2 = T_C2F_PSUM;
+    layers[7].bytes = C2F_PSUM_BYTES;
+    layers[7].dim_m = MICRO_YOLO_C2F_TILE_OH;
+    layers[7].dim_n = MICRO_YOLO_C2F_TILE_OW;
     layers[7].multiplier = 1;
     layers[7].shift = 0;
     layers[7].min_val = -128;
@@ -173,29 +210,40 @@ int main(void) {
     npu_graph_scratch_init(&scratch, SCRATCH_BASE, SCRATCH_SIZE);
     SIG_STATUS = 0x30000002u;
 
-    init_tensor(&tensors[T_INPUT], alloc_or_fail(&scratch, INPUT_H * INPUT_W * INPUT_C),
+    uint32_t input_addr = alloc_or_fail(&scratch, INPUT_H * INPUT_W * INPUT_C);
+    uint32_t weight0_addr = alloc_or_fail(&scratch, WEIGHT_BYTES);
+    uint32_t weight1_addr = alloc_or_fail(&scratch, C2F_WEIGHT_BYTES);
+    uint32_t lut_addr = alloc_or_fail(&scratch, LUT_BYTES);
+    uint32_t act_a_addr = alloc_or_fail(&scratch, ACT_BYTES);
+    uint32_t psum_or_sig_addr = alloc_or_fail(&scratch, C2F_PSUM_BYTES);
+    uint32_t act_c_addr = alloc_or_fail(&scratch, ACT_BYTES);
+
+    init_tensor(&tensors[T_INPUT], input_addr,
                 INPUT_H, INPUT_W, INPUT_C, INPUT_H * INPUT_W * INPUT_C,
                 NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
-    init_tensor(&tensors[T_WEIGHT0], alloc_or_fail(&scratch, WEIGHT_BYTES),
+    init_tensor(&tensors[T_WEIGHT0], weight0_addr,
                 32, 32, 32, WEIGHT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
-    init_tensor(&tensors[T_WEIGHT1], alloc_or_fail(&scratch, WEIGHT_BYTES),
-                32, 32, 32, WEIGHT_BYTES,
+    init_tensor(&tensors[T_WEIGHT1], weight1_addr,
+                288, 32, 32, C2F_WEIGHT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
-    init_tensor(&tensors[T_IM2COL], alloc_or_fail(&scratch, ACT_BYTES),
-                INPUT_H, INPUT_W, 32, ACT_BYTES,
+    init_tensor(&tensors[T_SIG_LUT], lut_addr,
+                1, 1, 256, LUT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
+    init_tensor(&tensors[T_STEM], act_a_addr,
+                OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
-    init_tensor(&tensors[T_PSUM0], alloc_or_fail(&scratch, PSUM_BYTES),
-                INPUT_H, INPUT_W, 32, PSUM_BYTES,
+    init_tensor(&tensors[T_SIG], psum_or_sig_addr,
+                OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_SILU], act_c_addr,
+                OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_C2F_PSUM], psum_or_sig_addr,
+                OUTPUT_H, OUTPUT_W, 32, C2F_PSUM_BYTES,
                 NPU_DTYPE_I32, NPU_LAYOUT_ROW32, 1, 0);
-    init_tensor(&tensors[T_ACT0], alloc_or_fail(&scratch, ACT_BYTES),
-                INPUT_H, INPUT_W, 32, ACT_BYTES,
-                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
-    init_tensor(&tensors[T_PSUM1], alloc_or_fail(&scratch, PSUM_BYTES),
-                INPUT_H, INPUT_W, 32, PSUM_BYTES,
-                NPU_DTYPE_I32, NPU_LAYOUT_ROW32, 1, 0);
-    init_tensor(&tensors[T_OUT], alloc_or_fail(&scratch, ACT_BYTES),
-                INPUT_H, INPUT_W, 32, ACT_BYTES,
+    init_tensor(&tensors[T_OUT], act_a_addr,
+                OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     SIG_STATUS = 0x30000003u;
 

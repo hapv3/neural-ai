@@ -94,6 +94,8 @@ module systolic_controller #(
     logic [31:0] i_ptr_q, i_ptr_d;
     logic [31:0] o_ptr_q, o_ptr_d;
     logic [31:0] a_ptr_q, a_ptr_d;
+    logic [31:0] o_col_q, o_col_d;
+    logic [31:0] a_col_q, a_col_d;
     logic [31:0] req_cnt_q, req_cnt_d; // Counter for requests
     logic [31:0] rsp_cnt_q, rsp_cnt_d; // Counter for responses
     logic [31:0] drain_cnt_q, drain_cnt_d; // Counter for valid outputs
@@ -113,6 +115,38 @@ module systolic_controller #(
     typedef logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   ofm_row_t;
 
     localparam int unsigned OFM_FIFO_ADDR_DEPTH = (OFM_FIFO_DEPTH > 1) ? $clog2(OFM_FIFO_DEPTH) : 1;
+
+    function automatic logic [31:0] next_strided_ptr(
+        input logic [31:0] ptr,
+        input logic [31:0] col,
+        input logic [31:0] row_bytes,
+        input logic [31:0] row_stride_bytes,
+        input logic [31:0] tile_cols
+    );
+        logic [31:0] row_gap;
+        begin
+            row_gap = row_stride_bytes - ((tile_cols - 32'd1) * row_bytes);
+            if ((row_stride_bytes != 32'd0) && (tile_cols != 32'd0) &&
+                ((col + 32'd1) == tile_cols)) begin
+                next_strided_ptr = ptr + row_gap;
+            end else begin
+                next_strided_ptr = ptr + row_bytes;
+            end
+        end
+    endfunction
+
+    function automatic logic [31:0] next_strided_col(
+        input logic [31:0] col,
+        input logic [31:0] tile_cols
+    );
+        begin
+            if ((tile_cols != 32'd0) && ((col + 32'd1) == tile_cols)) begin
+                next_strided_col = 32'd0;
+            end else begin
+                next_strided_col = col + 32'd1;
+            end
+        end
+    endfunction
 
     input_row_t    weight_fifo_data;
     input_row_t    weight_fifo_out;
@@ -188,6 +222,9 @@ module systolic_controller #(
     logic [31:0]   cfg_sys_psum_ptr_i;
     logic [31:0]   cfg_sys_dim_m_i;
     logic          cfg_sys_accum_en_i;
+    logic [31:0]   cfg_sys_ofm_row_stride_bytes_i;
+    logic [31:0]   cfg_sys_ofm_tile_cols_i;
+    logic [31:0]   cfg_sys_psum_row_stride_bytes_i;
     logic          cfg_requant_en_i;
     logic [ARRAY_DIM-1:0][31:0] cfg_requant_bias_i;
     logic [ARRAY_DIM-1:0][31:0] cfg_requant_multiplier_i;
@@ -227,6 +264,7 @@ module systolic_controller #(
     logic [7:0]    linebuf_seed_kh_eff;
     logic          linebuf_kgen_multi;
     logic          accum_active;
+    logic          requant_active;
     logic          drain_enabled;
     logic          linebuf_use_next_cfg;
     logic [31:0]   k_tile_idx_q, k_tile_idx_d;
@@ -296,12 +334,12 @@ module systolic_controller #(
                                 (cfg_linebuf_k_tiles_i > 32'd1);
     assign linebuf_has_next_k_tile = linebuf_kgen_multi && ((k_tile_idx_q + 32'd1) < cfg_linebuf_k_tiles_i);
     assign accum_active = cfg_sys_accum_en_i || (linebuf_kgen_multi && (k_tile_idx_q != 32'd0));
-    assign psum_buf_active = linebuf_kgen_multi && !cfg_requant_en_i &&
-                             (cfg_sys_dim_m_i <= 32'(PSUM_BUF_M));
+    assign requant_active = cfg_requant_en_i && (!linebuf_kgen_multi || !linebuf_has_next_k_tile);
+    assign psum_buf_active = linebuf_kgen_multi && (cfg_sys_dim_m_i <= 32'(PSUM_BUF_M));
     assign psum_buf_needs_external = psum_buf_active && cfg_sys_accum_en_i && (k_tile_idx_q == 32'd0);
     assign accum_uses_tcdm_psum = accum_active && (!psum_buf_active || psum_buf_needs_external);
     assign psum_buf_final_tile = psum_buf_active && !linebuf_has_next_k_tile;
-    assign psum_buf_overlap_active = psum_buf_active && linebuf_kgen_multi && !cfg_requant_en_i;
+    assign psum_buf_overlap_active = psum_buf_active && linebuf_kgen_multi && linebuf_has_next_k_tile;
     assign psum_buf_overlap_next_ready = psum_buf_overlap_active && linebuf_has_next_k_tile &&
                                          weight_preload_done_q && !linebuf_prefetch_busy &&
                                          (array_flush_cnt_q == '0);
@@ -332,7 +370,8 @@ module systolic_controller #(
         end
     end
 
-    assign requant_acc = (drain_state_q == DRAIN_ACCUM_REQUANT) ? accum_sum : ofm_fifo_out.row;
+    assign requant_acc = (psum_buf_drain_entry && requant_active) ? psum_buf_sum :
+                         ((accum_active && requant_active) ? accum_sum : ofm_fifo_out.row);
 
     function automatic void advance_k_seed32(
         input  logic [7:0]  kh_i,
@@ -519,6 +558,9 @@ module systolic_controller #(
         .cfg_sys_psum_ptr_o (cfg_sys_psum_ptr_i),
         .cfg_sys_dim_m_o    (cfg_sys_dim_m_i),
         .cfg_sys_accum_en_o (cfg_sys_accum_en_i),
+        .cfg_sys_ofm_row_stride_bytes_o(cfg_sys_ofm_row_stride_bytes_i),
+        .cfg_sys_ofm_tile_cols_o(cfg_sys_ofm_tile_cols_i),
+        .cfg_sys_psum_row_stride_bytes_o(cfg_sys_psum_row_stride_bytes_i),
         .cfg_requant_en_o   (cfg_requant_en_i),
         .cfg_requant_bias_o (cfg_requant_bias_i),
         .cfg_requant_multiplier_o(cfg_requant_multiplier_i),
@@ -624,6 +666,8 @@ module systolic_controller #(
         i_ptr_d = i_ptr_q;
         o_ptr_d = o_ptr_q;
         a_ptr_d = a_ptr_q;
+        o_col_d = o_col_q;
+        a_col_d = a_col_q;
         req_cnt_d = req_cnt_q;
         rsp_cnt_d = rsp_cnt_q;
         drain_cnt_d = drain_cnt_q;
@@ -738,10 +782,52 @@ module systolic_controller #(
                     end
                 end
 
+                if (accum_requant_sent_q && requant_out_valid) begin
+                    drain_state_d = DRAIN_ACCUM_REQUANT;
+                    obi_o_req_o[0] = 1'b1;
+                    obi_o_wdata_o[0] = requant_packed_data;
+                    if (obi_o_gnt_i[0] || requant_invalid) begin
+                        requant_out_ready = 1'b1;
+                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                   cfg_sys_ofm_row_stride_bytes_i,
+                                                   cfg_sys_ofm_tile_cols_i);
+                        o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
+                        drain_cnt_d = drain_cnt_q - 1;
+                        accum_requant_sent_d = 1'b0;
+                    end
+                    if (requant_invalid) begin
+                        obi_o_req_o[0] = 1'b0;
+                    end
+                end
+
                 if (!ofm_fifo_empty &&
                     (!ofm_fifo_out.needs_external_psum || !psum_fifo_empty)) begin
                     drain_state_d = DRAIN_ACCUM_WRITE;
-                    if (ofm_fifo_out.final_tile) begin
+                    if (ofm_fifo_out.final_tile && requant_active) begin
+                        drain_state_d = DRAIN_ACCUM_REQUANT;
+                        if (!accum_requant_sent_q && requant_in_ready && !requant_config_invalid) begin
+                            requant_in_valid = 1'b1;
+                            ofm_fifo_pop = 1'b1;
+                            psum_fifo_pop = ofm_fifo_out.needs_external_psum;
+                            accum_requant_sent_d = 1'b1;
+                        end
+                        if (requant_out_valid) begin
+                            obi_o_req_o[0] = 1'b1;
+                            obi_o_wdata_o[0] = requant_packed_data;
+                            if (obi_o_gnt_i[0] || requant_invalid) begin
+                                requant_out_ready = 1'b1;
+                                o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                           cfg_sys_ofm_row_stride_bytes_i,
+                                                           cfg_sys_ofm_tile_cols_i);
+                                o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
+                                drain_cnt_d = drain_cnt_q - 1;
+                                accum_requant_sent_d = 1'b0;
+                            end
+                            if (requant_invalid) begin
+                                obi_o_req_o[0] = 1'b0;
+                            end
+                        end
+                    end else if (ofm_fifo_out.final_tile) begin
                         obi_o_we_o = '1;
                         obi_o_wdata_o[0] = psum_buf_sum[OFM_ELEMS_PER_OBI-1:0];
                         obi_o_wdata_o[1] = psum_buf_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
@@ -751,7 +837,10 @@ module systolic_controller #(
                         if (obi_o_gnt_i == 4'b1111) begin
                             ofm_fifo_pop = 1'b1;
                             psum_fifo_pop = ofm_fifo_out.needs_external_psum;
-                            o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
+                            o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
+                                                       cfg_sys_ofm_row_stride_bytes_i,
+                                                       cfg_sys_ofm_tile_cols_i);
+                            o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
                             drain_cnt_d = drain_cnt_q - 1;
                         end
                     end else begin
@@ -774,20 +863,26 @@ module systolic_controller #(
                     obi_o_addr_o[2] = a_ptr_q + (2 * OFM_BEAT_BYTES);
                     obi_o_addr_o[3] = a_ptr_q + (3 * OFM_BEAT_BYTES);
                     if (obi_o_gnt_i == 4'b1111) begin
-                        a_ptr_d = a_ptr_q + OFM_ROW_BYTES;
+                        a_ptr_d = next_strided_ptr(a_ptr_q, a_col_q, 32'(OFM_ROW_BYTES),
+                                                   cfg_sys_psum_row_stride_bytes_i,
+                                                   cfg_sys_ofm_tile_cols_i);
+                        a_col_d = next_strided_col(a_col_q, cfg_sys_ofm_tile_cols_i);
                         psum_prefetch_rows_d = psum_prefetch_rows_q - 1;
                         psum_read_active_d = 1'b1;
                         psum_read_resp_mask_d = '0;
                         psum_read_row_d = '0;
                     end
                 end
-            end else if (!accum_active && cfg_requant_en_i) begin
+            end else if (!accum_active && requant_active) begin
                 if (requant_out_valid) begin
                     obi_o_req_o[0] = 1'b1;
                     obi_o_wdata_o[0] = requant_packed_data;
                     if (obi_o_gnt_i[0] || requant_invalid) begin
                         requant_out_ready = 1'b1;
-                        o_ptr_d = o_ptr_q + REQUANT_ROW_BYTES;
+                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                   cfg_sys_ofm_row_stride_bytes_i,
+                                                   cfg_sys_ofm_tile_cols_i);
+                        o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
                         drain_cnt_d = drain_cnt_q - 1;
                     end
                     if (requant_invalid) begin
@@ -802,7 +897,10 @@ module systolic_controller #(
                 obi_o_req_o = 4'b1111;
                 if (obi_o_gnt_i == 4'b1111) begin
                     ofm_fifo_pop = 1'b1;
-                    o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
+                    o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
+                                               cfg_sys_ofm_row_stride_bytes_i,
+                                               cfg_sys_ofm_tile_cols_i);
+                    o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
                     drain_cnt_d = drain_cnt_q - 1;
                 end
             end else if (accum_active) begin
@@ -827,7 +925,7 @@ module systolic_controller #(
                     end
                 end
 
-                if (!cfg_requant_en_i && !ofm_fifo_empty && !psum_fifo_empty) begin
+                if (!requant_active && !ofm_fifo_empty && !psum_fifo_empty) begin
                     drain_state_d = DRAIN_ACCUM_WRITE;
                     obi_o_we_o = '1;
                     obi_o_wdata_o[0] = accum_sum[OFM_ELEMS_PER_OBI-1:0];
@@ -838,10 +936,13 @@ module systolic_controller #(
                     if (obi_o_gnt_i == 4'b1111) begin
                         ofm_fifo_pop = 1'b1;
                         psum_fifo_pop = 1'b1;
-                        o_ptr_d = o_ptr_q + OFM_ROW_BYTES;
+                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
+                                                   cfg_sys_ofm_row_stride_bytes_i,
+                                                   cfg_sys_ofm_tile_cols_i);
+                        o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
                         drain_cnt_d = drain_cnt_q - 1;
                     end
-                end else if (cfg_requant_en_i) begin
+                end else if (requant_active) begin
                     if (!accum_requant_sent_q && !ofm_fifo_empty && !psum_fifo_empty &&
                         requant_in_ready && !requant_config_invalid) begin
                         drain_state_d = DRAIN_ACCUM_REQUANT;
@@ -857,7 +958,10 @@ module systolic_controller #(
                         obi_o_wdata_o[0] = requant_packed_data;
                         if (obi_o_gnt_i[0] || requant_invalid) begin
                             requant_out_ready = 1'b1;
-                            o_ptr_d = o_ptr_q + REQUANT_ROW_BYTES;
+                            o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                       cfg_sys_ofm_row_stride_bytes_i,
+                                                       cfg_sys_ofm_tile_cols_i);
+                            o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
                             drain_cnt_d = drain_cnt_q - 1;
                             accum_requant_sent_d = 1'b0;
                         end
@@ -877,7 +981,10 @@ module systolic_controller #(
                     obi_o_addr_o[2] = a_ptr_q + (2 * OFM_BEAT_BYTES);
                     obi_o_addr_o[3] = a_ptr_q + (3 * OFM_BEAT_BYTES);
                     if (obi_o_gnt_i == 4'b1111) begin
-                        a_ptr_d = a_ptr_q + OFM_ROW_BYTES;
+                        a_ptr_d = next_strided_ptr(a_ptr_q, a_col_q, 32'(OFM_ROW_BYTES),
+                                                   cfg_sys_psum_row_stride_bytes_i,
+                                                   cfg_sys_ofm_tile_cols_i);
+                        a_col_d = next_strided_col(a_col_q, cfg_sys_ofm_tile_cols_i);
                         psum_prefetch_rows_d = psum_prefetch_rows_q - 1;
                         psum_read_active_d = 1'b1;
                         psum_read_resp_mask_d = '0;
@@ -894,6 +1001,8 @@ module systolic_controller #(
                     i_ptr_d = cfg_sys_ifm_ptr_i;
                     o_ptr_d = cfg_sys_ofm_ptr_i;
                     a_ptr_d = cfg_sys_psum_ptr_i;
+                    o_col_d = '0;
+                    a_col_d = '0;
                     req_cnt_d = ARRAY_DIM;
                     rsp_cnt_d = ARRAY_DIM;
                     drain_cnt_d = cfg_sys_dim_m_i;
@@ -1108,6 +1217,8 @@ module systolic_controller #(
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
                         a_ptr_d = cfg_sys_psum_ptr_i;
+                        o_col_d = '0;
+                        a_col_d = '0;
                         req_cnt_d = cfg_sys_dim_m_i;
                         rsp_cnt_d = cfg_sys_dim_m_i;
                         drain_cnt_d = drain_cnt_q + cfg_sys_dim_m_i;
@@ -1129,6 +1240,8 @@ module systolic_controller #(
                             i_ptr_d = cfg_sys_ifm_ptr_i;
                             o_ptr_d = cfg_sys_ofm_ptr_i;
                             a_ptr_d = cfg_sys_psum_ptr_i;
+                            o_col_d = '0;
+                            a_col_d = '0;
                             state_d = LOAD_WEIGHTS;
                         end else if (linebuf_has_next_k_tile) begin
                             state_d = WAIT_DRAIN;
@@ -1150,6 +1263,8 @@ module systolic_controller #(
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
                         a_ptr_d = cfg_sys_psum_ptr_i;
+                        o_col_d = '0;
+                        a_col_d = '0;
                         req_cnt_d = cfg_sys_dim_m_i;
                         rsp_cnt_d = cfg_sys_dim_m_i;
                         drain_cnt_d = drain_cnt_q + cfg_sys_dim_m_i;
@@ -1171,6 +1286,8 @@ module systolic_controller #(
                             i_ptr_d = cfg_sys_ifm_ptr_i;
                             o_ptr_d = cfg_sys_ofm_ptr_i;
                             a_ptr_d = cfg_sys_psum_ptr_i;
+                            o_col_d = '0;
+                            a_col_d = '0;
                             state_d = LOAD_WEIGHTS;
                         end else if (linebuf_has_next_k_tile) begin
                             state_d = WAIT_DRAIN;
@@ -1200,6 +1317,8 @@ module systolic_controller #(
             i_ptr_q         <= '0;
             o_ptr_q         <= '0;
             a_ptr_q         <= '0;
+            o_col_q         <= '0;
+            a_col_q         <= '0;
             req_cnt_q       <= '0;
             rsp_cnt_q       <= '0;
             drain_cnt_q     <= '0;
@@ -1231,6 +1350,8 @@ module systolic_controller #(
             i_ptr_q     <= i_ptr_d;
             o_ptr_q     <= o_ptr_d;
             a_ptr_q     <= a_ptr_d;
+            o_col_q     <= o_col_d;
+            a_col_q     <= a_col_d;
             req_cnt_q   <= req_cnt_d;
             rsp_cnt_q   <= rsp_cnt_d;
             drain_cnt_q <= drain_cnt_d;
