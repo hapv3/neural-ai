@@ -78,6 +78,13 @@ void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t kernel_h, uint32_t kernel_w,
                         uint32_t stride_h, uint32_t stride_w,
                         uint32_t pad_h, uint32_t pad_w) {
+    if (channels == 32u && kernel_h == 5u && kernel_w == 5u &&
+        stride_h == 1u && stride_w == 1u && pad_h == 2u && pad_w == 2u &&
+        src != dst) {
+        spatz_maxpool2d_5x5s1p2_c32_i8(src, dst, input_h, input_w);
+        return;
+    }
+
     uint32_t output_h = ((input_h + (2u * pad_h) - kernel_h) / stride_h) + 1u;
     uint32_t output_w = ((input_w + (2u * pad_w) - kernel_w) / stride_w) + 1u;
 

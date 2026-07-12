@@ -117,6 +117,7 @@
 #define REG_LB_CTRL_EN  0x00000001u
 #define REG_LB_CTRL_COALESCE 0x00000002u
 #define REG_LB_CTRL_KGEN 0x00000004u
+#define REG_LB_CTRL_POOL 0x00000008u
 
 // Interrupt controller registers
 #define NPU_IRQ_INT_ENABLE    (NPU_IRQ_BASE + 0x00)

@@ -61,6 +61,7 @@ OP_NAMES = {
     12: "CONV3x3s1_C32_LB_RQ",
     13: "ADD_I8",
     14: "CONV3x3s2_C32_LB_RQ",
+    15: "MAXPOOL2D5x5s1p2_I8",
 }
 
 
@@ -254,6 +255,26 @@ def conv3x3s2p1_c32_o32(input_flat, weight):
     return conv3x3_c32_o32(input_flat, OUTPUT_H, OUTPUT_W, DOWN_H, DOWN_W, 2, weight)
 
 
+def maxpool2d_5x5s1p2_c32(input_flat):
+    out = []
+    for oh in range(DOWN_H):
+        for ow in range(DOWN_W):
+            out_pixel = [-128] * 32
+            for kh in range(-2, 3):
+                ih = oh + kh
+                if ih < 0 or ih >= DOWN_H:
+                    continue
+                for kw in range(-2, 3):
+                    iw = ow + kw
+                    if iw < 0 or iw >= DOWN_W:
+                        continue
+                    base = ((ih * DOWN_W + iw) * 32)
+                    for c in range(32):
+                        out_pixel[c] = max(out_pixel[c], input_flat[base + c])
+            out.extend(out_pixel)
+    return out
+
+
 def requant(values, min_val, max_val):
     return [max(min_val, min(max_val, value)) for value in values]
 
@@ -276,7 +297,8 @@ def golden_micro_yolo(input_hwc, weight0, weight1, weight2, sigmoid_lut):
     )
     down = conv3x3s2p1_c32_o32(residual_flat, weight2)
     down_flat = requant([value for row in down for value in row], -128, 127)
-    return [to_u8(value) for value in down_flat]
+    pool_flat = maxpool2d_5x5s1p2_c32(down_flat)
+    return [to_u8(value) for value in pool_flat]
 
 
 @cocotb.test()

@@ -114,6 +114,8 @@ async def reset(dut):
     dut.cfg_lane_base_i.value = 0
     dut.cfg_coalesce_i.value = 0
     dut.cfg_kgen_i.value = 0
+    if hasattr(dut, "cfg_pool_i"):
+        dut.cfg_pool_i.value = 0
     dut.cfg_k_seed_kh_i.value = 0
     dut.cfg_k_seed_kw_i.value = 0
     dut.cfg_k_seed_ic_i.value = 0

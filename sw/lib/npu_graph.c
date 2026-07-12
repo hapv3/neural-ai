@@ -496,6 +496,25 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_MAXPOOL2D5X5S1P2_I8:
+            if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
+            if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||
+                !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
+                src->h != dst->h || src->w != dst->w || src->c != dst->c ||
+                src->bytes < dst->bytes || dst->c == 0u ||
+                src->addr == dst->addr) {
+                return NPU_GRAPH_ERR_BAD_TENSOR;
+            }
+            if (src->c == 32u && src->bytes >= ((uint32_t)src->h * src->w * 32u) &&
+                dst->bytes >= ((uint32_t)dst->h * dst->w * 32u)) {
+                systolic_maxpool5x5s1p2_c32_linebuf(src->addr, dst->addr, src->h, src->w);
+            } else {
+                spatz_maxpool2d_i8((const int8_t *)src->addr, (int8_t *)dst->addr,
+                                   src->h, src->w, src->c,
+                                   5u, 5u, 1u, 1u, 2u, 2u);
+            }
+            break;
+
         case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {

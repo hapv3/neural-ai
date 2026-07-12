@@ -37,6 +37,7 @@ module conv_linebuf_stream_packer #(
     input  logic [5:0]                cfg_lane_base_i,
     input  logic                      cfg_coalesce_i,
     input  logic                      cfg_kgen_i,
+    input  logic                      cfg_pool_i,
     input  logic [7:0]                cfg_k_seed_kh_i,
     input  logic [7:0]                cfg_k_seed_kw_i,
     input  logic [15:0]               cfg_k_seed_ic_i,
@@ -250,6 +251,7 @@ module conv_linebuf_stream_packer #(
     logic [15:0] next_kw;
     logic signed [31:0] slide_from_iw;
     logic slide_req_active;
+    logic [DATA_WIDTH-1:0] pad_vector;
     
     // Stage 1 Pipeline Registers (Coordinates)
     logic [ARRAY_DIM-1:0][7:0] stg1_lane_kh_q;
@@ -276,6 +278,7 @@ module conv_linebuf_stream_packer #(
     assign bypass_vectors_o = bypass_vectors_q;
     assign debug_state_o = state_q;
     assign bank_be = '1;
+    assign pad_vector = cfg_pool_i ? {BEAT_BYTES{8'h80}} : DATA_WIDTH'(0);
 
     for (genvar bank = 0; bank < BANKS; bank++) begin : gen_line_banks
         tc_sram #(
@@ -745,7 +748,7 @@ module conv_linebuf_stream_packer #(
                     if ((kh < cfg_kernel_h_i) && ((32'(kw) + 32'(cfg_stride_w_i)) < 32'(cfg_kernel_w_i))) begin
                         slide_window[kh][kw] = window_q[kh][kw + 32'(cfg_stride_w_i)];
                     end else begin
-                        slide_window[kh][kw] = '0;
+                        slide_window[kh][kw] = pad_vector;
                     end
                 end
             end
@@ -770,7 +773,7 @@ module conv_linebuf_stream_packer #(
                                          (row_cache_full_q ? cell_ih[15:0] : 16'(kh)), slide_iw[15:0]);
                         slide_window[kh][slide_target_kw[2:0]] = bank_rdata[idx];
                     end else begin
-                        slide_window[kh][slide_target_kw[2:0]] = '0;
+                        slide_window[kh][slide_target_kw[2:0]] = pad_vector;
                     end
                 end
             end
@@ -1110,7 +1113,7 @@ module conv_linebuf_stream_packer #(
                                                 cell_iw_ff[15:0]);
                             window_q[kh][window_kw_q[2:0]] <= bank_rdata[idx_ff];
                         end else if (kh < K_MAX) begin
-                            window_q[kh][window_kw_q[2:0]] <= '0;
+                            window_q[kh][window_kw_q[2:0]] <= pad_vector;
                         end
                     end
                     if ((window_kw_q + 16'd1) == cfg_kernel_w_i) begin
