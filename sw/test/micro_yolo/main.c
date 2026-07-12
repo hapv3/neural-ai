@@ -2,12 +2,13 @@
 #include "npu_memory_map.h"
 
 /*
- * Phase 3g Conv_Stem + SiLU + C2f_Conv + residual Add + Conv_Down + SPPF MaxPool checkpoint:
+ * Phase 3h Conv_Stem + SiLU + C2f_Conv + residual Add + Conv_Down + SPPF MaxPool + Upsample checkpoint:
  *   96x96x3 HWC -> linebuffer 3x3s2p1 -> GEMM32 -> clamp/requant
  *                -> Logistic LUT -> Mul -> fused linebuffer Conv3x3s1p1 C32
  *                -> Add residual(SiLU) -> fused linebuffer Conv3x3s2p1 C32
  *                -> MaxPool2D 5x5s1p2
- *                -> 24x24x32 INT8 L2 output.
+ *                -> Upsample nearest 2x
+ *                -> 48x48x32 INT8 L2 output.
  */
 #define PASS_SIGNATURE 0xDEADBEEFu
 #define FAIL_SIGNATURE 0xBAD30000u
@@ -84,11 +85,12 @@ enum {
     T_OUT,
     T_DOWN,
     T_POOL,
+    T_UPSAMPLE,
     TENSOR_COUNT
 };
 
 static npu_tensor_t tensors[TENSOR_COUNT];
-static npu_layer_t layers[13];
+static npu_layer_t layers[14];
 static npu_graph_t graph;
 
 void npu_graph_trace(uint32_t layer_index, npu_op_type_t op, uint32_t event) {
@@ -232,10 +234,15 @@ static void init_layers(void) {
     layers[11].dst = T_POOL;
     layers[11].bytes = DOWN_ACT_BYTES;
 
-    layers[12].op = NPU_OP_DMA_OUT;
+    layers[12].op = NPU_OP_UPSAMPLE_NEAREST2X_I8;
     layers[12].src = T_POOL;
-    layers[12].l2_addr = L2_OUTPUT;
-    layers[12].bytes = DOWN_ACT_BYTES;
+    layers[12].dst = T_UPSAMPLE;
+    layers[12].bytes = ACT_BYTES;
+
+    layers[13].op = NPU_OP_DMA_OUT;
+    layers[13].src = T_UPSAMPLE;
+    layers[13].l2_addr = L2_OUTPUT;
+    layers[13].bytes = ACT_BYTES;
 
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;
@@ -309,6 +316,9 @@ int main(void) {
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     init_tensor(&tensors[T_POOL], act_a_addr,
                 DOWN_H, DOWN_W, 32, DOWN_ACT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_UPSAMPLE], act_c_addr,
+                OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     SIG_STATUS = 0x30000003u;
 
