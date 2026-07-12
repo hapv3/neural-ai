@@ -17,7 +17,8 @@ typedef enum {
     NPU_OP_MUL_I8 = 10,
     NPU_OP_CONV2D3X3S1P1_C32_LINEBUF = 11,
     NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT = 12,
-    NPU_OP_ADD_I8 = 13
+    NPU_OP_ADD_I8 = 13,
+    NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT = 14
 } npu_op_type_t;
 
 typedef struct {
