@@ -23,6 +23,9 @@ module systolic_ctrl_regs #(
     output logic [31:0]               cfg_sys_psum_ptr_o,
     output logic [31:0]               cfg_sys_dim_m_o,
     output logic                      cfg_sys_accum_en_o,
+    output logic [31:0]               cfg_sys_ofm_row_stride_bytes_o,
+    output logic [31:0]               cfg_sys_ofm_tile_cols_o,
+    output logic [31:0]               cfg_sys_psum_row_stride_bytes_o,
     output logic                      cfg_requant_en_o,
     output logic [31:0][31:0]         cfg_requant_bias_o,
     output logic [31:0][31:0]         cfg_requant_multiplier_o,
@@ -93,12 +96,18 @@ module systolic_ctrl_regs #(
     localparam logic [ADDR_WIDTH-1:0] REG_LB_LANE_BASE = 32'h0444;
     localparam logic [ADDR_WIDTH-1:0] REG_LB_K_TILES = 32'h0448;
     localparam logic [ADDR_WIDTH-1:0] REG_LB_K_SEED = 32'h044C;
+    localparam logic [ADDR_WIDTH-1:0] REG_SYS_OFM_ROW_STRIDE = 32'h0450;
+    localparam logic [ADDR_WIDTH-1:0] REG_SYS_OFM_TILE_COLS = 32'h0454;
+    localparam logic [ADDR_WIDTH-1:0] REG_SYS_PSUM_ROW_STRIDE = 32'h0458;
 
     logic [31:0] r_sys_w_ptr;
     logic [31:0] r_sys_i_ptr;
     logic [31:0] r_sys_o_ptr;
     logic [31:0] r_sys_psum_ptr;
     logic [31:0] r_sys_dim_m;
+    logic [31:0] r_sys_ofm_row_stride_bytes;
+    logic [31:0] r_sys_ofm_tile_cols;
+    logic [31:0] r_sys_psum_row_stride_bytes;
     logic        r_sys_start;
     logic        r_sys_done;
     logic        r_sys_accum_en;
@@ -145,6 +154,9 @@ module systolic_ctrl_regs #(
             r_sys_o_ptr <= '0;
             r_sys_psum_ptr <= '0;
             r_sys_dim_m <= '0;
+            r_sys_ofm_row_stride_bytes <= '0;
+            r_sys_ofm_tile_cols <= '0;
+            r_sys_psum_row_stride_bytes <= '0;
             r_sys_start <= 1'b0;
             r_sys_done  <= 1'b0;
             r_sys_accum_en <= 1'b0;
@@ -208,6 +220,9 @@ module systolic_ctrl_regs #(
                                 REG_SYS_O_PTR: r_sys_o_ptr <= wdata_word;
                                 REG_SYS_PSUM_PTR: r_sys_psum_ptr <= wdata_word;
                                 REG_SYS_DIM_M: r_sys_dim_m <= wdata_word;
+                                REG_SYS_OFM_ROW_STRIDE: r_sys_ofm_row_stride_bytes <= wdata_word;
+                                REG_SYS_OFM_TILE_COLS: r_sys_ofm_tile_cols <= wdata_word;
+                                REG_SYS_PSUM_ROW_STRIDE: r_sys_psum_row_stride_bytes <= wdata_word;
                                 REG_SYS_START: r_sys_start <= wdata_word[0];
                                 REG_SYS_DONE:  r_sys_done  <= 1'b0;
                                 REG_SYS_ACCUM_CTRL: r_sys_accum_en <= wdata_word[0];
@@ -288,6 +303,9 @@ module systolic_ctrl_regs #(
                     REG_SYS_O_PTR: rdata_word = r_sys_o_ptr;
                     REG_SYS_PSUM_PTR: rdata_word = r_sys_psum_ptr;
                     REG_SYS_DIM_M: rdata_word = r_sys_dim_m;
+                    REG_SYS_OFM_ROW_STRIDE: rdata_word = r_sys_ofm_row_stride_bytes;
+                    REG_SYS_OFM_TILE_COLS: rdata_word = r_sys_ofm_tile_cols;
+                    REG_SYS_PSUM_ROW_STRIDE: rdata_word = r_sys_psum_row_stride_bytes;
                     REG_SYS_START: rdata_word = {31'd0, r_sys_start};
                     REG_SYS_DONE:  rdata_word = {31'd0, r_sys_done};
                     REG_SYS_ACCUM_CTRL: rdata_word = {31'd0, r_sys_accum_en};
@@ -336,6 +354,9 @@ module systolic_ctrl_regs #(
     assign cfg_sys_psum_ptr_o   = r_sys_psum_ptr;
     assign cfg_sys_dim_m_o      = r_sys_dim_m;
     assign cfg_sys_accum_en_o   = r_sys_accum_en;
+    assign cfg_sys_ofm_row_stride_bytes_o = r_sys_ofm_row_stride_bytes;
+    assign cfg_sys_ofm_tile_cols_o = r_sys_ofm_tile_cols;
+    assign cfg_sys_psum_row_stride_bytes_o = r_sys_psum_row_stride_bytes;
     assign cfg_requant_en_o     = r_requant_en;
     assign cfg_requant_bias_o   = r_requant_bias;
     assign cfg_requant_multiplier_o = r_requant_multiplier;

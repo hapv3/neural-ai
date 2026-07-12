@@ -196,6 +196,17 @@ Required decisions:
 Acceptance: the minimal graph in Phase 3a can run using the same tensor
 descriptors and layout rules that the full 96x96 graph will use.
 
+Current implementation status:
+
+- `sw/lib/npu_tensor.h` defines the shared tensor descriptor, INT8/INT32 dtype
+  enum, HWC/ROW32/C32-blocked layout enum, C32 byte-size helpers, and address
+  helpers.
+- `sw/lib/npu_graph.c` owns the small graph executor, tensor/layout validation,
+  and a linear TCDM scratch allocator used by the Micro-YOLO firmware.
+- Requant qparams are carried through graph-layer attributes. The Phase 3a
+  firmware currently uses uniform qparams per layer; per-channel qparams remain
+  compatible with the systolic requant configuration API.
+
 ### Phase 3: Incremental Graph Integration
 
 Objective: grow the graph one operator at a time, with a byte-exact checkpoint
@@ -218,6 +229,49 @@ Acceptance: every step writes its checkpoint tensor to L2 and compares against
 the Python golden before the next operator is enabled. Step 3a also creates the
 `sw/test/micro_yolo/` firmware, Makefile, linker/start files, and makes the
 existing `test_micro_yolo_e2e.py` style test pass.
+
+Current implementation status:
+
+- Step 3a is implemented in `sw/test/micro_yolo/`.
+- The graph is:
+  `DMA_IN input -> DMA_IN weights -> IM2COL3x3S1P1_C3_PAD32 ->
+  SYSTOLIC_GEMM32_REQUANT -> SYSTOLIC_GEMM32_REQUANT -> DMA_OUT`.
+- `NPU_OP_SYSTOLIC_GEMM32_REQUANT` fuses GEMM32 with the existing systolic
+  per-channel requant path. This avoids the earlier scalar/Spatz requant
+  timeout in the first micro graph and keeps the checkpoint byte-exact.
+- Latest cluster RTL result for `test_micro_yolo_e2e.py`: PASS, 233752 cycles,
+  systolic compute 2048 cycles, iDMA busy 1220 cycles, no TCDM stalls. The
+  remaining Phase 3a latency is therefore dominated by scalar firmware/im2col
+  graph overhead, not systolic compute.
+- Step 3b is now the active `sw/test/micro_yolo/` firmware. It runs:
+  `DMA_IN input -> DMA_IN weight -> CONV2D3X3S2P1_C3_LINEBUF_REQUANT ->
+  DMA_OUT`.
+- The Phase 3b Conv_Stem path uses the systolic linebuffer for the supported
+  RGB 3x3 stride-2 window and writes INT8 through the systolic requant drain.
+  It does not build an im2col tensor in scalar firmware. The scalar im2col graph
+  op remains available only as a fallback/debug path.
+- Latest Phase 3b cluster RTL result for `test_micro_yolo_e2e.py`: PASS,
+  30442 cycles, systolic compute 2304 cycles, iDMA busy 3286 cycles, TCDM stall
+  265 cycles. Remaining overhead is linebuffer request/drain and graph/DMA
+  setup, not scalar im2col.
+- Step 3c is the current passing checkpoint: `Conv_Stem -> Logistic LUT ->
+  Mul_Q7`, using AFU for both LUT and Q7 multiply. Latest RTL result: PASS,
+  67886 cycles.
+- Step 3d now uses a no-im2col runtime path for C2f Conv. The graph issues
+  C32 linebuffer/KGEN multi-K tiles, writes INT32 psum, then requants to INT8.
+  The firmware does not allocate or fill an im2col tensor for this CONV2D path.
+- The Step 3d host/planner contract is explicit: Python/model export chooses
+  spatial `tile_oh` from the layer shape and linebuffer limits, then emits it in
+  the graph descriptor. Firmware consumes that descriptor and launches the
+  corresponding `oh_base/tile_oh` linebuffer stripes. The current 96x96
+  micro-yolo C2f layer uses `tile_oh=3`, producing 16 stripes for 48 output
+  rows.
+- The Python golden for Step 3d computes convolution directly from window loops,
+  not by materializing im2col rows. This keeps the test aligned with the runtime
+  scheduling direction.
+- Next scheduler work: optimize the linebuffer KGEN scheduler so adjacent
+  host-planned stripes keep row/window state where possible instead of paying a
+  full refill/setup cost at every `oh_base` boundary.
 
 ### Phase 4: Full 96x96 Raw-Head E2E
 
