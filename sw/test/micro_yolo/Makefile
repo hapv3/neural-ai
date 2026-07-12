@@ -4,6 +4,8 @@ HEXOBJCOPY = ../../../hw/spatz/install/riscv-gcc/bin/riscv32-unknown-elf-objcopy
 
 MICRO_YOLO_C2F_TILE_OH ?= 16
 MICRO_YOLO_C2F_TILE_OW ?= 16
+MICRO_YOLO_DOWN_TILE_OH ?= 16
+MICRO_YOLO_DOWN_TILE_OW ?= 16
 MICRO_YOLO_HEAD_TILE_OH ?= 16
 MICRO_YOLO_HEAD_TILE_OW ?= 16
 
@@ -12,6 +14,8 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -I../../lib -T link.ld -Wl,--no-relax \
          -DMICRO_YOLO_C2F_TILE_OH=$(MICRO_YOLO_C2F_TILE_OH) \
          -DMICRO_YOLO_C2F_TILE_OW=$(MICRO_YOLO_C2F_TILE_OW) \
+         -DMICRO_YOLO_DOWN_TILE_OH=$(MICRO_YOLO_DOWN_TILE_OH) \
+         -DMICRO_YOLO_DOWN_TILE_OW=$(MICRO_YOLO_DOWN_TILE_OW) \
          -DMICRO_YOLO_HEAD_TILE_OH=$(MICRO_YOLO_HEAD_TILE_OH) \
          -DMICRO_YOLO_HEAD_TILE_OW=$(MICRO_YOLO_HEAD_TILE_OW)
 

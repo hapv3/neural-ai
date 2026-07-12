@@ -77,6 +77,22 @@
 
 #define HEAD_TILE_BYTES (MICRO_YOLO_HEAD_TILE_OH * MICRO_YOLO_HEAD_TILE_OW * 32u)
 
+/*
+ * Static 3j graph contract:
+ *
+ * - All C32 activations use ROW32 layout: one contiguous 32-byte vector per
+ *   spatial pixel.
+ * - The logical concat before Head_Conv is intentionally not materialized.
+ *   Layer 16 consumes two tensors: T_UPSAMPLE as chunk 0 and T_SKIP_RELOAD as
+ *   chunk 1. The graph runtime accumulates both chunks into INT32 psum and
+ *   requants only after chunk 1.
+ * - T_C2F_PSUM and T_DOWN_PSUM intentionally alias the same large INT32 scratch
+ *   allocation. Their lifetimes do not overlap.
+ * - T_SIG also aliases that scratch allocation before any Conv psum use.
+ * - T_HEAD_TILE must not alias T_SKIP_RELOAD or T_UPSAMPLE because layer 16
+ *   reads both input branches while writing the output tile.
+ */
+
 void *memset(void *dst, int value, uint32_t bytes) {
     uint8_t *ptr = (uint8_t *)dst;
     for (uint32_t i = 0; i < bytes; i++) {
@@ -218,6 +234,11 @@ static void init_layers(void) {
     layers[8].min_val = -128;
     layers[8].max_val = 127;
 
+    /*
+     * Preserve the L3 skip branch before T_SILU/T_DOWN reuse overwrites this
+     * TCDM storage. This replaces materialized concat: the skip branch is later
+     * reloaded and consumed as Head_Conv chunk 1.
+     */
     layers[9].op = NPU_OP_DMA_OUT;
     layers[9].src = T_SILU;
     layers[9].l2_addr = L2_SKIP;
@@ -267,11 +288,18 @@ static void init_layers(void) {
     layers[14].dst = T_UPSAMPLE;
     layers[14].bytes = ACT_BYTES;
 
+    /* Reload the preserved skip branch for logical concat bypass. */
     layers[15].op = NPU_OP_DMA_IN;
     layers[15].dst = T_SKIP_RELOAD;
     layers[15].l2_addr = L2_SKIP;
     layers[15].bytes = ACT_BYTES;
 
+    /*
+     * Fused logical Concat + Head_Conv:
+     *   src  = upsample branch, weight3 chunk 0 -> INT32 psum
+     *   src2 = skip branch,     weight3 chunk 1 -> accumulate + requant
+     * The op writes the final INT8 head output tile-by-tile to L2_OUTPUT.
+     */
     layers[16].op = NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2;
     layers[16].src = T_UPSAMPLE;
     layers[16].src2 = T_SKIP_RELOAD;
@@ -323,6 +351,20 @@ int main(void) {
     uint32_t act_c_addr = alloc_or_fail(&scratch, ACT_BYTES);
     uint32_t head_tile_addr = alloc_or_fail(&scratch, HEAD_TILE_BYTES);
 
+    /*
+     * Buffer lifetime map:
+     *
+     * act_a:
+     *   T_STEM -> T_OUT -> T_POOL -> T_SKIP_RELOAD
+     * act_c:
+     *   T_SILU -> T_DOWN -> T_UPSAMPLE
+     * psum_or_sig:
+     *   T_SIG -> T_C2F_PSUM/T_DOWN_PSUM/head full psum
+     *
+     * The static aliases above are part of the test contract. If a new layer is
+     * inserted, update this map first; otherwise the graph can pass build but
+     * silently overwrite an input branch.
+     */
     init_tensor(&tensors[T_INPUT], input_addr,
                 INPUT_H, INPUT_W, INPUT_C, INPUT_H * INPUT_W * INPUT_C,
                 NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);

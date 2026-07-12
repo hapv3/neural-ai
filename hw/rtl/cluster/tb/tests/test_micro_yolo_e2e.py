@@ -33,19 +33,12 @@ OUTPUT_H = 48
 OUTPUT_W = 48
 DOWN_H = 24
 DOWN_W = 24
-INPUT_BYTES = INPUT_H * INPUT_W * 3
 WEIGHT_BYTES = 32 * 32
 C2F_WEIGHT_BYTES = 3 * 3 * 32 * 32
 DOWN_WEIGHT_BYTES = C2F_WEIGHT_BYTES
 HEAD_WEIGHT_BYTES = 2 * C2F_WEIGHT_BYTES
 LUT_BYTES = 256
 OUTPUT_BYTES = OUTPUT_H * OUTPUT_W * 32
-LINEBUF_K_MAX = 5
-LINEBUF_KGEN_MAX_M = 1024
-C2F_TILE_OH = 16
-C2F_TILE_OW = 16
-DOWN_TILE_OH = 16
-DOWN_TILE_OW = 16
 DTCM_STATUS = 0x10008000
 DTCM_FAIL_CODE = 0x10008004
 DTCM_LAYER = 0x10008008
@@ -67,11 +60,6 @@ OP_NAMES = {
     16: "UPSAMPLE_NEAREST2X_I8",
     17: "CONV3x3s1_C32x2_LB_RQ_L2",
 }
-
-
-def safe_int(handle):
-    value = handle.value
-    return value.to_unsigned() if value.is_resolvable else None
 
 
 def pmu_direct_snapshot(dut):
@@ -112,6 +100,9 @@ def format_layer_pmu(layer, op, counters):
 
 
 async def monitor_step_pmu(dut, timeout_cycles):
+    # Firmware updates a tiny D-TCM trace page at graph-layer entry/exit.
+    # Sampling PMU on those trace transitions gives a per-layer performance
+    # breakdown without needing Snitch-side printf or interrupt handlers.
     samples = []
     last_trace = None
 
@@ -151,20 +142,6 @@ async def monitor_step_pmu(dut, timeout_cycles):
     return layer_lines
 
 
-def read_systolic_debug(dut):
-    ctrl = dut.u_npu_cluster.u_systolic_controller
-    return {
-        "state": safe_int(ctrl.state_q),
-        "req_cnt": safe_int(ctrl.req_cnt_q),
-        "rsp_cnt": safe_int(ctrl.rsp_cnt_q),
-        "drain_cnt": safe_int(ctrl.drain_cnt_q),
-        "ofm_buf_valid": safe_int(ctrl.ofm_buf_valid_q),
-        "ofm_valid": safe_int(dut.u_npu_cluster.sys_ofm_valid),
-        "o_gnt": safe_int(dut.u_npu_cluster.sys_obi_o_gnt),
-        "cfg_done": safe_int(dut.u_npu_cluster.cfg_sys_done),
-    }
-
-
 def to_u8(value):
     return value & 0xFF
 
@@ -175,6 +152,10 @@ def to_i8(value):
 
 
 def deterministic_fixture():
+    # Keep all fixtures generated in Python so this test is self-contained.
+    # The formulas intentionally stay small-valued: they exercise sign,
+    # saturation, padding, and accumulation without making mismatches hard to
+    # inspect as signed INT8 values.
     input_hwc = [
         ((y * 3 + x * 5 + c * 7) % 7) - 3
         for y in range(INPUT_H)
@@ -197,6 +178,9 @@ def deterministic_fixture():
         for n in range(32)
     ]
     weight3 = [
+        # The first contiguous C32 chunk is consumed by the upsample branch.
+        # The second contiguous C32 chunk is consumed by the skip branch.
+        # Firmware does not materialize concat; it runs these chunks separately.
         ((chunk * 17 + k * 7 + n * 5 + 1) % 13) - 6
         for chunk in range(2)
         for k in range(3 * 3 * 32)
@@ -234,6 +218,8 @@ def conv3x3s2p1_c3_o32(input_hwc, weight):
 
 
 def conv3x3_c32_o32(input_flat, input_h, input_w, output_h, output_w, stride, weight):
+    # ROW32 logical layout: each spatial pixel stores one contiguous C32 vector.
+    # Weight layout is K-major, OC-minor: [kh, kw, ic, oc32].
     out = []
     for oy in range(output_h):
         for ox in range(output_w):
@@ -286,6 +272,8 @@ def maxpool2d_5x5s1p2_c32(input_flat):
 
 
 def upsample_nearest2x_c32(input_flat):
+    # C32 nearest-neighbor upsample mirrors spatz_upsample_nearest2x_c32_i8:
+    # every 24x24x32 input pixel is copied to a 2x2 block in the 48x48 output.
     out = []
     for oh in range(OUTPUT_H):
         ih = oh // 2
@@ -301,6 +289,10 @@ def requant(values, min_val, max_val):
 
 
 def golden_micro_yolo(input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut):
+    # Golden follows the current hardware graph, not an older materialized
+    # concat graph. The head identity is:
+    #   Conv([upsample, skip], W) == Conv(upsample, W0) + Conv(skip, W1)
+    # Requant/clamp happens only after the two C32 chunks are accumulated.
     conv0 = conv3x3s2p1_c3_o32(input_hwc, weight0)
     stem_flat = requant([value for row in conv0 for value in row], -128, 127)
     sig_flat = [to_i8(sigmoid_lut[to_u8(value)]) for value in stem_flat]
@@ -350,10 +342,6 @@ async def test_micro_yolo_e2e(dut):
 
     input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut = deterministic_fixture()
     expected = golden_micro_yolo(input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut)
-    assert C2F_TILE_OH == 16
-    assert C2F_TILE_OW == 16
-    assert DOWN_TILE_OH == 16
-    assert DOWN_TILE_OW == 16
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
