@@ -2,10 +2,11 @@
 #include "npu_memory_map.h"
 
 /*
- * Phase 3e Conv_Stem + SiLU + C2f_Conv + residual Add checkpoint:
+ * Phase 3f Conv_Stem + SiLU + C2f_Conv + residual Add + Conv_Down checkpoint:
  *   96x96x3 HWC -> linebuffer 3x3s2p1 -> GEMM32 -> clamp/requant
  *                -> Logistic LUT -> Mul -> fused linebuffer Conv3x3s1p1 C32
- *                -> Add residual(SiLU) -> 48x48x32 INT8 L2 output.
+ *                -> Add residual(SiLU) -> fused linebuffer Conv3x3s2p1 C32
+ *                -> 24x24x32 INT8 L2 output.
  */
 #define PASS_SIGNATURE 0xDEADBEEFu
 #define FAIL_SIGNATURE 0xBAD30000u
@@ -20,6 +21,7 @@
 #define L2_WEIGHT0 0x80008000u
 #define L2_SIG_LUT 0x80009000u
 #define L2_WEIGHT1 0x8000A000u
+#define L2_WEIGHT2 0x8000D000u
 #define L2_OUTPUT  0x80020000u
 
 #define SCRATCH_BASE 0x10100000u
@@ -31,11 +33,17 @@
 #define OUTPUT_H ((INPUT_H + 1u) / 2u)
 #define OUTPUT_W ((INPUT_W + 1u) / 2u)
 #define ROWS    (OUTPUT_H * OUTPUT_W)
+#define DOWN_H  ((OUTPUT_H + 1u) / 2u)
+#define DOWN_W  ((OUTPUT_W + 1u) / 2u)
+#define DOWN_ROWS (DOWN_H * DOWN_W)
 #define WEIGHT_BYTES (32u * 32u)
 #define C2F_WEIGHT_BYTES (3u * 3u * 32u * 32u)
+#define DOWN_WEIGHT_BYTES C2F_WEIGHT_BYTES
 #define LUT_BYTES    256u
 #define ACT_BYTES    (ROWS * 32u)
+#define DOWN_ACT_BYTES (DOWN_ROWS * 32u)
 #define C2F_PSUM_BYTES (ROWS * 32u * 4u)
+#define DOWN_PSUM_BYTES (DOWN_ROWS * 32u * 4u)
 
 #ifndef MICRO_YOLO_C2F_TILE_OH
 #define MICRO_YOLO_C2F_TILE_OH 16u
@@ -43,6 +51,14 @@
 
 #ifndef MICRO_YOLO_C2F_TILE_OW
 #define MICRO_YOLO_C2F_TILE_OW 16u
+#endif
+
+#ifndef MICRO_YOLO_DOWN_TILE_OH
+#define MICRO_YOLO_DOWN_TILE_OH 16u
+#endif
+
+#ifndef MICRO_YOLO_DOWN_TILE_OW
+#define MICRO_YOLO_DOWN_TILE_OW 16u
 #endif
 
 void *memset(void *dst, int value, uint32_t bytes) {
@@ -57,17 +73,20 @@ enum {
     T_INPUT = 0,
     T_WEIGHT0,
     T_WEIGHT1,
+    T_WEIGHT2,
     T_SIG_LUT,
     T_STEM,
     T_SIG,
     T_SILU,
     T_C2F_PSUM,
+    T_DOWN_PSUM,
     T_OUT,
+    T_DOWN,
     TENSOR_COUNT
 };
 
 static npu_tensor_t tensors[TENSOR_COUNT];
-static npu_layer_t layers[10];
+static npu_layer_t layers[12];
 static npu_graph_t graph;
 
 void npu_graph_trace(uint32_t layer_index, npu_op_type_t op, uint32_t event) {
@@ -137,61 +156,79 @@ static void init_layers(void) {
     layers[2].bytes = C2F_WEIGHT_BYTES;
 
     layers[3].op = NPU_OP_DMA_IN;
-    layers[3].dst = T_SIG_LUT;
-    layers[3].l2_addr = L2_SIG_LUT;
-    layers[3].bytes = LUT_BYTES;
+    layers[3].dst = T_WEIGHT2;
+    layers[3].l2_addr = L2_WEIGHT2;
+    layers[3].bytes = DOWN_WEIGHT_BYTES;
 
-    layers[4].op = NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT;
-    layers[4].src = T_INPUT;
-    layers[4].dst = T_STEM;
-    layers[4].aux = T_WEIGHT0;
-    layers[4].dim_m = ROWS;
-    layers[4].multiplier = 1;
-    layers[4].shift = 0;
-    layers[4].min_val = -128;
-    layers[4].max_val = 127;
+    layers[4].op = NPU_OP_DMA_IN;
+    layers[4].dst = T_SIG_LUT;
+    layers[4].l2_addr = L2_SIG_LUT;
+    layers[4].bytes = LUT_BYTES;
 
-    layers[5].op = NPU_OP_LOGISTIC_LUT_I8;
-    layers[5].src = T_STEM;
-    layers[5].dst = T_SIG;
-    layers[5].aux = T_SIG_LUT;
-    layers[5].bytes = ACT_BYTES;
+    layers[5].op = NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT;
+    layers[5].src = T_INPUT;
+    layers[5].dst = T_STEM;
+    layers[5].aux = T_WEIGHT0;
+    layers[5].dim_m = ROWS;
+    layers[5].multiplier = 1;
+    layers[5].shift = 0;
+    layers[5].min_val = -128;
+    layers[5].max_val = 127;
 
-    layers[6].op = NPU_OP_MUL_I8;
+    layers[6].op = NPU_OP_LOGISTIC_LUT_I8;
     layers[6].src = T_STEM;
-    layers[6].dst = T_SILU;
-    layers[6].aux = T_SIG;
+    layers[6].dst = T_SIG;
+    layers[6].aux = T_SIG_LUT;
     layers[6].bytes = ACT_BYTES;
-    layers[6].multiplier = 1;
-    layers[6].shift = 7;
-    layers[6].min_val = -128;
-    layers[6].max_val = 127;
 
-    layers[7].op = NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT;
-    layers[7].src = T_SILU;
-    layers[7].dst = T_OUT;
-    layers[7].aux = T_WEIGHT1;
-    layers[7].aux2 = T_C2F_PSUM;
-    layers[7].bytes = C2F_PSUM_BYTES;
-    layers[7].dim_m = MICRO_YOLO_C2F_TILE_OH;
-    layers[7].dim_n = MICRO_YOLO_C2F_TILE_OW;
+    layers[7].op = NPU_OP_MUL_I8;
+    layers[7].src = T_STEM;
+    layers[7].dst = T_SILU;
+    layers[7].aux = T_SIG;
+    layers[7].bytes = ACT_BYTES;
     layers[7].multiplier = 1;
-    layers[7].shift = 0;
+    layers[7].shift = 7;
     layers[7].min_val = -128;
     layers[7].max_val = 127;
 
-    layers[8].op = NPU_OP_ADD_I8;
-    layers[8].src = T_OUT;
+    layers[8].op = NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT;
+    layers[8].src = T_SILU;
     layers[8].dst = T_OUT;
-    layers[8].aux = T_SILU;
-    layers[8].bytes = ACT_BYTES;
+    layers[8].aux = T_WEIGHT1;
+    layers[8].aux2 = T_C2F_PSUM;
+    layers[8].bytes = C2F_PSUM_BYTES;
+    layers[8].dim_m = MICRO_YOLO_C2F_TILE_OH;
+    layers[8].dim_n = MICRO_YOLO_C2F_TILE_OW;
+    layers[8].multiplier = 1;
+    layers[8].shift = 0;
     layers[8].min_val = -128;
     layers[8].max_val = 127;
 
-    layers[9].op = NPU_OP_DMA_OUT;
+    layers[9].op = NPU_OP_ADD_I8;
     layers[9].src = T_OUT;
-    layers[9].l2_addr = L2_OUTPUT;
+    layers[9].dst = T_OUT;
+    layers[9].aux = T_SILU;
     layers[9].bytes = ACT_BYTES;
+    layers[9].min_val = -128;
+    layers[9].max_val = 127;
+
+    layers[10].op = NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT;
+    layers[10].src = T_OUT;
+    layers[10].dst = T_DOWN;
+    layers[10].aux = T_WEIGHT2;
+    layers[10].aux2 = T_DOWN_PSUM;
+    layers[10].bytes = DOWN_PSUM_BYTES;
+    layers[10].dim_m = MICRO_YOLO_DOWN_TILE_OH;
+    layers[10].dim_n = MICRO_YOLO_DOWN_TILE_OW;
+    layers[10].multiplier = 1;
+    layers[10].shift = 0;
+    layers[10].min_val = -128;
+    layers[10].max_val = 127;
+
+    layers[11].op = NPU_OP_DMA_OUT;
+    layers[11].src = T_DOWN;
+    layers[11].l2_addr = L2_OUTPUT;
+    layers[11].bytes = DOWN_ACT_BYTES;
 
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;
@@ -221,6 +258,7 @@ int main(void) {
     uint32_t input_addr = alloc_or_fail(&scratch, INPUT_H * INPUT_W * INPUT_C);
     uint32_t weight0_addr = alloc_or_fail(&scratch, WEIGHT_BYTES);
     uint32_t weight1_addr = alloc_or_fail(&scratch, C2F_WEIGHT_BYTES);
+    uint32_t weight2_addr = alloc_or_fail(&scratch, DOWN_WEIGHT_BYTES);
     uint32_t lut_addr = alloc_or_fail(&scratch, LUT_BYTES);
     uint32_t act_a_addr = alloc_or_fail(&scratch, ACT_BYTES);
     uint32_t psum_or_sig_addr = alloc_or_fail(&scratch, C2F_PSUM_BYTES);
@@ -234,6 +272,9 @@ int main(void) {
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     init_tensor(&tensors[T_WEIGHT1], weight1_addr,
                 288, 32, 32, C2F_WEIGHT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_WEIGHT2], weight2_addr,
+                288, 32, 32, DOWN_WEIGHT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     init_tensor(&tensors[T_SIG_LUT], lut_addr,
                 1, 1, 256, LUT_BYTES,
@@ -250,8 +291,14 @@ int main(void) {
     init_tensor(&tensors[T_C2F_PSUM], psum_or_sig_addr,
                 OUTPUT_H, OUTPUT_W, 32, C2F_PSUM_BYTES,
                 NPU_DTYPE_I32, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_DOWN_PSUM], psum_or_sig_addr,
+                DOWN_H, DOWN_W, 32, DOWN_PSUM_BYTES,
+                NPU_DTYPE_I32, NPU_LAYOUT_ROW32, 1, 0);
     init_tensor(&tensors[T_OUT], act_a_addr,
                 OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_DOWN], act_c_addr,
+                DOWN_H, DOWN_W, 32, DOWN_ACT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     SIG_STATUS = 0x30000003u;
 

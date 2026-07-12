@@ -134,23 +134,33 @@ static uint32_t run_conv2d3x3s1p1_c32_linebuf(const npu_tensor_t *src,
     return (conv_status == NPU_CONV2D_PACKED_OK) ? NPU_GRAPH_OK : conv_status;
 }
 
-static uint32_t run_conv2d3x3s1p1_c32_linebuf_requant(const npu_tensor_t *src,
-                                                      const npu_tensor_t *dst,
-                                                      const npu_tensor_t *weight,
-                                                      const npu_tensor_t *psum,
-                                                      const npu_layer_t *layer) {
+static uint32_t run_conv2d3x3_c32_linebuf_requant(const npu_tensor_t *src,
+                                                  const npu_tensor_t *dst,
+                                                  const npu_tensor_t *weight,
+                                                  const npu_tensor_t *psum,
+                                                  const npu_layer_t *layer,
+                                                  uint32_t stride_h,
+                                                  uint32_t stride_w) {
     const uint32_t input_c = 32u;
     const uint32_t kernel_h = 3u;
     const uint32_t kernel_w = 3u;
     const uint32_t weight_bytes = kernel_h * kernel_w * input_c * 32u;
     uint32_t rows;
+    uint32_t expected_h;
+    uint32_t expected_w;
+
+    if (stride_h == 0u || stride_w == 0u || src->h == 0u || src->w == 0u) {
+        return NPU_GRAPH_ERR_BAD_TENSOR;
+    }
+    expected_h = (((uint32_t)src->h - 1u) / stride_h) + 1u;
+    expected_w = (((uint32_t)src->w - 1u) / stride_w) + 1u;
 
     if (!tensor_has_layout(src, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
         !tensor_has_layout(dst, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
         !tensor_has_layout(weight, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
         !tensor_has_layout(psum, NPU_LAYOUT_ROW32, NPU_DTYPE_I32) ||
         src->c != 32u || dst->c != 32u || psum->c != 32u ||
-        src->h != dst->h || src->w != dst->w ||
+        dst->h != expected_h || dst->w != expected_w ||
         psum->h != dst->h || psum->w != dst->w ||
         weight->bytes < weight_bytes ||
         dst->bytes < npu_tensor_row32_bytes((uint32_t)dst->h * dst->w) ||
@@ -174,8 +184,8 @@ static uint32_t run_conv2d3x3s1p1_c32_linebuf_requant(const npu_tensor_t *src,
     conv_cfg.output_w = dst->w;
     conv_cfg.kernel_h = kernel_h;
     conv_cfg.kernel_w = kernel_w;
-    conv_cfg.stride_h = 1u;
-    conv_cfg.stride_w = 1u;
+    conv_cfg.stride_h = stride_h;
+    conv_cfg.stride_w = stride_w;
     conv_cfg.pad_h = 1u;
     conv_cfg.pad_w = 1u;
     conv_cfg.dilation_h = 1u;
@@ -499,7 +509,16 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
-                    run_conv2d3x3s1p1_c32_linebuf_requant(src, dst, aux, aux2, layer);
+                    run_conv2d3x3_c32_linebuf_requant(src, dst, aux, aux2, layer, 1u, 1u);
+                if (conv_status != NPU_GRAPH_OK) return conv_status;
+            }
+            break;
+
+        case NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT:
+            if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t conv_status =
+                    run_conv2d3x3_c32_linebuf_requant(src, dst, aux, aux2, layer, 2u, 2u);
                 if (conv_status != NPU_GRAPH_OK) return conv_status;
             }
             break;

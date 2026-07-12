@@ -23,21 +23,27 @@ L2_INPUT = 0x80000000
 L2_WEIGHT0 = 0x80008000
 L2_SIG_LUT = 0x80009000
 L2_WEIGHT1 = 0x8000A000
+L2_WEIGHT2 = 0x8000D000
 L2_OUTPUT = 0x80020000
 
 INPUT_H = 96
 INPUT_W = 96
 OUTPUT_H = 48
 OUTPUT_W = 48
+DOWN_H = 24
+DOWN_W = 24
 INPUT_BYTES = INPUT_H * INPUT_W * 3
 WEIGHT_BYTES = 32 * 32
 C2F_WEIGHT_BYTES = 3 * 3 * 32 * 32
+DOWN_WEIGHT_BYTES = C2F_WEIGHT_BYTES
 LUT_BYTES = 256
-OUTPUT_BYTES = OUTPUT_H * OUTPUT_W * 32
+OUTPUT_BYTES = DOWN_H * DOWN_W * 32
 LINEBUF_K_MAX = 5
 LINEBUF_KGEN_MAX_M = 1024
 C2F_TILE_OH = 16
 C2F_TILE_OW = 16
+DOWN_TILE_OH = 16
+DOWN_TILE_OW = 16
 DTCM_STATUS = 0x10008000
 DTCM_FAIL_CODE = 0x10008004
 DTCM_LAYER = 0x10008008
@@ -54,6 +60,7 @@ OP_NAMES = {
     11: "CONV3x3s1_C32_LB",
     12: "CONV3x3s1_C32_LB_RQ",
     13: "ADD_I8",
+    14: "CONV3x3s2_C32_LB_RQ",
 }
 
 
@@ -179,11 +186,16 @@ def deterministic_fixture():
         for k in range(3 * 3 * 32)
         for n in range(32)
     ]
+    weight2 = [
+        ((k * 11 + n * 13 + 5) % 11) - 5
+        for k in range(3 * 3 * 32)
+        for n in range(32)
+    ]
     sigmoid_lut = [
         max(0, min(127, int(round((1.0 / (1.0 + math.exp(-to_i8(index) / 16.0))) * 127.0))))
         for index in range(256)
     ]
-    return input_hwc, weight0, weight1, sigmoid_lut
+    return input_hwc, weight0, weight1, weight2, sigmoid_lut
 
 
 def conv3x3s2p1_c3_o32(input_hwc, weight):
@@ -210,21 +222,21 @@ def conv3x3s2p1_c3_o32(input_hwc, weight):
     return out
 
 
-def conv3x3s1p1_c32_o32(input_flat, weight):
+def conv3x3_c32_o32(input_flat, input_h, input_w, output_h, output_w, stride, weight):
     out = []
-    for oy in range(OUTPUT_H):
-        for ox in range(OUTPUT_W):
+    for oy in range(output_h):
+        for ox in range(output_w):
             out_row = []
             for n in range(32):
                 acc = 0
                 k = 0
                 for ky in range(-1, 2):
-                    iy = oy + ky
+                    iy = oy * stride + ky
                     for kx in range(-1, 2):
-                        ix = ox + kx
+                        ix = ox * stride + kx
                         for c in range(32):
-                            if 0 <= iy < OUTPUT_H and 0 <= ix < OUTPUT_W:
-                                value = input_flat[((iy * OUTPUT_W + ix) * 32) + c]
+                            if 0 <= iy < input_h and 0 <= ix < input_w:
+                                value = input_flat[((iy * input_w + ix) * 32) + c]
                             else:
                                 value = 0
                             acc += value * weight[k * 32 + n]
@@ -234,11 +246,19 @@ def conv3x3s1p1_c32_o32(input_flat, weight):
     return out
 
 
+def conv3x3s1p1_c32_o32(input_flat, weight):
+    return conv3x3_c32_o32(input_flat, OUTPUT_H, OUTPUT_W, OUTPUT_H, OUTPUT_W, 1, weight)
+
+
+def conv3x3s2p1_c32_o32(input_flat, weight):
+    return conv3x3_c32_o32(input_flat, OUTPUT_H, OUTPUT_W, DOWN_H, DOWN_W, 2, weight)
+
+
 def requant(values, min_val, max_val):
     return [max(min_val, min(max_val, value)) for value in values]
 
 
-def golden_micro_yolo(input_hwc, weight0, weight1, sigmoid_lut):
+def golden_micro_yolo(input_hwc, weight0, weight1, weight2, sigmoid_lut):
     conv0 = conv3x3s2p1_c3_o32(input_hwc, weight0)
     stem_flat = requant([value for row in conv0 for value in row], -128, 127)
     sig_flat = [to_i8(sigmoid_lut[to_u8(value)]) for value in stem_flat]
@@ -254,7 +274,9 @@ def golden_micro_yolo(input_hwc, weight0, weight1, sigmoid_lut):
         -128,
         127,
     )
-    return [to_u8(value) for value in residual_flat]
+    down = conv3x3s2p1_c32_o32(residual_flat, weight2)
+    down_flat = requant([value for row in down for value in row], -128, 127)
+    return [to_u8(value) for value in down_flat]
 
 
 @cocotb.test()
@@ -271,10 +293,12 @@ async def test_micro_yolo_e2e(dut):
         reset_active_level=False,
     )
 
-    input_hwc, weight0, weight1, sigmoid_lut = deterministic_fixture()
-    expected = golden_micro_yolo(input_hwc, weight0, weight1, sigmoid_lut)
+    input_hwc, weight0, weight1, weight2, sigmoid_lut = deterministic_fixture()
+    expected = golden_micro_yolo(input_hwc, weight0, weight1, weight2, sigmoid_lut)
     assert C2F_TILE_OH == 16
     assert C2F_TILE_OW == 16
+    assert DOWN_TILE_OH == 16
+    assert DOWN_TILE_OW == 16
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
@@ -287,6 +311,7 @@ async def test_micro_yolo_e2e(dut):
     await write_l2_bytes(dut, L2_WEIGHT0, [to_u8(value) for value in weight0])
     await write_l2_bytes(dut, L2_SIG_LUT, sigmoid_lut)
     await write_l2_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
+    await write_l2_bytes(dut, L2_WEIGHT2, [to_u8(value) for value in weight2])
     await load_firmware_axi(axi_master, fw_path)
     await release_fetch(dut, axi_master=axi_master)
     step_pmu_task = cocotb.start_soon(monitor_step_pmu(dut, 1200000))
