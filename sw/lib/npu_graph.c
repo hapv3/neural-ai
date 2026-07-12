@@ -515,6 +515,22 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_UPSAMPLE_NEAREST2X_I8:
+            if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
+            if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||
+                !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
+                src->c != dst->c ||
+                dst->h != ((uint32_t)src->h * 2u) ||
+                dst->w != ((uint32_t)src->w * 2u) ||
+                src->bytes < ((uint32_t)src->h * src->w * src->c) ||
+                dst->bytes < ((uint32_t)dst->h * dst->w * dst->c) ||
+                src->addr == dst->addr) {
+                return NPU_GRAPH_ERR_BAD_TENSOR;
+            }
+            spatz_upsample_nearest_i8((const int8_t *)src->addr, (int8_t *)dst->addr,
+                                      src->h, src->w, src->c, 2u, 2u);
+            break;
+
         case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {

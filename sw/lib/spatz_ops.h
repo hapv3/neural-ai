@@ -48,6 +48,8 @@ void spatz_maxpool2d_5x5s1p2_c32_i8(const int8_t *src, int8_t *dst,
 void spatz_upsample_nearest_i8(const int8_t *src, int8_t *dst,
                                uint32_t input_h, uint32_t input_w, uint32_t channels,
                                uint32_t scale_h, uint32_t scale_w);
+void spatz_upsample_nearest2x_c32_i8(const int8_t *src, int8_t *dst,
+                                      uint32_t input_h, uint32_t input_w);
 void spatz_concat_c32_i8(const int8_t *src0, uint32_t c0,
                          const int8_t *src1, uint32_t c1,
                          int8_t *dst, uint32_t height, uint32_t width);

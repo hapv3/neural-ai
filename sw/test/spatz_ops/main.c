@@ -55,6 +55,8 @@
 #define POOL_DST     ((volatile int8_t *)0x10101200u)
 #define UP_SRC       ((volatile int8_t *)0x10101400u)
 #define UP_DST       ((volatile int8_t *)0x10101500u)
+#define UP_C32_SRC   ((volatile int8_t *)0x10102000u)
+#define UP_C32_DST   ((volatile int8_t *)0x10103000u)
 #define CONCAT_SRC0  ((volatile int8_t *)0x10101800u)
 #define CONCAT_SRC1  ((volatile int8_t *)0x10101A00u)
 #define CONCAT_DST   ((volatile int8_t *)0x10101C00u)
@@ -84,6 +86,9 @@
 #define UP_W 3u
 #define UP_C 2u
 #define UP_SCALE 2u
+#define UP_C32_H 3u
+#define UP_C32_W 4u
+#define UP_C32_C 32u
 #define CONCAT_H 2u
 #define CONCAT_W 3u
 #define CONCAT_C0 32u
@@ -134,6 +139,10 @@ static int8_t expected_pool_value(uint32_t oh, uint32_t ow, uint32_t c) {
 
 static int8_t up_input_value(uint32_t h, uint32_t w, uint32_t c) {
     return (int8_t)((int32_t)(h * 17u + w * 9u + c * 3u) - 20);
+}
+
+static int8_t up_c32_input_value(uint32_t h, uint32_t w, uint32_t c) {
+    return (int8_t)((int32_t)((h * 17u + w * 11u + c * 5u) % 127u) - 63);
 }
 
 static void mark_pass(void) {
@@ -363,6 +372,28 @@ static void run_upsample(void) {
                 int8_t expected = up_input_value(h / UP_SCALE, w / UP_SCALE, c);
                 if (UP_DST[index] != expected) {
                     fail(8, index, UP_DST[index], expected);
+                }
+            }
+        }
+    }
+
+    for (uint32_t h = 0; h < UP_C32_H; h++) {
+        for (uint32_t w = 0; w < UP_C32_W; w++) {
+            for (uint32_t c = 0; c < UP_C32_C; c++) {
+                UP_C32_SRC[((h * UP_C32_W + w) * UP_C32_C) + c] =
+                    up_c32_input_value(h, w, c);
+            }
+        }
+    }
+    spatz_upsample_nearest_i8((const int8_t *)UP_C32_SRC, (int8_t *)UP_C32_DST,
+                              UP_C32_H, UP_C32_W, UP_C32_C, UP_SCALE, UP_SCALE);
+    for (uint32_t h = 0; h < (UP_C32_H * UP_SCALE); h++) {
+        for (uint32_t w = 0; w < (UP_C32_W * UP_SCALE); w++) {
+            for (uint32_t c = 0; c < UP_C32_C; c++) {
+                uint32_t index = ((h * (UP_C32_W * UP_SCALE) + w) * UP_C32_C) + c;
+                int8_t expected = up_c32_input_value(h / UP_SCALE, w / UP_SCALE, c);
+                if (UP_C32_DST[index] != expected) {
+                    fail(8, index, UP_C32_DST[index], expected);
                 }
             }
         }

@@ -365,3 +365,63 @@ spatz_maxpool2d_5x5s1p2_c32_i8:
     addi sp, sp, 48
 9:
     ret
+
+    .global spatz_upsample_nearest2x_c32_i8
+    .type spatz_upsample_nearest2x_c32_i8, @function
+spatz_upsample_nearest2x_c32_i8:
+    beqz a2, 5f
+    beqz a3, 5f
+    addi sp, sp, -32
+    sw s0, 0(sp)
+    sw s1, 4(sp)
+    sw s2, 8(sp)
+    sw s3, 12(sp)
+    sw s4, 16(sp)
+    sw s5, 20(sp)
+    sw s6, 24(sp)
+
+    mv s0, a0
+    mv s1, a1
+    mv s2, a2
+    mv s3, a3
+    slli s4, s3, 5
+    slli s5, s3, 6
+    li t0, 32
+    vsetvli zero, t0, e8, m1, ta, ma
+1:
+    beqz s2, 4f
+    mv t0, s0
+    mv t1, s1
+    add t2, s1, s5
+    mv s6, s3
+2:
+    beqz s6, 3f
+    vle8.v v8, (t0)
+    vse8.v v8, (t1)
+    addi t3, t1, 32
+    vse8.v v8, (t3)
+    vse8.v v8, (t2)
+    addi t3, t2, 32
+    vse8.v v8, (t3)
+    addi t0, t0, 32
+    addi t1, t1, 64
+    addi t2, t2, 64
+    addi s6, s6, -1
+    j 2b
+3:
+    add s0, s0, s4
+    slli t0, s5, 1
+    add s1, s1, t0
+    addi s2, s2, -1
+    j 1b
+4:
+    lw s0, 0(sp)
+    lw s1, 4(sp)
+    lw s2, 8(sp)
+    lw s3, 12(sp)
+    lw s4, 16(sp)
+    lw s5, 20(sp)
+    lw s6, 24(sp)
+    addi sp, sp, 32
+5:
+    ret

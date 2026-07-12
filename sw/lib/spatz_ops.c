@@ -124,6 +124,11 @@ void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
 void spatz_upsample_nearest_i8(const int8_t *src, int8_t *dst,
                                uint32_t input_h, uint32_t input_w, uint32_t channels,
                                uint32_t scale_h, uint32_t scale_w) {
+    if (channels == 32u && scale_h == 2u && scale_w == 2u && src != dst) {
+        spatz_upsample_nearest2x_c32_i8(src, dst, input_h, input_w);
+        return;
+    }
+
     uint32_t output_w = input_w * scale_w;
 
     for (uint32_t ih = 0; ih < input_h; ih++) {

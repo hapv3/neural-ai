@@ -37,7 +37,7 @@ WEIGHT_BYTES = 32 * 32
 C2F_WEIGHT_BYTES = 3 * 3 * 32 * 32
 DOWN_WEIGHT_BYTES = C2F_WEIGHT_BYTES
 LUT_BYTES = 256
-OUTPUT_BYTES = DOWN_H * DOWN_W * 32
+OUTPUT_BYTES = OUTPUT_H * OUTPUT_W * 32
 LINEBUF_K_MAX = 5
 LINEBUF_KGEN_MAX_M = 1024
 C2F_TILE_OH = 16
@@ -62,6 +62,7 @@ OP_NAMES = {
     13: "ADD_I8",
     14: "CONV3x3s2_C32_LB_RQ",
     15: "MAXPOOL2D5x5s1p2_I8",
+    16: "UPSAMPLE_NEAREST2X_I8",
 }
 
 
@@ -275,6 +276,17 @@ def maxpool2d_5x5s1p2_c32(input_flat):
     return out
 
 
+def upsample_nearest2x_c32(input_flat):
+    out = []
+    for oh in range(OUTPUT_H):
+        ih = oh // 2
+        for ow in range(OUTPUT_W):
+            iw = ow // 2
+            base = ((ih * DOWN_W + iw) * 32)
+            out.extend(input_flat[base:base + 32])
+    return out
+
+
 def requant(values, min_val, max_val):
     return [max(min_val, min(max_val, value)) for value in values]
 
@@ -298,7 +310,8 @@ def golden_micro_yolo(input_hwc, weight0, weight1, weight2, sigmoid_lut):
     down = conv3x3s2p1_c32_o32(residual_flat, weight2)
     down_flat = requant([value for row in down for value in row], -128, 127)
     pool_flat = maxpool2d_5x5s1p2_c32(down_flat)
-    return [to_u8(value) for value in pool_flat]
+    upsample_flat = upsample_nearest2x_c32(pool_flat)
+    return [to_u8(value) for value in upsample_flat]
 
 
 @cocotb.test()
