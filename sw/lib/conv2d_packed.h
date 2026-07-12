@@ -78,5 +78,10 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
                                                           uint32_t tile_count,
                                                           uint32_t psum_addr,
                                                           npu_conv2d_packed_stats_t *stats);
+uint32_t npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant(const npu_conv2d_packed_cfg_t *cfg,
+                                                                    const npu_conv2d_spatial_tile_t *tile,
+                                                                    uint32_t psum_addr,
+                                                                    uint32_t output_addr,
+                                                                    npu_conv2d_packed_stats_t *stats);
 
 #endif

@@ -20,12 +20,14 @@ typedef enum {
     NPU_OP_ADD_I8 = 13,
     NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT = 14,
     NPU_OP_MAXPOOL2D5X5S1P2_I8 = 15,
-    NPU_OP_UPSAMPLE_NEAREST2X_I8 = 16
+    NPU_OP_UPSAMPLE_NEAREST2X_I8 = 16,
+    NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2 = 17
 } npu_op_type_t;
 
 typedef struct {
     npu_op_type_t op;
     uint32_t src;
+    uint32_t src2;
     uint32_t dst;
     uint32_t aux;
     uint32_t aux2;
