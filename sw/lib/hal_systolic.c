@@ -246,6 +246,19 @@ void systolic_gemm32_linebuf_ktiles_accumulate_strided(uint32_t weight_addr,
     systolic_linebuf_disable();
 }
 
+void systolic_gemm32_linebuf_ktiles_accumulate_requant_strided(uint32_t weight_addr,
+                                                               uint32_t psum_addr,
+                                                               uint32_t ofm_addr,
+                                                               uint32_t dim_m,
+                                                               uint32_t ofm_row_stride_bytes,
+                                                               uint32_t ofm_tile_cols,
+                                                               uint32_t psum_row_stride_bytes) {
+    REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
+    systolic_gemm32_tile_ex(weight_addr, 0u, psum_addr, ofm_addr, dim_m, 1u,
+                            ofm_row_stride_bytes, ofm_tile_cols, psum_row_stride_bytes);
+    systolic_linebuf_disable();
+}
+
 void systolic_gemm32_linebuf_accumulate_requant(uint32_t weight_addr,
                                                 uint32_t psum_addr,
                                                 uint32_t ofm_addr,

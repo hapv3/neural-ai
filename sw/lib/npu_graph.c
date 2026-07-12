@@ -41,6 +41,8 @@ static uint32_t tensor_has_dtype(const npu_tensor_t *tensor, npu_dtype_t dtype) 
     return tensor && tensor->dtype == dtype;
 }
 
+static uint32_t npu_graph_dma_copy_wait(uint32_t dst_addr, uint32_t src_addr, uint32_t bytes);
+
 static int32_t rq_bias[32];
 static int32_t rq_multiplier[32];
 static uint8_t rq_shift[32];
@@ -237,6 +239,152 @@ static uint32_t run_conv2d3x3_c32_linebuf_requant(const npu_tensor_t *src,
     return (conv_status == NPU_CONV2D_PACKED_OK) ? NPU_GRAPH_OK : conv_status;
 }
 
+static uint32_t run_conv2d3x3s1p1_c32x2_linebuf_requant_l2(const npu_tensor_t *src0,
+                                                           const npu_tensor_t *src1,
+                                                           const npu_tensor_t *dst_tile,
+                                                           const npu_tensor_t *weight,
+                                                           const npu_tensor_t *psum,
+                                                           const npu_layer_t *layer) {
+    const uint32_t input_c = 32u;
+    const uint32_t kernel_h = 3u;
+    const uint32_t kernel_w = 3u;
+    const uint32_t chunk_weight_bytes = kernel_h * kernel_w * input_c * 32u;
+    const uint32_t output_h = src0 ? src0->h : 0u;
+    const uint32_t output_w = src0 ? src0->w : 0u;
+    const uint32_t rows = output_h * output_w;
+    const uint32_t full_psum_bytes = rows * 32u * 4u;
+    uint32_t tile_oh = layer->dim_m;
+    uint32_t tile_ow = layer->dim_n;
+
+    if (!src0 || !src1 || !dst_tile || !weight || !psum ||
+        tile_oh == 0u || tile_ow == 0u || layer->l2_addr == 0u) {
+        return NPU_GRAPH_ERR_BAD_TENSOR;
+    }
+
+    if (!tensor_has_layout(src0, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+        !tensor_has_layout(src1, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+        !tensor_has_layout(dst_tile, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+        !tensor_has_layout(weight, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+        !tensor_has_layout(psum, NPU_LAYOUT_ROW32, NPU_DTYPE_I32) ||
+        src0->h != src1->h || src0->w != src1->w ||
+        src0->c != 32u || src1->c != 32u ||
+        src0->bytes < npu_tensor_row32_bytes(rows) ||
+        src1->bytes < npu_tensor_row32_bytes(rows) ||
+        weight->bytes < (2u * chunk_weight_bytes) ||
+        psum->bytes < full_psum_bytes ||
+        dst_tile->bytes < (tile_oh * tile_ow * 32u)) {
+        return NPU_GRAPH_ERR_BAD_TENSOR;
+    }
+
+    npu_conv2d_packed_cfg_t cfg0;
+    npu_conv2d_packed_cfg_t cfg1;
+    npu_conv2d_packed_stats_t stats0;
+    npu_conv2d_packed_stats_t stats1;
+    npu_conv2d_spatial_tile_t tiles[NPU_GRAPH_MAX_CONV_TILES];
+    uint32_t tile_count = 0u;
+
+    cfg0.input_addr = src0->addr;
+    cfg0.weight_addr = weight->addr;
+    cfg0.im2col_addr = 0u;
+    cfg0.output_addr = psum->addr;
+    cfg0.input_h = output_h;
+    cfg0.input_w = output_w;
+    cfg0.input_c = input_c;
+    cfg0.output_h = output_h;
+    cfg0.output_w = output_w;
+    cfg0.kernel_h = kernel_h;
+    cfg0.kernel_w = kernel_w;
+    cfg0.stride_h = 1u;
+    cfg0.stride_w = 1u;
+    cfg0.pad_h = 1u;
+    cfg0.pad_w = 1u;
+    cfg0.dilation_h = 1u;
+    cfg0.dilation_w = 1u;
+    cfg0.input_c_stride = input_c;
+    cfg0.input_row_stride_bytes = 0u;
+    cfg0.input_c_base = 0u;
+    cfg0.accumulate = 0u;
+    cfg1.input_addr = src1->addr;
+    cfg1.weight_addr = weight->addr + chunk_weight_bytes;
+    cfg1.im2col_addr = cfg0.im2col_addr;
+    cfg1.output_addr = dst_tile->addr;
+    cfg1.input_h = cfg0.input_h;
+    cfg1.input_w = cfg0.input_w;
+    cfg1.input_c = cfg0.input_c;
+    cfg1.output_h = cfg0.output_h;
+    cfg1.output_w = cfg0.output_w;
+    cfg1.kernel_h = cfg0.kernel_h;
+    cfg1.kernel_w = cfg0.kernel_w;
+    cfg1.stride_h = cfg0.stride_h;
+    cfg1.stride_w = cfg0.stride_w;
+    cfg1.pad_h = cfg0.pad_h;
+    cfg1.pad_w = cfg0.pad_w;
+    cfg1.dilation_h = cfg0.dilation_h;
+    cfg1.dilation_w = cfg0.dilation_w;
+    cfg1.input_c_stride = cfg0.input_c_stride;
+    cfg1.input_row_stride_bytes = cfg0.input_row_stride_bytes;
+    cfg1.input_c_base = cfg0.input_c_base;
+    cfg1.accumulate = 1u;
+
+    for (uint32_t oh_base = 0; oh_base < output_h; oh_base += tile_oh) {
+        uint32_t this_tile_oh = output_h - oh_base;
+        if (this_tile_oh > tile_oh) {
+            this_tile_oh = tile_oh;
+        }
+        for (uint32_t ow_base = 0; ow_base < output_w; ow_base += tile_ow) {
+            if (tile_count >= NPU_GRAPH_MAX_CONV_TILES) {
+                return NPU_GRAPH_ERR_BAD_TENSOR;
+            }
+            uint32_t this_tile_ow = output_w - ow_base;
+            if (this_tile_ow > tile_ow) {
+                this_tile_ow = tile_ow;
+            }
+            tiles[tile_count].oh_base = oh_base;
+            tiles[tile_count].ow_base = ow_base;
+            tiles[tile_count].tile_oh = this_tile_oh;
+            tiles[tile_count].tile_ow = this_tile_ow;
+            tile_count++;
+        }
+    }
+
+    uint32_t conv_status = npu_conv2d_packed_run_oc32_linebuf_tiles(&cfg0, tiles,
+                                                                    tile_count, 4u,
+                                                                    &stats0);
+    if (conv_status != NPU_CONV2D_PACKED_OK) {
+        return conv_status;
+    }
+
+    configure_uniform_requant(layer);
+    for (uint32_t tile_idx = 0; tile_idx < tile_count; tile_idx++) {
+        const npu_conv2d_spatial_tile_t *tile = &tiles[tile_idx];
+        uint32_t this_tile_ow = tile->tile_ow ? tile->tile_ow : output_w;
+        conv_status = npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant(&cfg1,
+                                                                                 tile,
+                                                                                 psum->addr,
+                                                                                 dst_tile->addr,
+                                                                                 &stats1);
+        if (conv_status != NPU_CONV2D_PACKED_OK) {
+            systolic_requant_disable();
+            return conv_status;
+        }
+
+        for (uint32_t th = 0; th < tile->tile_oh; th++) {
+            uint32_t src_offset = th * this_tile_ow * 32u;
+            uint32_t dst_offset = (((tile->oh_base + th) * output_w) + tile->ow_base) * 32u;
+            uint32_t copy_status = npu_graph_dma_copy_wait(layer->l2_addr + dst_offset,
+                                                           dst_tile->addr + src_offset,
+                                                           this_tile_ow * 32u);
+            if (copy_status != NPU_GRAPH_OK) {
+                systolic_requant_disable();
+                return copy_status;
+            }
+        }
+    }
+    systolic_requant_disable();
+
+    return NPU_GRAPH_OK;
+}
+
 static uint32_t npu_graph_dma_copy_wait(uint32_t dst_addr, uint32_t src_addr, uint32_t bytes) {
     if (!idma_memcpy_blocking(src_addr, dst_addr, bytes)) {
         return NPU_GRAPH_ERR_DMA;
@@ -308,6 +456,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
     for (uint32_t i = 0; i < graph->num_layers; i++) {
         const npu_layer_t *layer = &graph->layers[i];
         const npu_tensor_t *src = get_tensor(graph, layer->src);
+        const npu_tensor_t *src2 = get_tensor(graph, layer->src2);
         const npu_tensor_t *dst = get_tensor(graph, layer->dst);
         const npu_tensor_t *aux = get_tensor(graph, layer->aux);
         const npu_tensor_t *aux2 = get_tensor(graph, layer->aux2);
@@ -529,6 +678,16 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             spatz_upsample_nearest_i8((const int8_t *)src->addr, (int8_t *)dst->addr,
                                       src->h, src->w, src->c, 2u, 2u);
+            break;
+
+        case NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2:
+            if (!src || !src2 || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t conv_status =
+                    run_conv2d3x3s1p1_c32x2_linebuf_requant_l2(src, src2, dst,
+                                                               aux, aux2, layer);
+                if (conv_status != NPU_GRAPH_OK) return conv_status;
+            }
             break;
 
         case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
