@@ -29,6 +29,12 @@ void spatz_requant_i32_to_i8(const int32_t *src, int8_t *dst, uint32_t count,
 
 void spatz_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                   uint32_t count, int32_t min_val, int32_t max_val) {
+    if (min_val == -128 && max_val == 127) {
+        if (npu_add_i8(lhs, rhs, dst, count)) {
+            return;
+        }
+    }
+
     for (uint32_t i = 0; i < count; i++) {
         int32_t value = (int32_t)lhs[i] + (int32_t)rhs[i];
         dst[i] = pack_i8(clamp_i32_local(value, min_val, max_val));
@@ -58,6 +64,12 @@ uint32_t npu_logistic_i8(const int8_t *src, int8_t *dst,
 uint32_t npu_mul_q7_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                        uint32_t count) {
     afu_start_mul_q7((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst, count);
+    return afu_wait_done(1000000u);
+}
+
+uint32_t npu_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
+                    uint32_t count) {
+    afu_start_add_i8((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst, count);
     return afu_wait_done(1000000u);
 }
 

@@ -23,7 +23,7 @@ module afu_frontend #(
     output logic [31:0]             cfg_src2_ptr_o,
     output logic [31:0]             cfg_dst_ptr_o,
     output logic [31:0]             cfg_length_o,
-    output logic [1:0]              cfg_mode_o,
+    output logic [2:0]              cfg_mode_o,
     output logic                    cfg_start_o,
     input  logic                    afu_done_i,
     input  logic                    afu_busy_i,
@@ -40,7 +40,7 @@ module afu_frontend #(
     logic [31:0] cfg_src2_ptr_q, cfg_src2_ptr_n;
     logic [31:0] cfg_dst_ptr_q,  cfg_dst_ptr_n;
     logic [31:0] cfg_length_q,   cfg_length_n;
-    logic [1:0]  cfg_mode_q,     cfg_mode_n;
+    logic [2:0]  cfg_mode_q,     cfg_mode_n;
     logic        cfg_start_q,    cfg_start_n;
 
     logic        obi_s_rvalid_q;
@@ -98,7 +98,7 @@ module afu_frontend #(
                         6'h04: cfg_src_ptr_n = apply_cfg_be(cfg_src_ptr_q, obi_s_wdata_i, obi_s_be_i);
                         6'h08: cfg_dst_ptr_n = apply_cfg_be(cfg_dst_ptr_q, obi_s_wdata_i, obi_s_be_i);
                         6'h0c: cfg_length_n  = apply_cfg_be(cfg_length_q, obi_s_wdata_i, obi_s_be_i);
-                        6'h10: cfg_mode_n    = apply_cfg_be({30'd0, cfg_mode_q}, obi_s_wdata_i, obi_s_be_i)[1:0];
+                        6'h10: cfg_mode_n    = apply_cfg_be({29'd0, cfg_mode_q}, obi_s_wdata_i, obi_s_be_i)[2:0];
                         6'h14: cfg_src2_ptr_n = apply_cfg_be(cfg_src2_ptr_q, obi_s_wdata_i, obi_s_be_i);
                         default: ;
                     endcase
@@ -128,7 +128,7 @@ module afu_frontend #(
                         6'h04: obi_s_rdata_q <= cfg_src_ptr_q;
                         6'h08: obi_s_rdata_q <= cfg_dst_ptr_q;
                         6'h0c: obi_s_rdata_q <= cfg_length_q;
-                        6'h10: obi_s_rdata_q <= {30'd0, cfg_mode_q};
+                        6'h10: obi_s_rdata_q <= {29'd0, cfg_mode_q};
                         6'h14: obi_s_rdata_q <= cfg_src2_ptr_q;
                         default: obi_s_rdata_q <= '0;
                     endcase

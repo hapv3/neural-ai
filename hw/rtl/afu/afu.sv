@@ -49,7 +49,7 @@ module afu #(
     logic [31:0] cfg_src2_ptr;
     logic [31:0] cfg_dst_ptr;
     logic [31:0] cfg_length;
-    logic [1:0]  cfg_mode;
+    logic [2:0]  cfg_mode;
     logic        cfg_start;
     
     // LUT write interface

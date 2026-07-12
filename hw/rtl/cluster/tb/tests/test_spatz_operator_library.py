@@ -38,6 +38,9 @@ LOG_FULL_DST = 0x1011A000
 MUL_Q7_LHS = 0x10108000
 MUL_Q7_RHS = 0x1011A000
 MUL_Q7_DST = 0x1012C000
+ADD_FULL_LHS = MUL_Q7_LHS
+ADD_FULL_RHS = MUL_Q7_RHS
+ADD_FULL_DST = MUL_Q7_DST
 
 VL = 32
 LOG_FULL_H = 48
@@ -277,6 +280,35 @@ def check_mul_q7_full(dut):
         assert got == expected, f"mul_q7_full[{idx}] got={got} expected={expected}"
 
 
+def add_full_lhs_value(index):
+    return as_i8((index * 29 + 17) & 0xFF)
+
+
+def add_full_rhs_value(index):
+    return as_i8((index * 31 + 23) & 0xFF)
+
+
+async def preload_add_full_tcdm(dut):
+    lhs = [(add_full_lhs_value(idx) & 0xFF) for idx in range(LOG_FULL_BYTES)]
+    rhs = [(add_full_rhs_value(idx) & 0xFF) for idx in range(LOG_FULL_BYTES)]
+    write_tcdm_bytes_aligned32(dut, ADD_FULL_LHS, lhs)
+    write_tcdm_bytes_aligned32(dut, ADD_FULL_RHS, rhs)
+    write_tcdm_bytes_aligned32(dut, ADD_FULL_DST, [0] * LOG_FULL_BYTES)
+    await Timer(1, "ps")
+    for idx in (0, 31, 32, 63, 64, 95, 96):
+        assert as_i8(read_tcdm_byte(dut, ADD_FULL_LHS + idx)) == add_full_lhs_value(idx)
+        assert as_i8(read_tcdm_byte(dut, ADD_FULL_RHS + idx)) == add_full_rhs_value(idx)
+
+
+def check_add_full(dut):
+    for idx in range(LOG_FULL_BYTES):
+        lhs = add_full_lhs_value(idx)
+        rhs = add_full_rhs_value(idx)
+        expected = max(-128, min(127, lhs + rhs))
+        got = as_i8(read_tcdm_byte(dut, ADD_FULL_DST + idx))
+        assert got == expected, f"add_full[{idx}] got={got} expected={expected}"
+
+
 def check_maxpool(dut):
     for h in range(POOL_H):
         for w in range(POOL_W):
@@ -492,6 +524,19 @@ async def test_spatz_op_requant(dut):
 @cocotb.test()
 async def test_spatz_op_add(dut):
     await run_firmware_case(dut, "spatz_ops_add.bin", "test_spatz_op_add", 1, check_add)
+
+
+@cocotb.test()
+async def test_spatz_op_add_full(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_add_full.bin",
+        "test_spatz_op_add_full",
+        1,
+        check_add_full,
+        timeout_cycles=900000,
+        pre_release=preload_add_full_tcdm,
+    )
 
 
 @cocotb.test()

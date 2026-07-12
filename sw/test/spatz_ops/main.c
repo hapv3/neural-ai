@@ -23,6 +23,7 @@
 #define SPATZ_OP_TEST_CONCAT   9u
 #define SPATZ_OP_TEST_LOGISTIC_FULL 10u
 #define SPATZ_OP_TEST_MUL_Q7_FULL 11u
+#define SPATZ_OP_TEST_ADD_FULL 12u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -64,6 +65,9 @@
 #define MUL_Q7_LHS   ((volatile int8_t *)0x10108000u)
 #define MUL_Q7_RHS   ((volatile int8_t *)0x1011A000u)
 #define MUL_Q7_DST   ((volatile int8_t *)0x1012C000u)
+#define ADD_FULL_LHS MUL_Q7_LHS
+#define ADD_FULL_RHS MUL_Q7_RHS
+#define ADD_FULL_DST MUL_Q7_DST
 
 #define VL 32u
 #define LOG_FULL_H 48u
@@ -304,6 +308,19 @@ static void run_mul_q7_full(void) {
     mark_pass();
 }
 
+static void run_add_full(void) {
+    SIG_STATUS = 0x30001201u;
+    // Full tensor inputs are preloaded by cocotb backdoor to isolate AFU add.
+    if (!npu_add_i8((const int8_t *)ADD_FULL_LHS, (const int8_t *)ADD_FULL_RHS,
+                    (int8_t *)ADD_FULL_DST, LOG_FULL_BYTES)) {
+        fail(12, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
+    }
+
+    SIG_STATUS = 0x30001202u;
+    // Full tensor output is checked by cocotb backdoor.
+    mark_pass();
+}
+
 static void run_maxpool(void) {
     for (uint32_t h = 0; h < POOL_H; h++) {
         for (uint32_t w = 0; w < POOL_W; w++) {
@@ -417,6 +434,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_MUL_Q7_FULL) {
         run_mul_q7_full();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_ADD_FULL) {
+        run_add_full();
     }
 
     SIG_STATUS = PASS_SIGNATURE;

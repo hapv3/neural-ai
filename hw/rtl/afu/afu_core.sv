@@ -12,7 +12,7 @@ module afu_core #(
     input  logic [31:0]  cfg_src2_ptr_i,
     input  logic [31:0]  cfg_dst_ptr_i,
     input  logic [31:0]  cfg_length_i,
-    input  logic [1:0]   cfg_mode_i,
+    input  logic [2:0]   cfg_mode_i,
     input  logic         cfg_start_i,
 
     // LUT write interface
@@ -40,10 +40,11 @@ module afu_core #(
     output logic         busy_o
 );
 
-    localparam logic [1:0] MODE_8BIT  = 2'd0;
-    localparam logic [1:0] MODE_16BIT = 2'd1;
-    localparam logic [1:0] MODE_32BIT = 2'd2;
-    localparam logic [1:0] MODE_MUL_Q7 = 2'd3;
+    localparam logic [2:0] MODE_8BIT  = 3'd0;
+    localparam logic [2:0] MODE_16BIT = 3'd1;
+    localparam logic [2:0] MODE_32BIT = 3'd2;
+    localparam logic [2:0] MODE_MUL_Q7 = 3'd3;
+    localparam logic [2:0] MODE_ADD_I8 = 3'd4;
 
     typedef enum logic [2:0] {
         ST_IDLE,
@@ -93,7 +94,7 @@ module afu_core #(
     logic [5:0]  num_valid_lanes;
 
     assign s2_stall = wfifo_full_i && p1_valid_q &&
-                      ((cfg_mode_i == MODE_MUL_Q7) ||
+                      ((cfg_mode_i == MODE_MUL_Q7) || (cfg_mode_i == MODE_ADD_I8) ||
                        p1_flush_mid_q || (p1_flush_done_q && out_be_q != 0));
 
     // SRAM LUT Instances
@@ -154,6 +155,23 @@ module afu_core #(
             shifted_i16 = product_i16 >>> 7;
             clamped_i9 = clamp_i8(shifted_i16);
             mul_q7_byte = clamped_i9[7:0];
+        end
+    endfunction
+
+    function automatic logic [7:0] add_i8_byte(
+        input logic [7:0] lhs_u8,
+        input logic [7:0] rhs_u8
+    );
+        logic signed [7:0] lhs_i8;
+        logic signed [7:0] rhs_i8;
+        logic signed [15:0] sum_i16;
+        logic signed [8:0] clamped_i9;
+        begin
+            lhs_i8 = $signed(lhs_u8);
+            rhs_i8 = $signed(rhs_u8);
+            sum_i16 = lhs_i8 + rhs_i8;
+            clamped_i9 = clamp_i8(sum_i16);
+            add_i8_byte = clamped_i9[7:0];
         end
     endfunction
 
@@ -233,7 +251,7 @@ module afu_core #(
                 end
 
             ST_READ_IN: begin
-                if (cfg_mode_i == MODE_MUL_Q7) begin
+                if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
                     if (!rfifo_empty_i && !rhs_rfifo_empty_i) begin
                         in_buf_n = rfifo_data_i;
                         rhs_buf_n = rhs_rfifo_data_i;
@@ -266,21 +284,23 @@ module afu_core #(
                         MODE_16BIT: out_avail_elems = {1'b0, out_avail_bytes[5:1]};
                         MODE_32BIT: out_avail_elems = {2'b0, out_avail_bytes[5:2]};
                         MODE_MUL_Q7: out_avail_elems = out_avail_bytes;
+                        MODE_ADD_I8: out_avail_elems = out_avail_bytes;
                         default:    out_avail_elems = out_avail_bytes;
                     endcase
 
-                    if (cfg_mode_i == MODE_MUL_Q7) begin
+                    if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
                         max_lanes_1 = (remaining_elems > 32) ? 6'd32 : 6'(remaining_elems);
                     end else begin
                         max_lanes_1 = (LUT_LANES < remaining_elems) ? LUT_LANES[5:0] : (remaining_elems > 6'd31 ? 6'd31 : 6'(remaining_elems));
                     end
                     max_lanes_2 = (max_lanes_1 < in_avail) ? max_lanes_1 : in_avail;
-                    max_lanes_3 = (cfg_mode_i == MODE_MUL_Q7 && rhs_avail < max_lanes_2) ? rhs_avail : max_lanes_2;
+                    max_lanes_3 = ((cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) &&
+                                   rhs_avail < max_lanes_2) ? rhs_avail : max_lanes_2;
                     max_lanes_4 = (max_lanes_3 < out_avail_elems) ? max_lanes_3 : out_avail_elems;
                     num_valid_lanes = max_lanes_4;
 
                     if (num_valid_lanes > 0) begin
-                        s1_sram_req = (cfg_mode_i != MODE_MUL_Q7);
+                        s1_sram_req = (cfg_mode_i != MODE_MUL_Q7 && cfg_mode_i != MODE_ADD_I8);
                         p1_num_valid_lanes_n = num_valid_lanes;
                         p1_valid_n = 1'b1;
                         p1_lhs_data_n = in_buf_q;
@@ -290,7 +310,7 @@ module afu_core #(
                         rhs_addr_n = rhs_addr_q + 32'(num_valid_lanes);
                         elem_cnt_n = elem_cnt_q + 32'(num_valid_lanes);
 
-                        if (cfg_mode_i == MODE_8BIT || cfg_mode_i == MODE_MUL_Q7) begin
+                        if (cfg_mode_i == MODE_8BIT || cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
                             dst_addr_n = dst_addr_q + 32'(num_valid_lanes);
                         end else if (cfg_mode_i == MODE_16BIT) begin
                             dst_addr_n = dst_addr_q + 32'(num_valid_lanes * 2);
@@ -298,7 +318,7 @@ module afu_core #(
                             dst_addr_n = dst_addr_q + 32'(num_valid_lanes * 4);
                         end
 
-                        if (cfg_mode_i == MODE_MUL_Q7) begin
+                        if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
                             if (elem_cnt_n == cfg_length_i) begin
                                 p1_flush_done_n = 1'b1;
                             end else begin
@@ -320,7 +340,7 @@ module afu_core #(
 
             ST_WAIT_FLUSH: begin
                 if (s2_flush_mid_completed) begin
-                    if (cfg_mode_i == MODE_MUL_Q7) begin
+                    if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
                         if (((src_addr_q[4:0] == 0) || (rhs_addr_q[4:0] == 0)) && elem_cnt_q < cfg_length_i) begin
                             state_n = ST_READ_IN;
                         end else begin
@@ -392,14 +412,21 @@ module afu_core #(
             out_be_n   = '0;
         end else if (p1_valid_q && !s2_stall) begin
             // Process lanes directly into combinational buffer
-            if (cfg_mode_i == MODE_MUL_Q7) begin
+            if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
                 for (int i = 0; i < 32; i++) begin
                     if (i < p1_num_valid_lanes_q) begin
                         cur_out_off = p1_dst_addr_q[4:0] + 5'(i);
-                        s2_out_buf_comb[cur_out_off * 8 +: 8] = mul_q7_byte(
-                            select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
-                            select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
-                        );
+                        if (cfg_mode_i == MODE_MUL_Q7) begin
+                            s2_out_buf_comb[cur_out_off * 8 +: 8] = mul_q7_byte(
+                                select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
+                                select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
+                            );
+                        end else begin
+                            s2_out_buf_comb[cur_out_off * 8 +: 8] = add_i8_byte(
+                                select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
+                                select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
+                            );
+                        end
                         s2_out_be_comb[cur_out_off] = 1'b1;
                     end
                 end

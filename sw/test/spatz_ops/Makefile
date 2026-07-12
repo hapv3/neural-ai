@@ -12,7 +12,7 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
 
 SRCS = start.S main.c ../../lib/spatz_ops.c ../../lib/spatz_ops.S
 
-OP_TESTS = copy relu requant add mul mul_q7_full logistic logistic_full maxpool upsample concat
+OP_TESTS = copy relu requant add add_full mul mul_q7_full logistic logistic_full maxpool upsample concat
 OP_BINS = $(addprefix spatz_ops_,$(addsuffix .bin,$(OP_TESTS)))
 OP_HEXS = $(addprefix spatz_ops_,$(addsuffix .hex,$(OP_TESTS)))
 
@@ -38,6 +38,9 @@ spatz_ops_requant.elf: $(SRCS) link.ld
 
 spatz_ops_add.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=4 $(SRCS) -o $@
+
+spatz_ops_add_full.elf: $(SRCS) link.ld
+	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=12 $(SRCS) -o $@
 
 spatz_ops_mul.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=5 $(SRCS) -o $@
