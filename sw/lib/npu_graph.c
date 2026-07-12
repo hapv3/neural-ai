@@ -468,6 +468,24 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_ADD_I8:
+            if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t count = layer->bytes ? layer->bytes : dst->bytes;
+                if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||
+                    !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
+                    !tensor_has_dtype(aux, NPU_DTYPE_I8) ||
+                    src->bytes < count || dst->bytes < count || aux->bytes < count ||
+                    src->h != dst->h || src->w != dst->w || src->c != dst->c ||
+                    aux->h != dst->h || aux->w != dst->w || aux->c != dst->c) {
+                    return NPU_GRAPH_ERR_BAD_TENSOR;
+                }
+                spatz_add_i8((const int8_t *)src->addr, (const int8_t *)aux->addr,
+                             (int8_t *)dst->addr, count,
+                             layer->min_val, layer->max_val);
+            }
+            break;
+
         case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {

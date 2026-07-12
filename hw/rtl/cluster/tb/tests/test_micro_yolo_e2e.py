@@ -53,6 +53,7 @@ OP_NAMES = {
     10: "MUL_I8",
     11: "CONV3x3s1_C32_LB",
     12: "CONV3x3s1_C32_LB_RQ",
+    13: "ADD_I8",
 }
 
 
@@ -248,7 +249,12 @@ def golden_micro_yolo(input_hwc, weight0, weight1, sigmoid_lut):
     )
     c2f = conv3x3s1p1_c32_o32(out_flat, weight1)
     c2f_flat = requant([value for row in c2f for value in row], -128, 127)
-    return [to_u8(value) for value in c2f_flat]
+    residual_flat = requant(
+        [conv_value + residual_value for conv_value, residual_value in zip(c2f_flat, out_flat)],
+        -128,
+        127,
+    )
+    return [to_u8(value) for value in residual_flat]
 
 
 @cocotb.test()

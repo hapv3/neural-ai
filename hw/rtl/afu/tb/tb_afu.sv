@@ -10,9 +10,9 @@ module tb_afu;
     localparam int unsigned LUT_LANES      = 4;
     localparam int unsigned MEM_SIZE       = 16 * 1024;
 
-    localparam logic [1:0] MODE_8BIT  = 2'd0;
-    localparam logic [1:0] MODE_16BIT = 2'd1;
-    localparam logic [1:0] MODE_32BIT = 2'd2;
+    localparam logic [2:0] MODE_8BIT  = 3'd0;
+    localparam logic [2:0] MODE_16BIT = 3'd1;
+    localparam logic [2:0] MODE_32BIT = 3'd2;
     localparam logic [31:0] AFU_CSR_BASE = 32'h400;
 
     logic clk_i;
@@ -192,12 +192,12 @@ module tb_afu;
         input logic [31:0] src_ptr,
         input logic [31:0] dst_ptr,
         input logic [31:0] length,
-        input logic [1:0]  mode
+        input logic [2:0]  mode
     );
         write_obi(AFU_CSR_BASE + 32'h04, src_ptr);
         write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
         write_obi(AFU_CSR_BASE + 32'h0c, length);
-        write_obi(AFU_CSR_BASE + 32'h10, {30'd0, mode});
+        write_obi(AFU_CSR_BASE + 32'h10, {29'd0, mode});
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
 
@@ -243,7 +243,7 @@ module tb_afu;
         end
     endtask
 
-    task automatic fill_lut(input logic [1:0] mode, input int pattern_id);
+    task automatic fill_lut(input logic [2:0] mode, input int pattern_id);
         for (int i = 0; i < 256; i++) begin
             unique case (mode)
                 MODE_8BIT: begin
@@ -261,7 +261,7 @@ module tb_afu;
 
     task automatic check_case(
         input string       name,
-        input logic [1:0]  mode,
+        input logic [2:0]  mode,
         input int          src_base,
         input int          dst_base,
         input int          length,

@@ -53,6 +53,11 @@ static inline void afu_start_mul_q7(uint32_t lhs, uint32_t rhs, uint32_t dst,
     afu_start_binary(lhs, rhs, dst, length, NPU_AFU_MODE_MUL_Q7);
 }
 
+static inline void afu_start_add_i8(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                    uint32_t length) {
+    afu_start_binary(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8);
+}
+
 static inline uint32_t afu_wait_done(uint32_t timeout_cycles) {
     while (timeout_cycles-- > 0u) {
         uint32_t status = afu_status();

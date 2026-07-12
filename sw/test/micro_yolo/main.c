@@ -2,10 +2,10 @@
 #include "npu_memory_map.h"
 
 /*
- * Phase 3d Conv_Stem + SiLU + C2f_Conv checkpoint:
+ * Phase 3e Conv_Stem + SiLU + C2f_Conv + residual Add checkpoint:
  *   96x96x3 HWC -> linebuffer 3x3s2p1 -> GEMM32 -> clamp/requant
  *                -> Logistic LUT -> Mul -> fused linebuffer Conv3x3s1p1 C32
- *                -> 48x48x32 INT8 L2 output.
+ *                -> Add residual(SiLU) -> 48x48x32 INT8 L2 output.
  */
 #define PASS_SIGNATURE 0xDEADBEEFu
 #define FAIL_SIGNATURE 0xBAD30000u
@@ -67,7 +67,7 @@ enum {
 };
 
 static npu_tensor_t tensors[TENSOR_COUNT];
-static npu_layer_t layers[9];
+static npu_layer_t layers[10];
 static npu_graph_t graph;
 
 void npu_graph_trace(uint32_t layer_index, npu_op_type_t op, uint32_t event) {
@@ -180,10 +180,18 @@ static void init_layers(void) {
     layers[7].min_val = -128;
     layers[7].max_val = 127;
 
-    layers[8].op = NPU_OP_DMA_OUT;
+    layers[8].op = NPU_OP_ADD_I8;
     layers[8].src = T_OUT;
-    layers[8].l2_addr = L2_OUTPUT;
+    layers[8].dst = T_OUT;
+    layers[8].aux = T_SILU;
     layers[8].bytes = ACT_BYTES;
+    layers[8].min_val = -128;
+    layers[8].max_val = 127;
+
+    layers[9].op = NPU_OP_DMA_OUT;
+    layers[9].src = T_OUT;
+    layers[9].l2_addr = L2_OUTPUT;
+    layers[9].bytes = ACT_BYTES;
 
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;

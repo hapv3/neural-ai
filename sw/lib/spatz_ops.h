@@ -36,6 +36,8 @@ uint32_t npu_logistic_i8(const int8_t *src, int8_t *dst,
                          uint32_t count, const uint8_t *lut);
 uint32_t npu_mul_q7_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                        uint32_t count);
+uint32_t npu_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
+                    uint32_t count);
 void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t input_h, uint32_t input_w, uint32_t channels,
                         uint32_t kernel_h, uint32_t kernel_w,
