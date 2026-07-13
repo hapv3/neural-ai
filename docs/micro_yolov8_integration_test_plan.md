@@ -216,6 +216,20 @@ Required decisions:
   Materialized fallback must produce C32-blocked output blocks directly.
 - Conv consumers: use the C32-chunk descriptor path for `IC=64` and larger.
 - L2 is the owner of full intermediate tensors; TCDM only holds working tiles.
+- Python host / command generator must own the C32-aligned linebuffer schedule:
+  when it emits a Conv2D tile that uses the RTL `C32_FAST` linebuffer path, it
+  must guarantee `input_base`, `pixel_stride_bytes`, `row_stride_bytes`, and
+  `channel_addr_offset` are 32-byte aligned. It must also precompute and program
+  the linebuffer fast-path fields:
+  `block_valid_bytes`, `channel_addr_offset`, and `coalesce_k_bytes =
+  kernel_h * kernel_w * block_valid_bytes`. Firmware should treat these fields
+  as part of the descriptor, not re-plan the schedule on Snitch.
+- The current C firmware planner in `sw/lib/conv2d_packed.c` computes these
+  fields as a compatibility bridge. Once the Python host emits final command
+  descriptors, Python should produce the same values and only set `C32_FAST`
+  for one full C32 block (`block_valid_bytes == 32`, `lane_base == 0`,
+  `c_base == 0`, 32-byte aligned base/offset). Tail chunks and non-C32 layouts
+  must leave `C32_FAST` disabled and use the generic linebuffer path.
 
 | Step | Task | File |
 |---|---|---|
@@ -223,6 +237,7 @@ Required decisions:
 | 2b | Define C32-blocked tensor helpers and address math | `sw/lib/npu_tensor.h` or `sw/lib/npu_graph.h` |
 | 2c | Add graph scratch allocator for TCDM tile buffers | `sw/test/micro_yolo/main.c` or `sw/lib/npu_graph.c` |
 | 2d | Document qparam propagation for Requant/SiLU/Add/Mul | `docs/micro_yolov8_integration_test_plan.md` |
+| 2e | Emit C32-aligned Conv2D linebuffer precompute fields from Python host descriptors | Python command generator / graph export path |
 
 Acceptance: the minimal graph in Phase 3a can run using the same tensor
 descriptors and layout rules that the full 96x96 graph will use.

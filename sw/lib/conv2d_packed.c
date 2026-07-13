@@ -115,6 +115,28 @@ static uint32_t input_row_stride_bytes(const npu_conv2d_packed_cfg_t *cfg) {
                                          (cfg->input_w * input_c_stride(cfg));
 }
 
+static uint32_t linebuf_valid_bytes(uint32_t input_c, uint32_t c_base, uint32_t lane_base) {
+    uint32_t lane_room = (lane_base >= SYSTOLIC_GEMM32_K) ? 0u : (SYSTOLIC_GEMM32_K - lane_base);
+    if (c_base >= input_c || lane_room == 0u) {
+        return 0u;
+    }
+    return min_u32(input_c - c_base, lane_room);
+}
+
+static void linebuf_finalize_precompute(systolic_linebuf_cfg_t *cfg, uint32_t request_c32_fast) {
+    cfg->block_valid_bytes = (uint16_t)linebuf_valid_bytes(cfg->input_c, cfg->c_base, cfg->lane_base);
+    cfg->channel_addr_offset = cfg->c_base;
+    cfg->coalesce_k_bytes = (uint32_t)cfg->kernel_h * (uint32_t)cfg->kernel_w *
+                            (uint32_t)cfg->block_valid_bytes;
+    cfg->c32_fast = (uint16_t)(request_c32_fast &&
+                               cfg->block_valid_bytes == SYSTOLIC_GEMM32_K &&
+                               cfg->pixel_stride_bytes == SYSTOLIC_GEMM32_K &&
+                               cfg->lane_base == 0u &&
+                               cfg->c_base == 0u &&
+                               ((cfg->input_base & (SYSTOLIC_GEMM32_K - 1u)) == 0u) &&
+                               ((cfg->channel_addr_offset & (SYSTOLIC_GEMM32_K - 1u)) == 0u));
+}
+
 static uint32_t input_pixel_addr(const npu_conv2d_packed_cfg_t *cfg,
                                  uint32_t ih,
                                  uint32_t iw,
@@ -683,6 +705,10 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     linebuf_cfg->k_seed_ic = 0u;
     linebuf_cfg->k_tiles = k_tiles;
     linebuf_cfg->spatial_m = spatial_rows;
+    linebuf_finalize_precompute(linebuf_cfg,
+                                (stride_c == SYSTOLIC_GEMM32_K) &&
+                                (cfg->input_c == SYSTOLIC_GEMM32_K) &&
+                                (cfg->input_c_base == 0u));
 }
 
 static void linebuf_job_from_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
@@ -1302,33 +1328,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
 
     if (is_linebuf_coalesce_supported(cfg, spatial_rows, k_total)) {
         systolic_linebuf_cfg_t linebuf_cfg;
-        uint32_t stride_c = input_c_stride(cfg);
-        uint32_t row_stride_bytes = input_row_stride_bytes(cfg);
-        linebuf_cfg.input_base = cfg->input_addr + cfg->input_c_base - (cfg->pad_h * row_stride_bytes);
-        linebuf_cfg.input_h = (uint16_t)cfg->input_h;
-        linebuf_cfg.input_w = (uint16_t)cfg->input_w;
-        linebuf_cfg.input_c = (uint16_t)cfg->input_c;
-        linebuf_cfg.output_w = (uint16_t)cfg->output_w;
-        linebuf_cfg.stride_h = (uint16_t)cfg->stride_h;
-        linebuf_cfg.stride_w = (uint16_t)cfg->stride_w;
-        linebuf_cfg.pad_h = (uint16_t)cfg->pad_h;
-        linebuf_cfg.pad_w = (uint16_t)cfg->pad_w;
-        linebuf_cfg.row_stride_bytes = row_stride_bytes;
-        linebuf_cfg.pixel_stride_bytes = stride_c;
-        linebuf_cfg.ow_step_bytes = cfg->stride_w * stride_c;
-        linebuf_cfg.oh_step_bytes = cfg->stride_h * row_stride_bytes;
-        linebuf_cfg.kernel_h = (uint16_t)cfg->kernel_h;
-        linebuf_cfg.kernel_w = (uint16_t)cfg->kernel_w;
-        linebuf_cfg.c_base = 0u;
-        linebuf_cfg.lane_base = 0u;
-        linebuf_cfg.coalesce = 1u;
-        linebuf_cfg.kgen = 0u;
-        linebuf_cfg.pool = 0u;
-        linebuf_cfg.k_seed_kh = 0u;
-        linebuf_cfg.k_seed_kw = 0u;
-        linebuf_cfg.k_seed_ic = 0u;
-        linebuf_cfg.k_tiles = 0u;
-        linebuf_cfg.spatial_m = spatial_rows;
+        linebuf_config_from_conv(cfg, spatial_rows, 1u, 0u, 0u, &linebuf_cfg);
 
         systolic_linebuf_config(&linebuf_cfg);
         if (cfg->accumulate) {
@@ -1466,6 +1466,10 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
                     linebuf_cfg.k_seed_ic = 0u;
                     linebuf_cfg.k_tiles = 0u;
                     linebuf_cfg.spatial_m = chunk_ow;
+                    linebuf_finalize_precompute(&linebuf_cfg,
+                                                (stride_c == SYSTOLIC_GEMM32_K) &&
+                                                (valid_lanes == SYSTOLIC_GEMM32_K) &&
+                                                (lane == 0u));
 
                     systolic_linebuf_config(&linebuf_cfg);
                     systolic_gemm32_linebuf_accumulate(weight_addr, output_base, output_base, chunk_ow);

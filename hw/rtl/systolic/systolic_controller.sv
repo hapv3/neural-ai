@@ -236,6 +236,7 @@ module systolic_controller #(
     logic          cfg_linebuf_coalesce_i;
     logic          cfg_linebuf_kgen_i;
     logic          cfg_linebuf_pool_i;
+    logic          cfg_linebuf_c32_fast_i;
     logic [31:0]   cfg_linebuf_input_base_i;
     logic [15:0]   cfg_linebuf_input_h_i;
     logic [15:0]   cfg_linebuf_input_w_i;
@@ -258,6 +259,9 @@ module systolic_controller #(
     logic [7:0]    cfg_linebuf_k_seed_kw_i;
     logic [7:0]    cfg_linebuf_k_seed_kh_i;
     logic [31:0]   cfg_linebuf_spatial_m_i;
+    logic [5:0]    cfg_linebuf_block_valid_bytes_i;
+    logic [31:0]   cfg_linebuf_channel_addr_offset_i;
+    logic [31:0]   cfg_linebuf_coalesce_k_bytes_i;
     logic [31:0]   linebuf_spatial_m;
     logic [15:0]   linebuf_c_base_eff;
     logic [15:0]   linebuf_seed_ic_eff;
@@ -595,6 +599,7 @@ module systolic_controller #(
         .cfg_linebuf_en_o   (cfg_linebuf_en_i),
         .cfg_linebuf_coalesce_o(cfg_linebuf_coalesce_i),
         .cfg_linebuf_pool_o (cfg_linebuf_pool_i),
+        .cfg_linebuf_c32_fast_o(cfg_linebuf_c32_fast_i),
         .cfg_linebuf_kgen_o (cfg_linebuf_kgen_i),
         .cfg_linebuf_input_base_o(cfg_linebuf_input_base_i),
         .cfg_linebuf_input_h_o(cfg_linebuf_input_h_i),
@@ -618,6 +623,9 @@ module systolic_controller #(
         .cfg_linebuf_k_seed_kw_o(cfg_linebuf_k_seed_kw_i),
         .cfg_linebuf_k_seed_kh_o(cfg_linebuf_k_seed_kh_i),
         .cfg_linebuf_spatial_m_o(cfg_linebuf_spatial_m_i),
+        .cfg_linebuf_block_valid_bytes_o(cfg_linebuf_block_valid_bytes_i),
+        .cfg_linebuf_channel_addr_offset_o(cfg_linebuf_channel_addr_offset_i),
+        .cfg_linebuf_coalesce_k_bytes_o(cfg_linebuf_coalesce_k_bytes_i),
         .cfg_sys_done_i     (cfg_sys_done_o)
     );
 
@@ -657,6 +665,10 @@ module systolic_controller #(
         .cfg_coalesce_i          (cfg_linebuf_coalesce_i),
         .cfg_kgen_i              (cfg_linebuf_kgen_i),
         .cfg_pool_i              (cfg_linebuf_pool_i),
+        .cfg_c32_fast_i          (cfg_linebuf_c32_fast_i),
+        .cfg_block_valid_bytes_i (cfg_linebuf_block_valid_bytes_i),
+        .cfg_channel_addr_offset_i(cfg_linebuf_channel_addr_offset_i),
+        .cfg_coalesce_k_bytes_i  (cfg_linebuf_coalesce_k_bytes_i),
         .cfg_k_seed_kh_i         (linebuf_seed_kh_eff),
         .cfg_k_seed_kw_i         (linebuf_seed_kw_eff),
         .cfg_k_seed_ic_i         (linebuf_seed_ic_eff),

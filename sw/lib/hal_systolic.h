@@ -29,11 +29,15 @@ typedef struct {
     uint16_t coalesce;
     uint16_t kgen;
     uint16_t pool;
+    uint16_t c32_fast;
+    uint16_t block_valid_bytes;
     uint16_t k_seed_kh;
     uint16_t k_seed_kw;
     uint16_t k_seed_ic;
     uint32_t k_tiles;
     uint32_t spatial_m;
+    uint32_t channel_addr_offset;
+    uint32_t coalesce_k_bytes;
 } systolic_linebuf_cfg_t;
 
 typedef struct {

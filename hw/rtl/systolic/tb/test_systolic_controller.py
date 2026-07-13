@@ -36,6 +36,9 @@ REG_LB_SPATIAL_M = 0x0440
 REG_LB_LANE_BASE = 0x0444
 REG_LB_K_TILES = 0x0448
 REG_LB_K_SEED = 0x044C
+REG_LB_PRECOMP0 = 0x045C
+REG_LB_CHANNEL_OFFSET = 0x0460
+REG_LB_COALESCE_K_BYTES = 0x0464
 
 WEIGHT_ADDR = 0x00001000
 IFM_ADDR = 0x00003000
@@ -43,6 +46,7 @@ OFM_ADDR = 0x00005000
 DIM_M = 2
 ARRAY_DIM = 32
 BEAT_BYTES = 32
+REG_LB_CTRL_C32_FAST = 0x10
 
 
 def pack_u8(values):
@@ -74,6 +78,12 @@ def unpack_u8_beat(value):
 def clamp_u8_signed(value):
     value = max(-128, min(127, value))
     return value & 0xFF
+
+
+async def configure_c32_linebuf_fast_path(dut, kernel_h, kernel_w):
+    await mmio_write(dut, REG_LB_PRECOMP0, BEAT_BYTES)
+    await mmio_write(dut, REG_LB_CHANNEL_OFFSET, 0)
+    await mmio_write(dut, REG_LB_COALESCE_K_BYTES, kernel_h * kernel_w * BEAT_BYTES)
 
 
 def write_bytes(dut, base_addr, values):
@@ -570,7 +580,8 @@ async def systolic_controller_channel_linebuf_kgen_3x3_c32(dut):
     await mmio_write(dut, REG_LB_LANE_BASE, 0)
     await mmio_write(dut, REG_LB_K_TILES, k_tiles)
     await mmio_write(dut, REG_LB_K_SEED, 0)
-    await mmio_write(dut, REG_LB_CTRL, 0x7)
+    await configure_c32_linebuf_fast_path(dut, kernel_h, kernel_w)
+    await mmio_write(dut, REG_LB_CTRL, 0x7 | REG_LB_CTRL_C32_FAST)
     await mmio_write(dut, REG_SYS_START, 1)
 
     compute_pulses = 0
@@ -687,7 +698,8 @@ async def systolic_controller_channel_linebuf_kgen_3x3_c32_requant(dut):
     await mmio_write(dut, REG_LB_LANE_BASE, 0)
     await mmio_write(dut, REG_LB_K_TILES, k_tiles)
     await mmio_write(dut, REG_LB_K_SEED, 0)
-    await mmio_write(dut, REG_LB_CTRL, 0x7)
+    await configure_c32_linebuf_fast_path(dut, kernel_h, kernel_w)
+    await mmio_write(dut, REG_LB_CTRL, 0x7 | REG_LB_CTRL_C32_FAST)
     await mmio_write(dut, REG_SYS_START, 1)
 
     compute_pulses = 0
