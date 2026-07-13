@@ -2,8 +2,8 @@
 
 Tài liệu này ghi lại quá trình kiểm tra performance của
 `conv_channel_linebuf_packer`, lý do không tiếp tục dùng block này làm
-performance path, và kiến trúc linebuffer mới cần implement để feed systolic
-array ở mục tiêu `1 vector/cycle`.
+performance path, và kiến trúc `conv_linebuf_stream_packer` hiện đang feed
+systolic array cho các Conv2D linebuffer shape được support.
 
 Quyết định hiện tại:
 
@@ -16,7 +16,39 @@ Quyết định hiện tại:
 - Native stride tập trung vào `stride=1`, `stride=2`. Stride lớn hơn
   phải do compiler/scheduler decompose hoặc đi qua packed prepare backup.
 
+## 0. Trạng Thái Implement Hiện Tại
+
+Implementation hiện tại đã chuyển performance path sang
+`conv_linebuf_stream_packer` và không còn dựa vào
+`conv_channel_linebuf_packer` cho Micro-YOLO. Các điểm quan trọng:
+
+- **Host/Python sở hữu schedule Conv2D linebuffer**. Helper
+  `tools/npu_linebuf_precompute.py` sinh header
+  `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h` chứa full
+  `npu_conv2d_linebuf_job_desc_t` job arrays cho từng conv tile.
+- **Snitch firmware không dựng linebuffer tile trong hot path Micro-YOLO**.
+  `npu_layer_t` chỉ giữ pointer/count tới job arrays. Graph executor gọi
+  `npu_conv2d_packed_run_linebuf_job_descs()`, runner này preload shadow
+  registers cho job kế tiếp khi job hiện tại đang chạy.
+- **Generic C planner vẫn tồn tại làm fallback** cho các graph/layer chưa có
+  host-planned job descriptors. Fallback này vẫn dùng
+  `make_linebuf_output_tile_cfg()` và `linebuf_job_from_tile_cfg()`.
+- **C32 aligned fast path là path chính cho các layer YOLO sau stem**:
+  `input_c=32`, `pixel_stride_bytes=32`, `row_stride_bytes=input_w*32`,
+  `input_c_base=0`, `lane_base=0`, `block_valid_bytes=32`, 32B aligned base.
+  Trong path này RTL dùng trực tiếp `obi_rdata_i`/window word và tránh
+  `merge_beats` trên data path chính.
+- **`merge_beats` vẫn giữ lại** cho RGB stem, tail/sub-C32, `lane_base != 0`,
+  raw/NHWC hoặc non-aligned fallback, và bypass reads cắt qua biên 32B.
+- **Micro-YOLO test firmware dùng initialized D-TCM descriptors**. Cocotb load
+  ELF section-aware: `.text` vào I-TCM qua AXI, `.data` descriptor table vào
+  D-TCM qua testbench backdoor. Đây là cơ chế verification hiện tại, không có
+  nghĩa host AXI normal path đã expose D-TCM.
+
 ## 1. Contract RTL Legacy Đã Đo
+
+Phần này mô tả contract của `conv_channel_linebuf_packer` cũ. Nó hữu ích để
+so sánh semantics, nhưng không phải performance path hiện tại.
 
 | Thông số | Giá trị | Ý nghĩa |
 | :--- | :--- | :--- |
@@ -44,6 +76,9 @@ nhiều C-block trong cùng ring buffer, tag phải mở rộng thành `{ih, cbl
 
 ## 3. Dataflow Legacy
 
+Phần này là dataflow của channel-linebuffer cũ. Dataflow stream linebuffer
+hiện tại được mô tả ở mục 8.
+
 Luồng dữ liệu hiện tại:
 
 1. Host/scheduler cấu hình shape, stride, padding, `c_base`, và byte strides.
@@ -70,13 +105,11 @@ Với `K > 32`, RTL có KGEN v0 cho micro-tile:
    mỗi tile theo thứ tự `{kh,kw,ic}`.
 5. Tile đầu ghi OFM INT32; các tile sau đọc psum và accumulate vào cùng OFM.
 
-Gate hiện tại của KGEN v0: `M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` (hiện là
-`16`), `IC <= 32` hoặc `IC % 32 == 0`. Ngoài gate này scheduler dùng per-slice
-linebuffer accumulation hoặc packed prepare. Giới hạn `M` hiện là gate
-firmware/test conservative, không còn bị khóa bởi default OFM FIFO depth `8`:
-controller đã có drain engine song song với main compute FSM để đọc psum từ
-O-TCDM port 0, accumulate OFM FIFO row, writeback, và chỉ stall compute qua
-backpressure bình thường nếu drain engine không theo kịp.
+Gate lịch sử của KGEN v0 từng là `M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` rất nhỏ
+trong firmware/test. Implementation hiện tại đã nâng software limit lên
+`NPU_CONV2D_LINEBUF_KGEN_MAX_M = 1024`; Micro-YOLO dùng job `M=256` cho tile
+`16x16`. Các shape không thỏa gate linebuffer/KGEN vẫn đi qua generic planner
+hoặc packed-prepare fallback.
 
 Unaligned vector được xử lý bằng `merge_beats`: nếu vector 32 byte cắt qua biên
 256-bit beat, packer phát hai read rồi ghép lại.
@@ -87,8 +120,10 @@ Unaligned vector được xử lý bằng `merge_beats`: nếu vector 32 byte c�
 - Coalesced fast path: chỉ dùng khi `KH*KW*IC <= 32` và output spatial tile
   không vượt giới hạn một GEMM linebuffer launch hiện tại.
 - KGEN fast path: chỉ dùng khi `KH*KW*IC > 32`,
-  `M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` (hiện là `16`), và channel shape không
-  cắt ngang C-block (`IC <= 32` hoặc `IC % 32 == 0`).
+  `M <= NPU_CONV2D_LINEBUF_KGEN_MAX_M` (default `1024` ở software), và channel
+  shape không cắt ngang C-block. Với YOLO C32-blocked, host/Python nên emit
+  từng descriptor nhìn thấy đúng một C32 block: `input_c=32`,
+  `input_c_base=0`, `lane_base=0`, `block_valid_bytes=32`.
 - `7x7`, `9x9`, hoặc tile width lớn hơn `640` phải đi qua một trong hai hướng:
   decompose thành sub-kernel/tile nhỏ hơn, hoặc fallback packed prepare bằng
   iDMA/Spatz.
@@ -354,7 +389,7 @@ Vai trò từng khối:
 - Lane mux chọn byte từ window cache hoặc zero padding.
 - Skid FIFO tách timing giữa mux lớn và systolic ready/valid.
 
-## 8. Target `conv_linebuf_stream_packer`
+## 8. Implemented `conv_linebuf_stream_packer`
 
 Feature bắt buộc:
 
@@ -366,6 +401,24 @@ Feature bắt buộc:
 - Padding: zero-injection, không materialize padding vào SRAM.
 - `1x1` pad0: bypass path riêng, không đi qua window cache.
 - Native stride: `1`, `2`.
+
+Implementation detail hiện tại:
+
+- SRAM banked row/window path dùng `ROW_SLOTS = K_MAX + STRIDE_MAX`,
+  `BANKS = ROW_SLOTS * STRIDE_MAX`, mỗi bank là 256-bit word SRAM dual-port.
+- Fill path có beat metadata FIFO để track OBI responses. Response engine ghi
+  vào bank SRAM và xử lý single-beat/cross-beat reads.
+- C32 aligned mode (`cfg_c32_fast_i`) chỉ hợp lệ khi descriptor đã đảm bảo
+  full 32-byte block và 32B aligned channel offset. Khi đó fill/bypass có thể
+  dùng nguyên 256-bit beat mà không cần byte merge.
+- KGEN fast path (`c32_kgen_fast`) phát lane `0..31` trực tiếp từ C32 window
+  word tương ứng với `{kh,kw}` của lane descriptor. Đây là steady-state path
+  cho C32 YOLO conv.
+- Non-C32/coalesce/tail path vẫn dùng byte mux và `merge_beats` để giữ đúng
+  semantics khi address không aligned hoặc vector bị cắt qua hai OBI beats.
+- Background prefetch/fill đã tồn tại ở mức nhẹ nhưng chưa phải DMA 2D/3D
+  coalesced fill. Tối ưu request granularity theo row/segment vẫn là work item
+  riêng nếu muốn giảm `ifm_req`.
 
 Performance contract:
 
@@ -413,9 +466,14 @@ Cluster tests:
 - Collect PMU after every run and fail the perf test if linebuffer active
   cycles/vector exceeds the configured threshold.
 
-## 10. Đề Xuất Pipelining / Thiết Kế Decoupled FSM
+## 10. Pipelining / Decoupled FSM
 
-Để tối ưu hóa hiệu năng và triệt tiêu hoàn toàn thời gian chết (stall) của Systolic Array khi phải đợi Linebuffer nạp dữ liệu từ TCDM/OBI, cấu trúc FSM đơn tuần tự hiện tại của Linebuffer có thể được cải tiến thành kiến trúc Pipeline/Decoupled.
+Phần này là trạng thái đã implement một phần và phần còn lại của roadmap.
+`conv_linebuf_stream_packer` hiện không còn là FSM tuần tự hoàn toàn: đã có
+dual-port banks, response engine theo beat FIFO, background fill state, và
+pipeline emit stage. Tuy vậy fill/window/emit vẫn còn các điểm tuần tự trong
+row ensure và request granularity, nên chưa đạt mức DMA/segment streaming lý
+tưởng cho mọi shape.
 
 ### 10.1 Vấn đề của FSM đơn tuần tự
 Hiện tại, cả hai công đoạn **Nạp dữ liệu (Producer)** và **Phát dữ liệu (Consumer)** đều được quản lý bởi một FSM duy nhất (`state_q`).

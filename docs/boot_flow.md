@@ -9,7 +9,7 @@
 
 | Actor | Role |
 |-------|------|
-| Host / testbench | Owns reset/fetch-enable, writes firmware into I-TCM, observes completion IRQ |
+| Host / testbench | Owns reset/fetch-enable, writes firmware `.text` into I-TCM, optionally initializes test-only D-TCM `.data`, observes completion IRQ |
 | AXI4-Lite slave | Converts host writes into OBI requests |
 | I-TCM arbiter | Arbitrates host boot writes vs. Snitch instruction fetch |
 | I-TCM SRAM | Holds firmware at `0x1000_0000` |
@@ -26,7 +26,7 @@
 Host keeps fetch_enable_i low
   |
   v
-Host writes firmware bytes to 0x1000_0000+
+Host writes firmware `.text` bytes to 0x1000_0000+
   |
   v
 AXI4-Lite Slave
@@ -45,7 +45,15 @@ I-TCM SRAM
 2. Host loads `sw/test/boot/boot.bin` or `sw/test/matmul/matmul.bin` through AXI4-Lite.
 3. AXI4-Lite writes are converted into OBI writes.
 4. I-TCM arbiter grants bootloader writes into local I-TCM.
-5. Firmware image is now resident in L1 I-TCM.
+5. Firmware instruction image is now resident in L1 I-TCM.
+
+Most tests use a flat `.bin` image loaded only into I-TCM. Tests with
+initialized D-TCM data may use an ELF-aware cocotb loader. The current
+Micro-YOLO test does this because host-generated linebuffer/GEMM job descriptor
+arrays live in firmware `.data`; cocotb writes `.text` to I-TCM through AXI and
+initializes `.data` in D-TCM through testbench hierarchy/backdoor before
+releasing fetch. This is a verification loader convenience, not a normal host
+AXI path to D-TCM.
 
 ---
 
@@ -127,6 +135,8 @@ The completion path is deliberately separate from D-TCM:
 
 1. Firmware may keep private debug words in D-TCM for its own diagnosis.
 2. Testbench must not preload start flags or poll pass/fail through D-TCM.
+   Initializing ELF `.data` for tests that need static descriptor tables is an
+   allowed exception because it mirrors normal C runtime data initialization.
 3. Active cluster tests now use `irq_o` as completion and compare output data in L2/TCDM.
 4. The host AXI-Lite path must not access D-TCM or the full Shared TCDM
    aperture. Host-visible control/status windows such as PMU and planned

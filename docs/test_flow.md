@@ -24,6 +24,7 @@ firmware.
 | `sw/test/afu` | `afu.bin` | `test_afu_basic` | AFU LUT/CSR, TCDM master path, e8/e16/e32 output, AFU internal IRQ |
 | `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
 | `sw/test/spatz_vector` | `basic_mem_arith.bin`, etc. | `test_spatz_vector_basic` | Direct RVV instruction groups |
+| `sw/test/micro_yolo` | `micro_yolo.elf` | `test_micro_yolo_e2e` | 96x96 raw-head Micro-YOLO graph, host-generated linebuffer job descriptors, full output compare |
 
 `sw/lib` remains shared runtime/HAL code, not a test suite.
 
@@ -48,6 +49,14 @@ The host AXI-Lite boot path reaches I-TCM only. Cocotb holds Snitch with
 `fetch_enable_i=0`, loads the binary through AXI, then releases fetch. Cocotb
 does not read IRQ MMIO through AXI in the current topology; exact L2/TCDM output
 checks are the pass/fail oracle after `irq_o` asserts.
+
+Exception for initialized firmware data: tests that need static `.data` content
+may use an ELF-aware loader. `test_micro_yolo_e2e` uses this because the
+host-generated linebuffer/GEMM job descriptor arrays are linked into D-TCM
+`.data`. The loader writes `.text` to I-TCM through AXI and initializes `.data`
+through testbench hierarchy before fetch release. This is not a host-visible
+D-TCM frontend and must not be used as a start mailbox or pass/fail polling
+mechanism.
 
 The host AXI-Lite boot path also exposes the PMU window at `0x2000_4000`.
 Cocotb starts PMU counters before releasing fetch, snapshots/stops them after
@@ -313,6 +322,9 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_afu_basic
+
+env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_micro_yolo_e2e
 ```
 
 Optional diagnostic:

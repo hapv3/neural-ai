@@ -286,40 +286,53 @@ Matrix Engine
 8. In requant mode, the drain engine applies per-channel bias/scale/shift/zero-point/clamp and writes one packed 32-byte INT8 row through output port 0.
 9. DMA copies OFM/activation buffers from O-TCDM back to L2.
 
-### Direct Conv2D Channel Linebuffer Path
+### Direct Conv2D Stream Linebuffer Path
 
-The default full Conv2D path for supported TCDM-resident tensors is now the
-direct `conv_channel_linebuf_packer` path inside `systolic_controller`. Packed
+The default high-performance Conv2D path for supported TCDM-resident tensors is
+now `conv_linebuf_stream_packer` inside `systolic_controller`. The older
+`conv_channel_linebuf_packer` is retained only as a legacy/reference block in
+the documentation and tests; it is not the Micro-YOLO performance path. Packed
 `M x 32` IFM materialization through software+iDMA+Spatz remains available only
 as a backup for unsupported shapes, L2-only inputs, wider kernels, or debug
 comparison.
 
-The linebuffer path supports `C_BLOCK=32`, native `1x1..5x5` window generation,
-`input_w <= 640`, padding zero-injection, and a dedicated `1x1` bypass. For
-small kernels where `KH*KW*IC <= 32`, firmware enables coalesced window-pack
-mode: the linebuffer emits one 32-byte IFM vector per output spatial position,
-with all kernel taps/channels packed into systolic lanes. This is the default
-fast path for YOLO/CNN first-layer style `3x3/C3` cases and avoids materializing
-im2col rows in TCDM.
+The stream linebuffer supports `C_BLOCK=32`, native `1x1..5x5` window
+generation, `input_w <= 640`, padding zero-injection, row-ring/window caching,
+background fill, and a dedicated `1x1` bypass. For small kernels where
+`KH*KW*IC <= 32`, firmware enables coalesced window-pack mode: the linebuffer
+emits one 32-byte IFM vector per output spatial position, with all kernel
+taps/channels packed into systolic lanes. This is the default fast path for
+YOLO/CNN first-layer style `3x3/C3` cases and avoids materializing im2col rows
+in TCDM.
 
-For larger `K`, the first RTL K-tile frontend is implemented for bounded
-micro-tiles: host/Python provides `{kh,kw,ic}` seed and `k_tile_count`, Snitch
-programs the linebuffer once, and `systolic_controller` loops over K tiles
-internally with one start / one wait. RTL increments the 32 lane descriptors in
-`{kh,kw,ic}` order without Snitch hot-path div/mod, and intermediate K tiles
-accumulate through the controller psum path. Current safe gate is
-`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` (currently `16`), `IC <= 32` or
-`IC % 32 == 0`. The controller now has a parallel drain/accumulate engine, so
-the gate is conservative firmware/test coverage rather than an OFM-FIFO-depth
-limitation. Unsupported larger tiles fall back to the per-slice linebuffer or
-packed prepare path until the KGEN stress envelope is expanded.
+For larger `K`, KGEN mode is the main deep-layer path. Host/Python provides
+the linebuffer register image, `{kh,kw,ic}` seed, and `k_tile_count`; Snitch
+starts systolic once per spatial micro-tile; `systolic_controller` loops over K
+tiles internally. RTL increments the 32 lane descriptors in `{kh,kw,ic}` order
+without Snitch hot-path div/mod, and intermediate K tiles accumulate through
+the controller psum path. Current firmware uses `M_tile=256`/`16x16` spatial
+micro-tiles for Micro-YOLO C32 convs; `NPU_CONV2D_LINEBUF_KGEN_MAX_M=1024`
+remains the broader software limit for supported linebuffer launches.
 
-To reduce Snitch workload, the host-side compiler/runtime computes descriptors,
-DMA stripe ranges, and register images, writes the command stream to L2, and
-programs `npu_cmd_ctrl` through the cluster host AXI-slave path. Snitch refills
-the fixed 4 KB TCDM command staging window from L2, prefetches each descriptor
-into local scalar state before starting compute, then only dispatches
-precomputed descriptors and waits for iDMA/accelerator completion.
+For C32-blocked YOLO activations, the host-planned descriptor enables the
+`C32_FAST` RTL path: `input_base`, `pixel_stride_bytes`, `row_stride_bytes`,
+and `channel_addr_offset` are 32-byte aligned; `block_valid_bytes=32`;
+`lane_base=0`; `input_c_base=0`. In this path the linebuffer can consume the
+256-bit beat directly and bypass byte-level `merge_beats` on the main data
+path. `merge_beats` remains implemented for RGB stem, sub-C32/tail,
+`lane_base != 0`, raw/NHWC fallback, and any access crossing a 32-byte beat.
+
+To reduce Snitch workload, Micro-YOLO now uses host-generated
+`npu_conv2d_linebuf_job_desc_t` arrays. The generated header is built by
+`tools/npu_linebuf_precompute.py`; each descriptor contains the full
+`systolic_linebuf_cfg_t`, `systolic_gemm32_req_t`, row count, and K-tile count.
+Firmware stores descriptor pointer/count in `npu_layer_t` and calls
+`npu_conv2d_packed_run_linebuf_job_descs()`. That runner preloads the next
+linebuffer/GEMM shadow registers while the current job is running, so Snitch
+does not rebuild tile config in the critical graph path. The more general
+L2-resident command-stream flow through `npu_cmd_ctrl` remains the intended
+model-level host interface; Micro-YOLO currently uses generated C descriptors
+linked into D-TCM for verification.
 
 Detailed architecture, requirements, and pseudo-code are tracked in
 [`conv2d_packed_systolic_plan.md`](conv2d_packed_systolic_plan.md).

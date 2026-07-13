@@ -191,6 +191,23 @@ done by the host before launching the cluster. In current simulation this host
 compiler is Python; a later deployment can move the same logic into a runtime
 driver.
 
+Current implemented Micro-YOLO path:
+
+- `tools/npu_linebuf_precompute.py` generates a C header at firmware build time,
+  not an L2 command stream yet.
+- The generated header contains `npu_conv2d_linebuf_job_desc_t` arrays. Each
+  entry is a fully resolved linebuffer/GEMM job: `systolic_linebuf_cfg_t`,
+  `systolic_gemm32_req_t`, `rows`, and `k_tiles`.
+- `sw/test/micro_yolo/main.c` attaches those arrays to `npu_layer_t` using
+  descriptor pointer/count fields.
+- `sw/lib/npu_graph.c` prefers descriptor arrays when present. If a layer has
+  no host descriptor, it falls back to the generic C planner.
+- `sw/lib/conv2d_packed.c::npu_conv2d_packed_run_linebuf_job_descs()` preloads
+  job N+1 into RTL shadow registers while job N is running, then waits and
+  starts the preloaded job.
+
+Future/general model-level path:
+
 The host computes a descriptor table, writes the table to L2/DRAM, then programs
 a small host-visible command control/status register block through the cluster
 AXI-slave path. Snitch uses that bootstrap information to copy the descriptor
@@ -326,13 +343,16 @@ Scheduler rules:
 - `1x1/s1`, contiguous `IC` blocks should bypass the linebuffer and use the
   cheapest direct C32 stream path.
 - `1x1/s2x2` must trap as unsupported.
-- `K > 32` should use KGEN when inside the safe gate
-  (`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M`, `IC <= 32` or `IC % 32 == 0`). The
-  descriptor provides seed `{kh,kw,ic}` and tile count;
-  RTL generates the 32 lane descriptors and loops over K tiles internally.
-- `K > 32` outside the KGEN safe gate is expanded by the host into multiple
-  descriptors or falls back to packed prepare until the KGEN stress envelope is
-  expanded.
+- `K > 32` should use KGEN for supported linebuffer micro-tiles. The descriptor
+  provides seed `{kh,kw,ic}` and tile count; RTL generates the 32 lane
+  descriptors and loops over K tiles internally.
+- Current Micro-YOLO C32 convs use `16x16` spatial jobs (`M=256`) and 9 KGEN
+  tiles for `3x3x32`. `NPU_CONV2D_LINEBUF_KGEN_MAX_M=1024` is the broader
+  software gate, while the on-chip psum-buffer path is optimized around
+  `M_tile=256`.
+- `K > 32` outside the supported linebuffer/KGEN envelope is expanded by the
+  host into multiple descriptors or falls back to packed prepare until the KGEN
+  stress envelope is expanded.
 - Intermediate K descriptors write/read INT32 psum. Only host-marked final K
   descriptors may enable fused requant/activation.
 - Firmware may validate descriptor version, bounds, and unsupported mode bits,
@@ -343,10 +363,11 @@ Scheduler rules:
 The register block lives with the systolic controller/direct feeder, not inside
 the cluster-wide control register file. The legacy
 `conv_channel_linebuf_packer` channel-block interface is retained only as a
-correctness reference. The target `conv_linebuf_stream_packer` interface accepts
-host-compiled descriptors with `c_base`, spatial micro-tile shape, optional
-coalesce mode, and optional KGEN seed/tile count. RTL emits C32 IFM vectors
-directly to the systolic controller.
+correctness reference. The implemented `conv_linebuf_stream_packer` interface
+accepts host-compiled descriptors with spatial micro-tile shape, byte strides,
+optional coalesce mode, optional KGEN seed/tile count, and C32 fast-path
+precompute fields. RTL emits C32 IFM vectors directly to the systolic
+controller.
 
 ```c
 enum npu_cmd_type {
@@ -380,7 +401,19 @@ struct linebuf_cfg {
   uint16_t kernel_h;
   uint16_t kernel_w;
   uint16_t c_base;
+  uint16_t lane_base;
+  uint16_t coalesce;
+  uint16_t kgen;
+  uint16_t pool;
+  uint16_t c32_fast;
+  uint16_t block_valid_bytes;
+  uint16_t k_seed_kh;
+  uint16_t k_seed_kw;
+  uint16_t k_seed_ic;
+  uint32_t k_tiles;
   uint32_t spatial_m;
+  uint32_t channel_addr_offset;
+  uint32_t coalesce_k_bytes;
 
   uint32_t row_stride_bytes;
   uint32_t pixel_stride_bytes;
@@ -497,19 +530,25 @@ Implementation notes:
 - The buffer is capped to the current native contract, `5 * 640 * 32B =
   100 KiB`. Wider tiles and `7x7/9x9` kernels are decomposed or use the
   software+iDMA+Spatz packed prepare fallback.
-- The loader operates on a contiguous `C32` channel block selected by `c_base`.
+- The loader operates on a contiguous channel view. For the fast C32-blocked
+  path, the host presents each C32 block as an independent view:
+  `input_c=32`, `input_c_base=0`, `lane_base=0`, `pixel_stride_bytes=32`, and
+  32-byte aligned base/offset.
 - For tails or small-IC first layers, invalid channels are zero-filled by the
-  channel packer.
+  stream packer. Non-aligned vectors use `merge_beats` when a 32-byte vector
+  crosses a 256-bit OBI beat boundary.
 
 ### Layer 4: Channel-Block Descriptor Mapping
 
-Each emitted systolic IFM row is 32 bytes: one contiguous C32 block for one
-spatial/kernel position. The host descriptor programs row/pixel strides and
-step sizes instead of per-lane `(kh, kw, ic)` fields.
+Each emitted systolic IFM row is 32 bytes. In C32 fast mode that row is one
+contiguous C32 block for one spatial/kernel position. The host descriptor
+programs row/pixel strides and step sizes instead of per-lane `(kh, kw, ic)`
+fields. KGEN descriptors add `{k_seed_kh,k_seed_kw,k_seed_ic}` and `k_tiles`;
+RTL derives the 32 lane descriptors internally for each K tile.
 
 ```c
 void build_channel_linebuf_desc(desc, tensor, tile, uint32_t c_base) {
-  desc.input_base = tensor.input_base + c_base;
+  desc.input_base = tensor.input_base + c_base - tile.pad_h * tensor.row_stride_bytes;
   desc.input_h = tensor.input_h;
   desc.input_w = tensor.input_w;
   desc.input_c = tensor.input_c;
@@ -526,6 +565,10 @@ void build_channel_linebuf_desc(desc, tensor, tile, uint32_t c_base) {
   desc.pixel_stride_bytes = tensor.input_c;
   desc.ow_step_bytes = tile.stride_w * tensor.input_c;
   desc.oh_step_bytes = tile.stride_h * tensor.input_w * tensor.input_c;
+  desc.block_valid_bytes = min(32, tensor.input_c - c_base);
+  desc.channel_addr_offset = c_base;
+  desc.coalesce_k_bytes = tile.kernel_h * tile.kernel_w * desc.block_valid_bytes;
+  desc.c32_fast = is_c32_aligned_view(desc);
 }
 ```
 
