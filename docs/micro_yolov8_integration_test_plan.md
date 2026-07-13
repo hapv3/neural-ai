@@ -259,6 +259,14 @@ Current implementation status:
   job descriptor planning for the Micro-YOLO graph and generates
   `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h` during firmware build.
   The generated header is intentionally not tracked.
+- The generated descriptor ABI is `npu_conv2d_linebuf_job_desc_t`: full
+  `systolic_linebuf_cfg_t`, full `systolic_gemm32_req_t`, `rows`, and
+  `k_tiles`. Head chunk1 uses `npu_conv2d_l2_copy_job_desc_t`, which wraps the
+  linebuffer job plus compact tile-output and final L2 copy metadata.
+- `test_micro_yolo_e2e` loads `micro_yolo.elf` section-by-section because these
+  generated descriptors live in initialized D-TCM `.data`. `.text` is still
+  written through AXI I-TCM; `.data` is initialized through testbench hierarchy
+  before fetch release.
 
 ### Phase 3: Incremental Graph Integration
 
@@ -399,6 +407,10 @@ Head_Conv compute scales as expected:
   shadow registers for linebuffer tile scheduling: tile N+1 config is staged
   while tile N is running, so the DONE-to-START gap only needs a start pulse
   plus the residual wait.
+- This reduced total Micro-YOLO cycles from the previous field-precompute bridge
+  snapshot (`403,128`) to `386,044`. The systolic compute count stayed
+  `69,696`, confirming the gain comes from eliminating Snitch-side tile config
+  preparation rather than changing MAC work.
 
 Current head scheduler geometry:
 

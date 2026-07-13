@@ -1,6 +1,50 @@
 # Performance Gap Analysis: 68,968 → 8,704 cycles
 
+## 0. Current Implementation Status
+
+This document preserves the historical case-20/case-22 optimization analysis.
+It is no longer a complete description of the current Micro-YOLO execution
+path.
+
+Current implemented flow:
+
+- The active Conv2D performance path is `conv_linebuf_stream_packer` inside
+  `systolic_controller`, not the legacy `conv_channel_linebuf_packer`.
+- Micro-YOLO no longer asks Snitch firmware to build each linebuffer tile in
+  the hot path. `tools/npu_linebuf_precompute.py` generates
+  `npu_conv2d_linebuf_job_desc_t` arrays at firmware build time, and
+  `npu_conv2d_packed_run_linebuf_job_descs()` dispatches those descriptors.
+- The descriptor runner preloads the next linebuffer/GEMM shadow-register image
+  while the current job runs. This removed most per-job C planner arithmetic
+  from Snitch.
+- C32-blocked layers use the RTL `C32_FAST` path when the host descriptor
+  guarantees `input_c=32`, `input_c_base=0`, `lane_base=0`,
+  `block_valid_bytes=32`, and 32-byte aligned base/stride/channel offsets.
+  This bypasses byte-level `merge_beats` on the main C32 data path.
+- `merge_beats` is still required for RGB stem, sub-C32/tail chunks,
+  `lane_base != 0`, raw/NHWC fallback, and any non-32B-aligned access.
+- The large "Stripe-Stationary resident cache" idea is not active in RTL. The
+  current hardware keeps a row-ring/window state sized around kernel/stride and
+  relies on host spatial job descriptors plus C32 alignment to reduce schedule
+  overhead.
+
+Latest Micro-YOLO E2E snapshot after host-precomputed descriptors:
+
+| Counter | Value |
+|---|---:|
+| PMU cycles | 386,044 |
+| Previous field-precompute bridge snapshot | 403,128 |
+| Delta | -17,084 cycles (-4.2%) |
+| Total systolic useful compute | 69,696 cycles |
+
+The remaining gap is dominated by IFM request volume/window setup and graph
+operator overhead, not by Snitch recomputing linebuffer register fields. See
+`linebuffer_architecture.md`, `conv2d_packed_systolic_plan.md`, and
+`micro_yolov8_integration_test_plan.md` for the current architecture.
+
 ## 1. Cycle Budget Decomposition
+
+Historical case-20 snapshot before the later C32/group/host-descriptor work:
 
 Target: 8,704 cycles (systolic compute). Measured: 68,968 cycles. Gap: 60,264 cycles (87.4% overhead).
 
@@ -111,7 +155,16 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 
 **Prerequisite:** Linebuffer must support efficient refill when `row_cache_reuse=0`. Current refill costs ~1,690 cycles per K tile. With 27 tiles and no cache reuse, that becomes 27 × 1,690 = 45,630 additional cycles — a net regression.
 
-**True fix:** Implement stripe-stationary linebuffer (Section 6.4 of [npu_refactor_and_review.md](file:///home/dev01/neural-ai/docs/npu_refactor_and_review.md#L277-L332)). Resident cache holds 4 rows × 16 cols × 4 cblocks × 32B = 8 KB per context. Ping-pong 2 contexts = 16 KB total. This eliminates both the firmware loop overhead and per-tile refill.
+**Historical proposed fix:** Implement stripe-stationary linebuffer (Section
+6.4 of [npu_refactor_and_review.md](file:///home/dev01/neural-ai/docs/npu_refactor_and_review.md#L277-L332)).
+That idea used a resident cache holding 4 rows × 16 cols × 4 cblocks × 32B =
+8 KB per context, with ping-pong 2 contexts = 16 KB total.
+
+**Current status:** This large resident-cache path is not active. The current
+implementation instead uses host-generated spatial descriptors, C32 fast path,
+row-ring/window caching, and shadow-register preload. The next useful work is
+to improve the row/window pipeline and C32 segment request efficiency without
+reintroducing a full activation-tile cache.
 
 **Estimated savings:** 23,297 cycles (100% of Sink 1).
 
@@ -139,17 +192,25 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 
 **Current overlap:** Linebuffer prefetch executes during `WAIT_DRAIN`, hiding ~8,000 of the 20,280 cycles under drain time.
 
-**If stripe-stationary is implemented (Rank 1 fix):** Each stripe's IFM data (8 KB) requires ~256 OBI beats at 256 bits/beat = 256 cycles to fill. With ping-pong buffering, fill of stripe(N+1) overlaps entirely under compute of stripe(N) (8,704 / 8 stripes = 1,088 cycles per stripe, which is 4× the 256-cycle fill time).
+**Historical stripe-stationary estimate:** Each stripe's IFM data (8 KB) would
+require ~256 OBI beats at 256 bits/beat = 256 cycles to fill. With ping-pong
+buffering, fill of stripe(N+1) could overlap under compute of stripe(N).
 
-**Estimated savings:** Fully hidden under compute after stripe-stationary implementation.
+**Current status:** The active RTL does not implement that resident-cache mode.
+The relevant target is now to make the row-ring/window path issue fewer and
+more regular C32 reads, then overlap window setup with stream emit.
+
+**Historical estimated savings:** Fully hidden under compute if the
+stripe-stationary resident-cache path had been implemented. For the active
+row-ring/window path, use the priorities in Section 6.5 instead.
 
 ---
 
-## 5. Achievable Target
+## 5. Historical Achievable Target
 
 | Scenario | Estimated Cycles | Utilization |
 |---|---|---|
-| Current | 68,968 | 12.6% |
+| Historical case-20 snapshot | 68,968 | 12.6% |
 | After eliminating firmware loop (stripe-stationary) | ~45,000 | 19.3% |
 | + Compute/drain overlap | ~18,000–25,000 | 35–48% |
 | + Stripe-stationary with ping-pong fill | ~17,408 | 50.0% |
@@ -157,7 +218,7 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 
 The 17,408-cycle target (2× compute) is the practical lower bound for this workload because weight load bandwidth equals compute bandwidth: each systolic cycle consumes one 256-bit IFM vector AND requires one weight row pre-loaded. With a single `obi_i` port shared between weight load and IFM fetch, the minimum is `max(compute, weight_load) + startup` ≈ 2× compute.
 
-To reach below 2× compute would require either:
+For this historical case, reaching below 2× compute would require either:
 - A second OBI read port for weights (separate from IFM/linebuffer)
 - Or pre-loading all weights into on-chip SRAM before compute begins (feasible for small K but not for 34 tiles × 32 rows × 32B = 34 KB per stripe)
 

@@ -118,11 +118,23 @@ For $K > 32$, instead of scheduling multiple individual array launches, Snitch p
 - Ping-pongs weights and accumulates results on-chip using the PSum buffer.
 - Substantially reduces Snitch interrupt handling and MMIO programming overhead.
 
-### 3.4 Stripe-Stationary Mode (`ss_mode`)
-Generalizes coordinate generation to support larger spatial stripes (e.g., $\text{Output Height} = 16$).
-- The hardware automatically handles the internal sliding window of the linebuffer.
-- Eliminates the nested coordinate loop (`oh_base`) in Snitch firmware.
-- Enables single-pass compilation of deep layers without intermediate pipeline flushes.
+### 3.4 Row-Ring / Host-Descriptor Spatial Scheduling
+
+The current implementation does **not** use a large Stripe-Stationary resident
+cache that stores a full `16x16xC` tile. That path was removed from the active
+performance plan. Instead:
+
+- The RTL stream linebuffer keeps a small row-ring/window state sized by
+  `K_MAX`/`STRIDE_MAX`, not a full activation tile.
+- Host/Python decomposes the output tensor into spatial micro-tiles and emits
+  full linebuffer/GEMM job descriptors.
+- Snitch firmware does not run a heavy `oh_base/ow_base` planner loop in the
+  Micro-YOLO hot path; it dispatches precomputed job descriptors.
+- The descriptor runner preloads the next linebuffer and GEMM shadow registers
+  while the current job is running.
+- For C32-aligned tensors the RTL `C32_FAST` path avoids byte merge logic on
+  the main data path. Non-aligned/RGB/tail cases still use the generic
+  `merge_beats` correctness path.
 
 ---
 
@@ -193,6 +205,9 @@ All registers are 32-bit wide, mapped to the cluster control aperture.
 | `0x0444` | `REG_LB_LANE_BASE` | R/W | `0x0` | Internal byte shift selector (6-bit). |
 | `0x0448` | `REG_LB_K_TILES` | R/W | `0x0` | Total number of $K$-tiles to process. |
 | `0x044C` | `REG_LB_K_SEED` | R/W | `0x0` | Hardware seed for KGEN: Bits [15:0]: Seed IC; Bits [23:16]: Seed KW; Bits [31:24]: Seed KH. |
+| `0x045C` | `REG_LB_PRECOMP0` | R/W | `0x0` | Host/compiler precomputed `block_valid_bytes`; used by C32 fast and generic tail handling. |
+| `0x0460` | `REG_LB_CHANNEL_OFFSET` | R/W | `0x0` | Byte offset from linebuffer input base to the active channel block. Must be 32B aligned for `C32_FAST`. |
+| `0x0464` | `REG_LB_COALESCE_K_BYTES` | R/W | `0x0` | Precomputed `kernel_h * kernel_w * block_valid_bytes` for coalesce/KGEN decisions. |
 
 ---
 
@@ -210,6 +225,9 @@ All registers are 32-bit wide, mapped to the cluster control aperture.
 4. **Channel Bounds**:
    - Sub-32 channel bounds (e.g., $IC=3$ in Layer 0) must be zero-padded to 32 elements in memory layout or padded by the linebuffer.
    - For optimal KGEN, the input channels $IC$ should be $\le 32$ or a multiple of 32.
+   - For the C32-blocked fast path, the host descriptor must present each C32
+     block as an independent view with `input_c=32`, `input_c_base=0`,
+     `lane_base=0`, `pixel_stride_bytes=32`, and 32-byte aligned base/offset.
 5. **Memory Port Bandwidth Limit**:
    - Because the 256-bit OBI Read Port is shared between weights and IFM, the hardware cannot execute at 1 cycle/compute in situations where weights must be loaded continuously. 
    - The execution speed is bounded by: 
