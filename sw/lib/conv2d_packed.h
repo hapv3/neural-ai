@@ -1,6 +1,7 @@
 #ifndef CONV2D_PACKED_H
 #define CONV2D_PACKED_H
 
+#include "hal_systolic.h"
 #include "npu_types.h"
 
 #define NPU_CONV2D_PACKED_OC_TILE 32u
@@ -52,6 +53,21 @@ typedef struct {
     uint32_t tile_ow;
 } npu_conv2d_spatial_tile_t;
 
+typedef struct npu_conv2d_linebuf_job_desc {
+    systolic_linebuf_cfg_t linebuf;
+    systolic_gemm32_req_t gemm;
+    uint32_t rows;
+    uint32_t k_tiles;
+} npu_conv2d_linebuf_job_desc_t;
+
+typedef struct npu_conv2d_l2_copy_job_desc {
+    npu_conv2d_linebuf_job_desc_t job;
+    uint32_t l2_addr;
+    uint32_t tile_output_addr;
+    uint32_t tile_oh;
+    uint32_t tile_ow;
+} npu_conv2d_l2_copy_job_desc_t;
+
 enum {
     NPU_CONV2D_PACKED_OK = 0,
     NPU_CONV2D_PACKED_ERR_DILATION = 0xBAD20001u,
@@ -83,5 +99,8 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant(const npu_co
                                                                     uint32_t psum_addr,
                                                                     uint32_t output_addr,
                                                                     npu_conv2d_packed_stats_t *stats);
+uint32_t npu_conv2d_packed_run_linebuf_job_descs(const npu_conv2d_linebuf_job_desc_t *jobs,
+                                                 uint32_t job_count,
+                                                 npu_conv2d_packed_stats_t *stats);
 
 #endif

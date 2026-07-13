@@ -219,17 +219,20 @@ Required decisions:
 - Python host / command generator must own the C32-aligned linebuffer schedule:
   when it emits a Conv2D tile that uses the RTL `C32_FAST` linebuffer path, it
   must guarantee `input_base`, `pixel_stride_bytes`, `row_stride_bytes`, and
-  `channel_addr_offset` are 32-byte aligned. It must also precompute and program
-  the linebuffer fast-path fields:
+  `channel_addr_offset` are 32-byte aligned. It must also emit the complete
+  linebuffer/GEMM job descriptor, including the fast-path fields:
   `block_valid_bytes`, `channel_addr_offset`, and `coalesce_k_bytes =
   kernel_h * kernel_w * block_valid_bytes`. Firmware should treat these fields
   as part of the descriptor, not re-plan the schedule on Snitch.
-- The current C firmware planner in `sw/lib/conv2d_packed.c` computes these
-  fields as a compatibility bridge. Once the Python host emits final command
-  descriptors, Python should produce the same values and only set `C32_FAST`
-  for one full C32 block (`block_valid_bytes == 32`, `lane_base == 0`,
-  `c_base == 0`, 32-byte aligned base/offset). Tail chunks and non-C32 layouts
-  must leave `C32_FAST` disabled and use the generic linebuffer path.
+- The Python host helper in `tools/npu_linebuf_precompute.py` now emits full
+  Micro-YOLO linebuffer/GEMM job arrays as a generated header. Firmware stores
+  pointers to those arrays in `npu_layer_t` and calls the descriptor runner in
+  `sw/lib/conv2d_packed.c`. The C planner remains as a generic compatibility
+  fallback for layers that do not provide host-planned job descriptors. Python
+  must only set `C32_FAST` for one full C32 block (`block_valid_bytes == 32`,
+  `lane_base == 0`, `c_base == 0`, 32-byte aligned base/offset). Tail chunks
+  and non-C32 layouts must leave `C32_FAST` disabled and use the generic
+  linebuffer path.
 
 | Step | Task | File |
 |---|---|---|
@@ -237,7 +240,7 @@ Required decisions:
 | 2b | Define C32-blocked tensor helpers and address math | `sw/lib/npu_tensor.h` or `sw/lib/npu_graph.h` |
 | 2c | Add graph scratch allocator for TCDM tile buffers | `sw/test/micro_yolo/main.c` or `sw/lib/npu_graph.c` |
 | 2d | Document qparam propagation for Requant/SiLU/Add/Mul | `docs/micro_yolov8_integration_test_plan.md` |
-| 2e | Emit C32-aligned Conv2D linebuffer precompute fields from Python host descriptors | Python command generator / graph export path |
+| 2e | Emit C32-aligned Conv2D linebuffer/GEMM job descriptors from Python host | Python command generator / graph export path |
 
 Acceptance: the minimal graph in Phase 3a can run using the same tensor
 descriptors and layout rules that the full 96x96 graph will use.
@@ -252,6 +255,10 @@ Current implementation status:
 - Requant qparams are carried through graph-layer attributes. The current
   micro-yolo firmware uses uniform qparams per layer; per-channel qparams remain
   compatible with the systolic requant configuration API.
+- `tools/npu_linebuf_precompute.py` owns the current host-side C32 linebuffer
+  job descriptor planning for the Micro-YOLO graph and generates
+  `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h` during firmware build.
+  The generated header is intentionally not tracked.
 
 ### Phase 3: Incremental Graph Integration
 
@@ -369,18 +376,18 @@ Latest `test_micro_yolo_e2e.py` result after 3j:
 | 3 | DMA_IN weight2 | 784 | down weights |
 | 4 | DMA_IN weight3 | 1,240 | two C32 head chunks |
 | 5 | DMA_IN sigmoid LUT | 360 | 256-byte LUT |
-| 6 | Conv_Stem | 22,654 | `sys_compute=2,304`, `ifm_req=14,805` |
+| 6 | Conv_Stem | 21,136 | `sys_compute=2,304`, `ifm_req=14,805` |
 | 7 | Logistic LUT | 26,248 | AFU |
 | 8 | Mul_Q7 | 9,378 | AFU, `tcdm_stall=2,304` |
-| 9 | DMA_OUT skip | 4,102 | preserve L3 for later logical concat |
-| 10 | C2f_Conv | 51,378 | `sys_compute=20,736`, `ifm_req=26,928` |
+| 9 | DMA_OUT skip | 4,100 | preserve L3 for later logical concat |
+| 10 | C2f_Conv | 49,802 | `sys_compute=20,736`, `ifm_req=26,928` |
 | 11 | Residual Add | 9,388 | AFU, `tcdm_stall=2,304` |
-| 12 | Conv_Down | 42,184 | `sys_compute=5,184`, `ifm_req=32,463` |
-| 13 | MaxPool | 18,462 | linebuffer pool mode |
+| 12 | Conv_Down | 41,018 | `sys_compute=5,184`, `ifm_req=32,463` |
+| 13 | MaxPool | 18,474 | linebuffer pool mode |
 | 14 | Upsample | 35,462 | Spatz C32 fast path, `tcdm_stall=2,880` |
 | 15 | DMA_IN skip reload | 4,062 | reload L3 branch |
-| 16 | Head_Conv C32x2 | 159,202 | `sys_compute=41,472`, `ifm_req=54,277`, `ofm_req=21,042` |
-| **Total** |  | **398,024** | PASS |
+| 16 | Head_Conv C32x2 | 149,256 | `sys_compute=41,472`, `ifm_req=54,277`, `ofm_req=21,042` |
+| **Total** |  | **386,044** | PASS |
 
 Head_Conv compute scales as expected:
 
@@ -388,9 +395,10 @@ Head_Conv compute scales as expected:
 - Head logical C64 compute: `41,472` cycles, exactly `2x`.
 - Head total cycles are about `3.1x` C2f total because the second C32 chunk also
   reads external psum, accumulates, requants, and writes INT8 tiles to L2.
-- Firmware now uses the RTL shadow registers for linebuffer tile scheduling:
-  tile N+1 config is staged while tile N is running, so the DONE-to-START gap
-  only needs a start pulse plus the residual wait.
+- Firmware now uses host-generated linebuffer/GEMM job descriptors plus RTL
+  shadow registers for linebuffer tile scheduling: tile N+1 config is staged
+  while tile N is running, so the DONE-to-START gap only needs a start pulse
+  plus the residual wait.
 
 Current head scheduler geometry:
 

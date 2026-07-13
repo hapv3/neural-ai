@@ -39,13 +39,6 @@ typedef struct {
     uint32_t overflow;
 } npu_conv2d_prepare_plan_t;
 
-typedef struct {
-    systolic_linebuf_cfg_t linebuf;
-    systolic_gemm32_req_t gemm;
-    uint32_t rows;
-    uint32_t k_tiles;
-} npu_conv2d_linebuf_job_t;
-
 static uint32_t input_c_stride(const npu_conv2d_packed_cfg_t *cfg);
 static uint32_t input_row_stride_bytes(const npu_conv2d_packed_cfg_t *cfg);
 static void make_linebuf_output_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
@@ -717,7 +710,7 @@ static void linebuf_job_from_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
                                       uint32_t ofm_row_stride_bytes,
                                       uint32_t ofm_tile_cols,
                                       uint32_t psum_row_stride_bytes,
-                                      npu_conv2d_linebuf_job_t *job) {
+                                      npu_conv2d_linebuf_job_desc_t *job) {
     uint32_t spatial_rows = cfg->output_h * cfg->output_w;
     uint32_t k_total = cfg->kernel_h * cfg->kernel_w * cfg->input_c;
     uint32_t k_tiles = ceil_div_u32(k_total, NPU_CONV2D_PACKED_K_TILE);
@@ -737,17 +730,60 @@ static void linebuf_job_from_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
     job->k_tiles = k_tiles;
 }
 
-static void linebuf_job_preload(const npu_conv2d_linebuf_job_t *job) {
+static void linebuf_job_preload(const npu_conv2d_linebuf_job_desc_t *job) {
     systolic_linebuf_config(&job->linebuf);
     systolic_gemm32_preload(&job->gemm);
 }
 
 static void linebuf_job_record(npu_conv2d_packed_stats_t *stats,
-                               const npu_conv2d_linebuf_job_t *job) {
+                               const npu_conv2d_linebuf_job_desc_t *job) {
     if (stats) {
         stats->rows += job->rows;
         stats->k_tiles += job->k_tiles;
     }
+}
+
+uint32_t npu_conv2d_packed_run_linebuf_job_descs(const npu_conv2d_linebuf_job_desc_t *jobs,
+                                                 uint32_t job_count,
+                                                 npu_conv2d_packed_stats_t *stats) {
+    clear_stats(stats);
+
+    if (!jobs || job_count == 0u) {
+        if (stats) {
+            stats->status = NPU_CONV2D_PACKED_ERR_BAD_SHAPE;
+        }
+        return NPU_CONV2D_PACKED_ERR_BAD_SHAPE;
+    }
+
+    uint32_t total_start = spatz_rt_read_cycle();
+    npu_conv2d_packed_stats_t total_stats;
+    clear_stats(&total_stats);
+
+    linebuf_job_preload(&jobs[0]);
+    systolic_gemm32_start_preloaded();
+
+    for (uint32_t idx = 1u; idx < job_count; idx++) {
+        linebuf_job_preload(&jobs[idx]);
+        systolic_gemm32_wait_done();
+        linebuf_job_record(&total_stats, &jobs[idx - 1u]);
+        systolic_gemm32_start_preloaded();
+    }
+
+    systolic_gemm32_wait_done();
+    linebuf_job_record(&total_stats, &jobs[job_count - 1u]);
+    systolic_linebuf_disable();
+
+    if (stats) {
+        copy_conv_stats(stats, &total_stats);
+        stats->prepare_cycles = 0u;
+        stats->gemm_cycles = spatz_rt_read_cycle() - total_start;
+        stats->last_prepare_cycles = 0u;
+        stats->last_gemm_cycles = stats->gemm_cycles;
+        stats->total_cycles = stats->gemm_cycles;
+        stats->status = NPU_CONV2D_PACKED_OK;
+    }
+
+    return NPU_CONV2D_PACKED_OK;
 }
 
 static void run_linebuf_kgen_tile(const npu_conv2d_packed_cfg_t *cfg,
@@ -967,9 +1003,9 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles(const npu_conv2d_packed_cfg_t 
         }
     }
 
-    npu_conv2d_linebuf_job_t job_slots[2];
-    npu_conv2d_linebuf_job_t *cur_job = &job_slots[0];
-    npu_conv2d_linebuf_job_t *next_job = &job_slots[1];
+    npu_conv2d_linebuf_job_desc_t job_slots[2];
+    npu_conv2d_linebuf_job_desc_t *cur_job = &job_slots[0];
+    npu_conv2d_linebuf_job_desc_t *next_job = &job_slots[1];
     {
         const npu_conv2d_spatial_tile_t *tile = &tiles[0];
         npu_conv2d_packed_cfg_t tile_cfg;
@@ -1015,7 +1051,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles(const npu_conv2d_packed_cfg_t 
         linebuf_job_record(&total_stats, cur_job);
         systolic_gemm32_start_preloaded();
         {
-            npu_conv2d_linebuf_job_t *tmp = cur_job;
+            npu_conv2d_linebuf_job_desc_t *tmp = cur_job;
             cur_job = next_job;
             next_job = tmp;
         }
@@ -1078,9 +1114,9 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
         }
     }
 
-    npu_conv2d_linebuf_job_t job_slots[2];
-    npu_conv2d_linebuf_job_t *cur_job = &job_slots[0];
-    npu_conv2d_linebuf_job_t *next_job = &job_slots[1];
+    npu_conv2d_linebuf_job_desc_t job_slots[2];
+    npu_conv2d_linebuf_job_desc_t *cur_job = &job_slots[0];
+    npu_conv2d_linebuf_job_desc_t *next_job = &job_slots[1];
     {
         const npu_conv2d_spatial_tile_t *tile = &tiles[0];
         npu_conv2d_packed_cfg_t tile_cfg;
@@ -1132,7 +1168,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
         linebuf_job_record(&total_stats, cur_job);
         systolic_gemm32_start_preloaded();
         {
-            npu_conv2d_linebuf_job_t *tmp = cur_job;
+            npu_conv2d_linebuf_job_desc_t *tmp = cur_job;
             cur_job = next_job;
             next_job = tmp;
         }

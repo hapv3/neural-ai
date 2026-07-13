@@ -80,8 +80,17 @@ static uint32_t run_conv2d3x3s1p1_c32_linebuf(const npu_tensor_t *src,
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
 
-    npu_conv2d_packed_cfg_t conv_cfg;
     npu_conv2d_packed_stats_t conv_stats;
+
+    if (layer->linebuf_jobs && layer->linebuf_job_count) {
+        uint32_t conv_status =
+            npu_conv2d_packed_run_linebuf_job_descs(layer->linebuf_jobs,
+                                                    layer->linebuf_job_count,
+                                                    &conv_stats);
+        return (conv_status == NPU_CONV2D_PACKED_OK) ? NPU_GRAPH_OK : conv_status;
+    }
+
+    npu_conv2d_packed_cfg_t conv_cfg = {0};
 
     conv_cfg.input_addr = src->addr;
     conv_cfg.weight_addr = weight->addr;
@@ -172,8 +181,19 @@ static uint32_t run_conv2d3x3_c32_linebuf_requant(const npu_tensor_t *src,
 
     rows = (uint32_t)dst->h * dst->w;
 
-    npu_conv2d_packed_cfg_t conv_cfg;
     npu_conv2d_packed_stats_t conv_stats;
+
+    if (layer->linebuf_jobs && layer->linebuf_job_count) {
+        configure_uniform_requant(layer);
+        uint32_t conv_status =
+            npu_conv2d_packed_run_linebuf_job_descs(layer->linebuf_jobs,
+                                                    layer->linebuf_job_count,
+                                                    &conv_stats);
+        systolic_requant_disable();
+        return (conv_status == NPU_CONV2D_PACKED_OK) ? NPU_GRAPH_OK : conv_status;
+    }
+
+    npu_conv2d_packed_cfg_t conv_cfg = {0};
 
     conv_cfg.input_addr = src->addr;
     conv_cfg.weight_addr = weight->addr;
@@ -276,10 +296,47 @@ static uint32_t run_conv2d3x3s1p1_c32x2_linebuf_requant_l2(const npu_tensor_t *s
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
 
-    npu_conv2d_packed_cfg_t cfg0;
-    npu_conv2d_packed_cfg_t cfg1;
     npu_conv2d_packed_stats_t stats0;
     npu_conv2d_packed_stats_t stats1;
+
+    if (layer->linebuf_jobs && layer->linebuf_job_count &&
+        layer->linebuf_l2_jobs && layer->linebuf_l2_job_count) {
+        uint32_t conv_status =
+            npu_conv2d_packed_run_linebuf_job_descs(layer->linebuf_jobs,
+                                                    layer->linebuf_job_count,
+                                                    &stats0);
+        if (conv_status != NPU_CONV2D_PACKED_OK) {
+            return conv_status;
+        }
+
+        configure_uniform_requant(layer);
+        for (uint32_t job_idx = 0; job_idx < layer->linebuf_l2_job_count; job_idx++) {
+            const npu_conv2d_l2_copy_job_desc_t *copy_job = &layer->linebuf_l2_jobs[job_idx];
+            conv_status = npu_conv2d_packed_run_linebuf_job_descs(&copy_job->job, 1u, &stats1);
+            if (conv_status != NPU_CONV2D_PACKED_OK) {
+                systolic_requant_disable();
+                return conv_status;
+            }
+
+            for (uint32_t th = 0; th < copy_job->tile_oh; th++) {
+                uint32_t src_offset = th * copy_job->tile_ow * 32u;
+                uint32_t dst_offset = th * output_w * 32u;
+                uint32_t copy_status =
+                    npu_graph_dma_copy_wait(copy_job->l2_addr + dst_offset,
+                                            copy_job->tile_output_addr + src_offset,
+                                            copy_job->tile_ow * 32u);
+                if (copy_status != NPU_GRAPH_OK) {
+                    systolic_requant_disable();
+                    return copy_status;
+                }
+            }
+        }
+        systolic_requant_disable();
+        return NPU_GRAPH_OK;
+    }
+
+    npu_conv2d_packed_cfg_t cfg0 = {0};
+    npu_conv2d_packed_cfg_t cfg1 = {0};
     npu_conv2d_spatial_tile_t tiles[NPU_GRAPH_MAX_CONV_TILES];
     uint32_t tile_count = 0u;
 
@@ -554,8 +611,20 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
                 return NPU_GRAPH_ERR_BAD_TENSOR;
             }
             {
-                npu_conv2d_packed_cfg_t conv_cfg;
                 npu_conv2d_packed_stats_t conv_stats;
+
+                if (layer->linebuf_jobs && layer->linebuf_job_count) {
+                    configure_uniform_requant(layer);
+                    uint32_t conv_status =
+                        npu_conv2d_packed_run_linebuf_job_descs(layer->linebuf_jobs,
+                                                                layer->linebuf_job_count,
+                                                                &conv_stats);
+                    systolic_requant_disable();
+                    if (conv_status != NPU_CONV2D_PACKED_OK) return conv_status;
+                    break;
+                }
+
+                npu_conv2d_packed_cfg_t conv_cfg = {0};
 
                 conv_cfg.input_addr = src->addr;
                 conv_cfg.weight_addr = aux->addr;
