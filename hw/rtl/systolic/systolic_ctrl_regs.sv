@@ -36,6 +36,7 @@ module systolic_ctrl_regs #(
     output logic                      cfg_linebuf_en_o,
     output logic                      cfg_linebuf_coalesce_o,
     output logic                      cfg_linebuf_pool_o,
+    output logic                      cfg_linebuf_c32_fast_o,
     output logic [31:0]               cfg_linebuf_input_base_o,
     output logic [15:0]               cfg_linebuf_input_h_o,
     output logic [15:0]               cfg_linebuf_input_w_o,
@@ -59,6 +60,9 @@ module systolic_ctrl_regs #(
     output logic [7:0]                cfg_linebuf_k_seed_kw_o,
     output logic [7:0]                cfg_linebuf_k_seed_kh_o,
     output logic [31:0]               cfg_linebuf_spatial_m_o,
+    output logic [5:0]                cfg_linebuf_block_valid_bytes_o,
+    output logic [31:0]               cfg_linebuf_channel_addr_offset_o,
+    output logic [31:0]               cfg_linebuf_coalesce_k_bytes_o,
     input  logic                      cfg_sys_done_i
 );
 
@@ -100,6 +104,9 @@ module systolic_ctrl_regs #(
     localparam logic [ADDR_WIDTH-1:0] REG_SYS_OFM_ROW_STRIDE = 32'h0450;
     localparam logic [ADDR_WIDTH-1:0] REG_SYS_OFM_TILE_COLS = 32'h0454;
     localparam logic [ADDR_WIDTH-1:0] REG_SYS_PSUM_ROW_STRIDE = 32'h0458;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_PRECOMP0 = 32'h045C;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_CHANNEL_OFFSET = 32'h0460;
+    localparam logic [ADDR_WIDTH-1:0] REG_LB_COALESCE_K_BYTES = 32'h0464;
 
     logic [31:0] r_sys_w_ptr;
     logic [31:0] r_sys_i_ptr;
@@ -123,6 +130,7 @@ module systolic_ctrl_regs #(
     logic              r_linebuf_coalesce;
     logic              r_linebuf_pool;
     logic              r_linebuf_kgen;
+    logic              r_linebuf_c32_fast;
     logic [31:0]       r_linebuf_input_base;
     logic [15:0]       r_linebuf_input_h;
     logic [15:0]       r_linebuf_input_w;
@@ -145,6 +153,9 @@ module systolic_ctrl_regs #(
     logic [7:0]        r_linebuf_k_seed_kw;
     logic [7:0]        r_linebuf_k_seed_kh;
     logic [31:0]       r_linebuf_spatial_m;
+    logic [5:0]        r_linebuf_block_valid_bytes;
+    logic [31:0]       r_linebuf_channel_addr_offset;
+    logic [31:0]       r_linebuf_coalesce_k_bytes;
 
     logic [31:0] s_sys_w_ptr;
     logic [31:0] s_sys_i_ptr;
@@ -166,6 +177,7 @@ module systolic_ctrl_regs #(
     logic              s_linebuf_coalesce;
     logic              s_linebuf_pool;
     logic              s_linebuf_kgen;
+    logic              s_linebuf_c32_fast;
     logic [31:0]       s_linebuf_input_base;
     logic [15:0]       s_linebuf_input_h;
     logic [15:0]       s_linebuf_input_w;
@@ -188,6 +200,9 @@ module systolic_ctrl_regs #(
     logic [7:0]        s_linebuf_k_seed_kw;
     logic [7:0]        s_linebuf_k_seed_kh;
     logic [31:0]       s_linebuf_spatial_m;
+    logic [5:0]        s_linebuf_block_valid_bytes;
+    logic [31:0]       s_linebuf_channel_addr_offset;
+    logic [31:0]       s_linebuf_coalesce_k_bytes;
     logic [ADDR_WIDTH-1:0] r_addr_q;
 
     assign gnt_o = 1'b1;
@@ -212,6 +227,7 @@ module systolic_ctrl_regs #(
             r_linebuf_coalesce <= 1'b0;
             r_linebuf_pool <= 1'b0;
             r_linebuf_kgen <= 1'b0;
+            r_linebuf_c32_fast <= 1'b0;
             r_linebuf_input_base <= '0;
             r_linebuf_input_h <= '0;
             r_linebuf_input_w <= '0;
@@ -234,6 +250,9 @@ module systolic_ctrl_regs #(
             r_linebuf_k_seed_kw <= '0;
             r_linebuf_k_seed_kh <= '0;
             r_linebuf_spatial_m <= '0;
+            r_linebuf_block_valid_bytes <= '0;
+            r_linebuf_channel_addr_offset <= '0;
+            r_linebuf_coalesce_k_bytes <= '0;
             s_sys_w_ptr <= '0;
             s_sys_i_ptr <= '0;
             s_sys_o_ptr <= '0;
@@ -250,6 +269,7 @@ module systolic_ctrl_regs #(
             s_linebuf_coalesce <= 1'b0;
             s_linebuf_pool <= 1'b0;
             s_linebuf_kgen <= 1'b0;
+            s_linebuf_c32_fast <= 1'b0;
             s_linebuf_input_base <= '0;
             s_linebuf_input_h <= '0;
             s_linebuf_input_w <= '0;
@@ -272,6 +292,9 @@ module systolic_ctrl_regs #(
             s_linebuf_k_seed_kw <= '0;
             s_linebuf_k_seed_kh <= '0;
             s_linebuf_spatial_m <= '0;
+            s_linebuf_block_valid_bytes <= '0;
+            s_linebuf_channel_addr_offset <= '0;
+            s_linebuf_coalesce_k_bytes <= '0;
             for (int unsigned ch = 0; ch < 32; ch++) begin
                 r_requant_bias[ch] <= '0;
                 r_requant_multiplier[ch] <= 32'd1;
@@ -329,6 +352,7 @@ module systolic_ctrl_regs #(
                                         r_linebuf_coalesce <= s_linebuf_coalesce;
                                         r_linebuf_kgen <= s_linebuf_kgen;
                                         r_linebuf_pool <= s_linebuf_pool;
+                                        r_linebuf_c32_fast <= s_linebuf_c32_fast;
                                         r_linebuf_input_base <= s_linebuf_input_base;
                                         r_linebuf_input_h <= s_linebuf_input_h;
                                         r_linebuf_input_w <= s_linebuf_input_w;
@@ -351,6 +375,9 @@ module systolic_ctrl_regs #(
                                         r_linebuf_k_seed_kw <= s_linebuf_k_seed_kw;
                                         r_linebuf_k_seed_kh <= s_linebuf_k_seed_kh;
                                         r_linebuf_spatial_m <= s_linebuf_spatial_m;
+                                        r_linebuf_block_valid_bytes <= s_linebuf_block_valid_bytes;
+                                        r_linebuf_channel_addr_offset <= s_linebuf_channel_addr_offset;
+                                        r_linebuf_coalesce_k_bytes <= s_linebuf_coalesce_k_bytes;
                                         for (int unsigned ch = 0; ch < 32; ch++) begin
                                             r_requant_bias[ch] <= s_requant_bias[ch];
                                             r_requant_multiplier[ch] <= s_requant_multiplier[ch];
@@ -371,6 +398,7 @@ module systolic_ctrl_regs #(
                                     s_linebuf_coalesce <= wdata_word[1];
                                     s_linebuf_kgen <= wdata_word[2];
                                     s_linebuf_pool <= wdata_word[3];
+                                    s_linebuf_c32_fast <= wdata_word[4];
                                 end
                                 REG_LB_INPUT_BASE: s_linebuf_input_base <= wdata_word;
                                 REG_LB_INPUT_H: s_linebuf_input_h <= wdata_word[15:0];
@@ -402,6 +430,9 @@ module systolic_ctrl_regs #(
                                     s_linebuf_k_seed_kw <= wdata_word[23:16];
                                     s_linebuf_k_seed_kh <= wdata_word[31:24];
                                 end
+                                REG_LB_PRECOMP0: s_linebuf_block_valid_bytes <= wdata_word[5:0];
+                                REG_LB_CHANNEL_OFFSET: s_linebuf_channel_addr_offset <= wdata_word;
+                                REG_LB_COALESCE_K_BYTES: s_linebuf_coalesce_k_bytes <= wdata_word;
                                 default: begin
                                     if ((local_addr & 32'hFF80) == REG_RQ_BIAS_BASE) begin
                                         s_requant_bias[(local_addr - REG_RQ_BIAS_BASE) >> 2] <= wdata_word;
@@ -450,7 +481,7 @@ module systolic_ctrl_regs #(
                     REG_RQ_CTRL:   rdata_word = {31'd0, r_requant_en};
                     REG_RQ_CMIN:   rdata_word = r_requant_clamp_min;
                     REG_RQ_CMAX:   rdata_word = r_requant_clamp_max;
-                    REG_LB_CTRL: rdata_word = {28'd0, r_linebuf_pool, r_linebuf_kgen,
+                    REG_LB_CTRL: rdata_word = {27'd0, r_linebuf_c32_fast, r_linebuf_pool, r_linebuf_kgen,
                                                r_linebuf_coalesce, r_linebuf_en};
                     REG_LB_INPUT_BASE: rdata_word = r_linebuf_input_base;
                     REG_LB_INPUT_H: rdata_word = {16'd0, r_linebuf_input_h};
@@ -469,6 +500,9 @@ module systolic_ctrl_regs #(
                     REG_LB_LANE_BASE: rdata_word = {26'd0, r_linebuf_lane_base};
                     REG_LB_K_TILES: rdata_word = r_linebuf_k_tiles;
                     REG_LB_K_SEED: rdata_word = {r_linebuf_k_seed_kh, r_linebuf_k_seed_kw, r_linebuf_k_seed_ic};
+                    REG_LB_PRECOMP0: rdata_word = {26'd0, r_linebuf_block_valid_bytes};
+                    REG_LB_CHANNEL_OFFSET: rdata_word = r_linebuf_channel_addr_offset;
+                    REG_LB_COALESCE_K_BYTES: rdata_word = r_linebuf_coalesce_k_bytes;
                     default: begin
                         if ((exact_addr & 32'hFF80) == REG_RQ_BIAS_BASE) begin
                             rdata_word = r_requant_bias[(exact_addr - REG_RQ_BIAS_BASE) >> 2];
@@ -507,6 +541,7 @@ module systolic_ctrl_regs #(
     assign cfg_linebuf_coalesce_o = r_linebuf_coalesce;
     assign cfg_linebuf_pool_o = r_linebuf_pool;
     assign cfg_linebuf_kgen_o = r_linebuf_kgen;
+    assign cfg_linebuf_c32_fast_o = r_linebuf_c32_fast;
     assign cfg_linebuf_input_base_o = r_linebuf_input_base;
     assign cfg_linebuf_input_h_o = r_linebuf_input_h;
     assign cfg_linebuf_input_w_o = r_linebuf_input_w;
@@ -529,5 +564,8 @@ module systolic_ctrl_regs #(
     assign cfg_linebuf_k_seed_kw_o = r_linebuf_k_seed_kw;
     assign cfg_linebuf_k_seed_kh_o = r_linebuf_k_seed_kh;
     assign cfg_linebuf_spatial_m_o = r_linebuf_spatial_m;
+    assign cfg_linebuf_block_valid_bytes_o = r_linebuf_block_valid_bytes;
+    assign cfg_linebuf_channel_addr_offset_o = r_linebuf_channel_addr_offset;
+    assign cfg_linebuf_coalesce_k_bytes_o = r_linebuf_coalesce_k_bytes;
 
 endmodule

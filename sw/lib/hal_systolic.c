@@ -84,11 +84,15 @@ void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg) {
     REG_WRITE(REG_LB_K_SEED, ((uint32_t)(cfg->k_seed_kh & 0xFFu) << 24) |
                              ((uint32_t)(cfg->k_seed_kw & 0xFFu) << 16) |
                              (uint32_t)cfg->k_seed_ic);
+    REG_WRITE(REG_LB_PRECOMP0, cfg->block_valid_bytes & 0x3Fu);
+    REG_WRITE(REG_LB_CHANNEL_OFFSET, cfg->channel_addr_offset);
+    REG_WRITE(REG_LB_COALESCE_K_BYTES, cfg->coalesce_k_bytes);
 
     REG_WRITE(REG_LB_CTRL, REG_LB_CTRL_EN |
                            (cfg->coalesce ? REG_LB_CTRL_COALESCE : 0u) |
                            (cfg->kgen ? REG_LB_CTRL_KGEN : 0u) |
-                           (cfg->pool ? REG_LB_CTRL_POOL : 0u));
+                           (cfg->pool ? REG_LB_CTRL_POOL : 0u) |
+                           (cfg->c32_fast ? REG_LB_CTRL_C32_FAST : 0u));
 }
 
 void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
@@ -118,11 +122,15 @@ void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
     cfg.coalesce = 0u;
     cfg.kgen = 0u;
     cfg.pool = 1u;
+    cfg.c32_fast = 1u;
+    cfg.block_valid_bytes = 32u;
     cfg.k_seed_kh = 0u;
     cfg.k_seed_kw = 0u;
     cfg.k_seed_ic = 0u;
     cfg.k_tiles = 0u;
     cfg.spatial_m = height * width;
+    cfg.channel_addr_offset = 0u;
+    cfg.coalesce_k_bytes = cfg.kernel_h * cfg.kernel_w * cfg.block_valid_bytes;
 
     systolic_requant_disable();
     systolic_linebuf_config(&cfg);

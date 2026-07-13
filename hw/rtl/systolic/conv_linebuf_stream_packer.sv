@@ -38,6 +38,10 @@ module conv_linebuf_stream_packer #(
     input  logic                      cfg_coalesce_i,
     input  logic                      cfg_kgen_i,
     input  logic                      cfg_pool_i,
+    input  logic                      cfg_c32_fast_i,
+    input  logic [5:0]                cfg_block_valid_bytes_i,
+    input  logic [31:0]               cfg_channel_addr_offset_i,
+    input  logic [31:0]               cfg_coalesce_k_bytes_i,
     input  logic [7:0]                cfg_k_seed_kh_i,
     input  logic [7:0]                cfg_k_seed_kw_i,
     input  logic [15:0]               cfg_k_seed_ic_i,
@@ -219,8 +223,7 @@ module conv_linebuf_stream_packer #(
     logic row_cache_reuse;
     logic row_ring_mode;
     logic c32_blocked_mode;
-    logic [31:0] c32_block_span_bytes;
-    logic [31:0] c32_block_offset;
+    logic c32_kgen_fast;
     logic [31:0] channel_addr_offset;
     logic [15:0] fill_row_slot;
     logic fill_row_cached;
@@ -406,7 +409,11 @@ module conv_linebuf_stream_packer #(
         logic [15:0] dst_count;
         begin
             row = '0;
-            if (cfg_coalesce_i && cfg_kgen_i) begin
+            if (c32_kgen_fast) begin
+                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
+                    row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][lane * 8 +: 8];
+                end
+            end else if (cfg_coalesce_i && cfg_kgen_i) begin
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
                     if (({8'd0, l_kh[lane]} < cfg_kernel_h_i) &&
                         ({8'd0, l_kw[lane]} < cfg_kernel_w_i) &&
@@ -465,26 +472,44 @@ module conv_linebuf_stream_packer #(
         cell_iw = '0;
         idx = '0;
 
-        block_valid_bytes = valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i);
-        coalesce_k_bytes = 32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes);
+        block_valid_bytes = (cfg_block_valid_bytes_i != 6'd0) ?
+                            cfg_block_valid_bytes_i :
+                            valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i);
+        coalesce_k_bytes = (cfg_coalesce_k_bytes_i != 32'd0) ?
+                           cfg_coalesce_k_bytes_i :
+                           (32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes));
 
         gen_kh = cfg_k_seed_kh_i;
         gen_kw = cfg_k_seed_kw_i;
         gen_ic = cfg_k_seed_ic_i;
-        for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-            lane_kh[lane] = gen_kh;
-            lane_kw[lane] = gen_kw;
-            lane_ic[lane] = gen_ic;
-            if ((gen_ic + 16'd1) == cfg_input_c_i) begin
-                gen_ic = '0;
-                if ((gen_kw + 8'd1) == cfg_kernel_w_i[7:0]) begin
-                    gen_kw = '0;
-                    gen_kh = gen_kh + 8'd1;
+        c32_blocked_mode = cfg_c32_fast_i &&
+                           (cfg_block_valid_bytes_i == 6'(BEAT_BYTES)) &&
+                           (cfg_channel_addr_offset_i[BYTE_SEL_BITS-1:0] == '0);
+        c32_kgen_fast = c32_blocked_mode && cfg_coalesce_i && cfg_kgen_i &&
+                         (cfg_lane_base_i == 6'd0) &&
+                         (cfg_c_base_i[4:0] == 5'd0);
+        if (c32_kgen_fast) begin
+            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
+                lane_kh[lane] = cfg_k_seed_kh_i;
+                lane_kw[lane] = cfg_k_seed_kw_i;
+                lane_ic[lane] = cfg_c_base_i + 16'(lane);
+            end
+        end else begin
+            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
+                lane_kh[lane] = gen_kh;
+                lane_kw[lane] = gen_kw;
+                lane_ic[lane] = gen_ic;
+                if ((gen_ic + 16'd1) == cfg_input_c_i) begin
+                    gen_ic = '0;
+                    if ((gen_kw + 8'd1) == cfg_kernel_w_i[7:0]) begin
+                        gen_kw = '0;
+                        gen_kh = gen_kh + 8'd1;
+                    end else begin
+                        gen_kw = gen_kw + 8'd1;
+                    end
                 end else begin
-                    gen_kw = gen_kw + 8'd1;
+                    gen_ic = gen_ic + 16'd1;
                 end
-            end else begin
-                gen_ic = gen_ic + 16'd1;
             end
         end
 
@@ -500,15 +525,8 @@ module conv_linebuf_stream_packer #(
                         (cfg_stride_h_i <= STRIDE_MAX[15:0]) &&
                         (cfg_stride_w_i != 16'd0) &&
                         (cfg_stride_w_i <= STRIDE_MAX[15:0]);
-        c32_block_span_bytes = 32'(cfg_input_h_i) * cfg_row_stride_bytes_i;
-        c32_block_offset = 32'(cfg_c_base_i[15:5]) * c32_block_span_bytes;
-        c32_blocked_mode = (cfg_pixel_stride_bytes_i == 32'(BEAT_BYTES)) &&
-                           (cfg_row_stride_bytes_i == (32'(cfg_input_w_i) * 32'(BEAT_BYTES))) &&
-                           (cfg_lane_base_i == 6'd0) &&
-                           (cfg_c_base_i[4:0] == 5'd0) &&
-                           (cfg_origin_base_i[BYTE_SEL_BITS-1:0] == '0);
-        channel_addr_offset = c32_blocked_mode ?
-                              (c32_block_offset + {27'd0, cfg_c_base_i[4:0]}) :
+        channel_addr_offset = (cfg_channel_addr_offset_i != 32'd0) ?
+                              cfg_channel_addr_offset_i :
                               {16'd0, cfg_c_base_i};
         fill_done_rows = row_cache_full_q ? cfg_input_h_i : cfg_kernel_h_i;
         fill_ih = row_cache_full_q ?
@@ -955,11 +973,17 @@ module conv_linebuf_stream_packer #(
                             pending_beat_addr_q <= beat_base(bypass_addr_q) + 32'(BEAT_BYTES);
                             state_q <= CH_BYPASS_REQ1;
                         end else begin
-                            row_data_q <= unpack_row(
-                                merge_beats(obi_rdata_i, '0, bypass_addr_q[BYTE_SEL_BITS-1:0], bypass_valid_bytes_q),
-                                bypass_valid_bytes_q,
-                                cfg_lane_base_i
-                            );
+                            row_data_q <= (c32_blocked_mode &&
+                                           (bypass_addr_q[BYTE_SEL_BITS-1:0] == '0) &&
+                                           (bypass_valid_bytes_q == 6'(BEAT_BYTES))) ?
+                                          unpack_row(obi_rdata_i, bypass_valid_bytes_q, cfg_lane_base_i) :
+                                          unpack_row(
+                                              merge_beats(obi_rdata_i, '0,
+                                                          bypass_addr_q[BYTE_SEL_BITS-1:0],
+                                                          bypass_valid_bytes_q),
+                                              bypass_valid_bytes_q,
+                                              cfg_lane_base_i
+                                          );
                             row_valid_out_q <= 1'b1;
                             state_q <= CH_STREAM_EMIT;
                         end
