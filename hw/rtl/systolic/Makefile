@@ -24,7 +24,7 @@ TOPLEVEL = npu_systolic_array
 EXTRA_ARGS += -Wno-fatal --timing -j $(VERILATOR_JOBS)
 BUILD_ARGS += -j$(VERILATOR_JOBS)
 
-ifeq ($(MODULE),test_systolic_controller)
+ifneq ($(filter test_systolic_controller%,$(MODULE)),)
 TOPLEVEL = tb_systolic_controller
 VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
