@@ -4,6 +4,9 @@
 #include "npu_tensor.h"
 #include "npu_types.h"
 
+typedef struct npu_conv2d_linebuf_job_desc npu_conv2d_linebuf_job_desc_t;
+typedef struct npu_conv2d_l2_copy_job_desc npu_conv2d_l2_copy_job_desc_t;
+
 typedef enum {
     NPU_OP_DMA_IN = 1,
     NPU_OP_DMA_OUT = 2,
@@ -39,6 +42,10 @@ typedef struct {
     uint32_t shift;
     int32_t min_val;
     int32_t max_val;
+    const npu_conv2d_linebuf_job_desc_t *linebuf_jobs;
+    uint32_t linebuf_job_count;
+    const npu_conv2d_l2_copy_job_desc_t *linebuf_l2_jobs;
+    uint32_t linebuf_l2_job_count;
 } npu_layer_t;
 
 typedef struct {

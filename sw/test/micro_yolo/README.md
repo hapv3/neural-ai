@@ -72,6 +72,10 @@ early.
 make -C sw/test/micro_yolo
 ```
 
+The build generates `micro_yolo_linebuf_precompute.h` from
+`tools/npu_linebuf_precompute.py`; this is the host-owned linebuffer/GEMM job
+descriptor table consumed by the firmware graph.
+
 Optional compile-time tile knobs:
 
 ```sh
@@ -93,7 +97,7 @@ CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 The cocotb test:
 
 - generates deterministic input/weights/golden in Python;
-- loads the firmware binary and L2 payloads;
+- loads the firmware ELF sections and L2 payloads;
 - runs the Snitch graph firmware;
 - prints per-layer PMU counters;
 - compares all `48*48*32` output bytes with zero tolerance.
@@ -103,8 +107,8 @@ The cocotb test:
 Latest passing raw-head run:
 
 ```text
-total cycles: 398024
-head conv cycles: 159202
+total cycles: 386044
+head conv cycles: 149256
 head sys_compute: 41472
 ```
 
@@ -113,4 +117,6 @@ split into two C32 chunks. Total head latency is higher than 2x because the
 second chunk also reads psum, accumulates, requants, and writes INT8 tiles.
 The current firmware preloads the next linebuffer tile into RTL shadow
 registers while the current tile is running, so tile-to-tile MMIO setup is
-partially hidden behind systolic execution.
+partially hidden behind systolic execution. The Micro-YOLO graph now also uses
+host-generated linebuffer/GEMM job descriptors, so Snitch no longer rebuilds
+per-tile linebuffer config in the critical layer path.

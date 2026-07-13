@@ -130,6 +130,68 @@ async def load_firmware_axi(axi_master, filename, base_addr=ITCM_BASE, width=4):
             raise AssertionError(f"AXI boot image exceeds I-TCM at 0x{addr:08x}")
         await axi_master.write(base_addr + offset, firmware[offset : offset + width])
 
+
+def _is_tcm_addr(addr):
+    return (
+        ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES
+        or NPU_DTCM_BASE <= addr < NPU_DTCM_BASE + TCM_SIZE_BYTES
+    )
+
+
+def _write_dtcm_bytes(dut, addr, data, width=4):
+    if addr < NPU_DTCM_BASE:
+        raise AssertionError(f"D-TCM write below base at 0x{addr:08x}")
+    if len(data) % width != 0:
+        data += b"\x00" * (width - (len(data) % width))
+    for offset in range(0, len(data), width):
+        index = (addr + offset - NPU_DTCM_BASE) >> 2
+        word = int.from_bytes(data[offset : offset + width], "little")
+        dut.u_npu_cluster.u_sram_d_tcm.mem[index].value = word
+
+
+async def load_firmware_elf_axi(dut, axi_master, filename, width=4):
+    with open(filename, "rb") as firmware_file:
+        elf = firmware_file.read()
+
+    if len(elf) < 52 or elf[:4] != b"\x7fELF" or elf[4] != 1 or elf[5] != 1:
+        raise AssertionError("expected little-endian ELF32 firmware")
+
+    header = struct.unpack_from("<16sHHIIIIIHHHHHH", elf, 0)
+    e_phoff = header[5]
+    e_phentsize = header[9]
+    e_phnum = header[10]
+    if e_phentsize < 32:
+        raise AssertionError("unsupported ELF program header size")
+
+    for ph_idx in range(e_phnum):
+        ph_off = e_phoff + ph_idx * e_phentsize
+        if ph_off + 32 > len(elf):
+            raise AssertionError("ELF program header exceeds file size")
+        p_type, p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, _p_flags, _p_align = struct.unpack_from(
+            "<IIIIIIII", elf, ph_off
+        )
+        if p_type != 1 or p_memsz == 0:
+            continue
+
+        addr = p_paddr or p_vaddr
+        end_addr = addr + p_memsz
+        if not _is_tcm_addr(addr) or not _is_tcm_addr(end_addr - 1):
+            raise AssertionError(f"ELF load segment outside TCM at 0x{addr:08x}")
+        if p_offset + p_filesz > len(elf):
+            raise AssertionError("ELF load segment exceeds file size")
+
+        payload = elf[p_offset : p_offset + p_filesz]
+        if p_memsz > p_filesz:
+            payload += b"\x00" * (p_memsz - p_filesz)
+        if len(payload) % width != 0:
+            payload += b"\x00" * (width - (len(payload) % width))
+
+        if ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES:
+            for offset in range(0, len(payload), width):
+                await axi_master.write(addr + offset, payload[offset : offset + width])
+        else:
+            _write_dtcm_bytes(dut, addr, payload, width)
+
 async def _axi_read32(axi_master, addr):
     resp = await axi_master.read(addr, 4)
     data = resp.data if hasattr(resp, "data") else resp

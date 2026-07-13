@@ -9,7 +9,7 @@ from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
     PMU_COUNTER_NAMES,
-    load_firmware_axi,
+    load_firmware_elf_axi,
     read_dtcm_word,
     read_l2_bytes,
     release_fetch,
@@ -329,6 +329,7 @@ def golden_micro_yolo(input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut
 @cocotb.test()
 async def test_micro_yolo_e2e(dut):
     logging.getLogger("cocotb.tb_npu_cluster.s_axi").setLevel(logging.WARNING)
+    timeout_cycles = int(os.getenv("MICRO_YOLO_TIMEOUT_CYCLES", "1200000"))
 
     clock = Clock(dut.clk_i, 1, unit="ns")
     cocotb.start_soon(clock.start())
@@ -345,7 +346,7 @@ async def test_micro_yolo_e2e(dut):
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
-        "../../../../../sw/test/micro_yolo/micro_yolo.bin",
+        "../../../../../sw/test/micro_yolo/micro_yolo.elf",
     )
     assert os.path.exists(fw_path), "Missing firmware. Run `make -C sw/test/micro_yolo` first."
 
@@ -356,14 +357,14 @@ async def test_micro_yolo_e2e(dut):
     await write_l2_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
     await write_l2_bytes(dut, L2_WEIGHT2, [to_u8(value) for value in weight2])
     await write_l2_bytes(dut, L2_WEIGHT3, [to_u8(value) for value in weight3])
-    await load_firmware_axi(axi_master, fw_path)
+    await load_firmware_elf_axi(dut, axi_master, fw_path)
     await release_fetch(dut, axi_master=axi_master)
-    step_pmu_task = cocotb.start_soon(monitor_step_pmu(dut, 1200000))
+    step_pmu_task = cocotb.start_soon(monitor_step_pmu(dut, timeout_cycles))
 
     try:
         await wait_for_host_irq(
             dut,
-            timeout_cycles=1200000,
+            timeout_cycles=timeout_cycles,
             axi_master=axi_master,
             report_name="test_micro_yolo_e2e",
         )

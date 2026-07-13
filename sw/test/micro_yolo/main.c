@@ -1,5 +1,6 @@
 #include "npu_graph.h"
 #include "npu_memory_map.h"
+#include "micro_yolo_linebuf_precompute.h"
 
 /*
  * Phase 3j Conv_Stem + SiLU + C2f_Conv + residual Add + Conv_Down + SPPF MaxPool + Upsample + Head_Conv checkpoint:
@@ -171,6 +172,24 @@ static void clear_layer(npu_layer_t *layer) {
     layer->shift = 0;
     layer->min_val = 0;
     layer->max_val = 0;
+    layer->linebuf_jobs = 0;
+    layer->linebuf_job_count = 0;
+    layer->linebuf_l2_jobs = 0;
+    layer->linebuf_l2_job_count = 0;
+}
+
+static void set_linebuf_jobs(npu_layer_t *layer,
+                             const npu_conv2d_linebuf_job_desc_t *jobs,
+                             uint32_t job_count) {
+    layer->linebuf_jobs = jobs;
+    layer->linebuf_job_count = job_count;
+}
+
+static void set_linebuf_l2_jobs(npu_layer_t *layer,
+                                const npu_conv2d_l2_copy_job_desc_t *jobs,
+                                uint32_t job_count) {
+    layer->linebuf_l2_jobs = jobs;
+    layer->linebuf_l2_job_count = job_count;
 }
 
 static void init_layers(void) {
@@ -217,6 +236,7 @@ static void init_layers(void) {
     layers[6].shift = 0;
     layers[6].min_val = -128;
     layers[6].max_val = 127;
+    set_linebuf_jobs(&layers[6], MICRO_YOLO_LB_STEM_JOBS, MICRO_YOLO_LB_STEM_JOBS_COUNT);
 
     layers[7].op = NPU_OP_LOGISTIC_LUT_I8;
     layers[7].src = T_STEM;
@@ -256,6 +276,7 @@ static void init_layers(void) {
     layers[10].shift = 0;
     layers[10].min_val = -128;
     layers[10].max_val = 127;
+    set_linebuf_jobs(&layers[10], MICRO_YOLO_LB_C2F_JOBS, MICRO_YOLO_LB_C2F_JOBS_COUNT);
 
     layers[11].op = NPU_OP_ADD_I8;
     layers[11].src = T_OUT;
@@ -277,6 +298,7 @@ static void init_layers(void) {
     layers[12].shift = 0;
     layers[12].min_val = -128;
     layers[12].max_val = 127;
+    set_linebuf_jobs(&layers[12], MICRO_YOLO_LB_DOWN_JOBS, MICRO_YOLO_LB_DOWN_JOBS_COUNT);
 
     layers[13].op = NPU_OP_MAXPOOL2D5X5S1P2_I8;
     layers[13].src = T_DOWN;
@@ -314,6 +336,8 @@ static void init_layers(void) {
     layers[16].shift = 0;
     layers[16].min_val = -128;
     layers[16].max_val = 127;
+    set_linebuf_jobs(&layers[16], MICRO_YOLO_LB_HEAD0_JOBS, MICRO_YOLO_LB_HEAD0_JOBS_COUNT);
+    set_linebuf_l2_jobs(&layers[16], MICRO_YOLO_LB_HEAD1_L2_JOBS, MICRO_YOLO_LB_HEAD1_L2_JOBS_COUNT);
 
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;

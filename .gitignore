@@ -27,6 +27,7 @@ Thumbs.db
 *.dump
 *.o
 *.map
+sw/test/micro_yolo/micro_yolo_linebuf_precompute.h
 **/obj_dir/
 .superpowers/brainstorm/2319838-1783320015/state/server-instance-id
 .superpowers/brainstorm/2319838-1783320015/state/server.pid
