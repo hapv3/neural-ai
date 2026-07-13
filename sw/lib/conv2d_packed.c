@@ -39,6 +39,13 @@ typedef struct {
     uint32_t overflow;
 } npu_conv2d_prepare_plan_t;
 
+typedef struct {
+    systolic_linebuf_cfg_t linebuf;
+    systolic_gemm32_req_t gemm;
+    uint32_t rows;
+    uint32_t k_tiles;
+} npu_conv2d_linebuf_job_t;
+
 static uint32_t input_c_stride(const npu_conv2d_packed_cfg_t *cfg);
 static uint32_t input_row_stride_bytes(const npu_conv2d_packed_cfg_t *cfg);
 static void make_linebuf_output_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
@@ -187,6 +194,26 @@ static void accumulate_conv_stats(npu_conv2d_packed_stats_t *accum,
     accum->prepare_idma_transfers += tile->prepare_idma_transfers;
     accum->prepare_spatz_tiles += tile->prepare_spatz_tiles;
     accum->prepare_scalar_tiles += tile->prepare_scalar_tiles;
+}
+
+static void copy_conv_stats(npu_conv2d_packed_stats_t *dst,
+                            const npu_conv2d_packed_stats_t *src) {
+    if (!dst || !src) {
+        return;
+    }
+
+    dst->rows = src->rows;
+    dst->k_tiles = src->k_tiles;
+    dst->prepare_cycles = src->prepare_cycles;
+    dst->gemm_cycles = src->gemm_cycles;
+    dst->total_cycles = src->total_cycles;
+    dst->last_prepare_cycles = src->last_prepare_cycles;
+    dst->last_gemm_cycles = src->last_gemm_cycles;
+    dst->status = src->status;
+    dst->prepare_idma_tiles = src->prepare_idma_tiles;
+    dst->prepare_idma_transfers = src->prepare_idma_transfers;
+    dst->prepare_spatz_tiles = src->prepare_spatz_tiles;
+    dst->prepare_scalar_tiles = src->prepare_scalar_tiles;
 }
 
 static void zero_im2col_tile(const npu_conv2d_packed_cfg_t *cfg, uint32_t rows) {
@@ -658,6 +685,45 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     linebuf_cfg->spatial_m = spatial_rows;
 }
 
+static void linebuf_job_from_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
+                                      uint32_t psum_addr,
+                                      uint32_t accum_en,
+                                      uint32_t ofm_row_stride_bytes,
+                                      uint32_t ofm_tile_cols,
+                                      uint32_t psum_row_stride_bytes,
+                                      npu_conv2d_linebuf_job_t *job) {
+    uint32_t spatial_rows = cfg->output_h * cfg->output_w;
+    uint32_t k_total = cfg->kernel_h * cfg->kernel_w * cfg->input_c;
+    uint32_t k_tiles = ceil_div_u32(k_total, NPU_CONV2D_PACKED_K_TILE);
+
+    linebuf_config_from_conv(cfg, spatial_rows, 1u, 1u, k_tiles, &job->linebuf);
+
+    job->gemm.weight_addr = cfg->weight_addr;
+    job->gemm.ifm_addr = 0u;
+    job->gemm.psum_addr = psum_addr;
+    job->gemm.ofm_addr = cfg->output_addr;
+    job->gemm.dim_m = spatial_rows;
+    job->gemm.accum_en = accum_en;
+    job->gemm.ofm_row_stride_bytes = ofm_row_stride_bytes;
+    job->gemm.ofm_tile_cols = ofm_tile_cols;
+    job->gemm.psum_row_stride_bytes = psum_row_stride_bytes;
+    job->rows = spatial_rows;
+    job->k_tiles = k_tiles;
+}
+
+static void linebuf_job_preload(const npu_conv2d_linebuf_job_t *job) {
+    systolic_linebuf_config(&job->linebuf);
+    systolic_gemm32_preload(&job->gemm);
+}
+
+static void linebuf_job_record(npu_conv2d_packed_stats_t *stats,
+                               const npu_conv2d_linebuf_job_t *job) {
+    if (stats) {
+        stats->rows += job->rows;
+        stats->k_tiles += job->k_tiles;
+    }
+}
+
 static void run_linebuf_kgen_tile(const npu_conv2d_packed_cfg_t *cfg,
                                   uint32_t ofm_row_stride_bytes,
                                   uint32_t ofm_tile_cols,
@@ -863,9 +929,6 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles(const npu_conv2d_packed_cfg_t 
 
     for (uint32_t idx = 0; idx < tile_count; idx++) {
         const npu_conv2d_spatial_tile_t *tile = &tiles[idx];
-        npu_conv2d_packed_cfg_t tile_cfg;
-        npu_conv2d_packed_stats_t tile_stats;
-
         uint32_t tile_ow = tile->tile_ow ? tile->tile_ow : cfg->output_w;
         if (tile->tile_oh == 0u || tile_ow == 0u ||
             tile->oh_base >= cfg->output_h || tile->ow_base >= cfg->output_w ||
@@ -876,21 +939,71 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles(const npu_conv2d_packed_cfg_t 
             }
             return NPU_CONV2D_PACKED_ERR_LINEBUF_K_TILES;
         }
+    }
+
+    npu_conv2d_linebuf_job_t job_slots[2];
+    npu_conv2d_linebuf_job_t *cur_job = &job_slots[0];
+    npu_conv2d_linebuf_job_t *next_job = &job_slots[1];
+    {
+        const npu_conv2d_spatial_tile_t *tile = &tiles[0];
+        npu_conv2d_packed_cfg_t tile_cfg;
+        uint32_t tile_ow = tile->tile_ow ? tile->tile_ow : cfg->output_w;
+        uint32_t row_stride = (tile_ow != cfg->output_w) ?
+            (cfg->output_w * NPU_CONV2D_PACKED_OC_TILE * output_elem_bytes) : 0u;
+        uint32_t tile_cols = (tile_ow != cfg->output_w) ? tile_ow : 0u;
 
         make_linebuf_output_tile_cfg(cfg, tile->oh_base, tile->ow_base,
                                      tile->tile_oh, tile_ow,
                                      output_elem_bytes, &tile_cfg);
-        run_linebuf_kgen_tile(&tile_cfg,
-                              (tile_ow != cfg->output_w) ?
-                                  (cfg->output_w * NPU_CONV2D_PACKED_OC_TILE * output_elem_bytes) : 0u,
-                              (tile_ow != cfg->output_w) ? tile_ow : 0u,
-                              &tile_stats);
-        accumulate_conv_stats(&total_stats, &tile_stats);
+        linebuf_job_from_tile_cfg(&tile_cfg,
+                                  tile_cfg.output_addr,
+                                  cfg->accumulate ? 1u : 0u,
+                                  row_stride,
+                                  tile_cols,
+                                  row_stride,
+                                  cur_job);
+        linebuf_job_preload(cur_job);
+        systolic_gemm32_start_preloaded();
     }
 
+    for (uint32_t idx = 1; idx < tile_count; idx++) {
+        const npu_conv2d_spatial_tile_t *tile = &tiles[idx];
+        npu_conv2d_packed_cfg_t tile_cfg;
+        uint32_t tile_ow = tile->tile_ow ? tile->tile_ow : cfg->output_w;
+        uint32_t row_stride = (tile_ow != cfg->output_w) ?
+            (cfg->output_w * NPU_CONV2D_PACKED_OC_TILE * output_elem_bytes) : 0u;
+        uint32_t tile_cols = (tile_ow != cfg->output_w) ? tile_ow : 0u;
+
+        make_linebuf_output_tile_cfg(cfg, tile->oh_base, tile->ow_base,
+                                     tile->tile_oh, tile_ow,
+                                     output_elem_bytes, &tile_cfg);
+        linebuf_job_from_tile_cfg(&tile_cfg,
+                                  tile_cfg.output_addr,
+                                  cfg->accumulate ? 1u : 0u,
+                                  row_stride,
+                                  tile_cols,
+                                  row_stride,
+                                  next_job);
+        linebuf_job_preload(next_job);
+        systolic_gemm32_wait_done();
+        linebuf_job_record(&total_stats, cur_job);
+        systolic_gemm32_start_preloaded();
+        {
+            npu_conv2d_linebuf_job_t *tmp = cur_job;
+            cur_job = next_job;
+            next_job = tmp;
+        }
+    }
+
+    systolic_gemm32_wait_done();
+    linebuf_job_record(&total_stats, cur_job);
+    systolic_linebuf_disable();
+
     if (stats) {
-        *stats = total_stats;
+        copy_conv_stats(stats, &total_stats);
         stats->total_cycles = spatz_rt_read_cycle() - total_start;
+        stats->gemm_cycles = stats->total_cycles;
+        stats->last_gemm_cycles = stats->total_cycles;
         stats->status = NPU_CONV2D_PACKED_OK;
     }
 
@@ -927,10 +1040,6 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
 
     for (uint32_t idx = 0; idx < tile_count; idx++) {
         const npu_conv2d_spatial_tile_t *tile = &tiles[idx];
-        npu_conv2d_packed_cfg_t tile_cfg;
-        npu_conv2d_packed_stats_t tile_stats;
-        uint32_t tile_psum_addr;
-
         uint32_t tile_ow = tile->tile_ow ? tile->tile_ow : cfg->output_w;
         if (tile->tile_oh == 0u || tile_ow == 0u ||
             tile->oh_base >= cfg->output_h || tile->ow_base >= cfg->output_w ||
@@ -941,31 +1050,77 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
             }
             return NPU_CONV2D_PACKED_ERR_LINEBUF_K_TILES;
         }
+    }
+
+    npu_conv2d_linebuf_job_t job_slots[2];
+    npu_conv2d_linebuf_job_t *cur_job = &job_slots[0];
+    npu_conv2d_linebuf_job_t *next_job = &job_slots[1];
+    {
+        const npu_conv2d_spatial_tile_t *tile = &tiles[0];
+        npu_conv2d_packed_cfg_t tile_cfg;
+        uint32_t tile_ow = tile->tile_ow ? tile->tile_ow : cfg->output_w;
+        uint32_t tile_psum_addr = psum_addr +
+                                  (((tile->oh_base * cfg->output_w) + tile->ow_base) *
+                                   NPU_CONV2D_PACKED_OC_TILE * 4u);
+        uint32_t row_stride = (tile_ow != cfg->output_w) ?
+            (cfg->output_w * NPU_CONV2D_PACKED_OC_TILE) : 0u;
+        uint32_t tile_cols = (tile_ow != cfg->output_w) ? tile_ow : 0u;
 
         make_linebuf_output_tile_cfg(cfg, tile->oh_base, tile->ow_base,
                                      tile->tile_oh, tile_ow,
                                      1u, &tile_cfg);
-        tile_psum_addr = psum_addr +
-                         (((tile->oh_base * cfg->output_w) + tile->ow_base) *
-                          NPU_CONV2D_PACKED_OC_TILE * 4u);
-        status = run_linebuf_kgen_tile_requant(&tile_cfg,
-                                               tile_psum_addr,
-                                               (tile_ow != cfg->output_w) ?
-                                                   (cfg->output_w * NPU_CONV2D_PACKED_OC_TILE) : 0u,
-                                               (tile_ow != cfg->output_w) ? tile_ow : 0u,
-                                               &tile_stats);
-        if (status != NPU_CONV2D_PACKED_OK) {
-            if (stats) {
-                stats->status = status;
-            }
-            return status;
-        }
-        accumulate_conv_stats(&total_stats, &tile_stats);
+        linebuf_job_from_tile_cfg(&tile_cfg,
+                                  tile_psum_addr,
+                                  0u,
+                                  row_stride,
+                                  tile_cols,
+                                  0u,
+                                  cur_job);
+        linebuf_job_preload(cur_job);
+        systolic_gemm32_start_preloaded();
     }
 
+    for (uint32_t idx = 1; idx < tile_count; idx++) {
+        const npu_conv2d_spatial_tile_t *tile = &tiles[idx];
+        npu_conv2d_packed_cfg_t tile_cfg;
+        uint32_t tile_ow = tile->tile_ow ? tile->tile_ow : cfg->output_w;
+        uint32_t tile_psum_addr = psum_addr +
+                                  (((tile->oh_base * cfg->output_w) + tile->ow_base) *
+                                   NPU_CONV2D_PACKED_OC_TILE * 4u);
+        uint32_t row_stride = (tile_ow != cfg->output_w) ?
+            (cfg->output_w * NPU_CONV2D_PACKED_OC_TILE) : 0u;
+        uint32_t tile_cols = (tile_ow != cfg->output_w) ? tile_ow : 0u;
+
+        make_linebuf_output_tile_cfg(cfg, tile->oh_base, tile->ow_base,
+                                     tile->tile_oh, tile_ow,
+                                     1u, &tile_cfg);
+        linebuf_job_from_tile_cfg(&tile_cfg,
+                                  tile_psum_addr,
+                                  0u,
+                                  row_stride,
+                                  tile_cols,
+                                  0u,
+                                  next_job);
+        linebuf_job_preload(next_job);
+        systolic_gemm32_wait_done();
+        linebuf_job_record(&total_stats, cur_job);
+        systolic_gemm32_start_preloaded();
+        {
+            npu_conv2d_linebuf_job_t *tmp = cur_job;
+            cur_job = next_job;
+            next_job = tmp;
+        }
+    }
+
+    systolic_gemm32_wait_done();
+    linebuf_job_record(&total_stats, cur_job);
+    systolic_linebuf_disable();
+
     if (stats) {
-        *stats = total_stats;
+        copy_conv_stats(stats, &total_stats);
         stats->total_cycles = spatz_rt_read_cycle() - total_start;
+        stats->gemm_cycles = stats->total_cycles;
+        stats->last_gemm_cycles = stats->total_cycles;
         stats->status = NPU_CONV2D_PACKED_OK;
     }
 
@@ -1227,7 +1382,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf(const npu_conv2d_packed_cfg_t *cfg,
         }
 
         if (stats) {
-            *stats = total_stats;
+            copy_conv_stats(stats, &total_stats);
             stats->total_cycles = spatz_rt_read_cycle() - total_start;
             stats->status = NPU_CONV2D_PACKED_OK;
         }
@@ -1396,7 +1551,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_requant(const npu_conv2d_packed_cfg_
     }
 
     if (stats) {
-        *stats = total_stats;
+        copy_conv_stats(stats, &total_stats);
         stats->prepare_cycles = 0u;
         stats->last_prepare_cycles = 0u;
         stats->total_cycles = spatz_rt_read_cycle() - total_start;

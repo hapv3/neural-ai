@@ -28,25 +28,32 @@ module afu_frontend #(
     input  logic                    afu_done_i,
     input  logic                    afu_busy_i,
     input  logic                    afu_error_i,
-    
-    // LUT write interface
+
+    // LUT write interface. The core stages LUT writes into an inactive bank.
     output logic                    lut_we_o,
     output logic [7:0]              lut_addr_o,
     output logic [31:0]             lut_wdata_o,
     output logic [3:0]              lut_be_o
 );
 
-    logic [31:0] cfg_src_ptr_q,  cfg_src_ptr_n;
-    logic [31:0] cfg_src2_ptr_q, cfg_src2_ptr_n;
-    logic [31:0] cfg_dst_ptr_q,  cfg_dst_ptr_n;
-    logic [31:0] cfg_length_q,   cfg_length_n;
-    logic [2:0]  cfg_mode_q,     cfg_mode_n;
-    logic        cfg_start_q,    cfg_start_n;
+    logic [31:0] cfg_src_ptr_q;
+    logic [31:0] cfg_src2_ptr_q;
+    logic [31:0] cfg_dst_ptr_q;
+    logic [31:0] cfg_length_q;
+    logic [2:0]  cfg_mode_q;
+    logic        cfg_start_q;
+
+    logic [31:0] cfg_src_ptr_shadow_q;
+    logic [31:0] cfg_src2_ptr_shadow_q;
+    logic [31:0] cfg_dst_ptr_shadow_q;
+    logic [31:0] cfg_length_shadow_q;
+    logic [2:0]  cfg_mode_shadow_q;
 
     logic        obi_s_rvalid_q;
     logic [31:0] obi_s_rdata_q;
     logic        lut_sel;
     logic        csr_sel;
+    logic        start_fire;
 
     assign obi_s_gnt_o    = 1'b1;
     assign obi_s_rvalid_o = obi_s_rvalid_q;
@@ -61,6 +68,8 @@ module afu_frontend #(
 
     assign lut_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b00);
     assign csr_sel = (obi_s_addr_i[11:10] == 2'b01) || (obi_s_addr_i[15:12] == 4'h1);
+    assign start_fire = obi_s_req_i && obi_s_we_i && csr_sel &&
+                        (obi_s_addr_i[5:0] == 6'h00) && obi_s_wdata_i[0] && !afu_busy_i;
 
     function automatic logic [31:0] apply_cfg_be(
         input logic [31:0] current,
@@ -76,35 +85,10 @@ module afu_frontend #(
     endfunction
 
     always_comb begin
-        cfg_src_ptr_n = cfg_src_ptr_q;
-        cfg_src2_ptr_n = cfg_src2_ptr_q;
-        cfg_dst_ptr_n = cfg_dst_ptr_q;
-        cfg_length_n  = cfg_length_q;
-        cfg_mode_n    = cfg_mode_q;
-        cfg_start_n   = 1'b0; // start is a 1-cycle pulse
-        
-        lut_we_o      = 1'b0;
-        lut_addr_o    = obi_s_addr_i[9:2];
-        lut_wdata_o   = obi_s_wdata_i;
-        lut_be_o      = obi_s_be_i;
-
-        if (obi_s_req_i) begin
-            if (obi_s_we_i) begin
-                if (lut_sel) begin
-                    lut_we_o = 1'b1;
-                end else if (csr_sel) begin
-                    unique case (obi_s_addr_i[5:0])
-                        6'h00: cfg_start_n   = obi_s_wdata_i[0];
-                        6'h04: cfg_src_ptr_n = apply_cfg_be(cfg_src_ptr_q, obi_s_wdata_i, obi_s_be_i);
-                        6'h08: cfg_dst_ptr_n = apply_cfg_be(cfg_dst_ptr_q, obi_s_wdata_i, obi_s_be_i);
-                        6'h0c: cfg_length_n  = apply_cfg_be(cfg_length_q, obi_s_wdata_i, obi_s_be_i);
-                        6'h10: cfg_mode_n    = apply_cfg_be({29'd0, cfg_mode_q}, obi_s_wdata_i, obi_s_be_i)[2:0];
-                        6'h14: cfg_src2_ptr_n = apply_cfg_be(cfg_src2_ptr_q, obi_s_wdata_i, obi_s_be_i);
-                        default: ;
-                    endcase
-                end
-            end
-        end
+        lut_we_o    = obi_s_req_i && obi_s_we_i && lut_sel;
+        lut_addr_o  = obi_s_addr_i[9:2];
+        lut_wdata_o = obi_s_wdata_i;
+        lut_be_o    = obi_s_be_i;
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -117,30 +101,49 @@ module afu_frontend #(
             cfg_length_q   <= '0;
             cfg_mode_q     <= '0;
             cfg_start_q    <= 1'b0;
+            cfg_src_ptr_shadow_q  <= '0;
+            cfg_src2_ptr_shadow_q <= '0;
+            cfg_dst_ptr_shadow_q  <= '0;
+            cfg_length_shadow_q   <= '0;
+            cfg_mode_shadow_q     <= '0;
         end else begin
             obi_s_rvalid_q <= obi_s_req_i;
             obi_s_rdata_q  <= '0;
-            
+            cfg_start_q    <= 1'b0;
+
+            if (obi_s_req_i && obi_s_we_i && csr_sel) begin
+                unique case (obi_s_addr_i[5:0])
+                    6'h04: cfg_src_ptr_shadow_q <= apply_cfg_be(cfg_src_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    6'h08: cfg_dst_ptr_shadow_q <= apply_cfg_be(cfg_dst_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    6'h0c: cfg_length_shadow_q <= apply_cfg_be(cfg_length_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    6'h10: cfg_mode_shadow_q <= apply_cfg_be({29'd0, cfg_mode_shadow_q}, obi_s_wdata_i, obi_s_be_i)[2:0];
+                    6'h14: cfg_src2_ptr_shadow_q <= apply_cfg_be(cfg_src2_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    default: ;
+                endcase
+            end
+
+            if (start_fire) begin
+                cfg_src_ptr_q <= cfg_src_ptr_shadow_q;
+                cfg_src2_ptr_q <= cfg_src2_ptr_shadow_q;
+                cfg_dst_ptr_q <= cfg_dst_ptr_shadow_q;
+                cfg_length_q <= cfg_length_shadow_q;
+                cfg_mode_q <= cfg_mode_shadow_q;
+                cfg_start_q <= 1'b1;
+            end
+
             if (obi_s_req_i && !obi_s_we_i) begin
                 if (csr_sel) begin
                     unique case (obi_s_addr_i[5:0])
                         6'h00: obi_s_rdata_q <= {29'd0, afu_error_i, afu_busy_i, afu_done_i};
-                        6'h04: obi_s_rdata_q <= cfg_src_ptr_q;
-                        6'h08: obi_s_rdata_q <= cfg_dst_ptr_q;
-                        6'h0c: obi_s_rdata_q <= cfg_length_q;
-                        6'h10: obi_s_rdata_q <= {29'd0, cfg_mode_q};
-                        6'h14: obi_s_rdata_q <= cfg_src2_ptr_q;
+                        6'h04: obi_s_rdata_q <= cfg_src_ptr_shadow_q;
+                        6'h08: obi_s_rdata_q <= cfg_dst_ptr_shadow_q;
+                        6'h0c: obi_s_rdata_q <= cfg_length_shadow_q;
+                        6'h10: obi_s_rdata_q <= {29'd0, cfg_mode_shadow_q};
+                        6'h14: obi_s_rdata_q <= cfg_src2_ptr_shadow_q;
                         default: obi_s_rdata_q <= '0;
                     endcase
                 end
             end
-
-            cfg_src_ptr_q <= cfg_src_ptr_n;
-            cfg_src2_ptr_q <= cfg_src2_ptr_n;
-            cfg_dst_ptr_q <= cfg_dst_ptr_n;
-            cfg_length_q  <= cfg_length_n;
-            cfg_mode_q    <= cfg_mode_n;
-            cfg_start_q   <= cfg_start_n;
         end
     end
 

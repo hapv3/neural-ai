@@ -1,6 +1,33 @@
 #include "hal_systolic.h"
 #include "npu_memory_map.h"
 
+void systolic_gemm32_preload(const systolic_gemm32_req_t *req) {
+    REG_WRITE(REG_SYS_W_PTR, req->weight_addr);
+    REG_WRITE(REG_SYS_I_PTR, req->ifm_addr);
+    REG_WRITE(REG_SYS_O_PTR, req->ofm_addr);
+    REG_WRITE(REG_SYS_PSUM_PTR, req->psum_addr);
+    REG_WRITE(REG_SYS_DIM_M, req->dim_m);
+    REG_WRITE(REG_SYS_ACCUM_CTRL, req->accum_en ? REG_SYS_ACCUM_CTRL_EN : 0u);
+    REG_WRITE(REG_SYS_OFM_ROW_STRIDE, req->ofm_row_stride_bytes);
+    REG_WRITE(REG_SYS_OFM_TILE_COLS, req->ofm_tile_cols);
+    REG_WRITE(REG_SYS_PSUM_ROW_STRIDE, req->psum_row_stride_bytes);
+}
+
+void systolic_gemm32_start_preloaded(void) {
+    REG_WRITE(REG_SYS_DONE, 0);
+    REG_WRITE(REG_SYS_START, 1);
+}
+
+uint32_t systolic_gemm32_done(void) {
+    return REG_READ(REG_SYS_DONE) != 0u;
+}
+
+void systolic_gemm32_wait_done(void) {
+    while (!systolic_gemm32_done()) {
+    }
+    REG_WRITE(REG_SYS_DONE, 0);
+}
+
 static void systolic_gemm32_tile_ex(uint32_t weight_addr,
                                     uint32_t ifm_addr,
                                     uint32_t psum_addr,
@@ -10,22 +37,21 @@ static void systolic_gemm32_tile_ex(uint32_t weight_addr,
                                     uint32_t ofm_row_stride_bytes,
                                     uint32_t ofm_tile_cols,
                                     uint32_t psum_row_stride_bytes) {
-    REG_WRITE(REG_SYS_W_PTR, weight_addr);
-    REG_WRITE(REG_SYS_I_PTR, ifm_addr);
-    REG_WRITE(REG_SYS_O_PTR, ofm_addr);
-    REG_WRITE(REG_SYS_PSUM_PTR, psum_addr);
-    REG_WRITE(REG_SYS_DIM_M, dim_m);
-    REG_WRITE(REG_SYS_ACCUM_CTRL, accum_en ? REG_SYS_ACCUM_CTRL_EN : 0u);
-    REG_WRITE(REG_SYS_OFM_ROW_STRIDE, ofm_row_stride_bytes);
-    REG_WRITE(REG_SYS_OFM_TILE_COLS, ofm_tile_cols);
-    REG_WRITE(REG_SYS_PSUM_ROW_STRIDE, psum_row_stride_bytes);
-    REG_WRITE(REG_SYS_DONE, 0);
-    REG_WRITE(REG_SYS_START, 1);
+    systolic_gemm32_req_t req;
 
-    while (REG_READ(REG_SYS_DONE) == 0) {
-    }
+    req.weight_addr = weight_addr;
+    req.ifm_addr = ifm_addr;
+    req.psum_addr = psum_addr;
+    req.ofm_addr = ofm_addr;
+    req.dim_m = dim_m;
+    req.accum_en = accum_en;
+    req.ofm_row_stride_bytes = ofm_row_stride_bytes;
+    req.ofm_tile_cols = ofm_tile_cols;
+    req.psum_row_stride_bytes = psum_row_stride_bytes;
 
-    REG_WRITE(REG_SYS_DONE, 0);
+    systolic_gemm32_preload(&req);
+    systolic_gemm32_start_preloaded();
+    systolic_gemm32_wait_done();
     REG_WRITE(REG_SYS_ACCUM_CTRL, 0u);
 }
 

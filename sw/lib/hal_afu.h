@@ -30,22 +30,35 @@ static inline uint32_t afu_error(void) {
     return (afu_status() & NPU_AFU_STATUS_ERROR) != 0u;
 }
 
-static inline void afu_start(uint32_t src, uint32_t dst, uint32_t length, uint32_t mode) {
+static inline void afu_preload(uint32_t src, uint32_t dst, uint32_t length, uint32_t mode) {
     REG_WRITE(NPU_AFU_SRC_PTR, src);
     REG_WRITE(NPU_AFU_DST_PTR, dst);
     REG_WRITE(NPU_AFU_LENGTH, length);
     REG_WRITE(NPU_AFU_MODE, mode);
+}
+
+static inline void afu_start_preloaded(void) {
     REG_WRITE(NPU_AFU_STATUS, 1u);
 }
 
-static inline void afu_start_binary(uint32_t lhs, uint32_t rhs, uint32_t dst,
-                                    uint32_t length, uint32_t mode) {
+static inline void afu_preload_binary(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                      uint32_t length, uint32_t mode) {
     REG_WRITE(NPU_AFU_SRC_PTR, lhs);
     REG_WRITE(NPU_AFU_SRC2_PTR, rhs);
     REG_WRITE(NPU_AFU_DST_PTR, dst);
     REG_WRITE(NPU_AFU_LENGTH, length);
     REG_WRITE(NPU_AFU_MODE, mode);
-    REG_WRITE(NPU_AFU_STATUS, 1u);
+}
+
+static inline void afu_start(uint32_t src, uint32_t dst, uint32_t length, uint32_t mode) {
+    afu_preload(src, dst, length, mode);
+    afu_start_preloaded();
+}
+
+static inline void afu_start_binary(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                    uint32_t length, uint32_t mode) {
+    afu_preload_binary(lhs, rhs, dst, length, mode);
+    afu_start_preloaded();
 }
 
 static inline void afu_start_mul_q7(uint32_t lhs, uint32_t rhs, uint32_t dst,
