@@ -38,7 +38,7 @@ Our NPU uses OBI for the shared TCDM, while Spatz natively speaks the **TCDM pro
 
 ### snitch_core.sv — Expose Accelerator Interface
 
-#### [MODIFY] [snitch_core.sv](file:///home/dev01/neural-ai/hw/rtl/cluster/snitch_core.sv)
+#### [MODIFY] [snitch_core.sv](/neural-ai/hw/rtl/cluster/snitch_core.sv)
 
 1. Add output/input ports for the accelerator offload interface:
    - `acc_qvalid_o`, `acc_qready_i` — handshake
@@ -56,7 +56,7 @@ Our NPU uses OBI for the shared TCDM, while Spatz natively speaks the **TCDM pro
 
 ### npu_cluster.sv — Instantiate Spatz + Bridge
 
-#### [MODIFY] [npu_cluster.sv](file:///home/dev01/neural-ai/hw/rtl/cluster/npu_cluster.sv)
+#### [MODIFY] [npu_cluster.sv](/neural-ai/hw/rtl/cluster/npu_cluster.sv)
 
 1. **Increase `NUM_MASTERS` from 8 to 9** (Master 1 and Master 8 are Spatz VLSU ports).
 
@@ -78,7 +78,7 @@ Our NPU uses OBI for the shared TCDM, while Spatz natively speaks the **TCDM pro
 
 ### tcdm_to_obi_bridge.sv — New Bridge Module
 
-#### [NEW] [tcdm_to_obi_bridge.sv](file:///home/dev01/neural-ai/hw/rtl/cluster/tcdm_to_obi_bridge.sv)
+#### [NEW] [tcdm_to_obi_bridge.sv](/neural-ai/hw/rtl/cluster/tcdm_to_obi_bridge.sv)
 
 Simple combinational bridge (no buffering needed — TCDM is already single-cycle):
 
@@ -101,7 +101,7 @@ TCDM Side:                        OBI Side:
 
 ### snitch_minimal.F — Add New Files
 
-#### [MODIFY] [snitch_minimal.F](file:///home/dev01/neural-ai/hw/rtl/cluster/snitch_minimal.F)
+#### [MODIFY] [snitch_minimal.F](/neural-ai/hw/rtl/cluster/snitch_minimal.F)
 
 Add:
 ```
@@ -129,7 +129,7 @@ $(REPO_ROOT)/hw/rtl/cluster/tcdm_to_obi_bridge.sv
 
 ### spatz_pkg.sv — Override for INT8 NPU
 
-#### [MODIFY] [spatz_pkg.sv](file:///home/dev01/neural-ai/hw/spatz/hw/ip/spatz/src/generated/spatz_pkg.sv) (or create a local override)
+#### [MODIFY] [spatz_pkg.sv](/neural-ai/hw/spatz/hw/ip/spatz/src/generated/spatz_pkg.sv) (or create a local override)
 
 > [!WARNING]
 > Modifying the Spatz submodule directly is risky for upstream compatibility. Alternative: Create a local `npu_spatz_pkg.sv` that overrides `N_FPU = 0`. However, `spatz_pkg` is a package, not parameterizable at instantiation time. We would need to either:

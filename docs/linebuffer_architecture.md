@@ -1,205 +1,223 @@
-# Kiến trúc Linebuffer NPU
+# NPU Linebuffer Architecture
 
-Tài liệu này ghi lại quá trình kiểm tra performance của
-`conv_channel_linebuf_packer`, lý do không tiếp tục dùng block này làm
-performance path, và kiến trúc `conv_linebuf_stream_packer` hiện đang feed
-systolic array cho các Conv2D linebuffer shape được support.
+This document records the performance review of the legacy
+`conv_channel_linebuf_packer`, why it is no longer used as the performance
+path, and the current `conv_linebuf_stream_packer` architecture that feeds the
+systolic array for supported Conv2D linebuffer shapes.
 
-Quyết định hiện tại:
+Current decisions:
 
-- `conv_channel_linebuf_packer` chỉ được xem là RTL tham chiếu/legacy cho
-  correctness. Không dùng làm default performance path.
-- Linebuffer mới là `conv_linebuf_stream_packer`, thiết kế lại theo window-cache
-  + segment prefetch để phát IFM vector trực tiếp cho systolic.
-- Mục tiêu steady-state của linebuffer mới là `1 x 256-bit vector/cycle` vào
-  systolic IFM stream cho các shape được support.
-- Native stride tập trung vào `stride=1`, `stride=2`. Stride lớn hơn
-  phải do compiler/scheduler decompose hoặc đi qua packed prepare backup.
+- `conv_channel_linebuf_packer` is kept only as a legacy/reference RTL block
+  for correctness coverage. It is not the default performance path.
+- The active linebuffer is `conv_linebuf_stream_packer`, redesigned around a
+  window cache plus segment/row prefetch so it can stream IFM vectors directly
+  into the systolic array.
+- The steady-state target for supported shapes is one 256-bit IFM vector per
+  cycle.
+- Native stride support is focused on `stride=1` and `stride=2`. Larger strides
+  must be decomposed by the compiler/scheduler or routed through the packed
+  prepare fallback.
 
-## 0. Trạng Thái Implement Hiện Tại
+## 0. Current Implementation Status
 
-Implementation hiện tại đã chuyển performance path sang
-`conv_linebuf_stream_packer` và không còn dựa vào
-`conv_channel_linebuf_packer` cho Micro-YOLO. Các điểm quan trọng:
+The implementation has moved the Micro-YOLO performance path to
+`conv_linebuf_stream_packer`. Micro-YOLO no longer depends on
+`conv_channel_linebuf_packer`.
 
-- **Host/Python sở hữu schedule Conv2D linebuffer**. Helper
-  `tools/npu_linebuf_precompute.py` sinh header
-  `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h` chứa full
-  `npu_conv2d_linebuf_job_desc_t` job arrays cho từng conv tile.
-- **Snitch firmware không dựng linebuffer tile trong hot path Micro-YOLO**.
-  `npu_layer_t` chỉ giữ pointer/count tới job arrays. Graph executor gọi
-  `npu_conv2d_packed_run_linebuf_job_descs()`, runner này preload shadow
-  registers cho job kế tiếp khi job hiện tại đang chạy.
-- **Generic C planner vẫn tồn tại làm fallback** cho các graph/layer chưa có
-  host-planned job descriptors. Fallback này vẫn dùng
-  `make_linebuf_output_tile_cfg()` và `linebuf_job_from_tile_cfg()`.
-- **C32 aligned fast path là path chính cho các layer YOLO sau stem**:
-  `input_c=32`, `pixel_stride_bytes=32`, `row_stride_bytes=input_w*32`,
-  `input_c_base=0`, `lane_base=0`, `block_valid_bytes=32`, 32B aligned base.
-  Trong path này RTL dùng trực tiếp `obi_rdata_i`/window word và tránh
-  `merge_beats` trên data path chính.
-- **`merge_beats` vẫn giữ lại** cho RGB stem, tail/sub-C32, `lane_base != 0`,
-  raw/NHWC hoặc non-aligned fallback, và bypass reads cắt qua biên 32B.
-- **Micro-YOLO test firmware dùng initialized D-TCM descriptors**. Cocotb load
-  ELF section-aware: `.text` vào I-TCM qua AXI, `.data` descriptor table vào
-  D-TCM qua testbench backdoor. Đây là cơ chế verification hiện tại, không có
-  nghĩa host AXI normal path đã expose D-TCM.
+Important points:
 
-## 1. Contract RTL Legacy Đã Đo
+- **Host/Python owns the Conv2D linebuffer schedule.**
+  `tools/npu_linebuf_precompute.py` generates
+  `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h`, which contains full
+  `npu_conv2d_linebuf_job_desc_t` job arrays for each Conv tile.
+- **Snitch firmware does not build linebuffer tiles in the Micro-YOLO hot
+  path.** `npu_layer_t` stores only descriptor pointer/count fields. The graph
+  executor calls `npu_conv2d_packed_run_linebuf_job_descs()`, and that runner
+  preloads shadow registers for job N+1 while job N is running.
+- **The generic C planner remains as a fallback** for graphs/layers that do not
+  provide host-planned job descriptors. This fallback still uses
+  `make_linebuf_output_tile_cfg()` and `linebuf_job_from_tile_cfg()`.
+- **The C32-aligned fast path is the main path for YOLO layers after the
+  stem.** The descriptor must present `input_c=32`,
+  `pixel_stride_bytes=32`, `row_stride_bytes=input_w*32`,
+  `input_c_base=0`, `lane_base=0`, `block_valid_bytes=32`, and a 32-byte
+  aligned base/channel offset. In this path the RTL can use `obi_rdata_i` or a
+  window word directly and avoid `merge_beats` on the main data path.
+- **`merge_beats` is still required** for the RGB stem, sub-C32/tail chunks,
+  `lane_base != 0`, raw/NHWC or non-aligned fallback, and bypass reads crossing
+  a 32-byte beat boundary.
+- **The Micro-YOLO test firmware uses initialized D-TCM descriptors.** Cocotb
+  uses an ELF section-aware loader: `.text` is written into I-TCM through AXI,
+  while the `.data` descriptor table is initialized in D-TCM through testbench
+  hierarchy/backdoor. This is the current verification mechanism; it does not
+  mean the normal host AXI path exposes D-TCM.
 
-Phần này mô tả contract của `conv_channel_linebuf_packer` cũ. Nó hữu ích để
-so sánh semantics, nhưng không phải performance path hiện tại.
+## 1. Measured Legacy RTL Contract
 
-| Thông số | Giá trị | Ý nghĩa |
+This section describes the old `conv_channel_linebuf_packer` contract. It is
+useful for semantic comparison, but it is not the current performance path.
+
+| Parameter | Value | Meaning |
 | :--- | :--- | :--- |
-| `K_MAX` | `5` | Native support kernel height/width `1..5`. Kernel `7x7/9x9` phải được compiler/scheduler decompose trước khi dùng linebuffer. |
-| `MAX_INPUT_W` | `640` | SRAM line depth theo input width thật, không tính padding. Tile/stripe có `input_w > 640` phải split trước. |
-| `DATA_WIDTH` | `256-bit` | Một SRAM word chứa một C-block `32 x INT8`, khớp IFM row width của systolic array. |
-| `C_BLOCK` | `32` kênh | Mỗi run xử lý một `c_base`/C-block. Đổi `c_base` thì linebuffer flush ở `start_i`. |
+| `K_MAX` | `5` | Native kernel height/width support is `1..5`. `7x7/9x9` kernels must be decomposed by compiler/scheduler before using the linebuffer. |
+| `MAX_INPUT_W` | `640` | SRAM line depth is based on real input width, excluding padding. Tiles/stripes with `input_w > 640` must be split first. |
+| `DATA_WIDTH` | `256-bit` | One SRAM word stores one C-block, `32 x INT8`, matching the systolic IFM row width. |
+| `C_BLOCK` | `32 channels` | Each run processes one `c_base`/C-block. Changing `c_base` flushes the linebuffer on `start_i`. |
 
-`conv_channel_linebuf_packer` support padding bằng zero-injection, không
-materialize padding vào SRAM. Vì vậy `MAX_INPUT_W=640` là width input thật, còn
-`pad_h/pad_w` chỉ ảnh hưởng bounds check và output shape. Contract này hữu ích
-để giữ semantics, nhưng không đủ làm performance target.
+`conv_channel_linebuf_packer` supports padding through zero injection and does
+not materialize padding in SRAM. Therefore `MAX_INPUT_W=640` is the real input
+width; `pad_h/pad_w` only affect bounds checks and output shape. This contract
+is useful for preserving semantics, but it is not sufficient for the
+performance target.
 
 ## 2. SRAM Sizing
 
-Với cấu hình hiện tại:
+For the legacy configuration:
 
-- Dung lượng một line: `640 words x 32B = 20 KiB`.
-- Dung lượng ring buffer: `5 lines x 20 KiB = 100 KiB`.
-- Mỗi SRAM word là một vector 32 byte tại một tọa độ `x` cho một `c_base`.
+- One line: `640 words x 32B = 20 KiB`.
+- Ring buffer: `5 lines x 20 KiB = 100 KiB`.
+- Each SRAM word is a 32-byte vector at one `x` coordinate for one `c_base`.
 
-Thiết kế hiện tại không tag theo `c_base/cblk`; row tag chỉ theo `ih`. Điều này
-đúng với rule mỗi run chỉ dùng một `c_base` và flush khi start. Nếu cần giữ
-nhiều C-block trong cùng ring buffer, tag phải mở rộng thành `{ih, cblk}`.
+The legacy design does not tag by `c_base/cblk`; the row tag is only `ih`.
+This matches the rule that each run uses one `c_base` and flushes on start. If
+multiple C-blocks must be resident in the same ring buffer, the tag must be
+extended to `{ih, cblk}`.
 
-## 3. Dataflow Legacy
+## 3. Legacy Dataflow
 
-Phần này là dataflow của channel-linebuffer cũ. Dataflow stream linebuffer
-hiện tại được mô tả ở mục 8.
+This section describes the old channel-linebuffer dataflow. The current stream
+linebuffer dataflow is described in Section 8.
 
-Luồng dữ liệu hiện tại:
+Legacy flow:
 
-1. Host/scheduler cấu hình shape, stride, padding, `c_base`, và byte strides.
-   `input_base` là origin của padded output row: firmware đặt bằng
-   `input_addr - pad_h * row_stride_bytes`; padding ngang vẫn được xử lý bằng
-   `pad_w` và bounds check, không materialize vào SRAM.
-2. Packer bảo đảm các input row cần thiết nằm trong ring SRAM.
-3. Với mỗi output spatial/kernal position, packer đọc `C_BLOCK=32` byte từ row
-   SRAM hoặc phát zero nếu vị trí nằm ngoài input bounds.
-4. `1x1` không padding dùng bypass path riêng: đọc trực tiếp OBI/TCDM và bỏ qua
-   ring SRAM.
-5. Output row được feed vào systolic IFM stream bằng ready/valid.
+1. Host/scheduler configures shape, stride, padding, `c_base`, and byte
+   strides. `input_base` is the origin of the padded output row: firmware sets
+   it to `input_addr - pad_h * row_stride_bytes`. Horizontal padding is still
+   handled through `pad_w` and bounds checks, not materialized in SRAM.
+2. The packer ensures all input rows required by the current window are present
+   in the ring SRAM.
+3. For each output spatial/kernel position, the packer reads `C_BLOCK=32` bytes
+   from row SRAM, or emits zero when the coordinate is outside input bounds.
+4. `1x1` without padding uses a bypass path: it reads OBI/TCDM directly and
+   skips the ring SRAM.
+5. The output row is fed to the systolic IFM stream through ready/valid.
 
-Với `KH*KW*IC <= 32`, RTL hỗ trợ `coalesce` mode: mỗi output spatial phát một
-IFM row duy nhất chứa toàn bộ window theo thứ tự lane `{kh, kw, ic}`, khớp
-layout weight K-major của systolic array.
+For `KH*KW*IC <= 32`, RTL supports `coalesce` mode: each output spatial
+position emits one IFM row containing the full window in lane order
+`{kh, kw, ic}`, matching the K-major systolic weight layout.
 
-Với `K > 32`, RTL có KGEN v0 cho micro-tile:
+For `K > 32`, RTL has KGEN support for micro-tiles:
 
-1. Host/Python tính layer/tile config, seed `{kh,kw,ic}` và `k_tile_count`.
-2. Snitch ghi `REG_LB_K_SEED`, `REG_LB_K_TILES`, bật `REG_LB_CTRL_KGEN`.
-3. Snitch start systolic một lần và wait một lần.
-4. `systolic_controller` tự lặp qua các K tile, tăng lane descriptor 32 bước
-   mỗi tile theo thứ tự `{kh,kw,ic}`.
-5. Tile đầu ghi OFM INT32; các tile sau đọc psum và accumulate vào cùng OFM.
+1. Host/Python computes the layer/tile config, `{kh,kw,ic}` seed, and
+   `k_tile_count`.
+2. Snitch writes `REG_LB_K_SEED`, `REG_LB_K_TILES`, and enables
+   `REG_LB_CTRL_KGEN`.
+3. Snitch starts systolic once and waits once.
+4. `systolic_controller` loops over K tiles internally and advances the 32 lane
+   descriptors per tile in `{kh,kw,ic}` order.
+5. The first tile writes INT32 OFM; later tiles read psum and accumulate into
+   the same OFM.
 
-Gate lịch sử của KGEN v0 từng là `M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` rất nhỏ
-trong firmware/test. Implementation hiện tại đã nâng software limit lên
-`NPU_CONV2D_LINEBUF_KGEN_MAX_M = 1024`; Micro-YOLO dùng job `M=256` cho tile
-`16x16`. Các shape không thỏa gate linebuffer/KGEN vẫn đi qua generic planner
-hoặc packed-prepare fallback.
+The historical KGEN v0 gate used a very small
+`M <= SYSTOLIC_GEMM32_ACCUM_TILE_M` firmware/test limit. The current software
+limit has been raised to `NPU_CONV2D_LINEBUF_KGEN_MAX_M = 1024`; Micro-YOLO
+uses `M=256` jobs for `16x16` tiles. Shapes outside the supported
+linebuffer/KGEN envelope still use the generic planner or packed-prepare
+fallback.
 
-Unaligned vector được xử lý bằng `merge_beats`: nếu vector 32 byte cắt qua biên
-256-bit beat, packer phát hai read rồi ghép lại.
+Unaligned vectors are handled by `merge_beats`: if a 32-byte vector crosses a
+256-bit beat boundary, the packer issues two reads and merges them.
 
-## 4. Compiler/Scheduler Rules Legacy
+## 4. Legacy Compiler/Scheduler Rules
 
 - Native linebuffer path: `kernel_h <= 5`, `kernel_w <= 5`, `input_w <= 640`.
-- Coalesced fast path: chỉ dùng khi `KH*KW*IC <= 32` và output spatial tile
-  không vượt giới hạn một GEMM linebuffer launch hiện tại.
-- KGEN fast path: chỉ dùng khi `KH*KW*IC > 32`,
-  `M <= NPU_CONV2D_LINEBUF_KGEN_MAX_M` (default `1024` ở software), và channel
-  shape không cắt ngang C-block. Với YOLO C32-blocked, host/Python nên emit
-  từng descriptor nhìn thấy đúng một C32 block: `input_c=32`,
-  `input_c_base=0`, `lane_base=0`, `block_valid_bytes=32`.
-- `7x7`, `9x9`, hoặc tile width lớn hơn `640` phải đi qua một trong hai hướng:
-  decompose thành sub-kernel/tile nhỏ hơn, hoặc fallback packed prepare bằng
-  iDMA/Spatz.
-- `1x1` pad0 nên dùng bypass path; `1x1` có padding vẫn dùng ring/zero-injection
-  fallback để giữ correctness.
-- Conv2D scheduler đã từng ưu tiên linebuffer này trước packed prepare. Sau
-  performance review bên dưới, rule này bị thay thế: chỉ linebuffer mới
-  `conv_linebuf_stream_packer` được ưu tiên làm performance path.
-- Halo retention/cascade giữa stripe chưa được implement; `start_i` hiện clear
-  valid state của ring.
+- Coalesced fast path: only when `KH*KW*IC <= 32` and the output spatial tile
+  does not exceed the current GEMM linebuffer launch limit.
+- KGEN fast path: only when `KH*KW*IC > 32`,
+  `M <= NPU_CONV2D_LINEBUF_KGEN_MAX_M` (software default `1024`), and the
+  channel shape does not cut across a C-block. For YOLO C32-blocked tensors,
+  Host/Python should emit descriptors that each see exactly one C32 block:
+  `input_c=32`, `input_c_base=0`, `lane_base=0`, `block_valid_bytes=32`.
+- `7x7`, `9x9`, or tile widths larger than `640` must either be decomposed into
+  smaller sub-kernels/tiles or fall back to packed prepare through iDMA/Spatz.
+- `1x1` pad0 should use the bypass path. `1x1` with padding still uses the
+  ring/zero-injection fallback for correctness.
+- The old Conv2D scheduler once prioritized this linebuffer before packed
+  prepare. After the performance review below, that rule was replaced: only the
+  newer `conv_linebuf_stream_packer` should be prioritized as the performance
+  path.
+- Halo retention/cascade across stripes is not implemented; `start_i` currently
+  clears ring valid state.
 
 ### 4.1 Internal C32-Blocked Layout Contract
 
-Firmware/Python host cần tách rõ raw input layout và layout nội bộ của NPU:
+Firmware/Python host must distinguish the raw input layout from the NPU
+internal layout:
 
-- Boundary input từ camera/model loader có thể là default NHWC/RGB. Layer đầu
-  được phép dùng path tail/raw hoặc DMA/repack riêng vì `IC=3` nhỏ.
-- Sau layer đầu, OFM của systolic nên được xem là tensor nội bộ
-  **C32-blocked/block-major**, không phải NHWC full-C interleaved:
+- Boundary input from camera/model loader may be default NHWC/RGB. The first
+  layer may use a tail/raw path or a dedicated DMA/repack path because `IC=3`
+  is small.
+- After the first layer, systolic OFM should be treated as an internal
+  **C32-blocked/block-major** tensor, not compact full-C NHWC:
   `block[cblk][spatial][32C]`.
-- Khi layer sau đọc một C32 block, host phải cấu hình command như một tensor
-  view độc lập:
+- When a later layer reads one C32 block, the host must configure the command as
+  an independent tensor view:
   - `input_addr = base_of_cblk`
-  - `input_c = 32` cho block đủ, hoặc tail width cho block cuối
+  - `input_c = 32` for a full block, or tail width for the final block
   - `input_c_base = 0`
   - `input_c_stride = 32`
   - `row_stride_bytes = input_w * 32`
   - `pixel_stride_bytes = 32`
-- Với `IC > 32`, Python planner split thành nhiều C32 views và accumulate vào
-  cùng OFM/psum. Firmware Snitch chỉ chạy command đã được planner generate đúng;
-  không cần tự gate lại layout.
-- Nếu host truyền `input_c = full_IC` và `input_c_base = 32/64/...` trên
-  C32-blocked storage, linebuffer sẽ cộng offset sai. Quy ước đúng là đổi
-  `input_addr` sang block base và giữ `input_c_base = 0`.
+- For `IC > 32`, the Python planner splits work into multiple C32 views and
+  accumulates into the same OFM/psum. Snitch firmware only runs the commands
+  generated by the planner; it does not need to gate the layout again.
+- If the host passes `input_c = full_IC` and `input_c_base = 32/64/...` over
+  C32-blocked storage, the linebuffer will apply the wrong offset. The correct
+  convention is to move `input_addr` to the block base and keep
+  `input_c_base = 0`.
 
-`conv_linebuf_stream_packer` có fast handling cho view C32 aligned:
-`pixel_stride=32`, `row_stride=input_w*32`, `input_c_base=0`,
-`lane_base=0`, origin base 32B-aligned. Path raw NHWC/cross-beat vẫn là
-fallback correctness cho boundary và tail.
+`conv_linebuf_stream_packer` has fast handling for C32-aligned views:
+`pixel_stride=32`, `row_stride=input_w*32`, `input_c_base=0`, `lane_base=0`,
+and a 32-byte aligned origin base. Raw NHWC/cross-beat handling remains the
+correctness fallback for boundary and tail cases.
 
-## 5. Verification Legacy
+## 5. Legacy Verification
 
-Regression trực tiếp cho contract này nằm ở
+Direct regression coverage for this contract lives in
 `hw/rtl/systolic/tb/test_conv_channel_linebuf_packer.py`:
 
-- Positive: `1x1`, `3x3`, `5x5`, coalesced `3x3/C3`, stride `1/2`, padding,
-  tail channel, unaligned/cross-beat, width boundary `640`.
-- Sweep: toàn bộ kernel `1x1..5x5`.
-- Negative: reject `7x7`, `9x9`, và `input_w=641`.
+- Positive tests: `1x1`, `3x3`, `5x5`, coalesced `3x3/C3`, stride `1/2`,
+  padding, tail channel, unaligned/cross-beat, and width boundary `640`.
+- Sweep: all kernels `1x1..5x5`.
+- Negative tests: reject `7x7`, `9x9`, and `input_w=641`.
 
-## 6. Quá Trình Check Performance
+## 6. Performance Review
 
-Mục tiêu của check là xác định linebuffer hiện tại có thể thay thế packed
-im2col prepare cho Conv2D hay không. Case quan trọng nhất là deep Conv2D có
-`IC > 32`, vì đây là phần chiếm phần lớn workload YOLO/CNN sau first layer.
+The goal of this review was to determine whether the old linebuffer could
+replace packed im2col prepare for Conv2D. The most important case is deep
+Conv2D with `IC > 32`, because it dominates the YOLO/CNN workload after the
+first layer.
 
-### 6.1 Baseline Trước Khi Có Linebuffer
+### 6.1 Baseline Before Linebuffer
 
-Các số đo trước đó cho thấy packed prepare bằng scalar software không thể là
-performance path:
+Earlier measurements showed that scalar software packed prepare could not be
+the performance path:
 
 - `Conv1x1 IC=33`: `prepare=108592`, `gemm=662`, `total=109382`.
 - `Conv3x3 IC=3`: `prepare=95822`, `gemm=200`, `total=96096`.
 
-Sau khi tối ưu `Conv1x1 IC=33` bằng iDMA contiguous/2D pack, path pointwise đã
-gần như giải quyết được prepare:
+After optimizing `Conv1x1 IC=33` with iDMA contiguous/2D packing, the
+pointwise path was effectively solved:
 
 - `Conv1x1 IC=33`: `gemm=666`, `idma=2`, `spatz=0`, `scalar=0`.
 
-Kết luận từ giai đoạn này: vấn đề chính còn lại là spatial Conv2D
-`KH x KW > 1`, đặc biệt `3x3/5x5` với `IC` lớn. Vì vậy linebuffer được thêm để
-tránh materialize im2col trong TCDM.
+Conclusion from this stage: the remaining core issue is spatial Conv2D
+`KH x KW > 1`, especially `3x3/5x5` with large `IC`. The linebuffer was added
+to avoid materializing im2col in TCDM.
 
-### 6.2 Case Đo Chính: Conv3x3 IC120
+### 6.2 Main Measurement Case: Conv3x3 IC120
 
-Command dùng để đo:
+Command:
 
 ```bash
 env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
@@ -207,13 +225,13 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 ```
 
-Test pass:
+Test result:
 
 ```text
 TESTS=1 PASS=1 FAIL=0
 ```
 
-PMU tổng:
+PMU summary:
 
 ```text
 cycles=24170
@@ -282,172 +300,311 @@ rows=16 k_tiles=34 prepare=0 gemm=19418 total=19490
 last_prepare=0 last_gemm=4162 idma=0 idma_tx=0 spatz=0 scalar=0
 ```
 
-Ý nghĩa của case:
+Meaning of the case:
 
-- `M=16` output spatial rows trong micro-tile.
-- `k_tiles=34`; mỗi K tile tạo một IFM vector cho mỗi output row.
-- Tổng IFM vector đúng là `16 * 34 = 544`.
-- `systolic.compute=544` đúng bằng số vector thật vào MAC array.
-- `linebuf_row_valid=544` và `linebuf_row_ready=544`, nên không mất dữ liệu và
-  không bị backpressure ở output linebuffer.
+- `M=16` output spatial rows in the micro-tile.
+- `k_tiles=34`; each K tile creates one IFM vector for each output row.
+- The expected IFM vector count is `16 * 34 = 544`.
+- `systolic.compute=544` exactly matches the number of real vectors entering
+  the MAC array.
+- `linebuf_row_valid=544` and `linebuf_row_ready=544`, so no output data is
+  lost and the linebuffer output is not backpressured.
 
-### 6.3 Phân Tích Bottleneck
+### 6.3 Bottleneck Analysis
 
-`conv_channel_linebuf_packer` không bị nghẽn bởi TCDM grant:
+`conv_channel_linebuf_packer` was not blocked by TCDM grants:
 
-- `linebuf_obi_stall=26` trên tổng `950` OBI request.
-- `tcdm stall=26` trên tổng `7588` request.
-- OFM FIFO không full: `ofm_fifo_full=0`.
-- Linebuffer output luôn được nhận: `row_valid=row_ready=544`.
+- `linebuf_obi_stall=26` out of `950` OBI requests.
+- `tcdm stall=26` out of `7588` requests.
+- OFM FIFO was not full: `ofm_fifo_full=0`.
+- Linebuffer output was always accepted: `row_valid=row_ready=544`.
 
-Bottleneck nằm trong cách FSM tạo mỗi IFM vector:
+The bottleneck was the FSM sequence used to create each IFM vector:
 
-- MAC active thật chỉ `544` cycles.
-- Controller ở state `COMPUTE` tới `15202` cycles.
-- Bubbles trong compute state là `15202 - 544 = 14658` cycles.
-- Tốc độ hiệu dụng trong compute state là `544 / 15202 = 0.0358`
-  vector/cycle, tương đương khoảng `27.9` cycles/vector.
+- True MAC activity was only `544` cycles.
+- The controller stayed in `COMPUTE` for `15202` cycles.
+- Bubbles inside compute state were `15202 - 544 = 14658` cycles.
+- Effective throughput inside compute state was `544 / 15202 = 0.0358`
+  vector/cycle, or about `27.9` cycles/vector.
 
-Ba state linebuffer lớn nhất:
+The three largest linebuffer states were:
 
-- `CH_COAL_PREP=4896`;
-- `CH_COAL_READ_REQ=3400`;
-- `CH_COAL_READ_WAIT=3400`;
-- tổng `11696 / 15202 = 76.9%` active linebuffer cycles.
+- `CH_COAL_PREP=4896`
+- `CH_COAL_READ_REQ=3400`
+- `CH_COAL_READ_WAIT=3400`
+- Total: `11696 / 15202 = 76.9%` of active linebuffer cycles.
 
-Nguyên nhân kiến trúc:
+Architectural causes:
 
-- Coalesce/KGEN mixed tap hiện đi theo kiểu scan `kh/kw/ic` tuần tự.
-- Mỗi output vector cần nhiều bước prepare, request, wait, merge trước khi
-  `CH_COAL_EMIT`.
-- Row SRAM đang được dùng như nguồn đọc tap trực tiếp cho từng output vector,
-  không phải backing store cho một window cache đã sẵn sàng.
-- Vì vậy dù correctness đúng, design không thể đạt `1 vector/cycle`.
+- Coalesce/KGEN mixed-tap generation scanned `kh/kw/ic` sequentially.
+- Each output vector required multiple prepare, request, wait, and merge steps
+  before `CH_COAL_EMIT`.
+- Row SRAM was used as a direct tap read source for each output vector, not as
+  backing storage for a ready window cache.
+- Therefore correctness was good, but the design could not reach
+  `1 vector/cycle`.
 
-### 6.4 Tác Động Của Split IC Tail
+### 6.4 Effect of IC Tail Split
 
-Trước khi split IC tail tốt hơn, case IC120 từng rơi vào path tệ:
+Before better IC tail splitting, the IC120 case could fall into a slow path:
 
 ```text
 gemm=85008 cycles=89316
 ```
 
-Sau khi scheduler split IC thành các command hợp lý hơn:
+After splitting IC into more appropriate commands:
 
 ```text
 gemm=19418 cycles=24170
 ```
 
-Split command giải quyết fallback/tail quá chậm, nhưng không sửa bottleneck
-gốc của linebuffer: chỉ phát `544` vector sau khoảng `15202` cycles compute
-state. Vì vậy đây là tối ưu cần thiết cho correctness/perf bước đầu, nhưng
-không thay đổi quyết định phải viết lại linebuffer.
+Command splitting fixed the overly slow fallback/tail behavior, but did not fix
+the root linebuffer bottleneck: only `544` vectors were emitted during about
+`15202` controller compute cycles. This was a necessary first optimization for
+correctness/performance, but it did not change the decision to redesign the
+linebuffer.
 
-## 7. Quyết Định Thiết Kế Lại
+## 7. Redesign Decision
 
-`conv_channel_linebuf_packer` bị loại khỏi roadmap performance vì không có
-đường nâng cấp nhỏ nào đạt `1 vector/cycle`:
+`conv_channel_linebuf_packer` was removed from the performance roadmap because
+there was no small upgrade path to `1 vector/cycle`:
 
-- Thêm FIFO chỉ che backpressure downstream, không giảm `CH_COAL_PREP` và
-  `CH_COAL_READ_*`.
-- Tăng SRAM depth không giúp vì stall không đến từ capacity.
-- Tối ưu scheduler không loại được scan tuần tự trong RTL.
-- Giữ row SRAM 1-read làm nguồn tap trực tiếp không đủ cho coalesce/KGEN mixed
-  tap khi cần emit đều mỗi cycle.
+- Adding FIFO only hides downstream backpressure; it does not reduce
+  `CH_COAL_PREP` or `CH_COAL_READ_*`.
+- Increasing SRAM depth does not help because the stall does not come from
+  capacity.
+- Scheduler optimization cannot remove the sequential scan inside RTL.
+- A one-read row SRAM used as the direct tap source is insufficient for
+  coalesce/KGEN mixed taps when the design must emit steadily every cycle.
 
-Linebuffer mới phải đổi dataflow:
+The new linebuffer must use a different dataflow:
 
 ```text
 Shared TCDM / stripe in TCDM
-        │
-        ▼
+        |
+        v
 row SRAM banks / segment prefetch
-        │
-        ▼
+        |
+        v
 window cache: K_MAX x K_MAX x 32B
-        │
-        ▼
+        |
+        v
 lane descriptor generator
-        │
-        ▼
+        |
+        v
 32-lane byte mux / zero inject
-        │
-        ▼
+        |
+        v
 skid FIFO
-        │
-        ▼
+        |
+        v
 systolic IFM stream
 ```
 
-Vai trò từng khối:
+Block roles:
 
-- Row SRAM banks giữ input rows hoặc prefetched segments.
-- Window cache giữ window đang emit, không đọc tap trực tiếp từ SRAM cho từng
-  lane trong mỗi output.
-- Lane descriptor generator tạo mapping `{kh,kw,ic}` cho từng lane, bao gồm
-  KGEN seed và K tile increment.
-- Lane mux chọn byte từ window cache hoặc zero padding.
-- Skid FIFO tách timing giữa mux lớn và systolic ready/valid.
+- Row SRAM banks hold input rows or prefetched segments.
+- Window cache holds the window currently being emitted; the design should not
+  read taps directly from SRAM for every lane of every output.
+- Lane descriptor generator maps each lane to `{kh,kw,ic}`, including KGEN seed
+  and K-tile increments.
+- Lane mux selects bytes from the window cache or zero padding.
+- Skid FIFO decouples the large mux timing from systolic ready/valid.
 
 ## 8. Implemented `conv_linebuf_stream_packer`
 
-Feature bắt buộc:
+Required features:
 
-- Non-KGEN/non-coalesce: phát vector theo descriptor `{oh, ow, kh, kw, c_base}`.
-- Coalesce non-KGEN: khi `KH*KW*valid_channels <= 32`, phát một vector chứa
-  toàn bộ window theo lane order `{kh, kw, ic}`.
-- KGEN mixed tap: host/Python chỉ đưa seed `{kh,kw,ic}` và `k_tile_count`; RTL
-  tự sinh lane descriptor 32 bước mỗi K tile.
-- Padding: zero-injection, không materialize padding vào SRAM.
-- `1x1` pad0: bypass path riêng, không đi qua window cache.
+- Non-KGEN/non-coalesce: emit vectors according to descriptor
+  `{oh, ow, kh, kw, c_base}`.
+- Coalesce non-KGEN: when `KH*KW*valid_channels <= 32`, emit one vector
+  containing the whole window in lane order `{kh, kw, ic}`.
+- KGEN mixed tap: Host/Python only provides seed `{kh,kw,ic}` and
+  `k_tile_count`; RTL generates 32 lane descriptors per K tile.
+- Padding: zero injection, no materialized padding in SRAM.
+- `1x1` pad0: dedicated bypass path, not through window cache.
 - Native stride: `1`, `2`.
 
-Implementation detail hiện tại:
+Current implementation details:
 
-- SRAM banked row/window path dùng `ROW_SLOTS = K_MAX + STRIDE_MAX`,
-  `BANKS = ROW_SLOTS * STRIDE_MAX`, mỗi bank là 256-bit word SRAM dual-port.
-- Fill path có beat metadata FIFO để track OBI responses. Response engine ghi
-  vào bank SRAM và xử lý single-beat/cross-beat reads.
-- C32 aligned mode (`cfg_c32_fast_i`) chỉ hợp lệ khi descriptor đã đảm bảo
-  full 32-byte block và 32B aligned channel offset. Khi đó fill/bypass có thể
-  dùng nguyên 256-bit beat mà không cần byte merge.
-- KGEN fast path (`c32_kgen_fast`) phát lane `0..31` trực tiếp từ C32 window
-  word tương ứng với `{kh,kw}` của lane descriptor. Đây là steady-state path
-  cho C32 YOLO conv.
-- Non-C32/coalesce/tail path vẫn dùng byte mux và `merge_beats` để giữ đúng
-  semantics khi address không aligned hoặc vector bị cắt qua hai OBI beats.
-- Background prefetch/fill đã tồn tại ở mức nhẹ nhưng chưa phải DMA 2D/3D
-  coalesced fill. Tối ưu request granularity theo row/segment vẫn là work item
-  riêng nếu muốn giảm `ifm_req`.
+- The banked row/window path uses `ROW_SLOTS = K_MAX + STRIDE_MAX` and
+  `BANKS = ROW_SLOTS * STRIDE_MAX`. Each bank is a 256-bit dual-port SRAM word
+  array.
+- The fill path has a beat metadata FIFO to track OBI responses. The response
+  engine writes into bank SRAM and handles single-beat and cross-beat reads.
+- C32-aligned mode (`cfg_c32_fast_i`) is only valid when the descriptor
+  guarantees a full 32-byte block and a 32-byte aligned channel offset. In that
+  case fill/bypass can use the raw 256-bit beat without byte merge.
+- KGEN fast path (`c32_kgen_fast`) emits lanes `0..31` directly from the C32
+  window word corresponding to the `{kh,kw}` lane descriptor. This is the
+  steady-state path for C32 YOLO conv.
+- Non-C32/coalesce/tail paths still use byte muxing and `merge_beats` to keep
+  correct semantics when an address is not aligned or a vector crosses two OBI
+  beats.
+- Lightweight background prefetch/fill exists, but it is not DMA 2D/3D
+  coalesced fill. Request granularity optimization by row/segment remains a
+  separate work item if `ifm_req` must be reduced.
+
+### 8.1 Current Pipeline
+
+`conv_linebuf_stream_packer` is currently a sequential main FSM with several
+side pipelines: beat FIFO/response writeback, banked SRAM read/write, output
+stage, and a lightweight background fill FSM. It is not yet a fully decoupled
+producer/consumer design.
+
+```text
+                  cfg/start/next_tile/prefetch
+                             |
+                             v
++----------------------+  main control FSM  +----------------------+
+| CH_IDLE              |------------------->| CH_ENSURE            |
+| setup spatial walk   |                    | check needed rows    |
++----------------------+                    +----------+-----------+
+                                                       |
+                                                       | row miss
+                                                       v
+                                            +----------+-----------+
+                                            | CH_FILL_REQ0/REQ1    |
+                                            | issue OBI beat reads |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------+-----------+
+                                            | beat metadata FIFO   |
+                                            | addr_lsb, bytes,     |
+                                            | row slot, x, cross   |
+                                            +----------+-----------+
+                                                       |
+                                  OBI rvalid           v
++----------------------+                    +----------+-----------+
+| OBI/TCDM read port   |------------------->| response writeback   |
+| 256-bit beat         |                    | merge/full-beat mux  |
++----------------------+                    +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------+-----------+
+                                            | banked row SRAM      |
+                                            | ROW_SLOTS=7          |
+                                            | BANKS=14             |
+                                            | 256b dual-port banks |
+                                            +----------+-----------+
+                                                       |
+                                                       | row ready
+                                                       v
++----------------------+                    +----------+-----------+
+| BG fill FSM          |<------------------>| CH_WINDOW_REQ/WAIT   |
+| BG_SCAN/REQ/DRAIN    |                    | read window columns  |
+| prefetch next row    |                    +----------+-----------+
+| during window/emit   |                               |
++----------------------+                               v
+                                            +----------+-----------+
+                                            | window_q 5x5x256b    |
+                                            | pad zero injection   |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------+-----------+
+                                            | CH_STREAM_PRIME      |
+                                            | latch tap coords     |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------+-----------+
+                                            | CH_STREAM_EMIT       |
+                                            | build_emit_row mux   |
+                                            | C32/KGEN/coalesce    |
+                                            +----------+-----------+
+                                                       |
+                                                       v
+                                            +----------+-----------+
+                                            | row_valid/row_ready  |
+                                            | to systolic IFM      |
+                                            +----------------------+
+```
+
+Existing stages:
+
+- **Control/setup**: `CH_IDLE` accepts `start_i`, resets the spatial walk, and
+  selects bypass or window path.
+- **Row ensure/fill**: `CH_ENSURE` checks rows needed by the current window. If
+  a row misses, `CH_FILL_REQ0/REQ1` issues OBI reads one 256-bit beat at a
+  time; accesses crossing a beat boundary need two requests.
+- **OBI request tracking**: every request pushes metadata into `beat_fifo_q`
+  (`addr_lsb`, `valid_bytes`, row slot, `x`, and cross/single flag). The FIFO
+  depth is `4`, so this is a shallow pipeline, not a large burst queue.
+- **Response writeback**: on `obi_rvalid_i`, the response engine consumes the
+  matching metadata and writes bank SRAM. C32 aligned/full-beat accesses write
+  `obi_rdata_i` directly. Tail or non-aligned accesses use `merge_beats`.
+  Cross-beat accesses keep beat0 in `resp_beat0_q`.
+- **Banked row SRAM**: `ROW_SLOTS = K_MAX + STRIDE_MAX = 7` and
+  `BANKS = ROW_SLOTS * STRIDE_MAX = 14`. Bank index is based on
+  `{row_slot, x % STRIDE_MAX}` to support window-column reads and response
+  writes.
+- **Window load/slide**: `CH_WINDOW_REQ/WAIT` reads SRAM one `kw` at a time to
+  populate `window_q`. When sliding along the same output row, `slide_window`
+  reuses old columns and reads only the new column(s) required by `stride_w`.
+- **Emit stage**: `CH_STREAM_PRIME` latches tap coordinates, and
+  `CH_STREAM_EMIT` calls `build_emit_row()` and drives `row_valid_o`. The
+  formatter supports `c32_kgen_fast`, `coalesce+kgen`, `coalesce`, and
+  non-coalesce modes.
+- **Background fill**: `BG_IDLE/BG_SCAN/BG_REQ0/BG_REQ1/BG_DRAIN` runs only
+  while the main FSM is in `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`,
+  `CH_STREAM_PRIME`, or `CH_STREAM_EMIT`. It uses OBI only when the main path
+  is not issuing a request, and fetches rows for the next output row.
+
+Already overlapped or pipelined:
+
+- OBI request and response are decoupled by the beat metadata FIFO.
+- Response writeback can write bank SRAM independently of the main FSM state.
+- SRAM has separate read/window and write/response paths, so window reads can
+  overlap response writes when resources do not conflict.
+- Background fill can run during window load and stream emit.
+- Emit has a coordinate stage `stg1` and an output register
+  `row_data_q/row_valid_out_q`.
+
+Not fully pipelined yet:
+
+- `CH_ENSURE`, `CH_FILL_REQ*`, and `CH_FILL_DRAIN` still belong to the main
+  FSM. If a row misses on the critical path, stream emit cannot proceed.
+- Initial window load is still serialized by `kw` through `CH_WINDOW_REQ/WAIT`.
+- There is only one OBI read port; main fill/bypass has priority over
+  background fill.
+- Beat FIFO depth is small and request granularity is still pixel/C32-word
+  based, not row/segment coalesced DMA.
+- Background fill only prefetches the next row. There is no context ping-pong
+  or fully independent fill scheduler yet.
 
 Performance contract:
 
-- Với window cache hit và systolic ready, emit path phải phát `1 x 256-bit`
-  vector/cycle.
-- Refill/prefetch không được nằm nối tiếp trên critical emit path trong steady
+- With a window-cache hit and systolic ready, the emit path should produce one
+  256-bit vector per cycle.
+- Refill/prefetch should not be serialized on the critical emit path in steady
   state.
-- Counter/PMU phải đo riêng `window_refill`, `emit_valid`, `emit_ready`,
-  `emit_stall`, `k_tile_transition`, và `padding_zero`.
+- Counter/PMU support should measure `window_refill`, `emit_valid`,
+  `emit_ready`, `emit_stall`, `k_tile_transition`, and `padding_zero`
+  separately.
 
 Storage estimate:
 
-- `K_MAX=5`, `C_BLOCK=32B` tạo window cache `5*5*32B = 800B = 6.4Kb`.
-- Dung lượng này không lớn cho ASIC; rủi ro chính là mux/timing của
-  `25 x 32B` vào 32 lanes, nên cần pipeline hoặc chia mux theo lane group.
+- `K_MAX=5`, `C_BLOCK=32B` gives a window cache of
+  `5*5*32B = 800B = 6.4Kb`.
+- This is small for ASIC. The main risk is mux/timing from `25 x 32B` into
+  32 lanes, so the mux should be pipelined or split by lane group if timing
+  requires it.
 
 Stride policy:
 
-- `stride=1`: với 5 row banks, mỗi bank đọc một column/cycle là đủ để cập nhật
-  window `5x5` khi trượt sang output kế tiếp.
-- `stride=2`: không implement bằng scan stride-1 rồi bỏ output. Cần prefetch
-  segment rộng hơn hoặc x-banking để window cache có sẵn các column kế tiếp
-  trước khi emit.
-- `stride>=3`: không là native performance target trong phase này. Compiler
-  phải decompose/rewrite hoặc dùng packed prepare backup.
+- `stride=1`: with row banks, reading one column per bank per cycle is enough
+  to update a `5x5` window when sliding to the next output.
+- `stride=2`: this must not be implemented by scanning stride-1 outputs and
+  discarding half of them. It needs a wider prefetch segment or x-banking so
+  the next columns are already available before emit.
+- `stride>=3`: not a native performance target in this phase. The compiler must
+  decompose/rewrite the operation or use the packed prepare backup.
 
-## 9. Verification Cho Linebuffer Mới
+## 9. Verification for the Stream Linebuffer
 
-Unit tests bắt buộc trước khi nối cluster:
+Required unit tests before cluster integration:
 
 - `1x1` bypass: pad0, stride1, tail width, unaligned address.
 - Non-KGEN single tap: `3x3`, `5x5`, pad0/pad1, stride1/2.
@@ -462,39 +619,60 @@ Unit tests bắt buộc trước khi nối cluster:
 Cluster tests:
 
 - Run existing `CONV_PERF_CASE=17/18/20`.
-- Add large-shape first-layer YOLO case `3x3/s2/p1/IC=3`.
-- Collect PMU after every run and fail the perf test if linebuffer active
-  cycles/vector exceeds the configured threshold.
+- Add a large-shape first-layer YOLO case: `3x3/s2/p1/IC=3`.
+- Collect PMU after every run and fail the performance test if linebuffer
+  active cycles/vector exceeds the configured threshold.
 
-## 10. Pipelining / Decoupled FSM
+## 10. Pipelining / Decoupled FSM Roadmap
 
-Phần này là trạng thái đã implement một phần và phần còn lại của roadmap.
-`conv_linebuf_stream_packer` hiện không còn là FSM tuần tự hoàn toàn: đã có
-dual-port banks, response engine theo beat FIFO, background fill state, và
-pipeline emit stage. Tuy vậy fill/window/emit vẫn còn các điểm tuần tự trong
-row ensure và request granularity, nên chưa đạt mức DMA/segment streaming lý
-tưởng cho mọi shape.
+This section describes what has been partially implemented and what remains on
+the roadmap. `conv_linebuf_stream_packer` is no longer a purely sequential FSM:
+it already has dual-port banks, a beat-FIFO response engine, background fill
+state, and a pipelined emit stage. However, fill/window/emit still have
+sequential points in row ensure and request granularity, so the design has not
+yet reached ideal DMA/segment streaming behavior for all shapes.
 
-### 10.1 Vấn đề của FSM đơn tuần tự
-Hiện tại, cả hai công đoạn **Nạp dữ liệu (Producer)** và **Phát dữ liệu (Consumer)** đều được quản lý bởi một FSM duy nhất (`state_q`).
-* Khi ở trạng thái nạp dữ liệu (`CH_FILL_*`), Linebuffer dừng toàn bộ hoạt động phát dữ liệu.
-* Điều này làm cho việc nạp và phát dữ liệu bị tuần tự hóa hoàn toàn, gây ra tổn thất lớn về mặt chu kỳ (cycle bubbles) khi chạy các case lớn hoặc unaligned.
+### 10.1 Problem with the Single Main FSM
 
-### 10.2 Giải pháp Decoupled FSM (Producer-Consumer)
-Tận dụng tài nguyên SRAM banks đa cổng (Dual-port SRAM với `BANK_PORTS = 2`), ta có thể thiết kế lại Linebuffer thành 2 FSM chạy song song và độc lập:
+The current main flow still lets one FSM own both producer and consumer work:
 
-1. **Fill FSM (Producer - Write Port 0):**
-   * Quản lý các trạng thái: `CH_IDLE`, `CH_ENSURE`, `CH_FILL_REQ0`, `CH_FILL_REQ1`, `CH_FILL_DRAIN`.
-   * Chức năng: Độc lập kéo dữ liệu từ OBI/TCDM về ghi vào SRAM. Khi hoàn thành một dòng, nó set cờ valid tương ứng trong `row_slot_valid_q` và lưu chỉ số dòng vào `row_slot_ih_q`.
-2. **Stream FSM (Consumer - Read Port 1):**
-   * Quản lý các trạng thái: `CH_IDLE`, `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`, `CH_STREAM_PRIME`, `CH_STREAM_EMIT`, `CH_STREAM_DONE`.
-   * Chức năng: Đọc SRAM để slide window và emit dữ liệu sang Systolic.
-   * Đồng bộ: Khi Stream FSM cần một dòng, nó chỉ cần kiểm tra cờ valid của dòng đó:
-     * Nếu dòng đã valid: Tiếp tục trượt window và phát dữ liệu không trễ.
-     * Nếu chưa valid: Tạm thời stall và đợi Fill FSM báo hoàn thành.
+- When the main FSM is in `CH_FILL_*`, linebuffer stream emission is stopped.
+- This serializes fill and emit for critical row misses, which creates cycle
+  bubbles on large or unaligned cases.
+- Background fill helps only when the stream path is already in window/emit
+  states and the OBI read port is idle.
 
-### 10.3 Double Buffering cho C-Blocks (Ping-Pong Caching)
-Để che giấu hoàn toàn độ trễ nạp dữ liệu khi chuyển đổi giữa các K-tiles hoặc C-blocks:
-* Chia không gian Row SRAM thành 2 ngữ cảnh (Context 0 và Context 1) chạy theo mô hình Ping-Pong.
-* Trong khi **Stream FSM** đang đọc và tính toán dựa trên dữ liệu của Context 0, **Fill FSM** có thể song song nạp trước (prefetch) dữ liệu của Context 1 từ TCDM.
-* Khi kết thúc một tile, vai trò của 2 Context được hoán đổi ngay lập tức mà không tốn chu kỳ trống.
+### 10.2 Decoupled Producer/Consumer Direction
+
+The banked SRAM structure can support a cleaner two-FSM design:
+
+1. **Fill FSM (producer, SRAM write side)**
+   - Owns row scanning, OBI request issue, response accounting, and row-ready
+     scoreboarding.
+   - Writes data into row SRAM and marks `row_slot_valid_q` /
+     `row_slot_ih_q` when a row is complete.
+   - Runs whenever there is a future row miss to cover, not only when the main
+     FSM reaches `CH_ENSURE`.
+2. **Stream FSM (consumer, SRAM read side)**
+   - Owns `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`, `CH_STREAM_PRIME`,
+     `CH_STREAM_EMIT`, and `CH_STREAM_DONE` behavior.
+   - Reads SRAM to slide the window and emits vectors into systolic.
+   - Synchronizes through a row-ready scoreboard. If the needed row is valid,
+     it continues streaming; if not, it stalls only on that missing row.
+
+The key design point is that the stream FSM should not enter fill states. It
+should only observe row readiness and either emit or wait.
+
+### 10.3 C-Block Double Buffering / Ping-Pong Caching
+
+To hide fill latency when switching between K tiles or C-blocks, the row SRAM
+space can be split into two contexts:
+
+- While the stream FSM reads context 0, the fill FSM can prefetch context 1.
+- At tile/context boundary, the contexts swap without a long empty transition.
+- The tradeoff is more row state: valid bits, row tags, pending counters, and
+  possibly duplicated bank address context per ping-pong side.
+
+This is not implemented in the current RTL. The current implementation only has
+lightweight background fill for the next row, not a full context ping-pong
+cache.
