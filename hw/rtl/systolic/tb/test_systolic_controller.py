@@ -138,6 +138,14 @@ async def configure_identity_requant(dut, shift=0):
     await mmio_write(dut, REG_RQ_CTRL, 1)
 
 
+async def wait_controller_done(dut, timeout_cycles):
+    for _ in range(timeout_cycles):
+        await RisingEdge(dut.clk_i)
+        if int(dut.cfg_sys_done_o.value) == 1:
+            return
+    raise AssertionError("systolic_controller did not complete before timeout")
+
+
 def mem_index(addr):
     return addr >> 5
 
@@ -203,6 +211,70 @@ async def systolic_controller_gemm32_strided_ofm(dut):
     for logical_row in untouched_rows:
         value = int(dut.tcdm_mem[mem_index(OFM_ADDR) + logical_row * 4].value)
         assert value == sentinel, f"strided OFM overwrote skipped logical row {logical_row}"
+
+
+@cocotb.test()
+async def systolic_controller_shadow_preload_next_config(dut):
+    """
+    Scenario: preload the next systolic/requant config while the current GEMM is running.
+    Target: active config remains stable until the next START; staged requant takes
+    effect only for the following invocation.
+    """
+    clock = Clock(dut.clk_i, 10, unit="ns")
+    cocotb.start_soon(clock.start())
+    await reset(dut)
+
+    ofm_a_addr = OFM_ADDR
+    ofm_b_addr = OFM_ADDR + 0x1000
+    dim_a = 64
+    dim_b = 1
+    one_beat = pack_u8([1] * BEAT_BYTES)
+
+    for beat in range(ARRAY_DIM):
+        dut.tcdm_mem[mem_index(WEIGHT_ADDR) + beat].value = one_beat
+    for row in range(dim_a):
+        dut.tcdm_mem[mem_index(IFM_ADDR) + row].value = one_beat
+    for beat in range(dim_a * 4):
+        dut.tcdm_mem[mem_index(ofm_a_addr) + beat].value = 0
+    dut.tcdm_mem[mem_index(ofm_b_addr)].value = 0
+
+    await mmio_write(dut, REG_RQ_CTRL, 0)
+    await mmio_write(dut, REG_LB_CTRL, 0)
+    await mmio_write(dut, REG_SYS_ACCUM_CTRL, 0)
+    await mmio_write(dut, REG_SYS_OFM_ROW_STRIDE, 0)
+    await mmio_write(dut, REG_SYS_OFM_TILE_COLS, 0)
+    await mmio_write(dut, REG_SYS_PSUM_ROW_STRIDE, 0)
+    await mmio_write(dut, REG_SYS_W_PTR, WEIGHT_ADDR)
+    await mmio_write(dut, REG_SYS_I_PTR, IFM_ADDR)
+    await mmio_write(dut, REG_SYS_O_PTR, ofm_a_addr)
+    await mmio_write(dut, REG_SYS_PSUM_PTR, 0)
+    await mmio_write(dut, REG_SYS_DIM_M, dim_a)
+    await mmio_write(dut, REG_SYS_DONE, 0)
+    await mmio_write(dut, REG_SYS_START, 1)
+
+    await mmio_write(dut, REG_SYS_W_PTR, WEIGHT_ADDR)
+    await mmio_write(dut, REG_SYS_I_PTR, IFM_ADDR)
+    await mmio_write(dut, REG_SYS_O_PTR, ofm_b_addr)
+    await mmio_write(dut, REG_SYS_PSUM_PTR, 0)
+    await mmio_write(dut, REG_SYS_DIM_M, dim_b)
+    await configure_identity_requant(dut, shift=0)
+
+    await wait_controller_done(dut, 2000)
+
+    expected_i32 = [ARRAY_DIM] * ARRAY_DIM
+    for row in range(dim_a):
+        got = []
+        for beat in range(4):
+            value = int(dut.tcdm_mem[mem_index(ofm_a_addr) + row * 4 + beat].value)
+            got.extend(unpack_s32_beat(value))
+        assert got == expected_i32, f"shadow preload corrupted active INT32 row {row}"
+
+    await mmio_write(dut, REG_SYS_DONE, 0)
+    await mmio_write(dut, REG_SYS_START, 1)
+    await wait_controller_done(dut, 1000)
+
+    got_i8 = unpack_u8_beat(int(dut.tcdm_mem[mem_index(ofm_b_addr)].value))
+    assert got_i8 == [ARRAY_DIM] * ARRAY_DIM, "staged requant config did not commit on next START"
 
 
 @cocotb.test()

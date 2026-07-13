@@ -101,7 +101,30 @@ module afu_core #(
     logic s1_sram_req;
     logic [7:0] lut_idx_s1 [LUT_LANES];
     logic [31:0] lut_rdata_ports [LUT_LANES];
-    logic [31:0] lut_rdata_dummy [LUT_LANES];
+    logic [31:0] lut_rdata_bank0 [LUT_LANES];
+    logic [31:0] lut_rdata_bank1 [LUT_LANES];
+    logic [31:0] lut_rdata_dummy_bank0 [LUT_LANES];
+    logic [31:0] lut_rdata_dummy_bank1 [LUT_LANES];
+    logic        active_lut_bank_q;
+    logic        stage_lut_bank_q;
+    logic        lut_pending_q;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            active_lut_bank_q <= 1'b0;
+            stage_lut_bank_q <= 1'b1;
+            lut_pending_q <= 1'b0;
+        end else begin
+            if (lut_we_i) begin
+                lut_pending_q <= 1'b1;
+            end
+            if (cfg_start_i && lut_pending_q) begin
+                active_lut_bank_q <= stage_lut_bank_q;
+                stage_lut_bank_q <= ~stage_lut_bank_q;
+                lut_pending_q <= 1'b0;
+            end
+        end
+    end
 
     // Read byte extraction for S1.  Keep this as per-lane byte muxing instead
     // of shifting the full 256-bit read beat by a dynamic byte offset.
@@ -180,20 +203,40 @@ module afu_core #(
             assign lut_byte_idx_s1[i] = {1'b0, in_off_s1} + 6'(i);
             assign lut_idx_s1[i] = select_input_byte(in_buf_q, lut_byte_idx_s1[i]);
 
+            assign lut_rdata_ports[i] = active_lut_bank_q ? lut_rdata_bank1[i] : lut_rdata_bank0[i];
+
             tc_sram #(
                 .NumWords  (256),
                 .DataWidth (32),
                 .NumPorts  (2),
                 .Latency   (1)
-            ) i_lut_sram (
+            ) i_lut_sram_bank0 (
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),
-                .req_i   ({s1_sram_req, lut_we_i}), // Port 1=Read, Port 0=Write
+                .req_i   ({s1_sram_req && !active_lut_bank_q,
+                           lut_we_i && !stage_lut_bank_q}),
                 .we_i    ({1'b0,        1'b1}),
                 .addr_i  ({lut_idx_s1[i], lut_addr_i}),
                 .wdata_i ({32'd0,       lut_wdata_i}),
                 .be_i    ({4'b1111,     lut_be_i}),
-                .rdata_o ({lut_rdata_ports[i], lut_rdata_dummy[i]})
+                .rdata_o ({lut_rdata_bank0[i], lut_rdata_dummy_bank0[i]})
+            );
+
+            tc_sram #(
+                .NumWords  (256),
+                .DataWidth (32),
+                .NumPorts  (2),
+                .Latency   (1)
+            ) i_lut_sram_bank1 (
+                .clk_i   (clk_i),
+                .rst_ni  (rst_ni),
+                .req_i   ({s1_sram_req && active_lut_bank_q,
+                           lut_we_i && stage_lut_bank_q}),
+                .we_i    ({1'b0,        1'b1}),
+                .addr_i  ({lut_idx_s1[i], lut_addr_i}),
+                .wdata_i ({32'd0,       lut_wdata_i}),
+                .be_i    ({4'b1111,     lut_be_i}),
+                .rdata_o ({lut_rdata_bank1[i], lut_rdata_dummy_bank1[i]})
             );
         end
     endgenerate

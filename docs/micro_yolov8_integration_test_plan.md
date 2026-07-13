@@ -358,21 +358,24 @@ Latest `test_micro_yolo_e2e.py` result after 3j:
 | 7 | Logistic LUT | 26,248 | AFU |
 | 8 | Mul_Q7 | 9,378 | AFU, `tcdm_stall=2,304` |
 | 9 | DMA_OUT skip | 4,102 | preserve L3 for later logical concat |
-| 10 | C2f_Conv | 56,334 | `sys_compute=20,736`, `ifm_req=26,928` |
+| 10 | C2f_Conv | 51,378 | `sys_compute=20,736`, `ifm_req=26,928` |
 | 11 | Residual Add | 9,388 | AFU, `tcdm_stall=2,304` |
-| 12 | Conv_Down | 43,862 | `sys_compute=5,184`, `ifm_req=32,463` |
+| 12 | Conv_Down | 42,184 | `sys_compute=5,184`, `ifm_req=32,463` |
 | 13 | MaxPool | 18,462 | linebuffer pool mode |
 | 14 | Upsample | 35,462 | Spatz C32 fast path, `tcdm_stall=2,880` |
 | 15 | DMA_IN skip reload | 4,062 | reload L3 branch |
-| 16 | Head_Conv C32x2 | 168,524 | `sys_compute=41,472`, `ifm_req=54,277`, `ofm_req=21,042` |
-| **Total** |  | **413,980** | PASS |
+| 16 | Head_Conv C32x2 | 159,202 | `sys_compute=41,472`, `ifm_req=54,277`, `ofm_req=21,042` |
+| **Total** |  | **398,024** | PASS |
 
 Head_Conv compute scales as expected:
 
 - C2f C32 compute: `20,736` cycles.
 - Head logical C64 compute: `41,472` cycles, exactly `2x`.
-- Head total cycles are about `3x` C2f total because the second C32 chunk also
+- Head total cycles are about `3.1x` C2f total because the second C32 chunk also
   reads external psum, accumulates, requants, and writes INT8 tiles to L2.
+- Firmware now uses the RTL shadow registers for linebuffer tile scheduling:
+  tile N+1 config is staged while tile N is running, so the DONE-to-START gap
+  only needs a start pulse plus the residual wait.
 
 Current head scheduler geometry:
 

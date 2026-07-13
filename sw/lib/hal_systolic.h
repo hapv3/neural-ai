@@ -36,6 +36,22 @@ typedef struct {
     uint32_t spatial_m;
 } systolic_linebuf_cfg_t;
 
+typedef struct {
+    uint32_t weight_addr;
+    uint32_t ifm_addr;
+    uint32_t psum_addr;
+    uint32_t ofm_addr;
+    uint32_t dim_m;
+    uint32_t accum_en;
+    uint32_t ofm_row_stride_bytes;
+    uint32_t ofm_tile_cols;
+    uint32_t psum_row_stride_bytes;
+} systolic_gemm32_req_t;
+
+void systolic_gemm32_preload(const systolic_gemm32_req_t *req);
+void systolic_gemm32_start_preloaded(void);
+uint32_t systolic_gemm32_done(void);
+void systolic_gemm32_wait_done(void);
 void systolic_linebuf_disable(void);
 void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg);
 void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,

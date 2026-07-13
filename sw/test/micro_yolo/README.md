@@ -103,11 +103,14 @@ The cocotb test:
 Latest passing raw-head run:
 
 ```text
-total cycles: 413980
-head conv cycles: 168524
+total cycles: 398024
+head conv cycles: 159202
 head sys_compute: 41472
 ```
 
 Head compute is exactly 2x the C32 Conv compute because the logical C64 input is
 split into two C32 chunks. Total head latency is higher than 2x because the
 second chunk also reads psum, accumulates, requants, and writes INT8 tiles.
+The current firmware preloads the next linebuffer tile into RTL shadow
+registers while the current tile is running, so tile-to-tile MMIO setup is
+partially hidden behind systolic execution.

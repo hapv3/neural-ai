@@ -145,6 +145,49 @@ module systolic_ctrl_regs #(
     logic [7:0]        r_linebuf_k_seed_kw;
     logic [7:0]        r_linebuf_k_seed_kh;
     logic [31:0]       r_linebuf_spatial_m;
+
+    logic [31:0] s_sys_w_ptr;
+    logic [31:0] s_sys_i_ptr;
+    logic [31:0] s_sys_o_ptr;
+    logic [31:0] s_sys_psum_ptr;
+    logic [31:0] s_sys_dim_m;
+    logic [31:0] s_sys_ofm_row_stride_bytes;
+    logic [31:0] s_sys_ofm_tile_cols;
+    logic [31:0] s_sys_psum_row_stride_bytes;
+    logic        s_sys_accum_en;
+    logic        s_requant_en;
+    logic [31:0][31:0] s_requant_bias;
+    logic [31:0][31:0] s_requant_multiplier;
+    logic [31:0][7:0]  s_requant_shift;
+    logic [31:0][31:0] s_requant_zero_point;
+    logic [31:0]       s_requant_clamp_min;
+    logic [31:0]       s_requant_clamp_max;
+    logic              s_linebuf_en;
+    logic              s_linebuf_coalesce;
+    logic              s_linebuf_pool;
+    logic              s_linebuf_kgen;
+    logic [31:0]       s_linebuf_input_base;
+    logic [15:0]       s_linebuf_input_h;
+    logic [15:0]       s_linebuf_input_w;
+    logic [15:0]       s_linebuf_input_c;
+    logic [15:0]       s_linebuf_output_w;
+    logic [15:0]       s_linebuf_stride_h;
+    logic [15:0]       s_linebuf_stride_w;
+    logic [15:0]       s_linebuf_pad_h;
+    logic [15:0]       s_linebuf_pad_w;
+    logic [31:0]       s_linebuf_row_stride_bytes;
+    logic [31:0]       s_linebuf_pixel_stride_bytes;
+    logic [31:0]       s_linebuf_ow_step_bytes;
+    logic [31:0]       s_linebuf_oh_step_bytes;
+    logic [15:0]       s_linebuf_kernel_h;
+    logic [15:0]       s_linebuf_kernel_w;
+    logic [15:0]       s_linebuf_c_base;
+    logic [5:0]        s_linebuf_lane_base;
+    logic [31:0]       s_linebuf_k_tiles;
+    logic [15:0]       s_linebuf_k_seed_ic;
+    logic [7:0]        s_linebuf_k_seed_kw;
+    logic [7:0]        s_linebuf_k_seed_kh;
+    logic [31:0]       s_linebuf_spatial_m;
     logic [ADDR_WIDTH-1:0] r_addr_q;
 
     assign gnt_o = 1'b1;
@@ -191,11 +234,53 @@ module systolic_ctrl_regs #(
             r_linebuf_k_seed_kw <= '0;
             r_linebuf_k_seed_kh <= '0;
             r_linebuf_spatial_m <= '0;
+            s_sys_w_ptr <= '0;
+            s_sys_i_ptr <= '0;
+            s_sys_o_ptr <= '0;
+            s_sys_psum_ptr <= '0;
+            s_sys_dim_m <= '0;
+            s_sys_ofm_row_stride_bytes <= '0;
+            s_sys_ofm_tile_cols <= '0;
+            s_sys_psum_row_stride_bytes <= '0;
+            s_sys_accum_en <= 1'b0;
+            s_requant_en <= 1'b0;
+            s_requant_clamp_min <= 32'hFFFF_FF80;
+            s_requant_clamp_max <= 32'h0000_007F;
+            s_linebuf_en <= 1'b0;
+            s_linebuf_coalesce <= 1'b0;
+            s_linebuf_pool <= 1'b0;
+            s_linebuf_kgen <= 1'b0;
+            s_linebuf_input_base <= '0;
+            s_linebuf_input_h <= '0;
+            s_linebuf_input_w <= '0;
+            s_linebuf_input_c <= '0;
+            s_linebuf_output_w <= '0;
+            s_linebuf_stride_h <= 16'd1;
+            s_linebuf_stride_w <= 16'd1;
+            s_linebuf_pad_h <= '0;
+            s_linebuf_pad_w <= '0;
+            s_linebuf_row_stride_bytes <= '0;
+            s_linebuf_pixel_stride_bytes <= '0;
+            s_linebuf_ow_step_bytes <= '0;
+            s_linebuf_oh_step_bytes <= '0;
+            s_linebuf_kernel_h <= 16'd3;
+            s_linebuf_kernel_w <= 16'd3;
+            s_linebuf_c_base <= '0;
+            s_linebuf_lane_base <= '0;
+            s_linebuf_k_tiles <= '0;
+            s_linebuf_k_seed_ic <= '0;
+            s_linebuf_k_seed_kw <= '0;
+            s_linebuf_k_seed_kh <= '0;
+            s_linebuf_spatial_m <= '0;
             for (int unsigned ch = 0; ch < 32; ch++) begin
                 r_requant_bias[ch] <= '0;
                 r_requant_multiplier[ch] <= 32'd1;
                 r_requant_shift[ch] <= '0;
                 r_requant_zero_point[ch] <= '0;
+                s_requant_bias[ch] <= '0;
+                s_requant_multiplier[ch] <= 32'd1;
+                s_requant_shift[ch] <= '0;
+                s_requant_zero_point[ch] <= '0;
             end
             r_addr_q <= '0;
             rvalid_o <= 1'b0;
@@ -218,65 +303,114 @@ module systolic_ctrl_regs #(
                             wdata_word = wdata_i[i*32 +: 32];
 
                             unique case (local_addr)
-                                REG_SYS_W_PTR: r_sys_w_ptr <= wdata_word;
-                                REG_SYS_I_PTR: r_sys_i_ptr <= wdata_word;
-                                REG_SYS_O_PTR: r_sys_o_ptr <= wdata_word;
-                                REG_SYS_PSUM_PTR: r_sys_psum_ptr <= wdata_word;
-                                REG_SYS_DIM_M: r_sys_dim_m <= wdata_word;
-                                REG_SYS_OFM_ROW_STRIDE: r_sys_ofm_row_stride_bytes <= wdata_word;
-                                REG_SYS_OFM_TILE_COLS: r_sys_ofm_tile_cols <= wdata_word;
-                                REG_SYS_PSUM_ROW_STRIDE: r_sys_psum_row_stride_bytes <= wdata_word;
-                                REG_SYS_START: r_sys_start <= wdata_word[0];
-                                REG_SYS_DONE:  r_sys_done  <= 1'b0;
-                                REG_SYS_ACCUM_CTRL: r_sys_accum_en <= wdata_word[0];
-                                REG_RQ_CTRL:   r_requant_en <= wdata_word[0];
-                                REG_RQ_CMIN:   r_requant_clamp_min <= wdata_word;
-                                REG_RQ_CMAX:   r_requant_clamp_max <= wdata_word;
-                                REG_LB_CTRL: begin
-                                    r_linebuf_en <= wdata_word[0];
-                                    r_linebuf_coalesce <= wdata_word[1];
-                                    r_linebuf_kgen <= wdata_word[2];
-                                    r_linebuf_pool <= wdata_word[3];
+                                REG_SYS_W_PTR: s_sys_w_ptr <= wdata_word;
+                                REG_SYS_I_PTR: s_sys_i_ptr <= wdata_word;
+                                REG_SYS_O_PTR: s_sys_o_ptr <= wdata_word;
+                                REG_SYS_PSUM_PTR: s_sys_psum_ptr <= wdata_word;
+                                REG_SYS_DIM_M: s_sys_dim_m <= wdata_word;
+                                REG_SYS_OFM_ROW_STRIDE: s_sys_ofm_row_stride_bytes <= wdata_word;
+                                REG_SYS_OFM_TILE_COLS: s_sys_ofm_tile_cols <= wdata_word;
+                                REG_SYS_PSUM_ROW_STRIDE: s_sys_psum_row_stride_bytes <= wdata_word;
+                                REG_SYS_START: begin
+                                    if (wdata_word[0]) begin
+                                        r_sys_w_ptr <= s_sys_w_ptr;
+                                        r_sys_i_ptr <= s_sys_i_ptr;
+                                        r_sys_o_ptr <= s_sys_o_ptr;
+                                        r_sys_psum_ptr <= s_sys_psum_ptr;
+                                        r_sys_dim_m <= s_sys_dim_m;
+                                        r_sys_ofm_row_stride_bytes <= s_sys_ofm_row_stride_bytes;
+                                        r_sys_ofm_tile_cols <= s_sys_ofm_tile_cols;
+                                        r_sys_psum_row_stride_bytes <= s_sys_psum_row_stride_bytes;
+                                        r_sys_accum_en <= s_sys_accum_en;
+                                        r_requant_en <= s_requant_en;
+                                        r_requant_clamp_min <= s_requant_clamp_min;
+                                        r_requant_clamp_max <= s_requant_clamp_max;
+                                        r_linebuf_en <= s_linebuf_en;
+                                        r_linebuf_coalesce <= s_linebuf_coalesce;
+                                        r_linebuf_kgen <= s_linebuf_kgen;
+                                        r_linebuf_pool <= s_linebuf_pool;
+                                        r_linebuf_input_base <= s_linebuf_input_base;
+                                        r_linebuf_input_h <= s_linebuf_input_h;
+                                        r_linebuf_input_w <= s_linebuf_input_w;
+                                        r_linebuf_input_c <= s_linebuf_input_c;
+                                        r_linebuf_output_w <= s_linebuf_output_w;
+                                        r_linebuf_stride_h <= s_linebuf_stride_h;
+                                        r_linebuf_stride_w <= s_linebuf_stride_w;
+                                        r_linebuf_pad_h <= s_linebuf_pad_h;
+                                        r_linebuf_pad_w <= s_linebuf_pad_w;
+                                        r_linebuf_row_stride_bytes <= s_linebuf_row_stride_bytes;
+                                        r_linebuf_pixel_stride_bytes <= s_linebuf_pixel_stride_bytes;
+                                        r_linebuf_ow_step_bytes <= s_linebuf_ow_step_bytes;
+                                        r_linebuf_oh_step_bytes <= s_linebuf_oh_step_bytes;
+                                        r_linebuf_kernel_h <= s_linebuf_kernel_h;
+                                        r_linebuf_kernel_w <= s_linebuf_kernel_w;
+                                        r_linebuf_c_base <= s_linebuf_c_base;
+                                        r_linebuf_lane_base <= s_linebuf_lane_base;
+                                        r_linebuf_k_tiles <= s_linebuf_k_tiles;
+                                        r_linebuf_k_seed_ic <= s_linebuf_k_seed_ic;
+                                        r_linebuf_k_seed_kw <= s_linebuf_k_seed_kw;
+                                        r_linebuf_k_seed_kh <= s_linebuf_k_seed_kh;
+                                        r_linebuf_spatial_m <= s_linebuf_spatial_m;
+                                        for (int unsigned ch = 0; ch < 32; ch++) begin
+                                            r_requant_bias[ch] <= s_requant_bias[ch];
+                                            r_requant_multiplier[ch] <= s_requant_multiplier[ch];
+                                            r_requant_shift[ch] <= s_requant_shift[ch];
+                                            r_requant_zero_point[ch] <= s_requant_zero_point[ch];
+                                        end
+                                        r_sys_done <= 1'b0;
+                                        r_sys_start <= 1'b1;
+                                    end
                                 end
-                                REG_LB_INPUT_BASE: r_linebuf_input_base <= wdata_word;
-                                REG_LB_INPUT_H: r_linebuf_input_h <= wdata_word[15:0];
-                                REG_LB_INPUT_W: r_linebuf_input_w <= wdata_word[15:0];
-                                REG_LB_INPUT_C: r_linebuf_input_c <= wdata_word[15:0];
-                                REG_LB_OUTPUT_W: r_linebuf_output_w <= wdata_word[15:0];
+                                REG_SYS_DONE:  r_sys_done  <= 1'b0;
+                                REG_SYS_ACCUM_CTRL: s_sys_accum_en <= wdata_word[0];
+                                REG_RQ_CTRL:   s_requant_en <= wdata_word[0];
+                                REG_RQ_CMIN:   s_requant_clamp_min <= wdata_word;
+                                REG_RQ_CMAX:   s_requant_clamp_max <= wdata_word;
+                                REG_LB_CTRL: begin
+                                    s_linebuf_en <= wdata_word[0];
+                                    s_linebuf_coalesce <= wdata_word[1];
+                                    s_linebuf_kgen <= wdata_word[2];
+                                    s_linebuf_pool <= wdata_word[3];
+                                end
+                                REG_LB_INPUT_BASE: s_linebuf_input_base <= wdata_word;
+                                REG_LB_INPUT_H: s_linebuf_input_h <= wdata_word[15:0];
+                                REG_LB_INPUT_W: s_linebuf_input_w <= wdata_word[15:0];
+                                REG_LB_INPUT_C: s_linebuf_input_c <= wdata_word[15:0];
+                                REG_LB_OUTPUT_W: s_linebuf_output_w <= wdata_word[15:0];
                                 REG_LB_STRIDE: begin
-                                    r_linebuf_stride_h <= wdata_word[15:0];
-                                    r_linebuf_stride_w <= wdata_word[31:16];
+                                    s_linebuf_stride_h <= wdata_word[15:0];
+                                    s_linebuf_stride_w <= wdata_word[31:16];
                                 end
                                 REG_LB_PAD: begin
-                                    r_linebuf_pad_h <= wdata_word[15:0];
-                                    r_linebuf_pad_w <= wdata_word[31:16];
+                                    s_linebuf_pad_h <= wdata_word[15:0];
+                                    s_linebuf_pad_w <= wdata_word[31:16];
                                 end
-                                REG_LB_ROW_STRIDE: r_linebuf_row_stride_bytes <= wdata_word;
-                                REG_LB_PIXEL_STRIDE: r_linebuf_pixel_stride_bytes <= wdata_word;
-                                REG_LB_OW_STEP: r_linebuf_ow_step_bytes <= wdata_word;
-                                REG_LB_OH_STEP: r_linebuf_oh_step_bytes <= wdata_word;
+                                REG_LB_ROW_STRIDE: s_linebuf_row_stride_bytes <= wdata_word;
+                                REG_LB_PIXEL_STRIDE: s_linebuf_pixel_stride_bytes <= wdata_word;
+                                REG_LB_OW_STEP: s_linebuf_ow_step_bytes <= wdata_word;
+                                REG_LB_OH_STEP: s_linebuf_oh_step_bytes <= wdata_word;
                                 REG_LB_KERNEL: begin
-                                    r_linebuf_kernel_h <= wdata_word[15:0];
-                                    r_linebuf_kernel_w <= wdata_word[31:16];
+                                    s_linebuf_kernel_h <= wdata_word[15:0];
+                                    s_linebuf_kernel_w <= wdata_word[31:16];
                                 end
-                                REG_LB_C_BASE: r_linebuf_c_base <= wdata_word[15:0];
-                                REG_LB_SPATIAL_M: r_linebuf_spatial_m <= wdata_word;
-                                REG_LB_LANE_BASE: r_linebuf_lane_base <= wdata_word[5:0];
-                                REG_LB_K_TILES: r_linebuf_k_tiles <= wdata_word;
+                                REG_LB_C_BASE: s_linebuf_c_base <= wdata_word[15:0];
+                                REG_LB_SPATIAL_M: s_linebuf_spatial_m <= wdata_word;
+                                REG_LB_LANE_BASE: s_linebuf_lane_base <= wdata_word[5:0];
+                                REG_LB_K_TILES: s_linebuf_k_tiles <= wdata_word;
                                 REG_LB_K_SEED: begin
-                                    r_linebuf_k_seed_ic <= wdata_word[15:0];
-                                    r_linebuf_k_seed_kw <= wdata_word[23:16];
-                                    r_linebuf_k_seed_kh <= wdata_word[31:24];
+                                    s_linebuf_k_seed_ic <= wdata_word[15:0];
+                                    s_linebuf_k_seed_kw <= wdata_word[23:16];
+                                    s_linebuf_k_seed_kh <= wdata_word[31:24];
                                 end
                                 default: begin
                                     if ((local_addr & 32'hFF80) == REG_RQ_BIAS_BASE) begin
-                                        r_requant_bias[(local_addr - REG_RQ_BIAS_BASE) >> 2] <= wdata_word;
+                                        s_requant_bias[(local_addr - REG_RQ_BIAS_BASE) >> 2] <= wdata_word;
                                     end else if ((local_addr & 32'hFF80) == REG_RQ_MULT_BASE) begin
-                                        r_requant_multiplier[(local_addr - REG_RQ_MULT_BASE) >> 2] <= wdata_word;
+                                        s_requant_multiplier[(local_addr - REG_RQ_MULT_BASE) >> 2] <= wdata_word;
                                     end else if ((local_addr & 32'hFF80) == REG_RQ_SHIFT_BASE) begin
-                                        r_requant_shift[(local_addr - REG_RQ_SHIFT_BASE) >> 2] <= wdata_word[7:0];
+                                        s_requant_shift[(local_addr - REG_RQ_SHIFT_BASE) >> 2] <= wdata_word[7:0];
                                     end else if ((local_addr & 32'hFF80) == REG_RQ_ZP_BASE) begin
-                                        r_requant_zero_point[(local_addr - REG_RQ_ZP_BASE) >> 2] <= wdata_word;
+                                        s_requant_zero_point[(local_addr - REG_RQ_ZP_BASE) >> 2] <= wdata_word;
                                     end
                                 end
                             endcase
