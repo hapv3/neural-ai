@@ -103,9 +103,9 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 
 **Evidence:** `WAIT_DRAIN = 31,101`. During this state, `compute_en = 0`.
 
-**Cause:** The main FSM at [systolic_controller.sv:1089](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1089) requires `drain_cnt_q == 0 && ofm_fifo_empty` before transitioning to the next tile. This means compute cannot begin until all 256 output rows from the previous tile have been fully written to TCDM or PSum buffer.
+**Cause:** The main FSM at [systolic_controller.sv:1089](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1089) requires `drain_cnt_q == 0 && ofm_fifo_empty` before transitioning to the next tile. This means compute cannot begin until all 256 output rows from the previous tile have been fully written to TCDM or PSum buffer.
 
-**What is pipelined:** Weight preload and linebuffer prefetch execute during `WAIT_DRAIN` ([systolic_controller.sv:1020-1070](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1020-L1070)). This saves ~600 cycles per tile that would otherwise be spent in `LOAD_WEIGHTS`.
+**What is pipelined:** Weight preload and linebuffer prefetch execute during `WAIT_DRAIN` ([systolic_controller.sv:1020-1070](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1020-L1070)). This saves ~600 cycles per tile that would otherwise be spent in `LOAD_WEIGHTS`.
 
 **What is NOT pipelined:** Compute of tile(N+1) cannot overlap with drain of tile(N).
 
@@ -113,7 +113,7 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 
 **Evidence:** `COMPUTE = 14,236` but only 8,704 of those are actual systolic MAC operations (`perf_compute_en`). The remaining 5,532 cycles are `ARRAY_FLUSH_CYCLES = 2 * ARRAY_DIM = 64` cycles per tile × ~86 tiles needing flush, plus stalls from `ofm_fifo_full = 25`.
 
-**Cause:** After the last IFM vector enters the systolic array, results take `ARRAY_DIM = 32` cycles to propagate through the pipeline. The flush counter at [systolic_controller.sv:1009](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1009) holds the FSM in `COMPUTE` (but not computing) for 64 cycles.
+**Cause:** After the last IFM vector enters the systolic array, results take `ARRAY_DIM = 32` cycles to propagate through the pipeline. The flush counter at [systolic_controller.sv:1009](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1009) holds the FSM in `COMPUTE` (but not computing) for 64 cycles.
 
 ### Sink 4: Linebuffer Refill per K-Tile — 20,280 OBI requests
 
@@ -135,12 +135,12 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 
 | Feature | Status | Location |
 |---|---|---|
-| Weight preload during `WAIT_DRAIN` | ✓ Active | [systolic_controller.sv:1020-1058](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1020-L1058) |
-| Linebuffer prefetch during `WAIT_DRAIN` | ✓ Active | [systolic_controller.sv:1060-1070](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1060-L1070) |
-| PSum buffer (on-chip accumulation) | ✓ Active | [systolic_controller.sv:285-291](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L285-L291) |
-| OFM FIFO decoupling compute from drain | ✓ Active (depth=128) | [systolic_controller.sv:443-459](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L443-L459) |
+| Weight preload during `WAIT_DRAIN` | ✓ Active | [systolic_controller.sv:1020-1058](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1020-L1058) |
+| Linebuffer prefetch during `WAIT_DRAIN` | ✓ Active | [systolic_controller.sv:1060-1070](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1060-L1070) |
+| PSum buffer (on-chip accumulation) | ✓ Active | [systolic_controller.sv:285-291](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L285-L291) |
+| OFM FIFO decoupling compute from drain | ✓ Active (depth=128) | [systolic_controller.sv:443-459](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L443-L459) |
 | Linebuffer sliding window (1 vector/cycle emit) | ✓ Active | `CH_STREAM_EMIT = 8,704` = target |
-| Beat FIFO for pipelined OBI fill | ✓ Active (depth=4) | [conv_linebuf_stream_packer.sv:97-112](file:///home/dev01/neural-ai/hw/rtl/systolic/conv_linebuf_stream_packer.sv#L97-L112) |
+| Beat FIFO for pipelined OBI fill | ✓ Active (depth=4) | [conv_linebuf_stream_packer.sv:97-112](/neural-ai/hw/rtl/systolic/conv_linebuf_stream_packer.sv#L97-L112) |
 
 ## 4. What Is NOT Pipelined (Ranked by Cycle Impact)
 
@@ -156,7 +156,7 @@ Linebuffer issues 20,280 OBI requests with 0 stalls. It spends 20,280 cycles in 
 **Prerequisite:** Linebuffer must support efficient refill when `row_cache_reuse=0`. Current refill costs ~1,690 cycles per K tile. With 27 tiles and no cache reuse, that becomes 27 × 1,690 = 45,630 additional cycles — a net regression.
 
 **Historical proposed fix:** Implement stripe-stationary linebuffer (Section
-6.4 of [npu_refactor_and_review.md](file:///home/dev01/neural-ai/docs/npu_refactor_and_review.md#L277-L332)).
+6.4 of [npu_refactor_and_review.md](/neural-ai/docs/npu_refactor_and_review.md#L277-L332)).
 That idea used a resident cache holding 4 rows × 16 cols × 4 cblocks × 32B =
 8 KB per context, with ping-pong 2 contexts = 16 KB total.
 
@@ -172,7 +172,7 @@ reintroducing a full activation-tile cache.
 
 **Problem:** `WAIT_DRAIN` = 31,101 cycles. Of this, weight preload uses ~600 cycles and linebuf prefetch uses ~8,047 cycles. The remaining ~22,454 cycles are pure stall waiting for `drain_cnt_q == 0 && ofm_fifo_empty`.
 
-**Solution:** Allow compute of tile(N+1) to begin before drain of tile(N) completes. The `psum_buf_overlap_active` path at [systolic_controller.sv:1073-1088](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1073-L1088) already supports this transition — it checks `psum_buf_overlap_active && linebuf_has_next_k_tile && !psum_buf_needs_external && weight_preload_done_q && !linebuf_prefetch_busy && (array_flush_cnt_q == '0)`.
+**Solution:** Allow compute of tile(N+1) to begin before drain of tile(N) completes. The `psum_buf_overlap_active` path at [systolic_controller.sv:1073-1088](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1073-L1088) already supports this transition — it checks `psum_buf_overlap_active && linebuf_has_next_k_tile && !psum_buf_needs_external && weight_preload_done_q && !linebuf_prefetch_busy && (array_flush_cnt_q == '0)`.
 
 **Current blocker:** The transition at line 1075 requires `!psum_buf_needs_external`, which is false when `cfg_sys_accum_en_i=1 && k_tile_idx_q==0`. For subsequent tiles where `psum_buf_needs_external=0`, the overlap path should fire. The fact that `WAIT_DRAIN` still shows 31,101 cycles suggests the conditions at line 1073-1075 are not being met — likely because `linebuf_prefetch_busy` or `array_flush_cnt_q != 0` holds the transition.
 
@@ -182,7 +182,7 @@ reintroducing a full activation-tile cache.
 
 **Problem:** `ARRAY_FLUSH_CYCLES = 64` per tile. With ~86 internal tiles (204 K-tiles distributed across 12 invocations, each having ~17 tiles), flush overhead = 86 × 64 = 5,504 cycles.
 
-**Solution:** If compute/drain overlap is achieved (Rank 2), flush cycles are hidden under drain. No RTL change needed — the flush counter already runs in `WAIT_DRAIN` at [systolic_controller.sv:1016-1018](file:///home/dev01/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1016-L1018).
+**Solution:** If compute/drain overlap is achieved (Rank 2), flush cycles are hidden under drain. No RTL change needed — the flush counter already runs in `WAIT_DRAIN` at [systolic_controller.sv:1016-1018](/neural-ai/hw/rtl/systolic/systolic_controller.sv#L1016-L1018).
 
 **Estimated savings:** 5,532 cycles (fully hidden by Rank 2 fix).
 
