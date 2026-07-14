@@ -145,6 +145,41 @@ static uint32_t run_conv2d3x3s1p1_c32_linebuf(const npu_tensor_t *src,
     return (conv_status == NPU_CONV2D_PACKED_OK) ? NPU_GRAPH_OK : conv_status;
 }
 
+static uint32_t tensor_is_c32_i8(const npu_tensor_t *tensor) {
+    return tensor_has_layout(tensor, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+           tensor_has_layout(tensor, NPU_LAYOUT_C32_BLOCKED, NPU_DTYPE_I8);
+}
+
+static uint32_t run_conv2d1x1_c32_requant(const npu_tensor_t *src,
+                                          const npu_tensor_t *dst,
+                                          const npu_tensor_t *weight,
+                                          const npu_layer_t *layer) {
+    const uint32_t input_c = 32u;
+    const uint32_t output_c = 32u;
+    const uint32_t weight_bytes = input_c * output_c;
+    uint32_t rows;
+
+    if (!tensor_is_c32_i8(src) ||
+        !tensor_is_c32_i8(dst) ||
+        !tensor_has_layout(weight, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+        src->c != input_c || dst->c != output_c ||
+        src->h != dst->h || src->w != dst->w ||
+        weight->bytes < weight_bytes) {
+        return NPU_GRAPH_ERR_BAD_TENSOR;
+    }
+
+    rows = (uint32_t)dst->h * dst->w;
+    if (src->bytes < npu_tensor_row32_bytes(rows) ||
+        dst->bytes < npu_tensor_row32_bytes(rows)) {
+        return NPU_GRAPH_ERR_BAD_TENSOR;
+    }
+
+    configure_uniform_requant(layer);
+    systolic_gemm32_requant(weight->addr, src->addr, dst->addr, rows);
+    systolic_requant_disable();
+    return NPU_GRAPH_OK;
+}
+
 static uint32_t run_conv2d3x3_c32_linebuf_requant(const npu_tensor_t *src,
                                                   const npu_tensor_t *dst,
                                                   const npu_tensor_t *weight,
@@ -829,6 +864,14 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             {
                 uint32_t conv_status =
                     run_conv2d3x3_c32_linebuf_requant(src, dst, aux, aux2, layer, 2u, 2u);
+                if (conv_status != NPU_GRAPH_OK) return conv_status;
+            }
+            break;
+
+        case NPU_OP_CONV2D1X1_C32_REQUANT:
+            if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t conv_status = run_conv2d1x1_c32_requant(src, dst, aux, layer);
                 if (conv_status != NPU_GRAPH_OK) return conv_status;
             }
             break;
