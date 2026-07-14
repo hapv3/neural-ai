@@ -162,6 +162,7 @@
 #define NPU_AFU_MODE_MUL_Q7   3u
 #define NPU_AFU_MODE_ADD_I8   4u
 #define NPU_AFU_MODE_DFL4_ROW32_Q8 5u
+#define NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16 6u
 
 // Host command-control bootstrap/status registers.
 #define NPU_CMD_L2_BASE       (NPU_CMD_CTRL_BASE + 0x00)

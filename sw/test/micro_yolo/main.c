@@ -34,6 +34,7 @@
 #define L2_DFL_EXP_LUT 0x80054000u
 #define L2_DFL_RECIP_LUT 0x80054400u
 #define L2_DFL_OUTPUT 0x80060000u
+#define L2_CLASS_OUTPUT 0x80065000u
 #define LINEBUF_DESC_MANIFEST_MAGIC 0x4D594C42u
 #define LINEBUF_DESC_MANIFEST_VERSION 1u
 #define LINEBUF_DESC_MANIFEST_ENTRIES 5u
@@ -62,9 +63,11 @@
 #define C2F_PSUM_BYTES (ROWS * 32u * 4u)
 #define DOWN_PSUM_BYTES (DOWN_ROWS * 32u * 4u)
 #define DFL_BOX_CHANNELS 16u
+#define CLASS_CHANNELS 16u
 #define DFL_SIDES 4u
 #define DFL_LUT_BYTES (256u * 4u)
 #define DFL_OUTPUT_BYTES (ROWS * DFL_SIDES * 2u)
+#define CLASS_OUTPUT_BYTES (ROWS * CLASS_CHANNELS)
 
 #ifndef MICRO_YOLO_C2F_TILE_OH
 #define MICRO_YOLO_C2F_TILE_OH 16u
@@ -166,13 +169,14 @@ enum {
     T_HEAD_TILE,
     T_RAW_HEAD,
     T_DFL_OUT,
+    T_CLASS_OUT,
     T_DFL_EXP_LUT,
     T_DFL_RECIP_LUT,
     TENSOR_COUNT
 };
 
 static npu_tensor_t tensors[TENSOR_COUNT];
-static npu_layer_t layers[20];
+static npu_layer_t layers[22];
 static npu_graph_t graph;
 static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_stem_jobs;
 static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_c2f_jobs;
@@ -423,6 +427,17 @@ static void init_layers(void) {
     layers[19].l2_addr = L2_DFL_OUTPUT;
     layers[19].bytes = DFL_OUTPUT_BYTES;
 
+    layers[20].op = NPU_OP_CLASS_SIGMOID_ROW32_HIGH16_I8;
+    layers[20].src = T_RAW_HEAD;
+    layers[20].dst = T_CLASS_OUT;
+    layers[20].aux = T_SIG_LUT;
+    layers[20].bytes = CLASS_OUTPUT_BYTES;
+
+    layers[21].op = NPU_OP_DMA_OUT;
+    layers[21].src = T_CLASS_OUT;
+    layers[21].l2_addr = L2_CLASS_OUTPUT;
+    layers[21].bytes = CLASS_OUTPUT_BYTES;
+
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;
     graph.layers = layers;
@@ -605,6 +620,9 @@ int main(void) {
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
     init_tensor(&tensors[T_DFL_OUT], psum_or_sig_addr,
                 OUTPUT_H, OUTPUT_W, DFL_SIDES, DFL_OUTPUT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
+    init_tensor(&tensors[T_CLASS_OUT], act_c_addr,
+                OUTPUT_H, OUTPUT_W, CLASS_CHANNELS, CLASS_OUTPUT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
     init_tensor(&tensors[T_DFL_EXP_LUT], dfl_exp_lut_addr,
                 1, 1, 256, DFL_LUT_BYTES,

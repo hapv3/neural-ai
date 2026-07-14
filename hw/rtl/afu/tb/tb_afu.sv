@@ -14,6 +14,7 @@ module tb_afu;
     localparam logic [2:0] MODE_16BIT = 3'd1;
     localparam logic [2:0] MODE_32BIT = 3'd2;
     localparam logic [2:0] MODE_DFL4_ROW32_Q8 = 3'd5;
+    localparam logic [2:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 3'd6;
     localparam logic [31:0] AFU_CSR_BASE = 32'h400;
     localparam logic [31:0] AFU_DFL_EXP_LUT_BASE = 32'h800;
     localparam logic [31:0] AFU_DFL_RECIP_LUT_BASE = 32'hc00;
@@ -481,6 +482,56 @@ module tb_afu;
         end
     endtask
 
+    task automatic check_class_sigmoid_case(
+        input string name,
+        input int    src_base,
+        input int    dst_base,
+        input int    locations
+    );
+        $display("[AFU TB] %s: class sigmoid src=0x%0h dst=0x%0h locations=%0d",
+                 name, src_base, dst_base, locations);
+        $fflush();
+
+        fill_lut(MODE_8BIT, 9);
+        load_lut();
+
+        for (int loc = 0; loc < locations; loc++) begin
+            for (int ch = 0; ch < 32; ch++) begin
+                tcdm_mem[(src_base + loc * 32 + ch) % MEM_SIZE] =
+                    8'((loc * 17 + ch * 5 + 3) & 8'hff);
+            end
+        end
+        for (int i = 0; i < locations * 16 + 64; i++) begin
+            tcdm_mem[(dst_base + i) % MEM_SIZE] = 8'ha5;
+        end
+
+        start_afu(src_base, dst_base, locations * 32, MODE_CLASS_SIGMOID_ROW32_HIGH16);
+        wait_done(name);
+
+        for (int loc = 0; loc < locations; loc++) begin
+            for (int cls = 0; cls < 16; cls++) begin
+                logic [7:0] input_value;
+                logic [7:0] expected;
+                logic [7:0] actual;
+                int out_addr;
+
+                input_value = tcdm_mem[(src_base + loc * 32 + 16 + cls) % MEM_SIZE];
+                expected = lut_data[input_value][7:0];
+                out_addr = dst_base + loc * 16 + cls;
+                actual = tcdm_mem[out_addr % MEM_SIZE];
+                if (actual !== expected) begin
+                    $display("[FAIL] %s loc=%0d cls=%0d input=%0h exp=%0h act=%0h",
+                             name, loc, cls, input_value, expected, actual);
+                    errors++;
+                end
+            end
+        end
+
+        if (errors == 0) begin
+            $display("[PASS] %s", name);
+        end
+    endtask
+
     initial begin
         errors      = 0;
         obi_s_req   = 1'b0;
@@ -505,6 +556,7 @@ module tb_afu;
         check_case("mode16_unaligned_33", MODE_16BIT, 'h13f, 'h584, 33, 1);
         check_case("mode32_unaligned_17", MODE_32BIT, 'h255, 'h684, 17, 2);
         check_dfl_case("dfl_row32_aligned_17", 'h1000, 'h2000, 17);
+        check_class_sigmoid_case("class_sigmoid_row32_high16_17", 'h1200, 'h2800, 17);
         check_case("mode8_after_dfl_pingpong", MODE_8BIT, 'h300, 'h900, 37, 3);
 
         $display("========================================");

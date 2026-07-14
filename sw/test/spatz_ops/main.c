@@ -27,6 +27,7 @@
 #define SPATZ_OP_TEST_ADD_FULL 12u
 #define SPATZ_OP_TEST_DFL 13u
 #define SPATZ_OP_TEST_DFL_FUSED 14u
+#define SPATZ_OP_TEST_CLASS_SIGMOID 15u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -82,6 +83,8 @@
 #define DFL_ROW32_DST ((volatile uint16_t *)0x10156000u)
 #define DFL_EXP_LUT32 ((volatile uint32_t *)0x10157000u)
 #define DFL_RECIP_LUT ((volatile uint32_t *)0x10158000u)
+#define CLASS_ROW32_SRC ((volatile int8_t *)0x10159000u)
+#define CLASS_DST       ((volatile int8_t *)0x1015A000u)
 #define L2_DFL_ROW32_SRC 0x80070000u
 #define L2_DFL_EXP_LUT32 0x80071000u
 #define L2_DFL_RECIP_LUT 0x80071400u
@@ -111,6 +114,7 @@
 #define CONCAT_C1 32u
 #define DFL_LOCATIONS 17u
 #define DFL_FUSED_LOCATIONS 64u
+#define CLASS_SIGMOID_LOCATIONS 17u
 #define DFL_CHANNELS 16u
 #define DFL_SIDES 4u
 #define DFL_REG_MAX 4u
@@ -152,6 +156,10 @@ static uint16_t dfl_exp_lut_value(uint32_t index) {
 
 static int8_t dfl_input_value(uint32_t loc, uint32_t channel) {
     return (int8_t)((int32_t)(((loc * 37u) + (channel * 19u) + 11u) & 0xffu) - 128);
+}
+
+static uint8_t sigmoid_lut_value(uint32_t index) {
+    return (uint8_t)((index * 3u + 7u) & 0xffu);
 }
 
 static uint8_t dfl_delta_index(int8_t value, int8_t max_value) {
@@ -516,6 +524,43 @@ static void run_dfl_fused(void) {
     mark_pass();
 }
 
+static void run_class_sigmoid(void) {
+    SIG_STATUS = 0x30001501u;
+    for (uint32_t i = 0; i < 256u; i++) {
+        LOG_LUT[i] = sigmoid_lut_value(i);
+    }
+    for (uint32_t loc = 0; loc < CLASS_SIGMOID_LOCATIONS; loc++) {
+        for (uint32_t ch = 0; ch < 32u; ch++) {
+            CLASS_ROW32_SRC[(loc * 32u) + ch] =
+                (int8_t)((int32_t)(((loc * 29u) + (ch * 13u) + 5u) & 0xffu) - 128);
+        }
+    }
+    for (uint32_t i = 0; i < CLASS_SIGMOID_LOCATIONS * 16u; i++) {
+        CLASS_DST[i] = 0;
+    }
+
+    SIG_STATUS = 0x30001502u;
+    if (!npu_class_sigmoid_row32_high16_i8((const int8_t *)CLASS_ROW32_SRC,
+                                           (int8_t *)CLASS_DST,
+                                           CLASS_SIGMOID_LOCATIONS,
+                                           (const uint8_t *)LOG_LUT)) {
+        fail(15, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
+    }
+
+    SIG_STATUS = 0x30001503u;
+    for (uint32_t loc = 0; loc < CLASS_SIGMOID_LOCATIONS; loc++) {
+        for (uint32_t cls = 0; cls < 16u; cls++) {
+            uint32_t index = loc * 16u + cls;
+            uint8_t input_byte = (uint8_t)CLASS_ROW32_SRC[(loc * 32u) + 16u + cls];
+            int8_t expected = (int8_t)sigmoid_lut_value(input_byte);
+            if (CLASS_DST[index] != expected) {
+                fail(15, index, CLASS_DST[index], expected);
+            }
+        }
+    }
+    mark_pass();
+}
+
 static void run_maxpool(void) {
     for (uint32_t h = 0; h < POOL_H; h++) {
         for (uint32_t w = 0; w < POOL_W; w++) {
@@ -660,6 +705,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL_FUSED) {
         run_dfl_fused();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_CLASS_SIGMOID) {
+        run_class_sigmoid();
     }
 
     SIG_STATUS = PASS_SIGNATURE;
