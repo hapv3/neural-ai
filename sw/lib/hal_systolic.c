@@ -92,7 +92,8 @@ void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg) {
                            (cfg->coalesce ? REG_LB_CTRL_COALESCE : 0u) |
                            (cfg->kgen ? REG_LB_CTRL_KGEN : 0u) |
                            (cfg->pool ? REG_LB_CTRL_POOL : 0u) |
-                           (cfg->c32_fast ? REG_LB_CTRL_C32_FAST : 0u));
+                           (cfg->c32_fast ? REG_LB_CTRL_C32_FAST : 0u) |
+                           (cfg->depthwise ? REG_LB_CTRL_DEPTHWISE : 0u));
 }
 
 void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
@@ -123,6 +124,7 @@ void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
     cfg.kgen = 0u;
     cfg.pool = 1u;
     cfg.c32_fast = 1u;
+    cfg.depthwise = 0u;
     cfg.block_valid_bytes = 32u;
     cfg.k_seed_kh = 0u;
     cfg.k_seed_kw = 0u;
@@ -135,6 +137,52 @@ void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
     systolic_requant_disable();
     systolic_linebuf_config(&cfg);
     systolic_gemm32_tile_ex(0u, 0u, 0u, output_addr, cfg.spatial_m,
+                            0u, row_stride, width, 0u);
+    systolic_linebuf_disable();
+}
+
+void systolic_depthwise3x3s1p1_c32_requant(uint32_t input_addr,
+                                           uint32_t weight_addr,
+                                           uint32_t output_addr,
+                                           uint32_t height,
+                                           uint32_t width) {
+    systolic_linebuf_cfg_t cfg;
+    uint32_t row_stride = width * 32u;
+    uint32_t rows = height * width;
+
+    cfg.input_base = input_addr - row_stride;
+    cfg.input_h = (uint16_t)height;
+    cfg.input_w = (uint16_t)width;
+    cfg.input_c = 32u;
+    cfg.output_w = (uint16_t)width;
+    cfg.stride_h = 1u;
+    cfg.stride_w = 1u;
+    cfg.pad_h = 1u;
+    cfg.pad_w = 1u;
+    cfg.row_stride_bytes = row_stride;
+    cfg.pixel_stride_bytes = 32u;
+    cfg.ow_step_bytes = 32u;
+    cfg.oh_step_bytes = row_stride;
+    cfg.kernel_h = 3u;
+    cfg.kernel_w = 3u;
+    cfg.c_base = 0u;
+    cfg.lane_base = 0u;
+    cfg.coalesce = 0u;
+    cfg.kgen = 0u;
+    cfg.pool = 0u;
+    cfg.c32_fast = 1u;
+    cfg.depthwise = 1u;
+    cfg.block_valid_bytes = 32u;
+    cfg.k_seed_kh = 0u;
+    cfg.k_seed_kw = 0u;
+    cfg.k_seed_ic = 0u;
+    cfg.k_tiles = 0u;
+    cfg.spatial_m = rows;
+    cfg.channel_addr_offset = 0u;
+    cfg.coalesce_k_bytes = cfg.kernel_h * cfg.kernel_w * cfg.block_valid_bytes;
+
+    systolic_linebuf_config(&cfg);
+    systolic_gemm32_tile_ex(weight_addr, 0u, 0u, output_addr, rows,
                             0u, row_stride, width, 0u);
     systolic_linebuf_disable();
 }

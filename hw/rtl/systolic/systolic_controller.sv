@@ -237,6 +237,7 @@ module systolic_controller #(
     logic          cfg_linebuf_kgen_i;
     logic          cfg_linebuf_pool_i;
     logic          cfg_linebuf_c32_fast_i;
+    logic          cfg_linebuf_depthwise_i;
     logic [31:0]   cfg_linebuf_input_base_i;
     logic [15:0]   cfg_linebuf_input_h_i;
     logic [15:0]   cfg_linebuf_input_w_i;
@@ -269,6 +270,7 @@ module systolic_controller #(
     logic [7:0]    linebuf_seed_kh_eff;
     logic          linebuf_kgen_multi;
     logic          linebuf_pool_mode;
+    logic          linebuf_depthwise_mode;
     logic          accum_active;
     logic          requant_active;
     logic          drain_enabled;
@@ -326,6 +328,15 @@ module systolic_controller #(
     logic          pool_out_valid_q, pool_out_valid_d;
     logic [7:0]    pool_tap_count_q, pool_tap_count_d;
     logic [31:0]   pool_kernel_vectors;
+    localparam int unsigned DW_MAX_TAPS = 25;
+    localparam int unsigned DW_TAP_COUNT_W = $clog2(DW_MAX_TAPS + 1);
+    input_row_t    dw_weight_q [DW_MAX_TAPS];
+    input_row_t    dw_weight_d [DW_MAX_TAPS];
+    ofm_row_t      dw_acc_q, dw_acc_d;
+    ofm_row_t      dw_next_acc;
+    ofm_row_t      dw_requant_acc;
+    logic [DW_TAP_COUNT_W-1:0] dw_tap_count_q, dw_tap_count_d;
+    logic [DW_TAP_COUNT_W-1:0] dw_weight_rsp_idx;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -345,6 +356,7 @@ module systolic_controller #(
     assign linebuf_kgen_multi = cfg_linebuf_en_i && cfg_linebuf_coalesce_i && cfg_linebuf_kgen_i &&
                                 (cfg_linebuf_k_tiles_i > 32'd1);
     assign linebuf_pool_mode = cfg_linebuf_en_i && cfg_linebuf_pool_i;
+    assign linebuf_depthwise_mode = cfg_linebuf_en_i && cfg_linebuf_depthwise_i;
     assign linebuf_has_next_k_tile = linebuf_kgen_multi && ((k_tile_idx_q + 32'd1) < cfg_linebuf_k_tiles_i);
     assign accum_active = cfg_sys_accum_en_i || (linebuf_kgen_multi && (k_tile_idx_q != 32'd0));
     assign requant_active = cfg_requant_en_i && (!linebuf_kgen_multi || !linebuf_has_next_k_tile);
@@ -362,7 +374,7 @@ module systolic_controller #(
     // the external accumulation wrote that row into the psum buffer.
     assign psum_buf_overlap_next_safe = psum_buf_overlap_next_ready;
     assign psum_buf_drain_entry = !ofm_fifo_empty && ofm_fifo_out.psum_buf_active;
-    assign drain_enabled = !linebuf_pool_mode &&
+    assign drain_enabled = !linebuf_pool_mode && !linebuf_depthwise_mode &&
                            ((state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN));
     assign weight_preload_fetch_done = weight_preload_done_q ||
                                        (weight_preload_active_q &&
@@ -377,6 +389,7 @@ module systolic_controller #(
     assign linebuf_seed_kh_eff = cfg_linebuf_kgen_i ? (linebuf_use_next_cfg ? k_seed_kh_next : k_seed_kh_q) :
                                                        cfg_linebuf_k_seed_kh_i;
     assign pool_kernel_vectors = 32'(cfg_linebuf_kernel_h_i) * 32'(cfg_linebuf_kernel_w_i);
+    assign dw_weight_rsp_idx = DW_TAP_COUNT_W'(pool_kernel_vectors - rsp_cnt_q);
 
     function automatic input_row_t max_i8_row(
         input input_row_t lhs,
@@ -391,6 +404,25 @@ module systolic_controller #(
         end
     endfunction
 
+    function automatic ofm_row_t depthwise_mac_row(
+        input ofm_row_t acc,
+        input input_row_t ifm,
+        input input_row_t weight,
+        input logic clear
+    );
+        ofm_row_t result;
+        logic signed [15:0] product;
+        logic signed [31:0] product_ext;
+        begin
+            for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
+                product = $signed(ifm[ch]) * $signed(weight[ch]);
+                product_ext = {{16{product[15]}}, product};
+                result[ch] = clear ? product_ext : (acc[ch] + product_ext);
+            end
+            depthwise_mac_row = result;
+        end
+    endfunction
+
     always_comb begin
         for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
             accum_sum[ch] = ofm_fifo_out.row[ch] + psum_fifo_out[ch];
@@ -398,7 +430,8 @@ module systolic_controller #(
         end
     end
 
-    assign requant_acc = (psum_buf_drain_entry && requant_active) ? psum_buf_sum :
+    assign requant_acc = linebuf_depthwise_mode ? dw_requant_acc :
+                         (psum_buf_drain_entry && requant_active) ? psum_buf_sum :
                          ((accum_active && requant_active) ? accum_sum : ofm_fifo_out.row);
 
     function automatic void advance_k_seed32(
@@ -600,6 +633,7 @@ module systolic_controller #(
         .cfg_linebuf_coalesce_o(cfg_linebuf_coalesce_i),
         .cfg_linebuf_pool_o (cfg_linebuf_pool_i),
         .cfg_linebuf_c32_fast_o(cfg_linebuf_c32_fast_i),
+        .cfg_linebuf_depthwise_o(cfg_linebuf_depthwise_i),
         .cfg_linebuf_kgen_o (cfg_linebuf_kgen_i),
         .cfg_linebuf_input_base_o(cfg_linebuf_input_base_i),
         .cfg_linebuf_input_h_o(cfg_linebuf_input_h_i),
@@ -735,6 +769,13 @@ module systolic_controller #(
         pool_out_valid_d = pool_out_valid_q;
         pool_tap_count_d = pool_tap_count_q;
         pool_next_acc = pool_acc_q;
+        dw_acc_d = dw_acc_q;
+        dw_next_acc = dw_acc_q;
+        dw_requant_acc = dw_acc_q;
+        dw_tap_count_d = dw_tap_count_q;
+        for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
+            dw_weight_d[tap] = dw_weight_q[tap];
+        end
         psum_buf_we = 1'b0;
         psum_buf_addr = '0;
         psum_buf_wdata = '0;
@@ -1074,6 +1115,8 @@ module systolic_controller #(
                     pool_out_d = '0;
                     pool_out_valid_d = 1'b0;
                     pool_tap_count_d = '0;
+                    dw_acc_d = '0;
+                    dw_tap_count_d = '0;
                     if (psum_buf_active) begin
                         psum_buf_sel_d = ~psum_buf_sel_q;
                     end
@@ -1088,6 +1131,15 @@ module systolic_controller #(
                         state_d = COMPUTE;
                     end
 
+                    if (linebuf_depthwise_mode) begin
+                        w_ptr_d = cfg_sys_weight_ptr_i;
+                        req_cnt_d = pool_kernel_vectors;
+                        rsp_cnt_d = pool_kernel_vectors;
+                        drain_cnt_d = linebuf_spatial_m;
+                        psum_prefetch_rows_d = '0;
+                        state_d = LOAD_WEIGHTS;
+                    end
+
                     if (cfg_requant_en_i && requant_config_invalid) begin
                         w_ptr_d = cfg_sys_weight_ptr_i;
                         req_cnt_d = '0;
@@ -1100,7 +1152,28 @@ module systolic_controller #(
             end
 
             LOAD_WEIGHTS: begin
-                if (weight_preload_done_q) begin
+                if (linebuf_depthwise_mode) begin
+                    if (req_cnt_q > 0) begin
+                        obi_w_req_o = 1'b1;
+                        obi_w_addr_o = w_ptr_q;
+                        if (obi_w_req_o && obi_w_gnt_i) begin
+                            w_ptr_d = w_ptr_q + 32;
+                            req_cnt_d = req_cnt_q - 1;
+                        end
+                    end
+                    if (obi_w_rvalid_i) begin
+                        if (dw_weight_rsp_idx < DW_TAP_COUNT_W'(DW_MAX_TAPS)) begin
+                            dw_weight_d[dw_weight_rsp_idx] = obi_w_rdata_i;
+                        end
+                        rsp_cnt_d = rsp_cnt_q - 1;
+                    end
+                    if ((req_cnt_q == 0) && (rsp_cnt_q == 1) && obi_w_rvalid_i) begin
+                        linebuf_start = 1'b1;
+                        dw_acc_d = '0;
+                        dw_tap_count_d = '0;
+                        state_d = COMPUTE;
+                    end
+                end else if (weight_preload_done_q) begin
                     req_cnt_d = cfg_sys_dim_m_i;
                     rsp_cnt_d = cfg_sys_dim_m_i;
                     drain_cnt_d = cfg_sys_dim_m_i;
@@ -1165,7 +1238,48 @@ module systolic_controller #(
             end
 
             COMPUTE: begin
-                if (linebuf_pool_mode) begin
+                if (linebuf_depthwise_mode) begin
+                    obi_i_req_o = linebuf_obi_req;
+                    obi_i_addr_o = linebuf_obi_addr;
+
+                    if (requant_out_valid) begin
+                        obi_o_req_o[0] = 1'b1;
+                        obi_o_wdata_o[0] = requant_packed_data;
+                        if (obi_o_gnt_i[0] || requant_invalid) begin
+                            requant_out_ready = 1'b1;
+                            o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                       cfg_sys_ofm_row_stride_bytes_i,
+                                                       cfg_sys_ofm_tile_cols_i);
+                            o_col_d = next_strided_col(o_col_q, cfg_sys_ofm_tile_cols_i);
+                            drain_cnt_d = drain_cnt_q - 1'b1;
+                        end
+                        if (requant_invalid) begin
+                            obi_o_req_o[0] = 1'b0;
+                        end
+                    end
+
+                    if (linebuf_row_valid && !requant_config_invalid &&
+                        (({27'd0, dw_tap_count_q} + 32'd1) != pool_kernel_vectors || requant_in_ready)) begin
+                        dw_next_acc = depthwise_mac_row(dw_acc_q,
+                                                        linebuf_row_data,
+                                                        dw_weight_q[dw_tap_count_q],
+                                                        (dw_tap_count_q == '0));
+                        linebuf_row_ready = 1'b1;
+                        if ({27'd0, dw_tap_count_q} + 32'd1 == pool_kernel_vectors) begin
+                            dw_requant_acc = dw_next_acc;
+                            requant_in_valid = cfg_requant_en_i;
+                            dw_acc_d = '0;
+                            dw_tap_count_d = '0;
+                        end else begin
+                            dw_acc_d = dw_next_acc;
+                            dw_tap_count_d = dw_tap_count_q + 1'b1;
+                        end
+                    end
+
+                    if ((drain_cnt_q == 32'd0) && !linebuf_busy && !requant_out_valid) begin
+                        state_d = DONE;
+                    end
+                end else if (linebuf_pool_mode) begin
                     obi_i_req_o = linebuf_obi_req;
                     obi_i_addr_o = linebuf_obi_addr;
 
@@ -1444,6 +1558,11 @@ module systolic_controller #(
             pool_out_q <= '0;
             pool_out_valid_q <= 1'b0;
             pool_tap_count_q <= '0;
+            dw_acc_q <= '0;
+            dw_tap_count_q <= '0;
+            for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
+                dw_weight_q[tap] <= '0;
+            end
         end else begin
             state_q     <= state_d;
             drain_state_q <= drain_state_d;
@@ -1481,6 +1600,11 @@ module systolic_controller #(
             pool_out_q <= pool_out_d;
             pool_out_valid_q <= pool_out_valid_d;
             pool_tap_count_q <= pool_tap_count_d;
+            dw_acc_q <= dw_acc_d;
+            dw_tap_count_q <= dw_tap_count_d;
+            for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
+                dw_weight_q[tap] <= dw_weight_d[tap];
+            end
             if (psum_buf_we) begin
                 psum_buf_q[psum_buf_sel_q][psum_buf_addr] <= psum_buf_wdata;
             end

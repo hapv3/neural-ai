@@ -95,9 +95,9 @@
 
 #define HEAD_TILE_BYTES (MICRO_YOLO_HEAD_TILE_OH * MICRO_YOLO_HEAD_TILE_OW * 32u)
 
-_Static_assert(sizeof(systolic_linebuf_cfg_t) == 76u, "linebuffer config ABI changed");
-_Static_assert(sizeof(npu_conv2d_linebuf_job_desc_t) == 120u, "linebuffer job ABI changed");
-_Static_assert(sizeof(npu_conv2d_l2_copy_job_desc_t) == 136u, "linebuffer L2 job ABI changed");
+_Static_assert(sizeof(systolic_linebuf_cfg_t) == 80u, "linebuffer config ABI changed");
+_Static_assert(sizeof(npu_conv2d_linebuf_job_desc_t) == 124u, "linebuffer job ABI changed");
+_Static_assert(sizeof(npu_conv2d_l2_copy_job_desc_t) == 140u, "linebuffer L2 job ABI changed");
 
 typedef struct {
     uint32_t l2_addr;

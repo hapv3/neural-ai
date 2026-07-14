@@ -121,6 +121,7 @@ static void linebuf_finalize_precompute(systolic_linebuf_cfg_t *cfg, uint32_t re
     cfg->channel_addr_offset = cfg->c_base;
     cfg->coalesce_k_bytes = (uint32_t)cfg->kernel_h * (uint32_t)cfg->kernel_w *
                             (uint32_t)cfg->block_valid_bytes;
+    cfg->depthwise = 0u;
     cfg->c32_fast = (uint16_t)(request_c32_fast &&
                                cfg->block_valid_bytes == SYSTOLIC_GEMM32_K &&
                                cfg->pixel_stride_bytes == SYSTOLIC_GEMM32_K &&
