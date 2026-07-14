@@ -73,6 +73,135 @@ uint32_t npu_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
     return afu_wait_done(1000000u);
 }
 
+static uint8_t dfl_delta_index(int8_t value, int8_t max_value) {
+    return (uint8_t)((int32_t)value - (int32_t)max_value);
+}
+
+static uint16_t dfl_distance_q8_from_exp4(const uint16_t *exp_values) {
+    uint32_t sum = (uint32_t)exp_values[0] +
+                   (uint32_t)exp_values[1] +
+                   (uint32_t)exp_values[2] +
+                   (uint32_t)exp_values[3];
+    uint32_t weighted = (uint32_t)exp_values[1] +
+                        (2u * (uint32_t)exp_values[2]) +
+                        (3u * (uint32_t)exp_values[3]);
+
+    if (sum == 0u) {
+        return 0u;
+    }
+
+    return (uint16_t)(((weighted << 8) + (sum >> 1)) / sum);
+}
+
+static uint32_t dfl_afu_timeout(uint32_t elem_count) {
+    return 100000u + (elem_count * 256u);
+}
+
+uint32_t spatz_dfl_softmax4_i8_q8(const int8_t *src, uint16_t *dst,
+                                  uint32_t locations,
+                                  const uint16_t *exp_lut) {
+    if (!src || !dst || !exp_lut) {
+        return 0u;
+    }
+
+    for (uint32_t loc = 0; loc < locations; loc++) {
+        const int8_t *in_pixel = &src[loc * 16u];
+        uint16_t *out_pixel = &dst[loc * 4u];
+
+        for (uint32_t side = 0; side < 4u; side++) {
+            const int8_t *logits = &in_pixel[side * 4u];
+            int8_t max_value = logits[0];
+            uint16_t exp_values[4];
+
+            for (uint32_t bin = 1u; bin < 4u; bin++) {
+                if (logits[bin] > max_value) {
+                    max_value = logits[bin];
+                }
+            }
+
+            for (uint32_t bin = 0u; bin < 4u; bin++) {
+                exp_values[bin] = exp_lut[dfl_delta_index(logits[bin], max_value)];
+            }
+            out_pixel[side] = dfl_distance_q8_from_exp4(exp_values);
+        }
+    }
+
+    return 1u;
+}
+
+uint32_t npu_dfl_softmax4_i8_q8(const int8_t *src, uint16_t *dst,
+                                uint32_t locations,
+                                const uint16_t *exp_lut,
+                                uint8_t *delta_scratch,
+                                uint16_t *exp_scratch) {
+    uint32_t elem_count = locations * 16u;
+
+    if (!src || !dst || !exp_lut || !delta_scratch || !exp_scratch) {
+        return 0u;
+    }
+
+    for (uint32_t loc = 0; loc < locations; loc++) {
+        const int8_t *in_pixel = &src[loc * 16u];
+        uint8_t *delta_pixel = &delta_scratch[loc * 16u];
+
+        for (uint32_t side = 0; side < 4u; side++) {
+            const int8_t *logits = &in_pixel[side * 4u];
+            uint8_t *delta_side = &delta_pixel[side * 4u];
+            int8_t max_value = logits[0];
+
+            for (uint32_t bin = 1u; bin < 4u; bin++) {
+                if (logits[bin] > max_value) {
+                    max_value = logits[bin];
+                }
+            }
+
+            for (uint32_t bin = 0u; bin < 4u; bin++) {
+                delta_side[bin] = dfl_delta_index(logits[bin], max_value);
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < 256u; i++) {
+        afu_load_lut_entry(i, (uint32_t)exp_lut[i]);
+    }
+    afu_start((uint32_t)delta_scratch, (uint32_t)exp_scratch,
+              elem_count, NPU_AFU_MODE_E16);
+    if (!afu_wait_done(dfl_afu_timeout(elem_count))) {
+        return 0u;
+    }
+
+    for (uint32_t loc = 0; loc < locations; loc++) {
+        const uint16_t *exp_pixel = &exp_scratch[loc * 16u];
+        uint16_t *out_pixel = &dst[loc * 4u];
+
+        for (uint32_t side = 0; side < 4u; side++) {
+            out_pixel[side] = dfl_distance_q8_from_exp4(&exp_pixel[side * 4u]);
+        }
+    }
+
+    return 1u;
+}
+
+uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
+                                      uint32_t locations,
+                                      const uint32_t *exp_lut,
+                                      const uint32_t *recip_lut) {
+    uint32_t input_bytes = locations * 32u;
+
+    if (!src_row32 || !dst || !exp_lut || !recip_lut) {
+        return 0u;
+    }
+
+    for (uint32_t i = 0; i < 256u; i++) {
+        afu_load_dfl_exp_lut_entry(i, exp_lut[i]);
+        afu_load_dfl_recip_lut_entry(i, recip_lut[i]);
+    }
+
+    afu_start((uint32_t)src_row32, (uint32_t)dst,
+              input_bytes, NPU_AFU_MODE_DFL4_ROW32_Q8);
+    return afu_wait_done(100000u + (locations * 128u));
+}
+
 void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t input_h, uint32_t input_w, uint32_t channels,
                         uint32_t kernel_h, uint32_t kernel_w,

@@ -759,6 +759,30 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_DFL_SOFTMAX4_I8_Q8:
+            if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t locations = (uint32_t)src->h * src->w;
+                uint32_t dst_bytes = locations * 4u * 2u;
+
+                if (!tensor_has_layout(src, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+                    src->c != 32u ||
+                    src->bytes < npu_tensor_row32_bytes(locations) ||
+                    dst->bytes < dst_bytes ||
+                    aux->bytes < 1024u ||
+                    aux2->bytes < 1024u) {
+                    return NPU_GRAPH_ERR_BAD_TENSOR;
+                }
+                if (!npu_dfl_softmax4_row32_i8_q8((const int8_t *)src->addr,
+                                                  (uint16_t *)dst->addr,
+                                                  locations,
+                                                  (const uint32_t *)aux->addr,
+                                                  (const uint32_t *)aux2->addr)) {
+                    return NPU_GRAPH_ERR_ACCEL;
+                }
+            }
+            break;
+
         case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {

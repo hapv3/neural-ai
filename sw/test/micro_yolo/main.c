@@ -31,6 +31,9 @@
 #define L2_OUTPUT  0x80020000u
 #define L2_SKIP    0x80040000u
 #define L2_LINEBUF_DESC_BASE 0x80052000u
+#define L2_DFL_EXP_LUT 0x80054000u
+#define L2_DFL_RECIP_LUT 0x80054400u
+#define L2_DFL_OUTPUT 0x80060000u
 #define LINEBUF_DESC_MANIFEST_MAGIC 0x4D594C42u
 #define LINEBUF_DESC_MANIFEST_VERSION 1u
 #define LINEBUF_DESC_MANIFEST_ENTRIES 5u
@@ -58,6 +61,10 @@
 #define DOWN_ACT_BYTES (DOWN_ROWS * 32u)
 #define C2F_PSUM_BYTES (ROWS * 32u * 4u)
 #define DOWN_PSUM_BYTES (DOWN_ROWS * 32u * 4u)
+#define DFL_BOX_CHANNELS 16u
+#define DFL_SIDES 4u
+#define DFL_LUT_BYTES (256u * 4u)
+#define DFL_OUTPUT_BYTES (ROWS * DFL_SIDES * 2u)
 
 #ifndef MICRO_YOLO_C2F_TILE_OH
 #define MICRO_YOLO_C2F_TILE_OH 16u
@@ -157,11 +164,15 @@ enum {
     T_UPSAMPLE,
     T_SKIP_RELOAD,
     T_HEAD_TILE,
+    T_RAW_HEAD,
+    T_DFL_OUT,
+    T_DFL_EXP_LUT,
+    T_DFL_RECIP_LUT,
     TENSOR_COUNT
 };
 
 static npu_tensor_t tensors[TENSOR_COUNT];
-static npu_layer_t layers[17];
+static npu_layer_t layers[20];
 static npu_graph_t graph;
 static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_stem_jobs;
 static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_c2f_jobs;
@@ -388,6 +399,30 @@ static void init_layers(void) {
     set_linebuf_jobs(&layers[16], micro_yolo_lb_head0_jobs, micro_yolo_lb_head0_count);
     set_linebuf_l2_jobs(&layers[16], micro_yolo_lb_head1_l2_jobs, micro_yolo_lb_head1_l2_count);
 
+    /*
+     * Post-head DFL graph stage:
+     *   - Raw head is produced tile-by-tile directly to L2_OUTPUT.
+     *   - Reload the complete ROW32 head once into T_RAW_HEAD after layer 16.
+     *   - Run AFU-assisted exp LUT over the first 16 channels of each pixel
+     *     and reduce 4 bins per side into Q8.8 distances.
+     */
+    layers[17].op = NPU_OP_DMA_IN;
+    layers[17].dst = T_RAW_HEAD;
+    layers[17].l2_addr = L2_OUTPUT;
+    layers[17].bytes = ACT_BYTES;
+
+    layers[18].op = NPU_OP_DFL_SOFTMAX4_I8_Q8;
+    layers[18].src = T_RAW_HEAD;
+    layers[18].dst = T_DFL_OUT;
+    layers[18].aux = T_DFL_EXP_LUT;
+    layers[18].aux2 = T_DFL_RECIP_LUT;
+    layers[18].bytes = DFL_OUTPUT_BYTES;
+
+    layers[19].op = NPU_OP_DMA_OUT;
+    layers[19].src = T_DFL_OUT;
+    layers[19].l2_addr = L2_DFL_OUTPUT;
+    layers[19].bytes = DFL_OUTPUT_BYTES;
+
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;
     graph.layers = layers;
@@ -487,7 +522,13 @@ int main(void) {
     uint32_t psum_or_sig_addr = alloc_or_fail(&scratch, C2F_PSUM_BYTES);
     uint32_t act_c_addr = alloc_or_fail(&scratch, ACT_BYTES);
     uint32_t head_tile_addr = alloc_or_fail(&scratch, HEAD_TILE_BYTES);
+    uint32_t dfl_exp_lut_addr = alloc_or_fail(&scratch, DFL_LUT_BYTES);
+    uint32_t dfl_recip_lut_addr = alloc_or_fail(&scratch, DFL_LUT_BYTES);
     load_runtime_linebuf_jobs(&scratch);
+    if (!idma_memcpy_blocking(L2_DFL_EXP_LUT, dfl_exp_lut_addr, DFL_LUT_BYTES) ||
+        !idma_memcpy_blocking(L2_DFL_RECIP_LUT, dfl_recip_lut_addr, DFL_LUT_BYTES)) {
+        fail(NPU_GRAPH_ERR_DMA);
+    }
 
     /*
      * Buffer lifetime map:
@@ -497,7 +538,12 @@ int main(void) {
      * act_c:
      *   T_SILU -> T_DOWN -> T_UPSAMPLE
      * psum_or_sig:
-     *   T_SIG -> T_C2F_PSUM/T_DOWN_PSUM/head full psum
+     *   T_SIG -> T_C2F_PSUM/T_DOWN_PSUM/head full psum -> T_DFL_OUT
+     *
+     * After Head_Conv completes, T_SKIP_RELOAD is dead and act_a is reused as
+     * T_RAW_HEAD for the L2 reload feeding DFL. DFL exp/reciprocal LUTs are
+     * host-precomputed blobs loaded from L2 and then written to AFU fixed LUT
+     * windows by the graph DFL operator.
      *
      * The static aliases above are part of the test contract. If a new layer is
      * inserted, update this map first; otherwise the graph can pass build but
@@ -554,6 +600,18 @@ int main(void) {
     init_tensor(&tensors[T_HEAD_TILE], head_tile_addr,
                 MICRO_YOLO_HEAD_TILE_OH, MICRO_YOLO_HEAD_TILE_OW, 32, HEAD_TILE_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_RAW_HEAD], act_a_addr,
+                OUTPUT_H, OUTPUT_W, 32, ACT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_ROW32, 1, 0);
+    init_tensor(&tensors[T_DFL_OUT], psum_or_sig_addr,
+                OUTPUT_H, OUTPUT_W, DFL_SIDES, DFL_OUTPUT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
+    init_tensor(&tensors[T_DFL_EXP_LUT], dfl_exp_lut_addr,
+                1, 1, 256, DFL_LUT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
+    init_tensor(&tensors[T_DFL_RECIP_LUT], dfl_recip_lut_addr,
+                1, 1, 256, DFL_LUT_BYTES,
+                NPU_DTYPE_I8, NPU_LAYOUT_HWC, 1, 0);
     SIG_STATUS = 0x30000003u;
 
     init_layers();
