@@ -1,6 +1,7 @@
+#include "conv2d_packed.h"
+#include "idma_mm_utils.h"
 #include "npu_graph.h"
 #include "npu_memory_map.h"
-#include "micro_yolo_linebuf_precompute.h"
 
 /*
  * Phase 3j Conv_Stem + SiLU + C2f_Conv + residual Add + Conv_Down + SPPF MaxPool + Upsample + Head_Conv checkpoint:
@@ -29,6 +30,12 @@
 #define L2_WEIGHT3 0x80010000u
 #define L2_OUTPUT  0x80020000u
 #define L2_SKIP    0x80040000u
+#define L2_LINEBUF_DESC_BASE 0x80052000u
+#define LINEBUF_DESC_MANIFEST_MAGIC 0x4D594C42u
+#define LINEBUF_DESC_MANIFEST_VERSION 1u
+#define LINEBUF_DESC_MANIFEST_ENTRIES 5u
+#define LINEBUF_DESC_KIND_LINEBUF 1u
+#define LINEBUF_DESC_KIND_L2_COPY 2u
 
 #define SCRATCH_BASE 0x10100000u
 #define SCRATCH_SIZE (512u * 1024u)
@@ -78,6 +85,36 @@
 
 #define HEAD_TILE_BYTES (MICRO_YOLO_HEAD_TILE_OH * MICRO_YOLO_HEAD_TILE_OW * 32u)
 
+_Static_assert(sizeof(systolic_linebuf_cfg_t) == 76u, "linebuffer config ABI changed");
+_Static_assert(sizeof(npu_conv2d_linebuf_job_desc_t) == 120u, "linebuffer job ABI changed");
+_Static_assert(sizeof(npu_conv2d_l2_copy_job_desc_t) == 136u, "linebuffer L2 job ABI changed");
+
+typedef struct {
+    uint32_t l2_addr;
+    uint32_t count;
+    uint32_t bytes;
+    uint32_t kind;
+} micro_yolo_linebuf_manifest_entry_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t entry_count;
+    uint32_t reserved;
+    micro_yolo_linebuf_manifest_entry_t entries[LINEBUF_DESC_MANIFEST_ENTRIES];
+} micro_yolo_linebuf_manifest_t;
+
+enum {
+    LB_DESC_STEM = 0,
+    LB_DESC_C2F = 1,
+    LB_DESC_DOWN = 2,
+    LB_DESC_HEAD0 = 3,
+    LB_DESC_HEAD1_L2 = 4,
+};
+
+_Static_assert(sizeof(micro_yolo_linebuf_manifest_t) == 96u,
+               "linebuffer manifest ABI changed");
+
 /*
  * Static 3j graph contract:
  *
@@ -126,6 +163,16 @@ enum {
 static npu_tensor_t tensors[TENSOR_COUNT];
 static npu_layer_t layers[17];
 static npu_graph_t graph;
+static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_stem_jobs;
+static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_c2f_jobs;
+static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_down_jobs;
+static npu_conv2d_linebuf_job_desc_t *micro_yolo_lb_head0_jobs;
+static npu_conv2d_l2_copy_job_desc_t *micro_yolo_lb_head1_l2_jobs;
+static uint32_t micro_yolo_lb_stem_count;
+static uint32_t micro_yolo_lb_c2f_count;
+static uint32_t micro_yolo_lb_down_count;
+static uint32_t micro_yolo_lb_head0_count;
+static uint32_t micro_yolo_lb_head1_l2_count;
 
 void npu_graph_trace(uint32_t layer_index, npu_op_type_t op, uint32_t event) {
     SIG_LAYER = layer_index;
@@ -140,6 +187,8 @@ static void fail(uint32_t code) {
     while (1) {
     }
 }
+
+static uint32_t alloc_or_fail(npu_graph_scratch_t *scratch, uint32_t bytes);
 
 static void init_tensor(npu_tensor_t *tensor, uint32_t addr,
                         uint16_t h, uint16_t w, uint16_t c,
@@ -236,7 +285,7 @@ static void init_layers(void) {
     layers[6].shift = 0;
     layers[6].min_val = -128;
     layers[6].max_val = 127;
-    set_linebuf_jobs(&layers[6], MICRO_YOLO_LB_STEM_JOBS, MICRO_YOLO_LB_STEM_JOBS_COUNT);
+    set_linebuf_jobs(&layers[6], micro_yolo_lb_stem_jobs, micro_yolo_lb_stem_count);
 
     layers[7].op = NPU_OP_LOGISTIC_LUT_I8;
     layers[7].src = T_STEM;
@@ -276,7 +325,7 @@ static void init_layers(void) {
     layers[10].shift = 0;
     layers[10].min_val = -128;
     layers[10].max_val = 127;
-    set_linebuf_jobs(&layers[10], MICRO_YOLO_LB_C2F_JOBS, MICRO_YOLO_LB_C2F_JOBS_COUNT);
+    set_linebuf_jobs(&layers[10], micro_yolo_lb_c2f_jobs, micro_yolo_lb_c2f_count);
 
     layers[11].op = NPU_OP_ADD_I8;
     layers[11].src = T_OUT;
@@ -298,7 +347,7 @@ static void init_layers(void) {
     layers[12].shift = 0;
     layers[12].min_val = -128;
     layers[12].max_val = 127;
-    set_linebuf_jobs(&layers[12], MICRO_YOLO_LB_DOWN_JOBS, MICRO_YOLO_LB_DOWN_JOBS_COUNT);
+    set_linebuf_jobs(&layers[12], micro_yolo_lb_down_jobs, micro_yolo_lb_down_count);
 
     layers[13].op = NPU_OP_MAXPOOL2D5X5S1P2_I8;
     layers[13].src = T_DOWN;
@@ -336,8 +385,8 @@ static void init_layers(void) {
     layers[16].shift = 0;
     layers[16].min_val = -128;
     layers[16].max_val = 127;
-    set_linebuf_jobs(&layers[16], MICRO_YOLO_LB_HEAD0_JOBS, MICRO_YOLO_LB_HEAD0_JOBS_COUNT);
-    set_linebuf_l2_jobs(&layers[16], MICRO_YOLO_LB_HEAD1_L2_JOBS, MICRO_YOLO_LB_HEAD1_L2_JOBS_COUNT);
+    set_linebuf_jobs(&layers[16], micro_yolo_lb_head0_jobs, micro_yolo_lb_head0_count);
+    set_linebuf_l2_jobs(&layers[16], micro_yolo_lb_head1_l2_jobs, micro_yolo_lb_head1_l2_count);
 
     graph.tensors = tensors;
     graph.num_tensors = TENSOR_COUNT;
@@ -351,6 +400,70 @@ static uint32_t alloc_or_fail(npu_graph_scratch_t *scratch, uint32_t bytes) {
         fail(NPU_GRAPH_ERR_SCRATCH);
     }
     return addr;
+}
+
+static uint32_t load_desc_or_fail(npu_graph_scratch_t *scratch,
+                                  const micro_yolo_linebuf_manifest_entry_t *entry,
+                                  uint32_t expected_kind,
+                                  uint32_t desc_size) {
+    SIG_EVENT = 0xD1000000u | expected_kind;
+    if (entry->kind != expected_kind ||
+        entry->count == 0u ||
+        entry->bytes != (entry->count * desc_size)) {
+        fail(NPU_GRAPH_ERR_BAD_TENSOR);
+    }
+
+    uint32_t bytes = entry->bytes;
+    uint32_t addr = alloc_or_fail(scratch, bytes);
+    if (!idma_memcpy_blocking(entry->l2_addr, addr, bytes)) {
+        fail(NPU_GRAPH_ERR_DMA);
+    }
+    return addr;
+}
+
+static void load_runtime_linebuf_jobs(npu_graph_scratch_t *scratch) {
+    uint32_t manifest_addr = alloc_or_fail(scratch, sizeof(micro_yolo_linebuf_manifest_t));
+    micro_yolo_linebuf_manifest_t *manifest = (micro_yolo_linebuf_manifest_t *)manifest_addr;
+
+    SIG_EVENT = 0xD0000001u;
+    if (!idma_memcpy_blocking(L2_LINEBUF_DESC_BASE,
+                              manifest_addr,
+                              sizeof(micro_yolo_linebuf_manifest_t))) {
+        fail(NPU_GRAPH_ERR_DMA);
+    }
+    SIG_EVENT = 0xD0000002u;
+    if (manifest->magic != LINEBUF_DESC_MANIFEST_MAGIC ||
+        manifest->version != LINEBUF_DESC_MANIFEST_VERSION ||
+        manifest->entry_count != LINEBUF_DESC_MANIFEST_ENTRIES) {
+        fail(NPU_GRAPH_ERR_BAD_TENSOR);
+    }
+
+    micro_yolo_lb_stem_jobs = (npu_conv2d_linebuf_job_desc_t *)
+        load_desc_or_fail(scratch, &manifest->entries[LB_DESC_STEM],
+                          LINEBUF_DESC_KIND_LINEBUF,
+                          sizeof(npu_conv2d_linebuf_job_desc_t));
+    micro_yolo_lb_c2f_jobs = (npu_conv2d_linebuf_job_desc_t *)
+        load_desc_or_fail(scratch, &manifest->entries[LB_DESC_C2F],
+                          LINEBUF_DESC_KIND_LINEBUF,
+                          sizeof(npu_conv2d_linebuf_job_desc_t));
+    micro_yolo_lb_down_jobs = (npu_conv2d_linebuf_job_desc_t *)
+        load_desc_or_fail(scratch, &manifest->entries[LB_DESC_DOWN],
+                          LINEBUF_DESC_KIND_LINEBUF,
+                          sizeof(npu_conv2d_linebuf_job_desc_t));
+    micro_yolo_lb_head0_jobs = (npu_conv2d_linebuf_job_desc_t *)
+        load_desc_or_fail(scratch, &manifest->entries[LB_DESC_HEAD0],
+                          LINEBUF_DESC_KIND_LINEBUF,
+                          sizeof(npu_conv2d_linebuf_job_desc_t));
+    micro_yolo_lb_head1_l2_jobs = (npu_conv2d_l2_copy_job_desc_t *)
+        load_desc_or_fail(scratch, &manifest->entries[LB_DESC_HEAD1_L2],
+                          LINEBUF_DESC_KIND_L2_COPY,
+                          sizeof(npu_conv2d_l2_copy_job_desc_t));
+
+    micro_yolo_lb_stem_count = manifest->entries[LB_DESC_STEM].count;
+    micro_yolo_lb_c2f_count = manifest->entries[LB_DESC_C2F].count;
+    micro_yolo_lb_down_count = manifest->entries[LB_DESC_DOWN].count;
+    micro_yolo_lb_head0_count = manifest->entries[LB_DESC_HEAD0].count;
+    micro_yolo_lb_head1_l2_count = manifest->entries[LB_DESC_HEAD1_L2].count;
 }
 
 int main(void) {
@@ -374,6 +487,7 @@ int main(void) {
     uint32_t psum_or_sig_addr = alloc_or_fail(&scratch, C2F_PSUM_BYTES);
     uint32_t act_c_addr = alloc_or_fail(&scratch, ACT_BYTES);
     uint32_t head_tile_addr = alloc_or_fail(&scratch, HEAD_TILE_BYTES);
+    load_runtime_linebuf_jobs(&scratch);
 
     /*
      * Buffer lifetime map:

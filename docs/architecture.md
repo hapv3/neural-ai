@@ -323,16 +323,18 @@ path. `merge_beats` remains implemented for RGB stem, sub-C32/tail,
 `lane_base != 0`, raw/NHWC fallback, and any access crossing a 32-byte beat.
 
 To reduce Snitch workload, Micro-YOLO now uses host-generated
-`npu_conv2d_linebuf_job_desc_t` arrays. The generated header is built by
-`tools/npu_linebuf_precompute.py`; each descriptor contains the full
-`systolic_linebuf_cfg_t`, `systolic_gemm32_req_t`, row count, and K-tile count.
-Firmware stores descriptor pointer/count in `npu_layer_t` and calls
+`npu_conv2d_linebuf_job_desc_t` arrays delivered through a runtime L2 descriptor
+manifest plus descriptor blobs. `tools/npu_linebuf_precompute.py` emits each
+descriptor with the full `systolic_linebuf_cfg_t`, `systolic_gemm32_req_t`, row
+count, and K-tile count. The host writes the manifest and blobs to L2, firmware
+DMA-copies them into scratch/TCDM, stores descriptor pointer/count in
+`npu_layer_t`, and calls
 `npu_conv2d_packed_run_linebuf_job_descs()`. That runner preloads the next
 linebuffer/GEMM shadow registers while the current job is running, so Snitch
 does not rebuild tile config in the critical graph path. The more general
 L2-resident command-stream flow through `npu_cmd_ctrl` remains the intended
-model-level host interface; Micro-YOLO currently uses generated C descriptors
-linked into D-TCM for verification.
+model-level host interface; Micro-YOLO now exercises the same host-owned
+descriptor delivery model at operator-descriptor granularity.
 
 Detailed architecture, requirements, and pseudo-code are tracked in
 [`conv2d_packed_systolic_plan.md`](conv2d_packed_systolic_plan.md).

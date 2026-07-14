@@ -1,6 +1,8 @@
 import logging
 import math
 import os
+import sys
+from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
@@ -16,6 +18,17 @@ from npu_test_utils import (
     reset_dut,
     wait_for_host_irq,
     write_l2_bytes,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[5]
+TOOLS_DIR = REPO_ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from npu_linebuf_precompute import (
+    MICRO_YOLO_DESC_L2_BASE,
+    micro_yolo_descriptor_blobs,
+    micro_yolo_descriptor_manifest,
 )
 
 
@@ -60,6 +73,26 @@ OP_NAMES = {
     16: "UPSAMPLE_NEAREST2X_I8",
     17: "CONV3x3s1_C32x2_LB_RQ_L2",
 }
+
+
+def tile_env(name, default=16):
+    return int(os.getenv(name, str(default)))
+
+
+def micro_yolo_linebuf_blobs():
+    return micro_yolo_descriptor_blobs(
+        c2f_tile_oh=tile_env("MICRO_YOLO_C2F_TILE_OH"),
+        c2f_tile_ow=tile_env("MICRO_YOLO_C2F_TILE_OW"),
+        down_tile_oh=tile_env("MICRO_YOLO_DOWN_TILE_OH"),
+        down_tile_ow=tile_env("MICRO_YOLO_DOWN_TILE_OW"),
+        head_tile_oh=tile_env("MICRO_YOLO_HEAD_TILE_OH"),
+        head_tile_ow=tile_env("MICRO_YOLO_HEAD_TILE_OW"),
+    )
+
+
+def micro_yolo_linebuf_manifest_and_blobs():
+    blobs = micro_yolo_linebuf_blobs()
+    return micro_yolo_descriptor_manifest(blobs), blobs
 
 
 def pmu_direct_snapshot(dut):
@@ -357,6 +390,22 @@ async def test_micro_yolo_e2e(dut):
     await write_l2_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
     await write_l2_bytes(dut, L2_WEIGHT2, [to_u8(value) for value in weight2])
     await write_l2_bytes(dut, L2_WEIGHT3, [to_u8(value) for value in weight3])
+    linebuf_manifest, linebuf_blobs = micro_yolo_linebuf_manifest_and_blobs()
+    dut._log.info(
+        "Writing Micro-YOLO linebuffer descriptor manifest: addr=0x%08x bytes=%d",
+        MICRO_YOLO_DESC_L2_BASE,
+        len(linebuf_manifest),
+    )
+    await write_l2_bytes(dut, MICRO_YOLO_DESC_L2_BASE, list(linebuf_manifest))
+    for blob in linebuf_blobs:
+        dut._log.info(
+            "Writing Micro-YOLO linebuffer descriptor blob %s: addr=0x%08x count=%d bytes=%d",
+            blob.name,
+            blob.l2_addr,
+            blob.count,
+            len(blob.data),
+        )
+        await write_l2_bytes(dut, blob.l2_addr, list(blob.data))
     await load_firmware_elf_axi(dut, axi_master, fw_path)
     await release_fetch(dut, axi_master=axi_master)
     step_pmu_task = cocotb.start_soon(monitor_step_pmu(dut, timeout_cycles))
@@ -376,6 +425,14 @@ async def test_micro_yolo_e2e(dut):
             f"op={read_dtcm_word(dut, DTCM_OP)} "
             f"event={read_dtcm_word(dut, DTCM_EVENT)}"
         ) from exc
+    status = read_dtcm_word(dut, DTCM_STATUS)
+    assert status == 0xDEADBEEF, (
+        f"micro-YOLO firmware failed: status=0x{status:08x} "
+        f"fail=0x{read_dtcm_word(dut, DTCM_FAIL_CODE):08x} "
+        f"layer={read_dtcm_word(dut, DTCM_LAYER)} "
+        f"op={read_dtcm_word(dut, DTCM_OP)} "
+        f"event={read_dtcm_word(dut, DTCM_EVENT)}"
+    )
     step_pmu_lines = await step_pmu_task
     dut._log.info("test_micro_yolo_e2e per-layer PMU:\n  %s", "\n  ".join(step_pmu_lines))
 

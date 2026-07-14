@@ -193,12 +193,14 @@ driver.
 
 Current implemented Micro-YOLO path:
 
-- `tools/npu_linebuf_precompute.py` generates a C header at firmware build time,
-  not an L2 command stream yet.
-- The generated header contains `npu_conv2d_linebuf_job_desc_t` arrays. Each
-  entry is a fully resolved linebuffer/GEMM job: `systolic_linebuf_cfg_t`,
+- `tools/npu_linebuf_precompute.py` generates a runtime descriptor manifest plus
+  binary descriptor blobs in the host/Python flow.
+- The host writes the manifest and blobs to L2, and firmware DMA-copies them
+  into scratch/TCDM before graph setup.
+- Each blob contains `npu_conv2d_linebuf_job_desc_t` arrays. Each entry is a
+  fully resolved linebuffer/GEMM job: `systolic_linebuf_cfg_t`,
   `systolic_gemm32_req_t`, `rows`, and `k_tiles`.
-- `sw/test/micro_yolo/main.c` attaches those arrays to `npu_layer_t` using
+- `sw/test/micro_yolo/main.c` attaches the copied arrays to `npu_layer_t` using
   descriptor pointer/count fields.
 - `sw/lib/npu_graph.c` prefers descriptor arrays when present. If a layer has
   no host descriptor, it falls back to the generic C planner.
