@@ -184,28 +184,34 @@ static uint32_t run_depthwise3x3s1p1_c32_requant(const npu_tensor_t *src,
                                                  const npu_tensor_t *dst,
                                                  const npu_tensor_t *weight,
                                                  const npu_layer_t *layer) {
-    const uint32_t channels = 32u;
-    const uint32_t weight_bytes = 3u * 3u * channels;
-    uint32_t rows;
+    uint32_t channels;
+    uint32_t groups;
+    uint32_t weight_bytes;
+
+    channels = src ? src->c : 0u;
+    groups = npu_c32_blocks(channels);
+    weight_bytes = groups * 3u * 3u * 32u;
 
     if (!tensor_is_c32_i8(src) ||
         !tensor_is_c32_i8(dst) ||
         !tensor_has_layout(weight, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
-        src->c != channels || dst->c != channels ||
+        channels == 0u ||
+        (channels & 31u) != 0u ||
+        dst->c != channels ||
         src->h != dst->h || src->w != dst->w ||
         weight->bytes < weight_bytes) {
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
 
-    rows = (uint32_t)dst->h * dst->w;
-    if (src->bytes < npu_tensor_row32_bytes(rows) ||
-        dst->bytes < npu_tensor_row32_bytes(rows)) {
+    if (src->bytes < npu_tensor_c32_bytes((uint32_t)src->h, (uint32_t)src->w, channels) ||
+        dst->bytes < npu_tensor_c32_bytes((uint32_t)dst->h, (uint32_t)dst->w, channels)) {
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
 
     configure_uniform_requant(layer);
-    systolic_depthwise3x3s1p1_c32_requant(src->addr, weight->addr, dst->addr,
-                                          (uint32_t)src->h, (uint32_t)src->w);
+    systolic_depthwise3x3s1p1_c32_requant_channels(src->addr, weight->addr, dst->addr,
+                                                   (uint32_t)src->h, (uint32_t)src->w,
+                                                   channels);
     systolic_requant_disable();
     return NPU_GRAPH_OK;
 }

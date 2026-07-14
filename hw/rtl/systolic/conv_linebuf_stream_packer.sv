@@ -39,6 +39,7 @@ module conv_linebuf_stream_packer #(
     input  logic                      cfg_kgen_i,
     input  logic                      cfg_pool_i,
     input  logic                      cfg_c32_fast_i,
+    input  logic                      cfg_depthwise_i,
     input  logic [5:0]                cfg_block_valid_bytes_i,
     input  logic [31:0]               cfg_channel_addr_offset_i,
     input  logic [31:0]               cfg_coalesce_k_bytes_i,
@@ -505,7 +506,7 @@ module conv_linebuf_stream_packer #(
                                   (cfg_k_tiles_i > 32'd1) &&
                                   (cfg_input_h_i <= K_MAX[15:0]);
             row_cache_reuse = row_cache_full_q && (cfg_c_base_i == cached_c_base_q);
-            row_ring_mode = cfg_coalesce_i && cfg_kgen_i &&
+            row_ring_mode = (cfg_depthwise_i || (cfg_coalesce_i && cfg_kgen_i)) &&
                             !row_cache_full_q &&
                             (cfg_kernel_h_i <= K_MAX[15:0]) &&
                             (cfg_kernel_w_i <= K_MAX[15:0]) &&

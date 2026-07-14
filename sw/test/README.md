@@ -10,7 +10,7 @@ as test firmware.
 |-----------|----------|--------|
 | `boot` | `boot.bin` | Snitch boot, AXI I-TCM load, host IRQ signature, iDMA MMIO smoke |
 | `conv_perf` | `conv_perf.bin` | P0/P1 packed Conv2D scheduler using iDMA/RVV prepare with cycle stats written to L2 |
-| `depthwise_conv` | `depthwise_conv.bin` | Graph-level DepthwiseConv3x3 S1 P1 C32 fast path over `1x32x48x48` C32-blocked input |
+| `depthwise_conv` | `depthwise_conv.bin`, `depthwise_conv_c64.bin` | Graph-level DepthwiseConv3x3 S1 P1 linebuffer fast path over C32-blocked input; covers `1x32x48x48` and one-start C64 group iteration |
 | `independent_memory` | `independent_memory.bin` | L2 fixtures, iDMA 1D/2D/3D, TCDM bank/boundary decode |
 | `independent_systolic` | `independent_systolic.bin` | HAL GEMM32 for boundary `M` sizes with full INT32 output compare |
 | `matmul` | `matmul.bin` | Raw systolic register path with M=64 cocotb regression |
