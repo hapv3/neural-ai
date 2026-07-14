@@ -8,6 +8,14 @@ static inline void afu_load_lut_entry(uint32_t index, uint32_t value) {
     REG_WRITE(NPU_AFU_LUT_BASE + (index * 4u), value);
 }
 
+static inline void afu_load_dfl_exp_lut_entry(uint32_t index, uint32_t value) {
+    REG_WRITE(NPU_AFU_DFL_EXP_LUT_BASE + (index * 4u), value);
+}
+
+static inline void afu_load_dfl_recip_lut_entry(uint32_t index, uint32_t value) {
+    REG_WRITE(NPU_AFU_DFL_RECIP_LUT_BASE + (index * 4u), value);
+}
+
 static inline void afu_load_lut(const uint32_t *lut, uint32_t entries) {
     for (uint32_t i = 0; i < entries; i++) {
         afu_load_lut_entry(i, lut[i]);

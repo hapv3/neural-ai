@@ -1,3 +1,4 @@
+import inspect
 import logging
 
 import cocotb
@@ -9,10 +10,12 @@ from npu_test_utils import (
     firmware_path,
     load_firmware_axi,
     read_dtcm_word,
+    read_l2_bytes,
     read_tcdm_byte,
     release_fetch,
     reset_dut,
     wait_for_host_irq,
+    write_l2_bytes,
 )
 
 
@@ -41,6 +44,12 @@ MUL_Q7_DST = 0x1012C000
 ADD_FULL_LHS = MUL_Q7_LHS
 ADD_FULL_RHS = MUL_Q7_RHS
 ADD_FULL_DST = MUL_Q7_DST
+DFL_DST = 0x10151000
+DFL_ROW32_DST = 0x10156000
+L2_DFL_ROW32_SRC = 0x80070000
+L2_DFL_EXP_LUT32 = 0x80071000
+L2_DFL_RECIP_LUT = 0x80071400
+L2_DFL_ROW32_DST = 0x80072000
 
 VL = 32
 LOG_FULL_H = 48
@@ -60,6 +69,10 @@ UP_SCALE = 2
 CONCAT_H = 2
 CONCAT_W = 3
 CONCAT_PIXELS = CONCAT_H * CONCAT_W
+DFL_LOCATIONS = 17
+DFL_FUSED_LOCATIONS = 64
+DFL_SIDES = 4
+DFL_REG_MAX = 4
 
 
 def as_i8(value):
@@ -137,6 +150,78 @@ def expected_pool_value(oh, ow, c):
 
 def up_input_value(h, w, c):
     return h * 17 + w * 9 + c * 3 - 20
+
+
+def read_tcdm_u16(dut, addr):
+    lo = read_tcdm_byte(dut, addr)
+    hi = read_tcdm_byte(dut, addr + 1)
+    return lo | (hi << 8)
+
+
+def dfl_exp_lut_value(index):
+    if index == 0:
+        return 32768
+    neg_delta = 256 - index
+    shift = neg_delta >> 4
+    frac = neg_delta & 15
+    base = 1 if shift >= 15 else 32768 >> shift
+    next_value = base >> 1 if base > 1 else 1
+    value = ((base * (16 - frac)) + (next_value * frac) + 8) >> 4
+    return value or 1
+
+
+def dfl_input_value(loc, channel):
+    return ((loc * 37 + channel * 19 + 11) & 0xFF) - 128
+
+
+def dfl_delta_index(value, max_value):
+    return (value - max_value) & 0xFF
+
+
+def dfl_expected_value(loc, side):
+    base_channel = side * DFL_REG_MAX
+    values = [dfl_input_value(loc, base_channel + bin_idx) for bin_idx in range(DFL_REG_MAX)]
+    max_value = max(values)
+    exp_values = [dfl_exp_lut_value(dfl_delta_index(value, max_value)) for value in values]
+    total = sum(exp_values)
+    weighted = sum(bin_idx * exp_values[bin_idx] for bin_idx in range(DFL_REG_MAX))
+    return ((weighted << 8) + (total >> 1)) // total
+
+
+def dfl_recip_lut_value(index):
+    midpoint_q9 = 512 + (index * 2) + 1
+    return ((1 << 37) + (midpoint_q9 >> 1)) // midpoint_q9
+
+
+def dfl_recip_index_from_sum(total):
+    shift = total.bit_length() - 1
+    norm_q8 = (total << 8) >> shift
+    if norm_q8 < 256:
+        return 0
+    if norm_q8 > 511:
+        return 255
+    return norm_q8 & 0xFF
+
+
+def dfl_expected_fused_value(loc, side):
+    base_channel = side * DFL_REG_MAX
+    values = [dfl_input_value(loc, base_channel + bin_idx) for bin_idx in range(DFL_REG_MAX)]
+    max_value = max(values)
+    exp_values = [dfl_exp_lut_value(dfl_delta_index(value, max_value)) for value in values]
+    total = sum(exp_values)
+    weighted = sum(bin_idx * exp_values[bin_idx] for bin_idx in range(DFL_REG_MAX))
+    shift = total.bit_length() - 1
+    recip = dfl_recip_lut_value(dfl_recip_index_from_sum(total))
+    total_shift = 28 + shift
+    rounded = (((weighted << 8) * recip) + (1 << (total_shift - 1))) >> total_shift
+    return min(rounded, 0xFFFF)
+
+
+def pack_u32_le(values):
+    data = []
+    for value in values:
+        data.extend([(value >> shift) & 0xFF for shift in (0, 8, 16, 24)])
+    return data
 
 
 def check_status(dut, expected_pass_count):
@@ -343,6 +428,44 @@ def check_concat(dut):
             assert got == expected, f"concat_c32[{idx}] got={got} expected={expected}"
 
 
+def check_dfl(dut):
+    for loc in range(DFL_LOCATIONS):
+        for side in range(DFL_SIDES):
+            idx = loc * DFL_SIDES + side
+            expected = dfl_expected_value(loc, side)
+            got = read_tcdm_u16(dut, DFL_DST + idx * 2)
+            assert got == expected, f"dfl_q8[{idx}] got={got} expected={expected}"
+
+
+async def preload_dfl_fused_l2(dut):
+    src = []
+    for loc in range(DFL_FUSED_LOCATIONS):
+        for channel in range(32):
+            value = dfl_input_value(loc, channel) if channel < 16 else loc + channel
+            src.append(value & 0xFF)
+
+    await write_l2_bytes(dut, L2_DFL_ROW32_SRC, src)
+    await write_l2_bytes(
+        dut, L2_DFL_EXP_LUT32, pack_u32_le(dfl_exp_lut_value(i) for i in range(256))
+    )
+    await write_l2_bytes(
+        dut, L2_DFL_RECIP_LUT, pack_u32_le(dfl_recip_lut_value(i) for i in range(256))
+    )
+    await write_l2_bytes(dut, L2_DFL_ROW32_DST, [0] * (DFL_FUSED_LOCATIONS * DFL_SIDES * 2))
+
+
+async def check_dfl_fused(dut):
+    data = await read_l2_bytes(dut, L2_DFL_ROW32_DST, DFL_FUSED_LOCATIONS * DFL_SIDES * 2)
+    for loc in range(DFL_FUSED_LOCATIONS):
+        for side in range(DFL_SIDES):
+            idx = loc * DFL_SIDES + side
+            expected = dfl_expected_fused_value(loc, side)
+            got = data[idx * 2] | (data[(idx * 2) + 1] << 8)
+            assert got == expected, (
+                f"dfl_fused_q8[{idx}] got={got} expected={expected}"
+            )
+
+
 def check_all(dut):
     check_copy(dut)
     check_relu(dut)
@@ -494,7 +617,9 @@ async def run_firmware_case(
             f"frontend_s_rvalid={frontend_s_rvalid} frontend_s_rdata={fmt_opt_hex(frontend_s_rdata)}"
         ) from exc
     check_status(dut, expected_pass_count)
-    checker(dut)
+    check_result = checker(dut)
+    if inspect.isawaitable(check_result):
+        await check_result
 
 
 @cocotb.test()
@@ -595,4 +720,24 @@ async def test_spatz_op_upsample(dut):
 async def test_spatz_op_concat(dut):
     await run_firmware_case(
         dut, "spatz_ops_concat.bin", "test_spatz_op_concat", 1, check_concat
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_dfl(dut):
+    await run_firmware_case(
+        dut, "spatz_ops_dfl.bin", "test_spatz_op_dfl", 1, check_dfl
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_dfl_fused(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_dfl_fused.bin",
+        "test_spatz_op_dfl_fused",
+        1,
+        check_dfl_fused,
+        timeout_cycles=200000,
+        pre_release=preload_dfl_fused_l2,
     )

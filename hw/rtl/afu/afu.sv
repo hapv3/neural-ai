@@ -57,6 +57,8 @@ module afu #(
     logic [7:0]  lut_addr;
     logic [31:0] lut_wdata;
     logic [3:0]  lut_be;
+    logic        lut_fixed_bank;
+    logic        lut_bank;
     
     // Read FIFO interface
     logic rfifo_full, rfifo_almost_full, rfifo_empty;
@@ -104,6 +106,8 @@ module afu #(
         .lut_addr_o     (lut_addr),
         .lut_wdata_o    (lut_wdata),
         .lut_be_o       (lut_be),
+        .lut_fixed_bank_o(lut_fixed_bank),
+        .lut_bank_o      (lut_bank),
         .afu_done_i     (done_o),
         .afu_busy_i     (core_busy || !backend_idle),
         .afu_error_i    (afu_error)
@@ -168,6 +172,8 @@ module afu #(
         .lut_addr_i     (lut_addr),
         .lut_wdata_i    (lut_wdata),
         .lut_be_i       (lut_be),
+        .lut_fixed_bank_i(lut_fixed_bank),
+        .lut_bank_i      (lut_bank),
         .rfifo_empty_i  (rfifo_empty),
         .rfifo_pop_o    (rfifo_pop),
         .rfifo_data_i   (rfifo_rdata),

@@ -20,6 +20,8 @@ module afu_core #(
     input  logic [7:0]   lut_addr_i,
     input  logic [31:0]  lut_wdata_i,
     input  logic [3:0]   lut_be_i,
+    input  logic         lut_fixed_bank_i,
+    input  logic         lut_bank_i,
 
     // Read FIFO
     input  logic         rfifo_empty_i,
@@ -45,12 +47,17 @@ module afu_core #(
     localparam logic [2:0] MODE_32BIT = 3'd2;
     localparam logic [2:0] MODE_MUL_Q7 = 3'd3;
     localparam logic [2:0] MODE_ADD_I8 = 3'd4;
+    localparam logic [2:0] MODE_DFL4_ROW32_Q8 = 3'd5;
 
-    typedef enum logic [2:0] {
+    typedef enum logic [3:0] {
         ST_IDLE,
         ST_READ_IN,
         ST_PROCESS,
         ST_WAIT_FLUSH,
+        ST_DFL_EXP_REQ,
+        ST_DFL_EXP_WAIT,
+        ST_DFL_RECIP_WAIT,
+        ST_DFL_PUSH,
         ST_DONE
     } state_e;
 
@@ -108,6 +115,27 @@ module afu_core #(
     logic        active_lut_bank_q;
     logic        stage_lut_bank_q;
     logic        lut_pending_q;
+    logic        dfl_exp_req;
+    logic        dfl_recip_req;
+    logic [7:0]  dfl_exp_idx [LUT_LANES];
+    logic [7:0]  dfl_recip_idx;
+    logic [1:0]  dfl_side_q, dfl_side_n;
+    logic [17:0] dfl_sum_q, dfl_sum_n;
+    logic [18:0] dfl_weighted_q, dfl_weighted_n;
+    logic [4:0]  dfl_shift_q, dfl_shift_n;
+    logic signed [7:0] dfl_s1_max_value;
+    logic [17:0] dfl_s1_sum_value;
+    logic [18:0] dfl_s1_weighted_value;
+    logic [31:0] dfl_s1_next_elem_cnt;
+    logic [31:0] dfl_s1_next_dst_addr;
+    logic        dfl_s1_flush_output;
+    logic        dfl_s1_final_location;
+    logic [15:0] dfl_s2_out_value;
+    logic [4:0]  dfl_s2_out_off;
+    logic        dfl_s2_final_location;
+    logic [31:0] dfl_s2_next_elem_cnt;
+    logic [31:0] dfl_s2_next_dst_addr;
+    logic        dfl_s2_flush_output;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -118,7 +146,7 @@ module afu_core #(
             if (lut_we_i) begin
                 lut_pending_q <= 1'b1;
             end
-            if (cfg_start_i && lut_pending_q) begin
+            if (cfg_start_i && lut_pending_q && cfg_mode_i != MODE_DFL4_ROW32_Q8) begin
                 active_lut_bank_q <= stage_lut_bank_q;
                 stage_lut_bank_q <= ~stage_lut_bank_q;
                 lut_pending_q <= 1'b0;
@@ -198,6 +226,85 @@ module afu_core #(
         end
     endfunction
 
+    function automatic logic [7:0] select_dfl_byte(
+        input logic [255:0] data,
+        input logic [1:0] side,
+        input logic [1:0] bin
+    );
+        logic [5:0] byte_idx;
+        begin
+            byte_idx = ({4'd0, side} * 6'd4) + {4'd0, bin};
+            select_dfl_byte = data[byte_idx * 8 +: 8];
+        end
+    endfunction
+
+    function automatic logic signed [7:0] max4_i8(
+        input logic [7:0] a,
+        input logic [7:0] b,
+        input logic [7:0] c,
+        input logic [7:0] d
+    );
+        logic signed [7:0] ma;
+        begin
+            ma = $signed(a);
+            if ($signed(b) > ma) ma = $signed(b);
+            if ($signed(c) > ma) ma = $signed(c);
+            if ($signed(d) > ma) ma = $signed(d);
+            max4_i8 = ma;
+        end
+    endfunction
+
+    function automatic logic [4:0] msb_pos18(input logic [17:0] value);
+        logic [4:0] pos;
+        begin
+            pos = 5'd0;
+            for (int i = 0; i < 18; i++) begin
+                if (value[i]) pos = 5'(i);
+            end
+            msb_pos18 = pos;
+        end
+    endfunction
+
+    function automatic logic [7:0] recip_index_from_sum(input logic [17:0] sum);
+        logic [4:0]  shift;
+        logic [25:0] shifted;
+        logic [8:0]  norm_q8;
+        begin
+            shift = msb_pos18(sum);
+            shifted = {8'd0, sum} << 8;
+            norm_q8 = shifted >> shift;
+            if (norm_q8 < 9'd256) begin
+                recip_index_from_sum = 8'd0;
+            end else if (norm_q8 > 9'd511) begin
+                recip_index_from_sum = 8'd255;
+            end else begin
+                recip_index_from_sum = norm_q8[7:0];
+            end
+        end
+    endfunction
+
+    function automatic logic [15:0] dfl_q8_from_recip(
+        input logic [18:0] weighted,
+        input logic [31:0] recip_q28,
+        input logic [4:0]  sum_shift
+    );
+        logic [63:0] product;
+        logic [63:0] rounded;
+        logic [5:0]  total_shift;
+        logic [63:0] round_add;
+        begin
+            product = ({37'd0, weighted} << 8) * {32'd0, recip_q28};
+            total_shift = 6'd28 + {1'b0, sum_shift};
+            round_add = 64'd1 << (total_shift - 6'd1);
+            rounded = (product + round_add) >> total_shift;
+            if (rounded > 64'hFFFF) begin
+                dfl_q8_from_recip = 16'hFFFF;
+            end else begin
+                dfl_q8_from_recip = rounded[15:0];
+            end
+        end
+    endfunction
+
     generate
         for (genvar i = 0; i < LUT_LANES; i++) begin : gen_lut_sram
             assign lut_byte_idx_s1[i] = {1'b0, in_off_s1} + 6'(i);
@@ -213,10 +320,11 @@ module afu_core #(
             ) i_lut_sram_bank0 (
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),
-                .req_i   ({s1_sram_req && !active_lut_bank_q,
-                           lut_we_i && !stage_lut_bank_q}),
+                .req_i   ({(dfl_exp_req && i < 4) || (s1_sram_req && !active_lut_bank_q),
+                           lut_we_i && ((lut_fixed_bank_i && !lut_bank_i) ||
+                                        (!lut_fixed_bank_i && !stage_lut_bank_q))}),
                 .we_i    ({1'b0,        1'b1}),
-                .addr_i  ({lut_idx_s1[i], lut_addr_i}),
+                .addr_i  ({dfl_exp_req ? dfl_exp_idx[i] : lut_idx_s1[i], lut_addr_i}),
                 .wdata_i ({32'd0,       lut_wdata_i}),
                 .be_i    ({4'b1111,     lut_be_i}),
                 .rdata_o ({lut_rdata_bank0[i], lut_rdata_dummy_bank0[i]})
@@ -230,10 +338,11 @@ module afu_core #(
             ) i_lut_sram_bank1 (
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),
-                .req_i   ({s1_sram_req && active_lut_bank_q,
-                           lut_we_i && stage_lut_bank_q}),
+                .req_i   ({(dfl_recip_req && i == 0) || (s1_sram_req && active_lut_bank_q),
+                           lut_we_i && ((lut_fixed_bank_i && lut_bank_i) ||
+                                        (!lut_fixed_bank_i && stage_lut_bank_q))}),
                 .we_i    ({1'b0,        1'b1}),
-                .addr_i  ({lut_idx_s1[i], lut_addr_i}),
+                .addr_i  ({dfl_recip_req && i == 0 ? dfl_recip_idx : lut_idx_s1[i], lut_addr_i}),
                 .wdata_i ({32'd0,       lut_wdata_i}),
                 .be_i    ({4'b1111,     lut_be_i}),
                 .rdata_o ({lut_rdata_bank1[i], lut_rdata_dummy_bank1[i]})
@@ -265,6 +374,23 @@ module afu_core #(
         p1_src_addr_n = src_addr_q;
         p1_rhs_addr_n = rhs_addr_q;
         p1_dst_addr_n = dst_addr_q;
+        dfl_side_n = dfl_side_q;
+        dfl_sum_n = dfl_sum_q;
+        dfl_weighted_n = dfl_weighted_q;
+        dfl_shift_n = dfl_shift_q;
+        dfl_exp_req = 1'b0;
+        dfl_recip_req = 1'b0;
+        dfl_recip_idx = 8'd0;
+        dfl_s1_max_value = '0;
+        dfl_s1_sum_value = '0;
+        dfl_s1_weighted_value = '0;
+        dfl_s1_next_elem_cnt = '0;
+        dfl_s1_next_dst_addr = '0;
+        dfl_s1_flush_output = 1'b0;
+        dfl_s1_final_location = 1'b0;
+        for (int i = 0; i < LUT_LANES; i++) begin
+            dfl_exp_idx[i] = 8'd0;
+        end
 
         remaining_elems = '0;
         in_avail = '0;
@@ -282,6 +408,10 @@ module afu_core #(
             src_addr_n = cfg_src_ptr_i;
             rhs_addr_n = cfg_src2_ptr_i;
             dst_addr_n = cfg_dst_ptr_i;
+            dfl_side_n = 2'd0;
+            dfl_sum_n = '0;
+            dfl_weighted_n = '0;
+            dfl_shift_n = '0;
             if (cfg_length_i == 0) begin
                 state_n = ST_DONE;
             end else begin
@@ -305,7 +435,75 @@ module afu_core #(
                 end else if (!rfifo_empty_i) begin
                     in_buf_n = rfifo_data_i;
                     rfifo_pop_o = 1'b1;
-                    state_n = ST_PROCESS;
+                    state_n = (cfg_mode_i == MODE_DFL4_ROW32_Q8) ? ST_DFL_EXP_REQ : ST_PROCESS;
+                end
+            end
+
+            ST_DFL_EXP_REQ: begin
+                dfl_s1_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_side_q, 2'd0),
+                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd1),
+                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd2),
+                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd3));
+                for (int i = 0; i < LUT_LANES; i++) begin
+                    dfl_exp_idx[i] = select_dfl_byte(in_buf_q, dfl_side_q, 2'(i)) - dfl_s1_max_value[7:0];
+                end
+                dfl_exp_req = 1'b1;
+                state_n = ST_DFL_EXP_WAIT;
+            end
+
+            ST_DFL_EXP_WAIT: begin
+                dfl_s1_sum_value = {2'd0, lut_rdata_bank0[0][15:0]} +
+                                   {2'd0, lut_rdata_bank0[1][15:0]} +
+                                   {2'd0, lut_rdata_bank0[2][15:0]} +
+                                   {2'd0, lut_rdata_bank0[3][15:0]};
+                dfl_s1_weighted_value = {3'd0, lut_rdata_bank0[1][15:0]} +
+                                        ({2'd0, lut_rdata_bank0[2][15:0]} << 1) +
+                                        ({2'd0, lut_rdata_bank0[3][15:0]} * 19'd3);
+                dfl_sum_n = dfl_s1_sum_value;
+                dfl_weighted_n = dfl_s1_weighted_value;
+                dfl_shift_n = msb_pos18(dfl_s1_sum_value);
+                dfl_recip_idx = recip_index_from_sum(dfl_s1_sum_value);
+                dfl_recip_req = 1'b1;
+                state_n = ST_DFL_RECIP_WAIT;
+            end
+
+            ST_DFL_RECIP_WAIT: begin
+                dfl_s1_final_location = (dfl_side_q == 2'd3);
+                dfl_s1_next_elem_cnt = elem_cnt_q + (dfl_s1_final_location ? 32'd32 : 32'd0);
+                dfl_s1_next_dst_addr = dst_addr_q + (dfl_s1_final_location ? 32'd8 : 32'd0);
+                dfl_s1_flush_output = dfl_s1_final_location &&
+                                      ((dfl_s1_next_dst_addr[4:0] == 5'd0) ||
+                                       (dfl_s1_next_elem_cnt >= cfg_length_i));
+
+                if (dfl_s1_flush_output && wfifo_full_i) begin
+                    elem_cnt_n = dfl_s1_next_elem_cnt;
+                    dst_addr_n = dfl_s1_next_dst_addr;
+                    dfl_side_n = 2'd0;
+                    state_n = ST_DFL_PUSH;
+                end else begin
+                    if (dfl_s1_final_location) begin
+                        elem_cnt_n = dfl_s1_next_elem_cnt;
+                        dst_addr_n = dfl_s1_next_dst_addr;
+                        dfl_side_n = 2'd0;
+                        if (dfl_s1_next_elem_cnt >= cfg_length_i) begin
+                            state_n = ST_DONE;
+                        end else begin
+                            state_n = ST_READ_IN;
+                        end
+                    end else begin
+                        dfl_side_n = dfl_side_q + 2'd1;
+                        state_n = ST_DFL_EXP_REQ;
+                    end
+                end
+            end
+
+            ST_DFL_PUSH: begin
+                if (!wfifo_full_i) begin
+                    if (elem_cnt_q >= cfg_length_i) begin
+                        state_n = ST_DONE;
+                    end else begin
+                        state_n = ST_READ_IN;
+                    end
                 end
             end
 
@@ -438,6 +636,12 @@ module afu_core #(
         logic [4:0]  cur_out_off;
         lut_val = '0;
         cur_out_off = '0;
+        dfl_s2_out_value = '0;
+        dfl_s2_out_off = '0;
+        dfl_s2_final_location = 1'b0;
+        dfl_s2_next_elem_cnt = '0;
+        dfl_s2_next_dst_addr = '0;
+        dfl_s2_flush_output = 1'b0;
         
         s2_flush_mid_completed = 1'b0;
         s2_flush_done_completed = 1'b0;
@@ -453,6 +657,35 @@ module afu_core #(
             out_base_n = cfg_dst_ptr_i;
             out_buf_n  = '0;
             out_be_n   = '0;
+        end else if (state_q == ST_DFL_RECIP_WAIT) begin
+            dfl_s2_out_value = dfl_q8_from_recip(dfl_weighted_q, lut_rdata_bank1[0], dfl_shift_q);
+            dfl_s2_out_off = dst_addr_q[4:0] + {2'd0, dfl_side_q, 1'b0};
+            dfl_s2_final_location = (dfl_side_q == 2'd3);
+            dfl_s2_next_elem_cnt = elem_cnt_q + (dfl_s2_final_location ? 32'd32 : 32'd0);
+            dfl_s2_next_dst_addr = dst_addr_q + (dfl_s2_final_location ? 32'd8 : 32'd0);
+            dfl_s2_flush_output = dfl_s2_final_location &&
+                                  ((dfl_s2_next_dst_addr[4:0] == 5'd0) ||
+                                   (dfl_s2_next_elem_cnt >= cfg_length_i));
+
+            s2_out_buf_comb = out_buf_q;
+            s2_out_be_comb = out_be_q;
+            s2_out_buf_comb[dfl_s2_out_off * 8 +: 16] = dfl_s2_out_value;
+            s2_out_be_comb[dfl_s2_out_off +: 2] = 2'b11;
+
+            if (dfl_s2_flush_output && !wfifo_full_i) begin
+                wfifo_push_o = 1'b1;
+                out_buf_n = '0;
+                out_be_n = '0;
+            end else begin
+                out_buf_n = s2_out_buf_comb;
+                out_be_n = s2_out_be_comb;
+            end
+        end else if (state_q == ST_DFL_PUSH) begin
+            if (!wfifo_full_i) begin
+                wfifo_push_o = 1'b1;
+                out_buf_n = '0;
+                out_be_n = '0;
+            end
         end else if (p1_valid_q && !s2_stall) begin
             // Process lanes directly into combinational buffer
             if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
@@ -527,6 +760,10 @@ module afu_core #(
             out_base_q <= '0;
             out_buf_q  <= '0;
             out_be_q   <= '0;
+            dfl_side_q <= '0;
+            dfl_sum_q <= '0;
+            dfl_weighted_q <= '0;
+            dfl_shift_q <= '0;
             
             p1_valid_q <= 1'b0;
             p1_num_valid_lanes_q <= '0;
@@ -549,6 +786,10 @@ module afu_core #(
             out_base_q <= out_base_n;
             out_buf_q  <= out_buf_n;
             out_be_q   <= out_be_n;
+            dfl_side_q <= dfl_side_n;
+            dfl_sum_q <= dfl_sum_n;
+            dfl_weighted_q <= dfl_weighted_n;
+            dfl_shift_q <= dfl_shift_n;
 
             if (!s2_stall) begin
                 p1_valid_q <= p1_valid_n;

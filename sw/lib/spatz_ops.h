@@ -38,6 +38,18 @@ uint32_t npu_mul_q7_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                        uint32_t count);
 uint32_t npu_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                     uint32_t count);
+uint32_t spatz_dfl_softmax4_i8_q8(const int8_t *src, uint16_t *dst,
+                                  uint32_t locations,
+                                  const uint16_t *exp_lut);
+uint32_t npu_dfl_softmax4_i8_q8(const int8_t *src, uint16_t *dst,
+                                uint32_t locations,
+                                const uint16_t *exp_lut,
+                                uint8_t *delta_scratch,
+                                uint16_t *exp_scratch);
+uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
+                                      uint32_t locations,
+                                      const uint32_t *exp_lut,
+                                      const uint32_t *recip_lut);
 void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t input_h, uint32_t input_w, uint32_t channels,
                         uint32_t kernel_h, uint32_t kernel_w,

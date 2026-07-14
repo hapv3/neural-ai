@@ -39,6 +39,9 @@ L2_WEIGHT1 = 0x8000A000
 L2_WEIGHT2 = 0x8000D000
 L2_WEIGHT3 = 0x80010000
 L2_OUTPUT = 0x80020000
+L2_DFL_EXP_LUT = 0x80054000
+L2_DFL_RECIP_LUT = 0x80054400
+L2_DFL_OUTPUT = 0x80060000
 
 INPUT_H = 96
 INPUT_W = 96
@@ -52,6 +55,15 @@ DOWN_WEIGHT_BYTES = C2F_WEIGHT_BYTES
 HEAD_WEIGHT_BYTES = 2 * C2F_WEIGHT_BYTES
 LUT_BYTES = 256
 OUTPUT_BYTES = OUTPUT_H * OUTPUT_W * 32
+HEAD_CHANNELS = 32
+HEAD_BOX_CHANNELS = 16
+HEAD_CLASS_CHANNELS = HEAD_CHANNELS - HEAD_BOX_CHANNELS
+HEAD_BOX_BYTES = OUTPUT_H * OUTPUT_W * HEAD_BOX_CHANNELS
+HEAD_CLASS_BYTES = OUTPUT_H * OUTPUT_W * HEAD_CLASS_CHANNELS
+DFL_REG_MAX = 4
+DFL_SIDES = 4
+DFL_OUTPUT_VALUES = OUTPUT_H * OUTPUT_W * DFL_SIDES
+DFL_OUTPUT_BYTES = DFL_OUTPUT_VALUES * 2
 DTCM_STATUS = 0x10008000
 DTCM_FAIL_CODE = 0x10008004
 DTCM_LAYER = 0x10008008
@@ -72,6 +84,7 @@ OP_NAMES = {
     15: "MAXPOOL2D5x5s1p2_I8",
     16: "UPSAMPLE_NEAREST2X_I8",
     17: "CONV3x3s1_C32x2_LB_RQ_L2",
+    18: "DFL_SOFTMAX4_I8_Q8",
 }
 
 
@@ -321,6 +334,93 @@ def requant(values, min_val, max_val):
     return [max(min_val, min(max_val, value)) for value in values]
 
 
+def split_raw_head_box_class(raw_head):
+    assert len(raw_head) == OUTPUT_H * OUTPUT_W * HEAD_CHANNELS
+    box = []
+    cls = []
+    for pixel in range(OUTPUT_H * OUTPUT_W):
+        base = pixel * HEAD_CHANNELS
+        box.extend(raw_head[base:base + HEAD_BOX_CHANNELS])
+        cls.extend(raw_head[base + HEAD_BOX_CHANNELS:base + HEAD_CHANNELS])
+    assert len(box) == HEAD_BOX_BYTES
+    assert len(cls) == HEAD_CLASS_BYTES
+    return box, cls
+
+
+def dfl_exp_lut_value(index):
+    if index == 0:
+        return 32768
+    neg_delta = 256 - index
+    shift = neg_delta >> 4
+    frac = neg_delta & 15
+    base = 1 if shift >= 15 else 32768 >> shift
+    next_value = base >> 1 if base > 1 else 1
+    value = ((base * (16 - frac)) + (next_value * frac) + 8) >> 4
+    return value or 1
+
+
+def dfl_recip_lut_value(index):
+    midpoint_q9 = 512 + (index * 2) + 1
+    return ((1 << 37) + (midpoint_q9 >> 1)) // midpoint_q9
+
+
+def dfl_recip_index_from_sum(total):
+    shift = total.bit_length() - 1
+    norm_q8 = (total << 8) >> shift
+    if norm_q8 < 256:
+        return 0
+    if norm_q8 > 511:
+        return 255
+    return norm_q8 & 0xFF
+
+
+def pack_u32_le(values):
+    data = []
+    for value in values:
+        data.extend([
+            value & 0xFF,
+            (value >> 8) & 0xFF,
+            (value >> 16) & 0xFF,
+            (value >> 24) & 0xFF,
+        ])
+    return data
+
+
+def dfl_softmax4_q8(box_branch):
+    # Bit-exact golden for AFU fused DFL mode. This intentionally follows the
+    # reciprocal-LUT approximation and rounding in afu_core.sv rather than an
+    # ideal integer divide, so the E2E check must match 1:1.
+    assert len(box_branch) == HEAD_BOX_BYTES
+    out = []
+    for loc in range(OUTPUT_H * OUTPUT_W):
+        pixel_base = loc * HEAD_BOX_CHANNELS
+        for side in range(DFL_SIDES):
+            side_base = pixel_base + side * DFL_REG_MAX
+            logits = [to_i8(box_branch[side_base + bin_idx]) for bin_idx in range(DFL_REG_MAX)]
+            max_value = max(logits)
+            exp_values = [
+                dfl_exp_lut_value((value - max_value) & 0xFF)
+                for value in logits
+            ]
+            total = sum(exp_values)
+            weighted = sum(bin_idx * exp_values[bin_idx] for bin_idx in range(DFL_REG_MAX))
+            shift = total.bit_length() - 1
+            recip = dfl_recip_lut_value(dfl_recip_index_from_sum(total))
+            total_shift = 28 + shift
+            rounded = (((weighted << 8) * recip) + (1 << (total_shift - 1))) >> total_shift
+            out.append(min(rounded, 0xFFFF))
+    assert len(out) == DFL_OUTPUT_VALUES
+    return out
+
+
+def bytes_to_u16_le(data):
+    assert len(data) % 2 == 0
+    return [
+        data[idx] | (data[idx + 1] << 8)
+        for idx in range(0, len(data), 2)
+    ]
+
+
 def golden_micro_yolo(input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut):
     # Golden follows the current hardware graph, not an older materialized
     # concat graph. The head identity is:
@@ -376,6 +476,8 @@ async def test_micro_yolo_e2e(dut):
 
     input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut = deterministic_fixture()
     expected = golden_micro_yolo(input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut)
+    expected_box, expected_class = split_raw_head_box_class(expected)
+    expected_dfl = dfl_softmax4_q8(expected_box)
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
@@ -390,6 +492,8 @@ async def test_micro_yolo_e2e(dut):
     await write_l2_bytes(dut, L2_WEIGHT1, [to_u8(value) for value in weight1])
     await write_l2_bytes(dut, L2_WEIGHT2, [to_u8(value) for value in weight2])
     await write_l2_bytes(dut, L2_WEIGHT3, [to_u8(value) for value in weight3])
+    await write_l2_bytes(dut, L2_DFL_EXP_LUT, pack_u32_le(dfl_exp_lut_value(i) for i in range(256)))
+    await write_l2_bytes(dut, L2_DFL_RECIP_LUT, pack_u32_le(dfl_recip_lut_value(i) for i in range(256)))
     linebuf_manifest, linebuf_blobs = micro_yolo_linebuf_manifest_and_blobs()
     dut._log.info(
         "Writing Micro-YOLO linebuffer descriptor manifest: addr=0x%08x bytes=%d",
@@ -441,4 +545,22 @@ async def test_micro_yolo_e2e(dut):
         assert got_byte == exp_byte, (
             f"micro-YOLO output mismatch idx={idx}: "
             f"got={to_i8(got_byte)} expected={to_i8(exp_byte)}"
+        )
+    got_box, got_class = split_raw_head_box_class(got)
+    got_dfl_bytes = await read_l2_bytes(dut, L2_DFL_OUTPUT, DFL_OUTPUT_BYTES)
+    got_dfl = bytes_to_u16_le(got_dfl_bytes)
+    for idx, (got_byte, exp_byte) in enumerate(zip(got_box, expected_box)):
+        assert got_byte == exp_byte, (
+            f"micro-YOLO box branch mismatch idx={idx}: "
+            f"got={to_i8(got_byte)} expected={to_i8(exp_byte)}"
+        )
+    for idx, (got_byte, exp_byte) in enumerate(zip(got_class, expected_class)):
+        assert got_byte == exp_byte, (
+            f"micro-YOLO class branch mismatch idx={idx}: "
+            f"got={to_i8(got_byte)} expected={to_i8(exp_byte)}"
+        )
+    for idx, (got_value, exp_value) in enumerate(zip(got_dfl, expected_dfl)):
+        assert got_value == exp_value, (
+            f"micro-YOLO DFL q8 mismatch idx={idx}: "
+            f"got={got_value} expected={exp_value}"
         )

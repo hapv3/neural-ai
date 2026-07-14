@@ -3,7 +3,7 @@
 This directory contains the active Micro-YOLO raw-head firmware used by
 `test_micro_yolo_e2e.py`.
 
-Current checkpoint: **Phase 3j**
+Current checkpoint: **Phase 4a**
 
 The firmware no longer represents older intermediate checkpoints such as
 Conv-only, SiLU-only, MaxPool-only, or materialized Concat. Those phases are
@@ -26,6 +26,7 @@ Logical model:
   -> logical Concat with preserved SiLU branch
   -> Head_Conv 3x3/s1/p1 C64->C32
   -> 48x48x32 INT8 raw-head output in L2
+  -> logical Box/Class branch split for postprocess validation
 ```
 
 Implementation detail: the Concat tensor is **not materialized**. The graph
@@ -37,6 +38,28 @@ Conv([upsample, skip], W) = Conv(upsample, W[0:32]) + Conv(skip, W[32:64])
 
 Layer 16 runs the first C32 chunk into INT32 psum, then runs the second C32
 chunk with accumulate + systolic requant and writes the INT8 output tile to L2.
+
+Phase 4a defines the raw-head postprocess ABI without adding a materialized
+firmware split operator yet:
+
+| Branch | Channel range | Shape |
+|---|---:|---|
+| Box / DFL logits | `0..15` | `48x48x16` INT8 |
+| Class logits | `16..31` | `48x48x16` INT8 |
+
+`test_micro_yolo_e2e.py` derives both branches from the raw ROW32 head tensor
+and compares them against the Python golden. Phase 4b will choose the physical
+flatten/transpose layout for the postprocess kernels.
+
+The test also computes the Phase 4c DFL golden from the Box branch:
+
+```text
+box[48*48][4 sides][4 bins] -> dfl_distance_q8[48*48][4 sides]
+```
+
+The DFL output is Q8.8. Firmware operator coverage for the AFU-assisted DFL path
+lives in `sw/test/spatz_ops`; Micro-YOLO currently keeps DFL as a Python golden
+postprocess check instead of appending a materialized DFL layer to the graph.
 
 ## Memory Contract
 
@@ -116,13 +139,17 @@ The cocotb test:
 - runs the Snitch graph firmware;
 - prints per-layer PMU counters;
 - compares all `48*48*32` output bytes with zero tolerance.
+- derives Box/Class branch views from that raw tensor and compares both branch
+  views with zero tolerance.
+- computes DFL Q8.8 distances from the Box branch and compares the derived
+  distances with zero tolerance.
 
 ## Current Reference Result
 
 Latest passing raw-head run:
 
 ```text
-total cycles: 386044
+total cycles: 388146
 head conv cycles: 149256
 head sys_compute: 41472
 ```

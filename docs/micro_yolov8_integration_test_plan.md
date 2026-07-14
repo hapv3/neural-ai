@@ -433,24 +433,25 @@ reducing per-tile setup, reusing linebuffer/window state across adjacent tiles,
 and avoiding L2 skip save/reload when a lifetime-aware TCDM allocator can keep
 the skip branch resident.
 
-### Phase 4: Full 96x96 Raw-Head E2E
+### Phase 3k: Full 96x96 Raw-Head E2E
 
 Objective: run the complete raw-head topology through `Raw_Head_Out`.
 DFL/Softmax/decode table entries may exist in metadata but must remain disabled.
 
 | Step | Task |
 |---|---|
-| 4a | Generate deterministic Python golden for the full raw-head topology |
-| 4b | Export input and weights as fixed `.bin` fixtures or generate them in cocotb |
-| 4c | Run firmware scheduler over L2-centric tiled tensors |
-| 4d | Compare raw head INT8 output byte-exactly |
-| 4e | Collect PMU counters per layer for performance triage |
+| 3k-a | Generate deterministic Python golden for the full raw-head topology |
+| 3k-b | Export input and weights as fixed `.bin` fixtures or generate them in cocotb |
+| 3k-c | Run firmware scheduler over L2-centric tiled tensors |
+| 3k-d | Compare raw head INT8 output byte-exactly |
+| 3k-e | Collect PMU counters per layer for performance triage |
 
 Acceptance: raw head `1x32x48x48` INT8 matches golden with 0 byte mismatch.
 
 Current status: **implemented and passing** through the Phase 3j raw-head
 checkpoint. The test remains in `test_micro_yolo_e2e.py` rather than a separate
-Phase 4 test file, but it now covers the full raw-head tensor.
+Phase 4 test file, but it now covers the full raw-head tensor. This closes the
+old Phase 4 scope, so postprocess preparation now starts at the new Phase 4.
 
 Current fixture policy:
 
@@ -473,17 +474,65 @@ Current L2 map:
 | `L2_OUTPUT` | `0x80020000` | raw head output |
 | `L2_SKIP` | `0x80040000` | temporary skip checkpoint |
 
-### Phase 5: Future Postprocess
+### Phase 4: Postprocess Preparation
 
 Objective: extend beyond raw-head output after the Conv/activation path is stable.
 
 | Step | Task |
 |---|---|
-| 5a | Head split into Box/Class branches |
-| 5b | Transpose/reshape to flattened head layout |
-| 5c | DFL Softmax implementation and unit test |
-| 5d | Class sigmoid |
-| 5e | Decode/NMS roadmap |
+| 4a | Head split into Box/Class branches |
+| 4b | Transpose/reshape to flattened head layout |
+| 4c | DFL Softmax implementation and unit test |
+| 4d | Class sigmoid |
+| 4e | Decode/NMS roadmap |
+
+#### Phase 4a: Head split into Box/Class branches
+
+Current status: **started**.
+
+The current micro-YOLO raw head remains a compact `48x48x32` INT8 ROW32 tensor
+written to `L2_OUTPUT`. Phase 4a defines the first postprocess ABI on top of
+that raw tensor:
+
+| Branch | Channel range | Shape | Bytes |
+|---|---:|---|---:|
+| Box / DFL logits | `0..15` | `48x48x16` INT8 | `36,864` |
+| Class logits | `16..31` | `48x48x16` INT8 | `36,864` |
+
+The split is currently a **logical split** in the cocotb/Python golden and E2E
+checker, not a materialized firmware operator. This deliberately avoids adding
+an extra full-head DMA/copy step before the next layout decision is made.
+`test_micro_yolo_e2e.py` still compares the raw head byte-exactly, then
+derives and compares the Box/Class branches from the same raw tensor. Phase 4b
+will decide whether those branch views should be materialized, transposed, or
+flattened for DFL/Class postprocess.
+
+#### Phase 4c: DFL Softmax implementation and unit test
+
+Current status: **started**.
+
+The current micro-YOLO Box branch uses `reg_max=4`, so each location has
+`4 sides * 4 bins = 16` logits. DFL converts those logits into four Q8.8
+distances per location:
+
+```text
+box_logits[location][side][bin] -> dfl_distance_q8[location][side]
+```
+
+The implementation is intentionally split into two layers:
+
+- `test_micro_yolo_e2e.py` contains the Python golden for DFL. It consumes the
+  logical Box branch from Phase 4a and computes `48*48*4` Q8.8 distances using
+  the same integer exp-LUT approximation as firmware.
+- `sw/lib/spatz_ops.c` exposes `spatz_dfl_softmax4_i8_q8()` as a scalar
+  reference path and `npu_dfl_softmax4_i8_q8()` as the optimized path. The
+  optimized path uses AFU E16 LUT mode for the exp lookup stage and then does
+  the small `sum/weighted-sum/divide` reduction in firmware because the current
+  AFU has no reduce/divide mode.
+
+This is not a new RTL mode. It reuses the existing AFU LUT datapath and keeps
+DFL reduction explicit until PMU data proves a dedicated reduction path is
+worth adding.
 
 ---
 
@@ -497,8 +546,9 @@ Objective: extend beyond raw-head output after the Conv/activation path is stabl
    - Head_Conv golden applies the same bypass-Concat identity:
      `Conv(up, W0) + Conv(skip, W1)`, followed by clamp/requant.
 2. **Firmware:**
-   - `sw/test/micro_yolo/main.c` builds a static graph descriptor and linear
-     TCDM scratch allocation.
+   - `sw/test/micro_yolo/main.c` builds the graph descriptor, allocates linear
+     TCDM scratch, and loads host-generated linebuffer job descriptors from L2
+     runtime manifest/blob payloads.
    - `sw/lib/npu_graph.c` validates tensor contracts and dispatches graph ops.
    - `sw/lib/conv2d_packed.c` owns linebuffer/KGEN tile execution.
 3. **RTL Simulation:**

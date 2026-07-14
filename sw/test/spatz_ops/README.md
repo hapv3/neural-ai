@@ -22,6 +22,7 @@ per operator while optimization is still local:
 | `spatz_ops_maxpool.bin` | `spatz_maxpool2d_i8()` |
 | `spatz_ops_upsample.bin` | `spatz_upsample_nearest_i8()` |
 | `spatz_ops_concat.bin` | `spatz_concat_c32_i8()` |
+| `spatz_ops_dfl.bin` | `npu_dfl_softmax4_i8_q8()` AFU-assisted DFL softmax for `reg_max=4` |
 
 `spatz_ops_test.bin` still runs the aggregate suite.
 

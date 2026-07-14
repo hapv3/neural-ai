@@ -139,7 +139,9 @@
 #define NPU_IRQ_SRC_SPATZ     0x00000008u
 #define NPU_IRQ_HOST_DONE     0x00000001u
 
-// AFU control window. LUT entries occupy 0x000..0x3ff; CSRs start at 0x400.
+// AFU control window. Normal ping-pong LUT entries occupy 0x000..0x3ff;
+// CSRs start at 0x400. DFL fused mode uses fixed LUT windows:
+// 0x800..0xbff = exp LUT bank0, 0xc00..0xfff = reciprocal LUT bank1.
 #define NPU_AFU_LUT_BASE      (NPU_AFU_BASE + 0x000)
 #define NPU_AFU_STATUS        (NPU_AFU_BASE + 0x400)
 #define NPU_AFU_SRC_PTR       (NPU_AFU_BASE + 0x404)
@@ -147,6 +149,8 @@
 #define NPU_AFU_LENGTH        (NPU_AFU_BASE + 0x40C)
 #define NPU_AFU_MODE          (NPU_AFU_BASE + 0x410)
 #define NPU_AFU_SRC2_PTR      (NPU_AFU_BASE + 0x414)
+#define NPU_AFU_DFL_EXP_LUT_BASE   (NPU_AFU_BASE + 0x800)
+#define NPU_AFU_DFL_RECIP_LUT_BASE (NPU_AFU_BASE + 0xC00)
 
 #define NPU_AFU_STATUS_DONE   0x00000001u
 #define NPU_AFU_STATUS_BUSY   0x00000002u
@@ -157,6 +161,7 @@
 #define NPU_AFU_MODE_E32      2u
 #define NPU_AFU_MODE_MUL_Q7   3u
 #define NPU_AFU_MODE_ADD_I8   4u
+#define NPU_AFU_MODE_DFL4_ROW32_Q8 5u
 
 // Host command-control bootstrap/status registers.
 #define NPU_CMD_L2_BASE       (NPU_CMD_CTRL_BASE + 0x00)

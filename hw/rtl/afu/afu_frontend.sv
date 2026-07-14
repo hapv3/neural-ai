@@ -33,7 +33,9 @@ module afu_frontend #(
     output logic                    lut_we_o,
     output logic [7:0]              lut_addr_o,
     output logic [31:0]             lut_wdata_o,
-    output logic [3:0]              lut_be_o
+    output logic [3:0]              lut_be_o,
+    output logic                    lut_fixed_bank_o,
+    output logic                    lut_bank_o
 );
 
     logic [31:0] cfg_src_ptr_q;
@@ -52,6 +54,10 @@ module afu_frontend #(
     logic        obi_s_rvalid_q;
     logic [31:0] obi_s_rdata_q;
     logic        lut_sel;
+    logic        lut_pingpong_sel;
+    logic        lut_dfl_exp_sel;
+    logic        lut_dfl_recip_sel;
+    logic        lut_dfl_sel;
     logic        csr_sel;
     logic        start_fire;
 
@@ -66,7 +72,11 @@ module afu_frontend #(
     assign cfg_mode_o    = cfg_mode_q;
     assign cfg_start_o   = cfg_start_q;
 
-    assign lut_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b00);
+    assign lut_pingpong_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b00);
+    assign lut_dfl_exp_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b10);
+    assign lut_dfl_recip_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b11);
+    assign lut_dfl_sel = lut_dfl_exp_sel || lut_dfl_recip_sel;
+    assign lut_sel = lut_pingpong_sel || lut_dfl_sel;
     assign csr_sel = (obi_s_addr_i[11:10] == 2'b01) || (obi_s_addr_i[15:12] == 4'h1);
     assign start_fire = obi_s_req_i && obi_s_we_i && csr_sel &&
                         (obi_s_addr_i[5:0] == 6'h00) && obi_s_wdata_i[0] && !afu_busy_i;
@@ -85,10 +95,12 @@ module afu_frontend #(
     endfunction
 
     always_comb begin
-        lut_we_o    = obi_s_req_i && obi_s_we_i && lut_sel;
+        lut_we_o    = obi_s_req_i && obi_s_we_i && lut_sel && !(lut_dfl_sel && afu_busy_i);
         lut_addr_o  = obi_s_addr_i[9:2];
         lut_wdata_o = obi_s_wdata_i;
         lut_be_o    = obi_s_be_i;
+        lut_fixed_bank_o = lut_dfl_sel;
+        lut_bank_o = lut_dfl_recip_sel;
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
