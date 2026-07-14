@@ -42,6 +42,7 @@ L2_OUTPUT = 0x80020000
 L2_DFL_EXP_LUT = 0x80054000
 L2_DFL_RECIP_LUT = 0x80054400
 L2_DFL_OUTPUT = 0x80060000
+L2_CLASS_OUTPUT = 0x80065000
 
 INPUT_H = 96
 INPUT_W = 96
@@ -64,6 +65,7 @@ DFL_REG_MAX = 4
 DFL_SIDES = 4
 DFL_OUTPUT_VALUES = OUTPUT_H * OUTPUT_W * DFL_SIDES
 DFL_OUTPUT_BYTES = DFL_OUTPUT_VALUES * 2
+CLASS_OUTPUT_BYTES = HEAD_CLASS_BYTES
 DTCM_STATUS = 0x10008000
 DTCM_FAIL_CODE = 0x10008004
 DTCM_LAYER = 0x10008008
@@ -85,6 +87,7 @@ OP_NAMES = {
     16: "UPSAMPLE_NEAREST2X_I8",
     17: "CONV3x3s1_C32x2_LB_RQ_L2",
     18: "DFL_SOFTMAX4_I8_Q8",
+    19: "CLASS_SIGMOID_ROW32_HIGH16_I8",
 }
 
 
@@ -478,6 +481,7 @@ async def test_micro_yolo_e2e(dut):
     expected = golden_micro_yolo(input_hwc, weight0, weight1, weight2, weight3, sigmoid_lut)
     expected_box, expected_class = split_raw_head_box_class(expected)
     expected_dfl = dfl_softmax4_q8(expected_box)
+    expected_class_sigmoid = [sigmoid_lut[value] for value in expected_class]
 
     fw_path = os.path.join(
         os.path.dirname(__file__),
@@ -549,6 +553,7 @@ async def test_micro_yolo_e2e(dut):
     got_box, got_class = split_raw_head_box_class(got)
     got_dfl_bytes = await read_l2_bytes(dut, L2_DFL_OUTPUT, DFL_OUTPUT_BYTES)
     got_dfl = bytes_to_u16_le(got_dfl_bytes)
+    got_class_sigmoid = await read_l2_bytes(dut, L2_CLASS_OUTPUT, CLASS_OUTPUT_BYTES)
     for idx, (got_byte, exp_byte) in enumerate(zip(got_box, expected_box)):
         assert got_byte == exp_byte, (
             f"micro-YOLO box branch mismatch idx={idx}: "
@@ -563,4 +568,9 @@ async def test_micro_yolo_e2e(dut):
         assert got_value == exp_value, (
             f"micro-YOLO DFL q8 mismatch idx={idx}: "
             f"got={got_value} expected={exp_value}"
+        )
+    for idx, (got_byte, exp_byte) in enumerate(zip(got_class_sigmoid, expected_class_sigmoid)):
+        assert got_byte == exp_byte, (
+            f"micro-YOLO class sigmoid mismatch idx={idx}: "
+            f"got={to_i8(got_byte)} expected={to_i8(exp_byte)}"
         )

@@ -50,6 +50,7 @@ L2_DFL_ROW32_SRC = 0x80070000
 L2_DFL_EXP_LUT32 = 0x80071000
 L2_DFL_RECIP_LUT = 0x80071400
 L2_DFL_ROW32_DST = 0x80072000
+CLASS_DST = 0x1015A000
 
 VL = 32
 LOG_FULL_H = 48
@@ -71,6 +72,7 @@ CONCAT_W = 3
 CONCAT_PIXELS = CONCAT_H * CONCAT_W
 DFL_LOCATIONS = 17
 DFL_FUSED_LOCATIONS = 64
+CLASS_SIGMOID_LOCATIONS = 17
 DFL_SIDES = 4
 DFL_REG_MAX = 4
 
@@ -172,6 +174,14 @@ def dfl_exp_lut_value(index):
 
 def dfl_input_value(loc, channel):
     return ((loc * 37 + channel * 19 + 11) & 0xFF) - 128
+
+
+def sigmoid_lut_value(index):
+    return (index * 3 + 7) & 0xFF
+
+
+def class_sigmoid_input_value(loc, channel):
+    return ((loc * 29 + channel * 13 + 5) & 0xFF) - 128
 
 
 def dfl_delta_index(value, max_value):
@@ -466,6 +476,18 @@ async def check_dfl_fused(dut):
             )
 
 
+def check_class_sigmoid(dut):
+    for loc in range(CLASS_SIGMOID_LOCATIONS):
+        for cls in range(16):
+            idx = loc * 16 + cls
+            input_byte = class_sigmoid_input_value(loc, cls + 16) & 0xFF
+            expected = as_i8(sigmoid_lut_value(input_byte))
+            got = as_i8(read_tcdm_byte(dut, CLASS_DST + idx))
+            assert got == expected, (
+                f"class_sigmoid[{idx}] got={got} expected={expected}"
+            )
+
+
 def check_all(dut):
     check_copy(dut)
     check_relu(dut)
@@ -740,4 +762,15 @@ async def test_spatz_op_dfl_fused(dut):
         check_dfl_fused,
         timeout_cycles=200000,
         pre_release=preload_dfl_fused_l2,
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_class_sigmoid(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_class_sigmoid.bin",
+        "test_spatz_op_class_sigmoid",
+        1,
+        check_class_sigmoid,
     )

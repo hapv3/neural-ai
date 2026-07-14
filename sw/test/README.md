@@ -13,7 +13,8 @@ as test firmware.
 | `independent_memory` | `independent_memory.bin` | L2 fixtures, iDMA 1D/2D/3D, TCDM bank/boundary decode |
 | `independent_systolic` | `independent_systolic.bin` | HAL GEMM32 for boundary `M` sizes with full INT32 output compare |
 | `matmul` | `matmul.bin` | Raw systolic register path with M=64 cocotb regression |
-| `spatz_ops` | `spatz_ops_test.bin` | C-callable Spatz operator wrappers used by future graph scheduler |
+| `micro_yolo` | `micro_yolo.bin` | Current Micro-YOLO raw-head, DFL, and class-sigmoid E2E firmware |
+| `spatz_ops` | `spatz_ops_test.bin` | C-callable Spatz/AFU operator wrappers used by graph firmware |
 | `spatz_vector` | `*.bin` per `.S` file | Direct RVV instruction coverage for integrated Spatz |
 
 ## Shared Contract
@@ -31,6 +32,7 @@ make -C sw/test/conv_perf
 make -C sw/test/independent_memory
 make -C sw/test/independent_systolic
 make -C sw/test/matmul
+make -C sw/test/micro_yolo
 make -C sw/test/spatz_ops
 make -C sw/test/spatz_vector
 ```

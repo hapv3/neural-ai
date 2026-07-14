@@ -50,6 +50,9 @@ uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
                                       uint32_t locations,
                                       const uint32_t *exp_lut,
                                       const uint32_t *recip_lut);
+uint32_t npu_class_sigmoid_row32_high16_i8(const int8_t *src_row32, int8_t *dst,
+                                           uint32_t locations,
+                                           const uint8_t *lut);
 void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t input_h, uint32_t input_w, uint32_t channels,
                         uint32_t kernel_h, uint32_t kernel_w,

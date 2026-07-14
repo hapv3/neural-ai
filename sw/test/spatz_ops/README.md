@@ -23,6 +23,8 @@ per operator while optimization is still local:
 | `spatz_ops_upsample.bin` | `spatz_upsample_nearest_i8()` |
 | `spatz_ops_concat.bin` | `spatz_concat_c32_i8()` |
 | `spatz_ops_dfl.bin` | `npu_dfl_softmax4_i8_q8()` AFU-assisted DFL softmax for `reg_max=4` |
+| `spatz_ops_dfl_fused.bin` | `npu_dfl_softmax4_row32_i8_q8()` fused AFU DFL path over ROW32 low 16 logits |
+| `spatz_ops_class_sigmoid.bin` | `npu_class_sigmoid_row32_high16_i8()` AFU class sigmoid over ROW32 high 16 logits |
 
 `spatz_ops_test.bin` still runs the aggregate suite.
 

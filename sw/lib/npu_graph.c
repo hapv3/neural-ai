@@ -783,6 +783,29 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_CLASS_SIGMOID_ROW32_HIGH16_I8:
+            if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t locations = (uint32_t)src->h * src->w;
+                uint32_t dst_bytes = locations * 16u;
+
+                if (!tensor_has_layout(src, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
+                    !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
+                    src->c != 32u ||
+                    src->bytes < npu_tensor_row32_bytes(locations) ||
+                    dst->bytes < dst_bytes ||
+                    aux->bytes < 256u) {
+                    return NPU_GRAPH_ERR_BAD_TENSOR;
+                }
+                if (!npu_class_sigmoid_row32_high16_i8((const int8_t *)src->addr,
+                                                       (int8_t *)dst->addr,
+                                                       locations,
+                                                       (const uint8_t *)aux->addr)) {
+                    return NPU_GRAPH_ERR_ACCEL;
+                }
+            }
+            break;
+
         case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {

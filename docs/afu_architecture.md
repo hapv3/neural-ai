@@ -77,12 +77,27 @@ The AFU system is divided into 5 main modules to ensure maintainability and clea
    - Intermediate data queues between the Backend and Core, helping to absorb OBI protocol latency.
    - Since the depth only requires `DEPTH=2`, designing it with Flip-Flops instead of calling an SRAM Macro saves significant Area, reduces routing delay, and avoids using complex memory initializers.
 
-### 2.2. Basic AFU Workflow (Dual-Mode)
+### 2.2. Basic AFU Workflow and Modes
 1. Snitch Firmware pre-calculates the function $f(x)$ and writes the result table into the AFU's LUT SRAM.
 2. Firmware writes configuration: `Src_Ptr`, `Dst_Ptr`, `Length`, and **`Mode`** (8-bit, 16-bit, or 32-bit output).
 3. Activate the AFU. Depending on the Mode:
    - **8-bit Mode (SiLU, Sigmoid):** The AFU processes 4 bytes/cycle (or based on bus width if configured wider), looks up 4 8-bit results, and pushes them to the Write FIFO. Extremely fast.
    - **16/32-bit Mode (exp, x^2 for Softmax/Norm):** The AFU reads byte by byte, looks up 16-bit or 32-bit results to maintain maximum precision, then writes these 16/32-bit words to TCDM for Spatz to handle subsequent accumulations.
+   - **Mul_Q7 / Add_I8 modes:** The AFU reads two streams and produces compact INT8 output for SiLU multiply and residual add.
+   - **DFL4_ROW32_Q8 mode:** The AFU reads one 32-byte YOLO raw-head location, consumes bytes `0..15`, uses fixed DFL exp/reciprocal LUT banks, and writes four Q8.8 distances.
+   - **CLASS_SIGMOID_ROW32_HIGH16 mode:** The AFU reads one 32-byte YOLO raw-head location, consumes bytes `16..31`, uses the active sigmoid LUT bank, and writes a compact 16-byte class vector.
+
+Current firmware-visible mode IDs are:
+
+| Mode | ID | Input interpretation | Output interpretation |
+|---|---:|---|---|
+| `NPU_AFU_MODE_8BIT` | 0 | compact INT8 bytes | compact INT8 bytes |
+| `NPU_AFU_MODE_16BIT` | 1 | compact INT8 bytes | compact 16-bit values |
+| `NPU_AFU_MODE_32BIT` | 2 | compact INT8 bytes | compact 32-bit values |
+| `NPU_AFU_MODE_MUL_Q7` | 3 | two compact INT8 streams | compact INT8 bytes |
+| `NPU_AFU_MODE_ADD_I8` | 4 | two compact INT8 streams | compact INT8 bytes |
+| `NPU_AFU_MODE_DFL4_ROW32_Q8` | 5 | ROW32, low 16 logits/location | four Q8.8 distances/location |
+| `NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16` | 6 | ROW32, high 16 logits/location | compact 16 INT8 class scores/location |
 
 ---
 
@@ -167,6 +182,29 @@ Formula: $y_i = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$
   5. **Spatz:** Runs `vsum` on array $E$ to get the sum $S$.
   6. **Snitch:** Uses C code to compute the scalar value `inv_S = 1 / S`.
   7. **Spatz:** Runs `vmul` multiplying the entire array $E$ by `inv_S` to yield the final result.
+
+### 4.2.1. YOLO DFL Softmax (`reg_max=4`)
+**Models:** YOLO detection head postprocess.
+- **Execution:** Fused AFU mode `NPU_AFU_MODE_DFL4_ROW32_Q8`.
+- **Input layout:** One 32-byte raw-head location per spatial point. Bytes
+  `0..15` are interpreted as four sides with four logits per side.
+- **LUT policy:** DFL mode disables normal ping-pong bank swapping. Bank0 is the
+  exp LUT and bank1 is the reciprocal LUT; LUT writes are blocked while the AFU
+  is busy.
+- **Output layout:** Four Q8.8 `uint16_t` distances per location.
+- **Current coverage:** AFU block test, `spatz_ops_dfl_fused.bin`, and
+  `test_micro_yolo_e2e.py`.
+
+### 4.2.2. YOLO Class Sigmoid
+**Models:** YOLO detection head class branch.
+- **Execution:** Fused AFU mode `NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16`.
+- **Input layout:** One 32-byte raw-head location per spatial point. Bytes
+  `16..31` are class logits.
+- **LUT policy:** Uses the normal active sigmoid LUT bank, so existing ping-pong
+  LUT behavior is preserved for non-DFL modes.
+- **Output layout:** Compact 16 INT8 class scores per location.
+- **Current coverage:** AFU block test, `spatz_ops_class_sigmoid.bin`, and
+  `test_micro_yolo_e2e.py`.
 
 ### 4.3. LayerNorm (ViT Layer)
 Formula: $y_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}} \times \gamma + \beta$

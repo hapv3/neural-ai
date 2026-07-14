@@ -79,6 +79,11 @@ static inline void afu_start_add_i8(uint32_t lhs, uint32_t rhs, uint32_t dst,
     afu_start_binary(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8);
 }
 
+static inline void afu_start_class_sigmoid_row32_high16(uint32_t src, uint32_t dst,
+                                                        uint32_t input_bytes) {
+    afu_start(src, dst, input_bytes, NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16);
+}
+
 static inline uint32_t afu_wait_done(uint32_t timeout_cycles) {
     while (timeout_cycles-- > 0u) {
         uint32_t status = afu_status();

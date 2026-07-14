@@ -6,12 +6,12 @@ Prove that the NPU (Systolic Array + Spatz + iDMA) can continuously run a neural
 
 Input: **96x96 RGB INT8**
 
-First end-to-end target: run the backbone/neck/head Conv path and write the
-**raw head tensor as INT8**. DFL/Softmax/decode remain in the graph roadmap but
-are not required for the first raw-head E2E pass.
+First end-to-end target: run the backbone/neck/head Conv path, write the
+**raw head tensor as INT8**, then run the first postprocess kernels for DFL and
+class sigmoid.
 
-Current status: the raw-head E2E path is implemented and passing in
-`test_micro_yolo_e2e.py`.
+Current status: the raw-head E2E path, fused DFL, and class sigmoid are
+implemented and passing in `test_micro_yolo_e2e.py`.
 
 ---
 
@@ -32,22 +32,23 @@ Current status: the raw-head E2E path is implemented and passing in
 | 10 | Concat | **Bypassed Concat** | logical L9 + L3 along C-axis | logical 1x64x48x48 | no materialized copy |
 | 11 | Head_Conv | **Conv2D** | K=3x3, S=1, Pad=1, IC=64, OC=32 | 1x32x48x48 | two C32 linebuffer chunks + psum accumulate/requant |
 | 12 | Raw_Head_Out | **DMA_OUT** | write raw head INT8 to L2 | 1x32x48x48 | iDMA row/tile writeback |
-| 13 | Future_Head_Split | **StridedSlice** | split Box[0:16] and Class[16:32] | 1x16x48x48 x2 | Future postprocess |
-| 14 | Future_Transpose | **Transpose** | [N,C,H,W] -> [N,H,W,C] | 1x48x48x16 | Future postprocess |
-| 15 | Future_Reshape | **Reshape** | flatten -> [1, 2304, 16] | 1x2304x16 | Future postprocess |
-| 16 | Future_DFL_Soft | **Softmax** | on Box branch (dim=-1) | 1x2304x16 | Future Spatz/AFU |
-| 17 | Future_Cls_Sig | **Logistic** | on Class branch | 1x2304x16 | Future AFU/Spatz |
+| 13 | Head_Split | **ROW32 view** | Box[0:16] and Class[16:32] | 1x16x48x48 x2 | no materialized split |
+| 14 | DFL_Soft | **DFL softmax** | on Box branch, `reg_max=4` | 1x4x48x48 Q8.8 | fused AFU mode |
+| 15 | Cls_Sig | **Logistic** | on Class branch | 1x16x48x48 INT8 | AFU class sigmoid |
+| 16 | Future_Transpose | **Transpose** | optional postprocess layout change | 1x48x48x16 | Future postprocess |
+| 17 | Future_Decode_NMS | **Decode/NMS** | boxes + class scores | detection output | Future firmware/host decision |
 
 Internal implementation should keep tensors in the existing HWC/NHWC packed
 layout used by `conv2d_packed`; the NxCxHxW notation above is only the logical
 model shape.
 
 First E2E unique operators: Conv2D, Logistic, Mul, Identity/Slice, Add,
-MaxPool2D, Upsample, logical Concat, Requant, DMA_OUT. The current raw-head
-path intentionally **does not materialize** the Concat tensor. Instead, the
-Head_Conv consumes the two C32 producers as separate input chunks and accumulates
-their partial sums. Transpose, Reshape, DFL Softmax, and class Sigmoid are
-retained as future postprocess operators after raw-head INT8 passes.
+MaxPool2D, Upsample, logical Concat, Requant, DMA_OUT, fused DFL, and class
+sigmoid. The current raw-head path intentionally **does not materialize** the
+Concat tensor. Instead, the Head_Conv consumes the two C32 producers as separate
+input chunks and accumulates their partial sums. DFL and class sigmoid also
+avoid materialized branch split: they consume the low/high halves of each ROW32
+raw-head location directly.
 
 ---
 
@@ -72,9 +73,10 @@ retained as future postprocess operators after raw-head INT8 passes.
 | **Logistic** | Medium | Sigmoid using 256-byte LUT on TCDM | Implemented through AFU LUT |
 | **MaxPool2D** | Medium | 5x5 sliding window finding max | Implemented through systolic linebuffer pool mode |
 | **Upsample** | Medium | Nearest 2x: duplicate pixels | Implemented as C32-specialized Spatz load-once/store-four kernel |
-| **Softmax / DFL** | **Hard** | findmax -> sub -> exp(LUT) -> sum -> div | Future postprocess; not required for first raw-head E2E |
+| **Softmax / DFL** | **Hard** | findmax -> sub -> exp(LUT) -> sum -> div | Implemented for YOLO `reg_max=4` as fused AFU ROW32 low16 mode |
 | **Concat** | Easy | Logical C-axis join | Current raw-head path bypasses materialization by splitting the following Conv over two C32 sources. |
 | **Transpose** | Medium | NCHW->NHWC: iDMA 2D stride copy | Future postprocess; iDMA 2D support already exists |
+| **Class sigmoid** | Medium | Sigmoid LUT on class logits | Implemented as fused AFU ROW32 high16 compact-output mode |
 
 ### 2.3 ZERO-COST (only metadata changes, no code needed)
 
@@ -196,12 +198,12 @@ allowed into the full graph scheduler.
 | 1d | `spatz_maxpool2d_i8()` for K=5, S=1, Pad=2 | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
 | 1e | `spatz_upsample_nearest_i8()` 2x nearest | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
 | 1f | `spatz_concat_c32_i8()` or equivalent C32-blocked concat helper | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
-| 1g | `spatz_softmax_i8()` / DFL postprocess | Future phase after raw-head E2E |
+| 1g | `npu_dfl_softmax4_row32_i8_q8()` and class sigmoid postprocess | `sw/lib/spatz_ops.c`, `sw/lib/spatz_ops.h` |
 | 1h | Unit tests for all implemented operators | `sw/test/spatz_ops/main.c`, `test_spatz_operator_library.py` |
 
 Acceptance: each operator has a deterministic Python golden and byte-exact RTL
-cluster test coverage. Softmax/DFL remains disabled until after raw-head INT8
-passes.
+cluster test coverage. Fused DFL and class sigmoid are now enabled after the
+raw-head INT8 layer in the Micro-YOLO E2E graph.
 
 ### Phase 2: Tensor Layout and Graph Runtime Contract
 
@@ -473,6 +475,11 @@ Current L2 map:
 | `L2_WEIGHT3` | `0x80010000` | head weight, two C32 chunks |
 | `L2_OUTPUT` | `0x80020000` | raw head output |
 | `L2_SKIP` | `0x80040000` | temporary skip checkpoint |
+| `L2_LINEBUF_DESC_BASE` | `0x80052000` | runtime linebuffer job manifest |
+| `L2_DFL_EXP_LUT` | `0x80054000` | DFL exp LUT |
+| `L2_DFL_RECIP_LUT` | `0x80054400` | DFL reciprocal LUT |
+| `L2_DFL_OUTPUT` | `0x80060000` | DFL Q8.8 output |
+| `L2_CLASS_OUTPUT` | `0x80065000` | class sigmoid INT8 output |
 
 ### Phase 4: Postprocess Preparation
 
@@ -488,7 +495,7 @@ Objective: extend beyond raw-head output after the Conv/activation path is stabl
 
 #### Phase 4a: Head split into Box/Class branches
 
-Current status: **started**.
+Current status: **implemented and passing**.
 
 The current micro-YOLO raw head remains a compact `48x48x32` INT8 ROW32 tensor
 written to `L2_OUTPUT`. Phase 4a defines the first postprocess ABI on top of
@@ -499,17 +506,20 @@ that raw tensor:
 | Box / DFL logits | `0..15` | `48x48x16` INT8 | `36,864` |
 | Class logits | `16..31` | `48x48x16` INT8 | `36,864` |
 
-The split is currently a **logical split** in the cocotb/Python golden and E2E
-checker, not a materialized firmware operator. This deliberately avoids adding
-an extra full-head DMA/copy step before the next layout decision is made.
-`test_micro_yolo_e2e.py` still compares the raw head byte-exactly, then
-derives and compares the Box/Class branches from the same raw tensor. Phase 4b
-will decide whether those branch views should be materialized, transposed, or
-flattened for DFL/Class postprocess.
+The raw-head tensor stays in ROW32 physical layout:
+
+```text
+raw_head[location][0..15]  -> Box / DFL logits
+raw_head[location][16..31] -> Class logits
+```
+
+The full raw head is still compared byte-exactly. The postprocess operators now
+consume the two branch views directly from the ROW32 tensor, avoiding an extra
+full-head materialized split/copy.
 
 #### Phase 4c: DFL Softmax implementation and unit test
 
-Current status: **started**.
+Current status: **implemented and passing**.
 
 The current micro-YOLO Box branch uses `reg_max=4`, so each location has
 `4 sides * 4 bins = 16` logits. DFL converts those logits into four Q8.8
@@ -519,20 +529,56 @@ distances per location:
 box_logits[location][side][bin] -> dfl_distance_q8[location][side]
 ```
 
-The implementation is intentionally split into two layers:
+The optimized implementation is a fused AFU mode:
 
-- `test_micro_yolo_e2e.py` contains the Python golden for DFL. It consumes the
-  logical Box branch from Phase 4a and computes `48*48*4` Q8.8 distances using
-  the same integer exp-LUT approximation as firmware.
-- `sw/lib/spatz_ops.c` exposes `spatz_dfl_softmax4_i8_q8()` as a scalar
-  reference path and `npu_dfl_softmax4_i8_q8()` as the optimized path. The
-  optimized path uses AFU E16 LUT mode for the exp lookup stage and then does
-  the small `sum/weighted-sum/divide` reduction in firmware because the current
-  AFU has no reduce/divide mode.
+- `NPU_AFU_MODE_DFL4_ROW32_Q8` reads one 32-byte ROW32 location at a time and
+  consumes the low 16 bytes.
+- AFU bank0 is interpreted as the DFL exp LUT and bank1 as the reciprocal LUT;
+  bank swapping is disabled while the fused DFL mode is active.
+- Firmware writes `48*48*4` Q8.8 distances to `L2_DFL_OUTPUT`.
+- The cocotb golden uses the same LUT contents and checks the output
+  byte-exactly.
 
-This is not a new RTL mode. It reuses the existing AFU LUT datapath and keeps
-DFL reduction explicit until PMU data proves a dedicated reduction path is
-worth adding.
+Coverage:
+
+- AFU block-level test covers the fused DFL datapath.
+- `spatz_ops_dfl_fused.bin` covers the C wrapper and cluster path.
+- `test_micro_yolo_e2e.py` runs the graph layer and checks `L2_DFL_OUTPUT`.
+
+#### Phase 4d: Class sigmoid
+
+Current status: **implemented and passing**.
+
+Class sigmoid consumes the high 16 bytes of each ROW32 raw-head location:
+
+```text
+raw_head[location][16..31] -> class_sigmoid[location][0..15]
+```
+
+The implementation uses the new AFU mode
+`NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16`:
+
+- input length is expressed as raw ROW32 input bytes (`locations * 32`);
+- AFU reads one 32-byte location, applies the active sigmoid LUT to bytes
+  `16..31`, and writes a compact 16-byte class vector;
+- the output is `48*48*16` INT8 bytes at `L2_CLASS_OUTPUT`;
+- normal AFU ping-pong LUT behavior is preserved for non-DFL modes.
+
+Coverage:
+
+- `hw/rtl/afu/tb/tb_afu.sv` checks a 17-location unaligned-size case at block
+  level.
+- `spatz_ops_class_sigmoid.bin` checks the C wrapper and cluster dispatch path.
+- `test_micro_yolo_e2e.py` compares the materialized class sigmoid output
+  byte-exactly against the Python golden.
+
+#### Phase 4e: Decode/NMS roadmap
+
+Current status: **not started**.
+
+The next postprocess step should consume `L2_DFL_OUTPUT` and
+`L2_CLASS_OUTPUT`, then decide whether decode/NMS should stay on firmware,
+Spatz/AFU vector kernels, or a host-side postprocess path.
 
 ---
 

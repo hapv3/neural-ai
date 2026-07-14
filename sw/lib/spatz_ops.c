@@ -202,6 +202,25 @@ uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
     return afu_wait_done(100000u + (locations * 128u));
 }
 
+uint32_t npu_class_sigmoid_row32_high16_i8(const int8_t *src_row32, int8_t *dst,
+                                           uint32_t locations,
+                                           const uint8_t *lut) {
+    uint32_t input_bytes = locations * 32u;
+
+    if (!src_row32 || !dst || !lut) {
+        return 0u;
+    }
+
+    for (uint32_t i = 0; i < 256u; i++) {
+        afu_load_lut_entry(i, (uint32_t)lut[i]);
+    }
+
+    afu_start_class_sigmoid_row32_high16((uint32_t)src_row32,
+                                         (uint32_t)dst,
+                                         input_bytes);
+    return afu_wait_done(100000u + (locations * 64u));
+}
+
 void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t input_h, uint32_t input_w, uint32_t channels,
                         uint32_t kernel_h, uint32_t kernel_w,
