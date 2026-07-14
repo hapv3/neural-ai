@@ -30,6 +30,7 @@ typedef struct {
     uint16_t kgen;
     uint16_t pool;
     uint16_t c32_fast;
+    uint16_t depthwise;
     uint16_t block_valid_bytes;
     uint16_t k_seed_kh;
     uint16_t k_seed_kw;
@@ -62,6 +63,11 @@ void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
                                          uint32_t output_addr,
                                          uint32_t height,
                                          uint32_t width);
+void systolic_depthwise3x3s1p1_c32_requant(uint32_t input_addr,
+                                           uint32_t weight_addr,
+                                           uint32_t output_addr,
+                                           uint32_t height,
+                                           uint32_t width);
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf_requant(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);

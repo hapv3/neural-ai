@@ -37,6 +37,7 @@ module systolic_ctrl_regs #(
     output logic                      cfg_linebuf_coalesce_o,
     output logic                      cfg_linebuf_pool_o,
     output logic                      cfg_linebuf_c32_fast_o,
+    output logic                      cfg_linebuf_depthwise_o,
     output logic [31:0]               cfg_linebuf_input_base_o,
     output logic [15:0]               cfg_linebuf_input_h_o,
     output logic [15:0]               cfg_linebuf_input_w_o,
@@ -131,6 +132,7 @@ module systolic_ctrl_regs #(
     logic              r_linebuf_pool;
     logic              r_linebuf_kgen;
     logic              r_linebuf_c32_fast;
+    logic              r_linebuf_depthwise;
     logic [31:0]       r_linebuf_input_base;
     logic [15:0]       r_linebuf_input_h;
     logic [15:0]       r_linebuf_input_w;
@@ -178,6 +180,7 @@ module systolic_ctrl_regs #(
     logic              s_linebuf_pool;
     logic              s_linebuf_kgen;
     logic              s_linebuf_c32_fast;
+    logic              s_linebuf_depthwise;
     logic [31:0]       s_linebuf_input_base;
     logic [15:0]       s_linebuf_input_h;
     logic [15:0]       s_linebuf_input_w;
@@ -228,6 +231,7 @@ module systolic_ctrl_regs #(
             r_linebuf_pool <= 1'b0;
             r_linebuf_kgen <= 1'b0;
             r_linebuf_c32_fast <= 1'b0;
+            r_linebuf_depthwise <= 1'b0;
             r_linebuf_input_base <= '0;
             r_linebuf_input_h <= '0;
             r_linebuf_input_w <= '0;
@@ -270,6 +274,7 @@ module systolic_ctrl_regs #(
             s_linebuf_pool <= 1'b0;
             s_linebuf_kgen <= 1'b0;
             s_linebuf_c32_fast <= 1'b0;
+            s_linebuf_depthwise <= 1'b0;
             s_linebuf_input_base <= '0;
             s_linebuf_input_h <= '0;
             s_linebuf_input_w <= '0;
@@ -353,6 +358,7 @@ module systolic_ctrl_regs #(
                                         r_linebuf_kgen <= s_linebuf_kgen;
                                         r_linebuf_pool <= s_linebuf_pool;
                                         r_linebuf_c32_fast <= s_linebuf_c32_fast;
+                                        r_linebuf_depthwise <= s_linebuf_depthwise;
                                         r_linebuf_input_base <= s_linebuf_input_base;
                                         r_linebuf_input_h <= s_linebuf_input_h;
                                         r_linebuf_input_w <= s_linebuf_input_w;
@@ -399,6 +405,7 @@ module systolic_ctrl_regs #(
                                     s_linebuf_kgen <= wdata_word[2];
                                     s_linebuf_pool <= wdata_word[3];
                                     s_linebuf_c32_fast <= wdata_word[4];
+                                    s_linebuf_depthwise <= wdata_word[5];
                                 end
                                 REG_LB_INPUT_BASE: s_linebuf_input_base <= wdata_word;
                                 REG_LB_INPUT_H: s_linebuf_input_h <= wdata_word[15:0];
@@ -481,7 +488,7 @@ module systolic_ctrl_regs #(
                     REG_RQ_CTRL:   rdata_word = {31'd0, r_requant_en};
                     REG_RQ_CMIN:   rdata_word = r_requant_clamp_min;
                     REG_RQ_CMAX:   rdata_word = r_requant_clamp_max;
-                    REG_LB_CTRL: rdata_word = {27'd0, r_linebuf_c32_fast, r_linebuf_pool, r_linebuf_kgen,
+                    REG_LB_CTRL: rdata_word = {26'd0, r_linebuf_depthwise, r_linebuf_c32_fast, r_linebuf_pool, r_linebuf_kgen,
                                                r_linebuf_coalesce, r_linebuf_en};
                     REG_LB_INPUT_BASE: rdata_word = r_linebuf_input_base;
                     REG_LB_INPUT_H: rdata_word = {16'd0, r_linebuf_input_h};
@@ -542,6 +549,7 @@ module systolic_ctrl_regs #(
     assign cfg_linebuf_pool_o = r_linebuf_pool;
     assign cfg_linebuf_kgen_o = r_linebuf_kgen;
     assign cfg_linebuf_c32_fast_o = r_linebuf_c32_fast;
+    assign cfg_linebuf_depthwise_o = r_linebuf_depthwise;
     assign cfg_linebuf_input_base_o = r_linebuf_input_base;
     assign cfg_linebuf_input_h_o = r_linebuf_input_h;
     assign cfg_linebuf_input_w_o = r_linebuf_input_w;

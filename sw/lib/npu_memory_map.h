@@ -122,6 +122,7 @@
 #define REG_LB_CTRL_KGEN 0x00000004u
 #define REG_LB_CTRL_POOL 0x00000008u
 #define REG_LB_CTRL_C32_FAST 0x00000010u
+#define REG_LB_CTRL_DEPTHWISE 0x00000020u
 
 // Interrupt controller registers
 #define NPU_IRQ_INT_ENABLE    (NPU_IRQ_BASE + 0x00)
