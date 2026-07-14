@@ -263,6 +263,7 @@ module systolic_controller #(
     logic [5:0]    cfg_linebuf_block_valid_bytes_i;
     logic [31:0]   cfg_linebuf_channel_addr_offset_i;
     logic [31:0]   cfg_linebuf_coalesce_k_bytes_i;
+    logic [31:0]   cfg_linebuf_channel_addr_offset_eff;
     logic [31:0]   linebuf_spatial_m;
     logic [15:0]   linebuf_c_base_eff;
     logic [15:0]   linebuf_seed_ic_eff;
@@ -337,6 +338,15 @@ module systolic_controller #(
     ofm_row_t      dw_requant_acc;
     logic [DW_TAP_COUNT_W-1:0] dw_tap_count_q, dw_tap_count_d;
     logic [DW_TAP_COUNT_W-1:0] dw_weight_rsp_idx;
+    logic [31:0]   dw_group_idx_q, dw_group_idx_d;
+    logic [31:0]   dw_group_count;
+    logic [31:0]   dw_group_span_bytes;
+    logic [31:0]   dw_group_output_bytes;
+    logic [31:0]   dw_weight_group_bytes;
+    logic [31:0]   dw_group_input_offset;
+    logic [31:0]   dw_group_output_offset;
+    logic [31:0]   dw_group_weight_offset;
+    logic          dw_last_group;
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -381,7 +391,8 @@ module systolic_controller #(
                                         (weight_preload_req_cnt_q == 32'd0) &&
                                         (weight_preload_obi_rsp_cnt_q == 32'd0));
     assign linebuf_use_next_cfg = (state_q == WAIT_DRAIN) && linebuf_has_next_k_tile;
-    assign linebuf_c_base_eff = cfg_linebuf_kgen_i ? {linebuf_seed_ic_eff[15:5], 5'b0} : cfg_linebuf_c_base_i;
+    assign linebuf_c_base_eff = linebuf_depthwise_mode ? (cfg_linebuf_c_base_i + 16'(dw_group_idx_q << 5)) :
+                                cfg_linebuf_kgen_i ? {linebuf_seed_ic_eff[15:5], 5'b0} : cfg_linebuf_c_base_i;
     assign linebuf_seed_ic_eff = cfg_linebuf_kgen_i ? (linebuf_use_next_cfg ? k_seed_ic_next : k_seed_ic_q) :
                                                        cfg_linebuf_k_seed_ic_i;
     assign linebuf_seed_kw_eff = cfg_linebuf_kgen_i ? (linebuf_use_next_cfg ? k_seed_kw_next : k_seed_kw_q) :
@@ -390,6 +401,17 @@ module systolic_controller #(
                                                        cfg_linebuf_k_seed_kh_i;
     assign pool_kernel_vectors = 32'(cfg_linebuf_kernel_h_i) * 32'(cfg_linebuf_kernel_w_i);
     assign dw_weight_rsp_idx = DW_TAP_COUNT_W'(pool_kernel_vectors - rsp_cnt_q);
+    assign dw_group_count = ({16'd0, cfg_linebuf_input_c_i} + 32'd31) >> 5;
+    assign dw_group_span_bytes = {16'd0, cfg_linebuf_input_h_i} * cfg_linebuf_row_stride_bytes_i;
+    assign dw_group_output_bytes = linebuf_spatial_m * 32'd32;
+    assign dw_weight_group_bytes = pool_kernel_vectors * 32'd32;
+    assign dw_group_input_offset = dw_group_idx_q * dw_group_span_bytes;
+    assign dw_group_output_offset = dw_group_idx_q * dw_group_output_bytes;
+    assign dw_group_weight_offset = dw_group_idx_q * dw_weight_group_bytes;
+    assign dw_last_group = (dw_group_idx_q + 32'd1) >= dw_group_count;
+    assign cfg_linebuf_channel_addr_offset_eff = linebuf_depthwise_mode ?
+                                                 (cfg_linebuf_channel_addr_offset_i + dw_group_input_offset) :
+                                                 cfg_linebuf_channel_addr_offset_i;
 
     function automatic input_row_t max_i8_row(
         input input_row_t lhs,
@@ -700,8 +722,9 @@ module systolic_controller #(
         .cfg_kgen_i              (cfg_linebuf_kgen_i),
         .cfg_pool_i              (cfg_linebuf_pool_i),
         .cfg_c32_fast_i          (cfg_linebuf_c32_fast_i),
+        .cfg_depthwise_i         (cfg_linebuf_depthwise_i),
         .cfg_block_valid_bytes_i (cfg_linebuf_block_valid_bytes_i),
-        .cfg_channel_addr_offset_i(cfg_linebuf_channel_addr_offset_i),
+        .cfg_channel_addr_offset_i(cfg_linebuf_channel_addr_offset_eff),
         .cfg_coalesce_k_bytes_i  (cfg_linebuf_coalesce_k_bytes_i),
         .cfg_k_seed_kh_i         (linebuf_seed_kh_eff),
         .cfg_k_seed_kw_i         (linebuf_seed_kw_eff),
@@ -773,6 +796,7 @@ module systolic_controller #(
         dw_next_acc = dw_acc_q;
         dw_requant_acc = dw_acc_q;
         dw_tap_count_d = dw_tap_count_q;
+        dw_group_idx_d = dw_group_idx_q;
         for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
             dw_weight_d[tap] = dw_weight_q[tap];
         end
@@ -1117,6 +1141,7 @@ module systolic_controller #(
                     pool_tap_count_d = '0;
                     dw_acc_d = '0;
                     dw_tap_count_d = '0;
+                    dw_group_idx_d = '0;
                     if (psum_buf_active) begin
                         psum_buf_sel_d = ~psum_buf_sel_q;
                     end
@@ -1133,6 +1158,7 @@ module systolic_controller #(
 
                     if (linebuf_depthwise_mode) begin
                         w_ptr_d = cfg_sys_weight_ptr_i;
+                        o_ptr_d = cfg_sys_ofm_ptr_i;
                         req_cnt_d = pool_kernel_vectors;
                         rsp_cnt_d = pool_kernel_vectors;
                         drain_cnt_d = linebuf_spatial_m;
@@ -1203,37 +1229,39 @@ module systolic_controller #(
                         req_cnt_d   = req_cnt_q - 1;
                     end
                 end
-                weight_fifo_push = obi_w_rvalid_i && !weight_fifo_full;
-                if (!weight_fifo_empty) begin
-                    weight_load_en = 1'b1;
-                    weight_fifo_pop  = 1'b1;
-                    weight_data    = weight_fifo_out;
-                    rsp_cnt_d = rsp_cnt_q - 1;
-                end
-                if (req_cnt_q == 0 && rsp_cnt_q == 1 && weight_fifo_pop) begin
-                    req_cnt_d = cfg_sys_dim_m_i;
-                    rsp_cnt_d = cfg_sys_dim_m_i;
-                    drain_cnt_d = cfg_sys_dim_m_i;
-                    drain_state_d = DRAIN_IDLE;
-                    accum_row_d = '0;
-                    accum_beat_d = '0;
-                    accum_req_beat_d = '0;
-                    accum_requant_sent_d = 1'b0;
-                    psum_read_row_d = '0;
-                    psum_read_active_d = 1'b0;
-                    psum_read_resp_mask_d = '0;
-                    psum_prefetch_rows_d = accum_uses_tcdm_psum ? cfg_sys_dim_m_i : '0;
-                    drain_cnt_d = (psum_buf_overlap_active && (k_tile_idx_q != 32'd0)) ?
-                                  (drain_cnt_q + cfg_sys_dim_m_i) : cfg_sys_dim_m_i;
-                    ofm_push_row_idx_d = '0;
-                    if (cfg_linebuf_en_i) begin
-                        if (linebuf_kgen_multi && (k_tile_idx_q != 32'd0)) begin
-                            linebuf_next_tile = 1'b1;
-                        end else begin
-                            linebuf_start = 1'b1;
-                        end
+                if (!linebuf_depthwise_mode) begin
+                    weight_fifo_push = obi_w_rvalid_i && !weight_fifo_full;
+                    if (!weight_fifo_empty) begin
+                        weight_load_en = 1'b1;
+                        weight_fifo_pop  = 1'b1;
+                        weight_data    = weight_fifo_out;
+                        rsp_cnt_d = rsp_cnt_q - 1;
                     end
-                    state_d = COMPUTE;
+                    if (req_cnt_q == 0 && rsp_cnt_q == 1 && weight_fifo_pop) begin
+                        req_cnt_d = cfg_sys_dim_m_i;
+                        rsp_cnt_d = cfg_sys_dim_m_i;
+                        drain_cnt_d = cfg_sys_dim_m_i;
+                        drain_state_d = DRAIN_IDLE;
+                        accum_row_d = '0;
+                        accum_beat_d = '0;
+                        accum_req_beat_d = '0;
+                        accum_requant_sent_d = 1'b0;
+                        psum_read_row_d = '0;
+                        psum_read_active_d = 1'b0;
+                        psum_read_resp_mask_d = '0;
+                        psum_prefetch_rows_d = accum_uses_tcdm_psum ? cfg_sys_dim_m_i : '0;
+                        drain_cnt_d = (psum_buf_overlap_active && (k_tile_idx_q != 32'd0)) ?
+                                      (drain_cnt_q + cfg_sys_dim_m_i) : cfg_sys_dim_m_i;
+                        ofm_push_row_idx_d = '0;
+                        if (cfg_linebuf_en_i) begin
+                            if (linebuf_kgen_multi && (k_tile_idx_q != 32'd0)) begin
+                                linebuf_next_tile = 1'b1;
+                            end else begin
+                                linebuf_start = 1'b1;
+                            end
+                        end
+                        state_d = COMPUTE;
+                    end
                 end
             end
 
@@ -1277,7 +1305,20 @@ module systolic_controller #(
                     end
 
                     if ((drain_cnt_q == 32'd0) && !linebuf_busy && !requant_out_valid) begin
-                        state_d = DONE;
+                        if (!dw_last_group) begin
+                            dw_group_idx_d = dw_group_idx_q + 32'd1;
+                            w_ptr_d = cfg_sys_weight_ptr_i + dw_group_weight_offset + dw_weight_group_bytes;
+                            o_ptr_d = cfg_sys_ofm_ptr_i + dw_group_output_offset + dw_group_output_bytes;
+                            o_col_d = '0;
+                            req_cnt_d = pool_kernel_vectors;
+                            rsp_cnt_d = pool_kernel_vectors;
+                            drain_cnt_d = linebuf_spatial_m;
+                            dw_acc_d = '0;
+                            dw_tap_count_d = '0;
+                            state_d = LOAD_WEIGHTS;
+                        end else begin
+                            state_d = DONE;
+                        end
                     end
                 end else if (linebuf_pool_mode) begin
                     obi_i_req_o = linebuf_obi_req;
@@ -1560,6 +1601,7 @@ module systolic_controller #(
             pool_tap_count_q <= '0;
             dw_acc_q <= '0;
             dw_tap_count_q <= '0;
+            dw_group_idx_q <= '0;
             for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
                 dw_weight_q[tap] <= '0;
             end
@@ -1602,6 +1644,7 @@ module systolic_controller #(
             pool_tap_count_q <= pool_tap_count_d;
             dw_acc_q <= dw_acc_d;
             dw_tap_count_q <= dw_tap_count_d;
+            dw_group_idx_q <= dw_group_idx_d;
             for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
                 dw_weight_q[tap] <= dw_weight_d[tap];
             end

@@ -15,12 +15,25 @@
 #define T_WEIGHT   0x10113000u
 #define T_OUTPUT   0x10114000u
 
-#define H 48u
-#define W 48u
-#define C 32u
+#ifndef DEPTHWISE_H
+#define DEPTHWISE_H 48u
+#endif
+
+#ifndef DEPTHWISE_W
+#define DEPTHWISE_W 48u
+#endif
+
+#ifndef DEPTHWISE_C
+#define DEPTHWISE_C 32u
+#endif
+
+#define H DEPTHWISE_H
+#define W DEPTHWISE_W
+#define C DEPTHWISE_C
 #define ROWS (H * W)
-#define ACTIVATION_BYTES (ROWS * C)
-#define WEIGHT_BYTES (3u * 3u * C)
+#define C32_GROUPS ((C + 31u) / 32u)
+#define ACTIVATION_BYTES (ROWS * C32_GROUPS * 32u)
+#define WEIGHT_BYTES (3u * 3u * C32_GROUPS * 32u)
 
 enum {
     TENSOR_INPUT = 0,

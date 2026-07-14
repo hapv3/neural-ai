@@ -19,14 +19,15 @@ represented at least twice:
 - DepthwiseConv2D: at least 2 layers;
 - Pointwise Conv2D `1x1`: at least 2 layers.
 
-Current status: **planning with first pointwise and first depthwise C32 fast
-paths implemented**.
+Current status: **planning with first pointwise and first depthwise fast paths
+implemented**.
 Existing Micro-YOLO infrastructure provides the stem Conv3x3 linebuffer path,
 AFU/Spatz activation ops, AFU Add, iDMA movement, and the graph/test harness.
 `NPU_OP_CONV2D1X1_C32_REQUANT` now covers the direct C32 `1x1` fast path for
 `C32->C32`. `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` now covers a linebuffer-fed
-lane-wise depthwise `3x3/s1/p1` C32 fast path. New work is still required for
-multi-C32 pointwise tiling and depthwise stride-2/multi-C32 graph wrappers.
+lane-wise depthwise `3x3/s1/p1` fast path for any channel count that is a
+multiple of 32. New work is still required for multi-C32 pointwise tiling,
+depthwise stride-2, and planner-side tail splitting when `C % 32 != 0`.
 
 ---
 
@@ -92,7 +93,7 @@ first Micro-MobileNet graph.
 
 | Op | Difficulty | Recommended first path | Optimized path |
 |---|---|---|---|
-| DepthwiseConv2D C32 | High | implemented RTL linebuffer-fed path for `3x3/s1/p1` | stride-2 support, multi-C32 wrappers, and wider tap issue if PMU requires it |
+| DepthwiseConv2D C32 groups | High | implemented RTL linebuffer-fed path for `3x3/s1/p1`, `C % 32 == 0` | stride-2 support, non-multiple-of-32 planner split, and wider tap issue if PMU requires it |
 | GlobalAvgPool | Medium | Spatz/scalar reduction over C32 groups | vector reduction or AFU reduction mode if it becomes hot |
 | ReLU6 exact quantization | Low | clamp op using precomputed quantized `[0, 6]` range | fuse into requant when producer is Conv/depthwise |
 
@@ -225,11 +226,13 @@ accepted subset: `C32->C32`, `48x48`, C32-blocked input/output.
 
 Objective: unblock graph integration with a simple depthwise implementation.
 
-Current implementation note: the first production-facing path skips the
-scalar/Spatz lowering and directly uses the optimized RTL mode for the accepted
-subset `3x3/s1/p1`, `C=32`, C32-blocked input/output. The weight layout is
-`kh, kw, lane` for each C32 group; future multi-C32 layers run one invocation
-per C32 group.
+Current implementation note: the production-facing path skips the scalar/Spatz
+lowering and directly uses the optimized RTL mode for `3x3/s1/p1`,
+C32-blocked input/output, and channel counts that are exact multiples of 32.
+The weight layout is `group, kh, kw, lane`. The systolic controller loops over
+all C32 groups inside one accelerator start, so `C=64/96/128/...` does not need
+to be split into multiple graph/firmware invocations. If `C % 32 != 0`, the
+host planner should emit one main multiple-of-32 job and a separate tail job.
 
 Tasks:
 
@@ -238,17 +241,18 @@ Tasks:
 | 3a | Add `systolic_depthwise3x3s1p1_c32_requant()` API |
 | 3b | Define depthwise weight layout as `kh, kw, lane` per C32 group |
 | 3c | Add graph op `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` for the C32 subset |
-| 3d | Add standalone C32 test; add C64/C128 wrappers later |
+| 3d | Add standalone C32 and C64 tests; add C128/odd-tail coverage later |
 
-Acceptance: standalone C32 `48x48` depthwise matches golden byte-exactly.
-Current measured standalone PMU is `cycles=39498`, `ifm_req=6825`,
-`ofm_req=2304` for `1x32x48x48`.
+Acceptance: standalone C32 `48x48` and C64 `24x24` depthwise match golden
+byte-exactly. Current measured standalone C32 PMU after row-ring reuse is
+`cycles=32524`, `ifm_req=2313`, `ofm_req=2304` for `1x32x48x48`. This removes
+the previous per-tap reread pattern (`ifm_req=6825`) without increasing SRAM.
 
 ### Phase 4: Optimized Depthwise Linebuffer Path
 
 Objective: replace the correctness path with a linebuffer-fed depthwise MAC.
 
-Status: first version is implemented for `3x3/s1/p1`, `C=32`.
+Status: first version is implemented for `3x3/s1/p1`, `C % 32 == 0`.
 
 Tasks:
 
@@ -261,7 +265,11 @@ Tasks:
 | 4e | Keep scalar/Spatz fallback for debug and unsupported shapes |
 
 Acceptance: depthwise optimized path matches golden and reduces PMU cycles vs
-the correctness path.
+the correctness path. Implemented optimization keeps only K resident rows in
+the existing row-ring cache, slides rows across output positions, and lets the
+existing background-fill FSM fetch the next row while the stream path emits
+current window taps. It does not add SRAM; it adds only control state for
+depthwise row-ring enablement and C32 group iteration.
 
 ### Phase 5: Micro-MobileNet E2E
 

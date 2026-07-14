@@ -146,6 +146,16 @@ void systolic_depthwise3x3s1p1_c32_requant(uint32_t input_addr,
                                            uint32_t output_addr,
                                            uint32_t height,
                                            uint32_t width) {
+    systolic_depthwise3x3s1p1_c32_requant_channels(input_addr, weight_addr,
+                                                   output_addr, height, width, 32u);
+}
+
+void systolic_depthwise3x3s1p1_c32_requant_channels(uint32_t input_addr,
+                                                    uint32_t weight_addr,
+                                                    uint32_t output_addr,
+                                                    uint32_t height,
+                                                    uint32_t width,
+                                                    uint32_t channels) {
     systolic_linebuf_cfg_t cfg;
     uint32_t row_stride = width * 32u;
     uint32_t rows = height * width;
@@ -153,7 +163,7 @@ void systolic_depthwise3x3s1p1_c32_requant(uint32_t input_addr,
     cfg.input_base = input_addr - row_stride;
     cfg.input_h = (uint16_t)height;
     cfg.input_w = (uint16_t)width;
-    cfg.input_c = 32u;
+    cfg.input_c = (uint16_t)channels;
     cfg.output_w = (uint16_t)width;
     cfg.stride_h = 1u;
     cfg.stride_w = 1u;
