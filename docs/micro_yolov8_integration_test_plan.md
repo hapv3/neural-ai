@@ -225,8 +225,9 @@ Required decisions:
   kernel_h * kernel_w * block_valid_bytes`. Firmware should treat these fields
   as part of the descriptor, not re-plan the schedule on Snitch.
 - The Python host helper in `tools/npu_linebuf_precompute.py` now emits full
-  Micro-YOLO linebuffer/GEMM job arrays as a generated header. Firmware stores
-  pointers to those arrays in `npu_layer_t` and calls the descriptor runner in
+  Micro-YOLO linebuffer/GEMM job arrays as runtime L2 descriptor blobs.
+  Firmware DMA-copies those blobs into scratch/TCDM, stores pointers to the
+  copied arrays in `npu_layer_t`, and calls the descriptor runner in
   `sw/lib/conv2d_packed.c`. The C planner remains as a generic compatibility
   fallback for layers that do not provide host-planned job descriptors. Python
   must only set `C32_FAST` for one full C32 block (`block_valid_bytes == 32`,
@@ -256,17 +257,20 @@ Current implementation status:
   micro-yolo firmware uses uniform qparams per layer; per-channel qparams remain
   compatible with the systolic requant configuration API.
 - `tools/npu_linebuf_precompute.py` owns the current host-side C32 linebuffer
-  job descriptor planning for the Micro-YOLO graph and generates
-  `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h` during firmware build.
-  The generated header is intentionally not tracked.
+  job descriptor planning for the Micro-YOLO graph. The active flow is runtime
+  descriptor delivery: Python/host emits a small descriptor manifest plus binary
+  descriptor blobs, writes the manifest to L2 at `0x80052000`, writes each blob
+  at the L2 address listed by the manifest, and firmware DMA-copies those blobs
+  into scratch/TCDM before graph setup. Firmware dispatches only the received
+  pointer/count pairs and does not compile the full job arrays into `.data`.
 - The generated descriptor ABI is `npu_conv2d_linebuf_job_desc_t`: full
   `systolic_linebuf_cfg_t`, full `systolic_gemm32_req_t`, `rows`, and
   `k_tiles`. Head chunk1 uses `npu_conv2d_l2_copy_job_desc_t`, which wraps the
   linebuffer job plus compact tile-output and final L2 copy metadata.
-- `test_micro_yolo_e2e` loads `micro_yolo.elf` section-by-section because these
-  generated descriptors live in initialized D-TCM `.data`. `.text` is still
-  written through AXI I-TCM; `.data` is initialized through testbench hierarchy
-  before fetch release.
+- `test_micro_yolo_e2e` loads `micro_yolo.elf` section-by-section and also
+  writes the Python-generated descriptor blobs into L2 before releasing fetch.
+  `.text` is still written through AXI I-TCM; firmware then pulls runtime
+  descriptor blobs from L2 into scratch.
 
 ### Phase 3: Incremental Graph Integration
 
@@ -384,18 +388,18 @@ Latest `test_micro_yolo_e2e.py` result after 3j:
 | 3 | DMA_IN weight2 | 784 | down weights |
 | 4 | DMA_IN weight3 | 1,240 | two C32 head chunks |
 | 5 | DMA_IN sigmoid LUT | 360 | 256-byte LUT |
-| 6 | Conv_Stem | 21,136 | `sys_compute=2,304`, `ifm_req=14,805` |
+| 6 | Conv_Stem | 21,134 | `sys_compute=2,304`, `ifm_req=14,805` |
 | 7 | Logistic LUT | 26,248 | AFU |
 | 8 | Mul_Q7 | 9,378 | AFU, `tcdm_stall=2,304` |
 | 9 | DMA_OUT skip | 4,100 | preserve L3 for later logical concat |
 | 10 | C2f_Conv | 49,802 | `sys_compute=20,736`, `ifm_req=26,928` |
 | 11 | Residual Add | 9,388 | AFU, `tcdm_stall=2,304` |
-| 12 | Conv_Down | 41,018 | `sys_compute=5,184`, `ifm_req=32,463` |
+| 12 | Conv_Down | 41,014 | `sys_compute=5,184`, `ifm_req=32,463` |
 | 13 | MaxPool | 18,474 | linebuffer pool mode |
 | 14 | Upsample | 35,462 | Spatz C32 fast path, `tcdm_stall=2,880` |
 | 15 | DMA_IN skip reload | 4,062 | reload L3 branch |
 | 16 | Head_Conv C32x2 | 149,256 | `sys_compute=41,472`, `ifm_req=54,277`, `ofm_req=21,042` |
-| **Total** |  | **386,044** | PASS |
+| **Total** |  | **388,146** | PASS, runtime L2 descriptor manifest |
 
 Head_Conv compute scales as expected:
 
@@ -403,14 +407,16 @@ Head_Conv compute scales as expected:
 - Head logical C64 compute: `41,472` cycles, exactly `2x`.
 - Head total cycles are about `3.1x` C2f total because the second C32 chunk also
   reads external psum, accumulates, requants, and writes INT8 tiles to L2.
-- Firmware now uses host-generated linebuffer/GEMM job descriptors plus RTL
-  shadow registers for linebuffer tile scheduling: tile N+1 config is staged
-  while tile N is running, so the DONE-to-START gap only needs a start pulse
-  plus the residual wait.
+- Firmware now uses host-generated linebuffer/GEMM job descriptors delivered
+  through a runtime L2 manifest/blob flow plus RTL shadow registers for
+  linebuffer tile scheduling: tile N+1 config is staged while tile N is running,
+  so the DONE-to-START gap only needs a start pulse plus the residual wait.
 - This reduced total Micro-YOLO cycles from the previous field-precompute bridge
-  snapshot (`403,128`) to `386,044`. The systolic compute count stayed
+  snapshot (`403,128`) to `388,146`. The systolic compute count stayed
   `69,696`, confirming the gain comes from eliminating Snitch-side tile config
-  preparation rather than changing MAC work.
+  preparation rather than changing MAC work. The runtime manifest/blob handoff
+  adds one small pre-graph DMA setup compared with the earlier static
+  descriptor-pointer verification flow.
 
 Current head scheduler geometry:
 

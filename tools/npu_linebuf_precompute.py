@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,15 @@ OC_TILE = 32
 K_TILE = 32
 SCRATCH_BASE = 0x10100000
 L2_OUTPUT = 0x80020000
+MICRO_YOLO_DESC_L2_BASE = 0x80052000
+MICRO_YOLO_DESC_MANIFEST_MAGIC = 0x4D594C42
+MICRO_YOLO_DESC_MANIFEST_VERSION = 1
+MICRO_YOLO_DESC_MANIFEST_ENTRIES = 5
+MICRO_YOLO_DESC_MANIFEST_SIZE = 16 + (MICRO_YOLO_DESC_MANIFEST_ENTRIES * 16)
+DESC_KIND_LINEBUF = 1
+DESC_KIND_L2_COPY = 2
+LINEBUF_DESC_SIZE = 120
+L2_COPY_DESC_SIZE = 136
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,15 @@ class MemoryMap:
     psum_or_sig_addr: int
     act_c_addr: int
     head_tile_addr: int
+
+
+@dataclass(frozen=True)
+class DescriptorBlob:
+    name: str
+    kind: str
+    l2_addr: int
+    count: int
+    data: bytes
 
 
 def alloc_sequence(head_tile_oh: int, head_tile_ow: int) -> MemoryMap:
@@ -350,6 +369,114 @@ def c_u32(value: int) -> str:
     return f"0x{value:08X}u" if value >= 0x10000 else f"{value}u"
 
 
+def pack_linebuf_cfg(fields: dict[str, int]) -> bytes:
+    return struct.pack(
+        "<I8H4I12H4I",
+        fields["input_base"],
+        fields["input_h"],
+        fields["input_w"],
+        fields["input_c"],
+        fields["output_w"],
+        fields["stride_h"],
+        fields["stride_w"],
+        fields["pad_h"],
+        fields["pad_w"],
+        fields["row_stride_bytes"],
+        fields["pixel_stride_bytes"],
+        fields["ow_step_bytes"],
+        fields["oh_step_bytes"],
+        fields["kernel_h"],
+        fields["kernel_w"],
+        fields["c_base"],
+        fields["lane_base"],
+        fields["coalesce"],
+        fields["kgen"],
+        fields["pool"],
+        fields["c32_fast"],
+        fields["block_valid_bytes"],
+        fields["k_seed_kh"],
+        fields["k_seed_kw"],
+        fields["k_seed_ic"],
+        fields["k_tiles"],
+        fields["spatial_m"],
+        fields["channel_addr_offset"],
+        fields["coalesce_k_bytes"],
+    )
+
+
+def pack_gemm_req(fields: dict[str, int]) -> bytes:
+    return struct.pack("<9I", *(fields[field] for field in GEMM_FIELDS))
+
+
+def pack_linebuf_job(job: dict[str, object]) -> bytes:
+    data = (
+        pack_linebuf_cfg(job["linebuf"])
+        + pack_gemm_req(job["gemm"])
+        + struct.pack("<2I", job["rows"], job["k_tiles"])
+    )
+    if len(data) != LINEBUF_DESC_SIZE:
+        raise ValueError(f"linebuffer descriptor ABI size mismatch: {len(data)}")
+    return data
+
+
+def pack_l2_job(entry: dict[str, object]) -> bytes:
+    data = (
+        pack_linebuf_job(entry["job"])
+        + struct.pack("<4I", entry["l2_addr"], entry["tile_output_addr"],
+                      entry["tile_oh"], entry["tile_ow"])
+    )
+    if len(data) != L2_COPY_DESC_SIZE:
+        raise ValueError(f"L2 copy descriptor ABI size mismatch: {len(data)}")
+    return data
+
+
+def align_up(value: int, align: int) -> int:
+    return (value + align - 1) & ~(align - 1)
+
+
+def micro_yolo_descriptor_blobs(c2f_tile_oh: int = 16, c2f_tile_ow: int = 16,
+                                down_tile_oh: int = 16, down_tile_ow: int = 16,
+                                head_tile_oh: int = 16, head_tile_ow: int = 16
+                                ) -> list[DescriptorBlob]:
+    jobs = micro_yolo_jobs(c2f_tile_oh, c2f_tile_ow,
+                           down_tile_oh, down_tile_ow,
+                           head_tile_oh, head_tile_ow)
+    specs = [
+        ("STEM", "linebuf", b"".join(pack_linebuf_job(job) for job in jobs["STEM"])),
+        ("C2F", "linebuf", b"".join(pack_linebuf_job(job) for job in jobs["C2F"])),
+        ("DOWN", "linebuf", b"".join(pack_linebuf_job(job) for job in jobs["DOWN"])),
+        ("HEAD0", "linebuf", b"".join(pack_linebuf_job(job) for job in jobs["HEAD0"])),
+        ("HEAD1_L2", "l2_copy", b"".join(pack_l2_job(job) for job in jobs["HEAD1_L2"])),
+    ]
+
+    blobs: list[DescriptorBlob] = []
+    addr = align_up(MICRO_YOLO_DESC_L2_BASE + MICRO_YOLO_DESC_MANIFEST_SIZE, BEAT_BYTES)
+    for name, kind, data in specs:
+        desc_size = L2_COPY_DESC_SIZE if kind == "l2_copy" else LINEBUF_DESC_SIZE
+        blobs.append(DescriptorBlob(name=name, kind=kind, l2_addr=addr,
+                                    count=len(data) // desc_size, data=data))
+        addr = align_up(addr + len(data), BEAT_BYTES)
+    return blobs
+
+
+def micro_yolo_descriptor_manifest(blobs: list[DescriptorBlob]) -> bytes:
+    if len(blobs) != MICRO_YOLO_DESC_MANIFEST_ENTRIES:
+        raise ValueError(f"expected {MICRO_YOLO_DESC_MANIFEST_ENTRIES} descriptor blobs")
+    data = struct.pack(
+        "<4I",
+        MICRO_YOLO_DESC_MANIFEST_MAGIC,
+        MICRO_YOLO_DESC_MANIFEST_VERSION,
+        len(blobs),
+        0,
+    )
+    for blob in blobs:
+        kind = DESC_KIND_L2_COPY if blob.kind == "l2_copy" else DESC_KIND_LINEBUF
+        data += struct.pack("<4I", blob.l2_addr, blob.count, len(blob.data), kind)
+    if len(data) != MICRO_YOLO_DESC_MANIFEST_SIZE:
+        raise ValueError(f"descriptor manifest ABI size mismatch: {len(data)}")
+    return data
+
+
 def emit_linebuf(job: dict[str, object], indent: str) -> list[str]:
     linebuf = job["linebuf"]
     gemm = job["gemm"]
@@ -424,6 +551,30 @@ def emit_micro_yolo_header(output: Path, args: argparse.Namespace) -> None:
     output.write_text("\n".join(lines), encoding="ascii")
 
 
+def emit_micro_yolo_blob_dir(output_dir: Path, args: argparse.Namespace) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    blobs = micro_yolo_descriptor_blobs(args.c2f_tile_oh, args.c2f_tile_ow,
+                                        args.down_tile_oh, args.down_tile_ow,
+                                        args.head_tile_oh, args.head_tile_ow)
+    (output_dir / "micro_yolo_linebuf_manifest.bin").write_bytes(
+        micro_yolo_descriptor_manifest(blobs)
+    )
+    manifest = [
+        f"# binary_manifest_l2_addr 0x{MICRO_YOLO_DESC_L2_BASE:08X}",
+        "# name kind l2_addr count bytes filename",
+    ]
+    for blob in blobs:
+        filename = f"micro_yolo_lb_{blob.name.lower()}.bin"
+        (output_dir / filename).write_bytes(blob.data)
+        manifest.append(
+            f"{blob.name} {blob.kind} 0x{blob.l2_addr:08X} "
+            f"{blob.count} {len(blob.data)} {filename}"
+        )
+    (output_dir / "micro_yolo_linebuf_manifest.txt").write_text(
+        "\n".join(manifest) + "\n", encoding="ascii"
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -435,10 +586,21 @@ def main() -> int:
     gen.add_argument("--down-tile-ow", type=int, default=16)
     gen.add_argument("--head-tile-oh", type=int, default=16)
     gen.add_argument("--head-tile-ow", type=int, default=16)
+    blob = sub.add_parser("micro-yolo-blob")
+    blob.add_argument("--output-dir", required=True, type=Path)
+    blob.add_argument("--c2f-tile-oh", type=int, default=16)
+    blob.add_argument("--c2f-tile-ow", type=int, default=16)
+    blob.add_argument("--down-tile-oh", type=int, default=16)
+    blob.add_argument("--down-tile-ow", type=int, default=16)
+    blob.add_argument("--head-tile-oh", type=int, default=16)
+    blob.add_argument("--head-tile-ow", type=int, default=16)
     args = parser.parse_args()
 
     if args.cmd == "micro-yolo-header":
         emit_micro_yolo_header(args.output, args)
+        return 0
+    if args.cmd == "micro-yolo-blob":
+        emit_micro_yolo_blob_dir(args.output_dir, args)
         return 0
     return 1
 

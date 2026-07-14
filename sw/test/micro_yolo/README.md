@@ -72,9 +72,24 @@ early.
 make -C sw/test/micro_yolo
 ```
 
-The build generates `micro_yolo_linebuf_precompute.h` from
-`tools/npu_linebuf_precompute.py`; this is the host-owned linebuffer/GEMM job
-descriptor table consumed by the firmware graph.
+The firmware no longer compiles the linebuffer/GEMM job descriptors into
+`.data`. The host side generates a small runtime descriptor manifest plus binary
+descriptor blobs with `tools/npu_linebuf_precompute.py`, writes the manifest to
+L2 at `0x80052000`, and writes each blob at the L2 address listed by that
+manifest. Firmware copies the manifest, then copies each blob into scratch/TCDM
+before graph setup and only dispatches the received pointer/count pairs.
+
+For the cocotb flow, `test_micro_yolo_e2e.py` calls the same Python planner and
+loads the descriptor blobs into L2 before releasing firmware fetch. For an
+external host flow, use:
+
+```sh
+tools/npu_linebuf_precompute.py micro-yolo-blob --output-dir /tmp/micro_yolo_desc
+```
+
+The generated `micro_yolo_linebuf_manifest.bin` is the runtime ABI consumed by
+firmware. `micro_yolo_linebuf_manifest.txt` is a readable sidecar that lists
+each blob name, L2 address, count, byte size, and filename.
 
 Optional compile-time tile knobs:
 

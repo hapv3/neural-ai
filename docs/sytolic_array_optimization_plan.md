@@ -11,9 +11,10 @@ Current implemented flow:
 - The active Conv2D performance path is `conv_linebuf_stream_packer` inside
   `systolic_controller`, not the legacy `conv_channel_linebuf_packer`.
 - Micro-YOLO no longer asks Snitch firmware to build each linebuffer tile in
-  the hot path. `tools/npu_linebuf_precompute.py` generates
-  `npu_conv2d_linebuf_job_desc_t` arrays at firmware build time, and
-  `npu_conv2d_packed_run_linebuf_job_descs()` dispatches those descriptors.
+  the hot path. `tools/npu_linebuf_precompute.py` generates a runtime L2
+  descriptor manifest plus blobs containing `npu_conv2d_linebuf_job_desc_t`
+  arrays; firmware DMA-copies those blobs into scratch/TCDM and
+  `npu_conv2d_packed_run_linebuf_job_descs()` dispatches them.
 - The descriptor runner preloads the next linebuffer/GEMM shadow-register image
   while the current job runs. This removed most per-job C planner arithmetic
   from Snitch.
@@ -28,13 +29,13 @@ Current implemented flow:
   relies on host spatial job descriptors plus C32 alignment to reduce schedule
   overhead.
 
-Latest Micro-YOLO E2E snapshot after host-precomputed descriptors:
+Latest Micro-YOLO E2E snapshot after runtime L2 descriptor manifest/blobs:
 
 | Counter | Value |
 |---|---:|
-| PMU cycles | 386,044 |
+| PMU cycles | 388,146 |
 | Previous field-precompute bridge snapshot | 403,128 |
-| Delta | -17,084 cycles (-4.2%) |
+| Delta | -14,982 cycles (-3.7%) |
 | Total systolic useful compute | 69,696 cycles |
 
 The remaining gap is dominated by IFM request volume/window setup and graph

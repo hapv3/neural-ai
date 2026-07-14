@@ -27,9 +27,11 @@ The implementation has moved the Micro-YOLO performance path to
 Important points:
 
 - **Host/Python owns the Conv2D linebuffer schedule.**
-  `tools/npu_linebuf_precompute.py` generates
-  `sw/test/micro_yolo/micro_yolo_linebuf_precompute.h`, which contains full
-  `npu_conv2d_linebuf_job_desc_t` job arrays for each Conv tile.
+  `tools/npu_linebuf_precompute.py` generates a runtime descriptor manifest plus
+  binary descriptor blobs containing full `npu_conv2d_linebuf_job_desc_t` job
+  arrays for each Conv tile. The host writes the manifest and blobs to L2;
+  firmware copies them into scratch/TCDM and dispatches received pointer/count
+  pairs.
 - **Snitch firmware does not build linebuffer tiles in the Micro-YOLO hot
   path.** `npu_layer_t` stores only descriptor pointer/count fields. The graph
   executor calls `npu_conv2d_packed_run_linebuf_job_descs()`, and that runner
@@ -46,11 +48,11 @@ Important points:
 - **`merge_beats` is still required** for the RGB stem, sub-C32/tail chunks,
   `lane_base != 0`, raw/NHWC or non-aligned fallback, and bypass reads crossing
   a 32-byte beat boundary.
-- **The Micro-YOLO test firmware uses initialized D-TCM descriptors.** Cocotb
-  uses an ELF section-aware loader: `.text` is written into I-TCM through AXI,
-  while the `.data` descriptor table is initialized in D-TCM through testbench
-  hierarchy/backdoor. This is the current verification mechanism; it does not
-  mean the normal host AXI path exposes D-TCM.
+- **The Micro-YOLO test firmware uses runtime L2 descriptor blobs.** Cocotb
+  writes a host-generated descriptor manifest and blobs into L2 before releasing
+  firmware fetch. Firmware then DMA-copies them into scratch/TCDM and stores
+  pointer/count pairs from the manifest in the graph layer descriptors. The
+  descriptor table is no longer compiled into initialized D-TCM `.data`.
 
 ## 1. Measured Legacy RTL Contract
 
