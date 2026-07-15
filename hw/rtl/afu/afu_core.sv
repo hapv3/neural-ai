@@ -49,6 +49,7 @@ module afu_core #(
     localparam logic [2:0] MODE_ADD_I8 = 3'd4;
     localparam logic [2:0] MODE_DFL4_ROW32_Q8 = 3'd5;
     localparam logic [2:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 3'd6;
+    localparam logic [2:0] MODE_GLOBAL_AVGPOOL_C32 = 3'd7;
 
     typedef enum logic [3:0] {
         ST_IDLE,
@@ -62,6 +63,8 @@ module afu_core #(
         ST_CLASS_LUT_REQ,
         ST_CLASS_LUT_WAIT,
         ST_CLASS_PUSH,
+        ST_GAP_ACCUM,
+        ST_GAP_PUSH,
         ST_DONE
     } state_e;
 
@@ -151,6 +154,18 @@ module afu_core #(
     logic [31:0] class_s2_next_elem_cnt;
     logic [31:0] class_s2_next_dst_addr;
     logic        class_s2_flush_output;
+    logic signed [31:0] gap_acc_q [32];
+    logic signed [31:0] gap_acc_n [32];
+    logic [31:0] gap_row_count_q, gap_row_count_n;
+    logic [31:0] gap_spatial_count;
+    logic [31:0] gap_next_elem_cnt;
+    logic        gap_group_done;
+    logic        gap_final_input;
+
+    assign gap_spatial_count = cfg_src2_ptr_i;
+    assign gap_next_elem_cnt = elem_cnt_q + 32'd32;
+    assign gap_group_done = ((gap_row_count_q + 32'd1) >= gap_spatial_count);
+    assign gap_final_input = (gap_next_elem_cnt >= cfg_length_i);
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -238,6 +253,25 @@ module afu_core #(
             sum_i16 = lhs_i8 + rhs_i8;
             clamped_i9 = clamp_i8(sum_i16);
             add_i8_byte = clamped_i9[7:0];
+        end
+    endfunction
+
+    function automatic logic [7:0] avg_i8_byte(
+        input logic signed [31:0] sum,
+        input logic [31:0] count
+    );
+        logic signed [31:0] avg;
+        logic signed [15:0] avg16;
+        logic signed [8:0] clamped_i9;
+        begin
+            if (count == 32'd0) begin
+                avg = '0;
+            end else begin
+                avg = sum / $signed({1'b0, count[30:0]});
+            end
+            avg16 = avg[15:0];
+            clamped_i9 = clamp_i8(avg16);
+            avg_i8_byte = clamped_i9[7:0];
         end
     endfunction
 
@@ -415,6 +449,10 @@ module afu_core #(
         class_s1_next_elem_cnt = '0;
         class_s1_next_dst_addr = '0;
         class_s1_flush_output = 1'b0;
+        gap_row_count_n = gap_row_count_q;
+        for (int i = 0; i < 32; i++) begin
+            gap_acc_n[i] = gap_acc_q[i];
+        end
         for (int i = 0; i < LUT_LANES; i++) begin
             dfl_exp_idx[i] = 8'd0;
             class_lut_idx[i] = 8'd0;
@@ -441,6 +479,10 @@ module afu_core #(
             dfl_sum_n = '0;
             dfl_weighted_n = '0;
             dfl_shift_n = '0;
+            gap_row_count_n = '0;
+            for (int i = 0; i < 32; i++) begin
+                gap_acc_n[i] = '0;
+            end
             if (cfg_length_i == 0) begin
                 state_n = ST_DONE;
             end else begin
@@ -468,8 +510,45 @@ module afu_core #(
                         state_n = ST_DFL_EXP_REQ;
                     end else if (cfg_mode_i == MODE_CLASS_SIGMOID_ROW32_HIGH16) begin
                         state_n = ST_CLASS_LUT_REQ;
+                    end else if (cfg_mode_i == MODE_GLOBAL_AVGPOOL_C32) begin
+                        state_n = (gap_spatial_count == 32'd0) ? ST_DONE : ST_GAP_ACCUM;
                     end else begin
                         state_n = ST_PROCESS;
+                    end
+                end
+            end
+
+            ST_GAP_ACCUM: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_acc_n[i] = gap_acc_q[i] +
+                                   {{24{in_buf_q[i * 8 + 7]}}, in_buf_q[i * 8 +: 8]};
+                end
+                elem_cnt_n = gap_next_elem_cnt;
+
+                if (gap_group_done) begin
+                    gap_row_count_n = '0;
+                    for (int i = 0; i < 32; i++) begin
+                        gap_acc_n[i] = '0;
+                    end
+                    if (wfifo_full_i) begin
+                        state_n = ST_GAP_PUSH;
+                    end else if (gap_final_input) begin
+                        state_n = ST_DONE;
+                    end else begin
+                        state_n = ST_READ_IN;
+                    end
+                end else begin
+                    gap_row_count_n = gap_row_count_q + 32'd1;
+                    state_n = ST_READ_IN;
+                end
+            end
+
+            ST_GAP_PUSH: begin
+                if (!wfifo_full_i) begin
+                    if (elem_cnt_q >= cfg_length_i) begin
+                        state_n = ST_DONE;
+                    end else begin
+                        state_n = ST_READ_IN;
                     end
                 end
             end
@@ -747,6 +826,31 @@ module afu_core #(
             out_base_n = cfg_dst_ptr_i;
             out_buf_n  = '0;
             out_be_n   = '0;
+        end else if (state_q == ST_GAP_ACCUM) begin
+            if (gap_group_done) begin
+                for (int i = 0; i < 32; i++) begin
+                    s2_out_buf_comb[i * 8 +: 8] = avg_i8_byte(
+                        gap_acc_q[i] + {{24{in_buf_q[i * 8 + 7]}}, in_buf_q[i * 8 +: 8]},
+                        gap_spatial_count
+                    );
+                    s2_out_be_comb[i] = 1'b1;
+                end
+
+                if (!wfifo_full_i) begin
+                    wfifo_push_o = 1'b1;
+                    out_buf_n = '0;
+                    out_be_n = '0;
+                end else begin
+                    out_buf_n = s2_out_buf_comb;
+                    out_be_n = s2_out_be_comb;
+                end
+            end
+        end else if (state_q == ST_GAP_PUSH) begin
+            if (!wfifo_full_i) begin
+                wfifo_push_o = 1'b1;
+                out_buf_n = '0;
+                out_be_n = '0;
+            end
         end else if (state_q == ST_CLASS_LUT_WAIT) begin
             class_s2_final_group = (class_group_q == 2'd3);
             class_s2_next_elem_cnt = elem_cnt_q + (class_s2_final_group ? 32'd32 : 32'd0);
@@ -886,6 +990,10 @@ module afu_core #(
             dfl_sum_q <= '0;
             dfl_weighted_q <= '0;
             dfl_shift_q <= '0;
+            gap_row_count_q <= '0;
+            for (int i = 0; i < 32; i++) begin
+                gap_acc_q[i] <= '0;
+            end
             
             p1_valid_q <= 1'b0;
             p1_num_valid_lanes_q <= '0;
@@ -913,6 +1021,10 @@ module afu_core #(
             dfl_sum_q <= dfl_sum_n;
             dfl_weighted_q <= dfl_weighted_n;
             dfl_shift_q <= dfl_shift_n;
+            gap_row_count_q <= gap_row_count_n;
+            for (int i = 0; i < 32; i++) begin
+                gap_acc_q[i] <= gap_acc_n[i];
+            end
 
             if (!s2_stall) begin
                 p1_valid_q <= p1_valid_n;

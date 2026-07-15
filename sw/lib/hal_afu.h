@@ -84,6 +84,17 @@ static inline void afu_start_class_sigmoid_row32_high16(uint32_t src, uint32_t d
     afu_start(src, dst, input_bytes, NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16);
 }
 
+static inline void afu_start_global_avgpool_c32(uint32_t src, uint32_t dst,
+                                                uint32_t input_bytes,
+                                                uint32_t spatial_count) {
+    REG_WRITE(NPU_AFU_SRC_PTR, src);
+    REG_WRITE(NPU_AFU_SRC2_PTR, spatial_count);
+    REG_WRITE(NPU_AFU_DST_PTR, dst);
+    REG_WRITE(NPU_AFU_LENGTH, input_bytes);
+    REG_WRITE(NPU_AFU_MODE, NPU_AFU_MODE_GLOBAL_AVGPOOL_C32);
+    afu_start_preloaded();
+}
+
 static inline uint32_t afu_wait_done(uint32_t timeout_cycles) {
     while (timeout_cycles-- > 0u) {
         uint32_t status = afu_status();
