@@ -14,15 +14,24 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
 SRCS = start.S main.c ../../lib/npu_graph.c ../../lib/conv2d_packed.c ../../lib/spatz_rt.c \
        ../../lib/hal_systolic.c ../../lib/spatz_ops.c ../../lib/spatz_ops.S
 
-all: pointwise_conv.bin pointwise_conv.hex
+all: pointwise_conv.bin pointwise_conv.hex pointwise_conv_c64_c128.bin pointwise_conv_c64_c128.hex
 
 pointwise_conv.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) $(SRCS) -o $@
 
+pointwise_conv_c64_c128.elf: $(SRCS) link.ld
+	$(CC) $(CFLAGS) -DH=16u -DW=16u -DIC=64u -DOC=128u $(SRCS) -o $@
+
 pointwise_conv.bin: pointwise_conv.elf
 	$(OBJCOPY) -O binary $< $@
 
+pointwise_conv_c64_c128.bin: pointwise_conv_c64_c128.elf
+	$(OBJCOPY) -O binary $< $@
+
 pointwise_conv.hex: pointwise_conv.elf
+	$(HEXOBJCOPY) -O verilog $< $@
+
+pointwise_conv_c64_c128.hex: pointwise_conv_c64_c128.elf
 	$(HEXOBJCOPY) -O verilog $< $@
 
 clean:

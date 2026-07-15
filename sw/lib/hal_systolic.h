@@ -153,5 +153,12 @@ void systolic_requant_config_per_channel(const int32_t *bias,
                                          int32_t clamp_min,
                                          int32_t clamp_max);
 void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
+void systolic_pointwise1x1_c32_multi_requant(uint32_t input_addr,
+                                             uint32_t weight_addr,
+                                             uint32_t psum_addr,
+                                             uint32_t output_addr,
+                                             uint32_t rows,
+                                             uint32_t input_c32_groups,
+                                             uint32_t output_c32_groups);
 
 #endif

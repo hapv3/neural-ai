@@ -96,7 +96,7 @@ first Micro-MobileNet graph.
 | Standard Conv3x3 C3->C32 | Existing systolic linebuffer + KGEN + requant | Reuse Micro-YOLO linebuffer job descriptors for stem stride-2/pad-1 RGB input | Native path; no im2col scalar prepare. |
 | Standard Conv3x3 C64->C64 | Existing systolic linebuffer + psum accumulation + requant | Emit OC32 x IC32 chunks and accumulate final chunk before requant | Reuses current dense Conv path; scheduler overhead should be tracked per tile. |
 | Pointwise Conv1x1 C32->C32 | `NPU_OP_CONV2D1X1_C32_REQUANT` using direct `systolic_gemm32_requant()` | Already covered by `sw/test/pointwise_conv` | No linebuffer/window states and no im2col scratch. |
-| Pointwise Conv1x1 multi-C32 | Same direct systolic GEMM32 path, tiled over IC/OC C32 groups | Add graph/planner wrapper for `C32->C64`, `C64->C128`, `C128->C64`, and `C64->C32` | Should be compute-dense; avoid CPU pack/copy by keeping tensors C32-blocked. |
+| Pointwise Conv1x1 multi-C32 | Same direct systolic GEMM32 path, tiled over IC/OC C32 groups through `systolic_pointwise1x1_c32_multi_requant()` | Implemented graph/HAL wrapper for C32-multiple tensors; current regression covers `C32->C32` and `C64->C128` | Compute-dense path with no im2col or linebuffer states. Inputs/outputs stay C32-blocked; weights are packed `OCG -> ICG -> 32x32`. |
 | Depthwise Conv3x3 S1/S2 P1 | RTL depthwise linebuffer path with row-ring reuse, one-start multi-group loop, and final-group lane masking | Supports C32/C64/C96-style group iteration, odd tails such as C33/C65, and S2 downsample dispatch; add C128 coverage | Current 48x48 S1 PMU scales near-linearly for full groups; tail groups run as one masked C32 group with padding lanes forced to zero. |
 | ReLU6 / clamp after Conv/Depthwise | Existing requant clamp fields | Fold activation min/max into producer requant whenever possible | Best path is zero extra pass over activation tensor. |
 | Standalone element-wise Add | AFU Add | Reuse Micro-YOLO residual Add path on C32-blocked tensors | Native vector datapath; no scalar loop. |
@@ -111,7 +111,7 @@ first Micro-MobileNet graph.
 | Depthwise throughput beyond 1 tap/cycle | Optional RTL mode issuing 3 C32 taps/cycle or a small unrolled tap pipeline. | Current path is correct and memory-efficient, but depthwise active cycles are still `output_pixels * groups * 9`. This is the largest remaining depthwise speedup knob. |
 | GlobalAvgPool native reduce | Implemented as AFU mode 7 plus graph op `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE`. It accumulates C32 lanes across C32-blocked spatial rows into signed 32-bit accumulators, divides by `H*W`, clamps to INT8, and writes one C32 vector per group. | Classification heads use pool-to-1x1 without scalar spatial reductions. Firmware passes `SRC2_PTR=spatial_count`; the wrapper owns dispatch only. |
 | Standalone ReLU6 if not fused | Implemented as graph op `NPU_OP_CLAMP_I8` and wrapper `npu_clamp_i8()`, using the existing AFU E8 LUT datapath with a generated 256-entry clamp table. | Requant fusion handles Conv/Depthwise producers. Non-fused ReLU6 after Add or other producers still stays off scalar tensor loops. |
-| Pointwise multi-C32 one-start mode | Optional systolic controller mode to loop IC/OC C32 tiles internally from a host descriptor. | Current graph can tile in firmware. Native one-start tile looping would reduce register/config overhead for `C64/C128` pointwise-heavy blocks. |
+| Pointwise RTL single-start mode | Optional systolic controller mode to loop IC/OC C32 tiles internally from a host descriptor. | Current graph/HAL path already dispatches one pointwise graph op and uses a reusable psum scratch buffer, but it still issues multiple systolic starts internally. Native RTL tile looping would further reduce register/config overhead for `C64/C128` pointwise-heavy blocks. |
 | Layer fusion | Optional RTL/SW stripe pipeline for `Depthwise -> Pointwise` and `Conv -> ReLU6`. | Avoids spilling full intermediate tensors to L2/TCDM when local capacity allows. This is a later E2E bandwidth optimization, not a correctness blocker. |
 
 ---
@@ -219,17 +219,27 @@ shapes listed in Section 1.
 Objective: add graph-level pointwise conv support using the existing systolic
 GEMM path.
 
-Current status: **partially implemented**. The first graph op,
-`NPU_OP_CONV2D1X1_C32_REQUANT`, directly maps a C32-blocked
-`1x32x48x48 -> 1x32x48x48` pointwise layer to systolic GEMM + requant:
+Current status: **implemented for C32-multiple channel counts**. The graph op,
+`NPU_OP_CONV2D1X1_C32_REQUANT`, maps C32-blocked pointwise layers to the native
+systolic GEMM path:
 
 ```text
-weight[32x32], input[Mx32] -> systolic_gemm32_requant() -> output[Mx32]
+IC_groups=1:
+  weight[32x32], input[Mx32] -> systolic_gemm32_requant() -> output[Mx32]
+
+IC_groups>1:
+  first ICG  -> systolic_gemm32() into int32 psum scratch
+  middle ICG -> systolic_gemm32_accumulate() into psum scratch
+  final ICG  -> systolic_gemm32_accumulate_requant() into i8 output
 ```
 
 It deliberately bypasses linebuffer and does not allocate an im2col/scratch
-prepare buffer. Unit coverage lives in `sw/test/pointwise_conv` and
-`test_pointwise_conv.py`.
+prepare buffer. The only scratch allocation is one reusable `rows x 32 x int32`
+psum tile for multi-IC-group accumulation. Weight layout is OCG-major,
+ICG-major, with each tile stored as the existing native GEMM32 `32x32`
+K-major/N-minor matrix.
+
+Unit coverage lives in `sw/test/pointwise_conv` and `test_pointwise_conv.py`.
 
 Tasks:
 
@@ -241,7 +251,10 @@ Tasks:
 | 2d | Add unit tests before E2E graph integration |
 
 Acceptance: all pointwise instances match Python golden byte-exactly. Current
-accepted subset: `C32->C32`, `48x48`, C32-blocked input/output.
+accepted subset:
+
+- `C32->C32`, `48x48`, C32-blocked input/output.
+- `C64->C128`, `16x16`, C32-blocked input/output, multi-IC and multi-OC groups.
 
 ### Phase 3: Native Depthwise Path
 

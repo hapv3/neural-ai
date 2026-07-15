@@ -153,29 +153,56 @@ static uint32_t tensor_is_c32_i8(const npu_tensor_t *tensor) {
 static uint32_t run_conv2d1x1_c32_requant(const npu_tensor_t *src,
                                           const npu_tensor_t *dst,
                                           const npu_tensor_t *weight,
+                                          const npu_tensor_t *psum,
                                           const npu_layer_t *layer) {
-    const uint32_t input_c = 32u;
-    const uint32_t output_c = 32u;
-    const uint32_t weight_bytes = input_c * output_c;
+    uint32_t input_groups;
+    uint32_t output_groups;
     uint32_t rows;
+    uint32_t weight_bytes;
+    uint32_t activation_input_bytes;
+    uint32_t activation_output_bytes;
+    uint32_t psum_bytes;
 
     if (!tensor_is_c32_i8(src) ||
         !tensor_is_c32_i8(dst) ||
         !tensor_has_layout(weight, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
-        src->c != input_c || dst->c != output_c ||
+        src->c == 0u || dst->c == 0u ||
+        (src->c & 31u) != 0u || (dst->c & 31u) != 0u ||
         src->h != dst->h || src->w != dst->w ||
-        weight->bytes < weight_bytes) {
+        src->h == 0u || src->w == 0u) {
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
 
     rows = (uint32_t)dst->h * dst->w;
-    if (src->bytes < npu_tensor_row32_bytes(rows) ||
-        dst->bytes < npu_tensor_row32_bytes(rows)) {
+    input_groups = npu_c32_blocks(src->c);
+    output_groups = npu_c32_blocks(dst->c);
+    weight_bytes = input_groups * output_groups * 32u * 32u;
+    activation_input_bytes = npu_tensor_c32_bytes(src->h, src->w, src->c);
+    activation_output_bytes = npu_tensor_c32_bytes(dst->h, dst->w, dst->c);
+    psum_bytes = rows * 32u * 4u;
+
+    if (weight->bytes < weight_bytes ||
+        src->bytes < activation_input_bytes ||
+        dst->bytes < activation_output_bytes) {
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
 
+    if (input_groups > 1u) {
+        if (!psum ||
+            !tensor_has_layout(psum, NPU_LAYOUT_ROW32, NPU_DTYPE_I32) ||
+            psum->bytes < psum_bytes) {
+            return NPU_GRAPH_ERR_BAD_TENSOR;
+        }
+    }
+
     configure_uniform_requant(layer);
-    systolic_gemm32_requant(weight->addr, src->addr, dst->addr, rows);
+    systolic_pointwise1x1_c32_multi_requant(src->addr,
+                                            weight->addr,
+                                            psum ? psum->addr : 0u,
+                                            dst->addr,
+                                            rows,
+                                            input_groups,
+                                            output_groups);
     systolic_requant_disable();
     return NPU_GRAPH_OK;
 }
@@ -965,7 +992,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
         case NPU_OP_CONV2D1X1_C32_REQUANT:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
-                uint32_t conv_status = run_conv2d1x1_c32_requant(src, dst, aux, layer);
+                uint32_t conv_status = run_conv2d1x1_c32_requant(src, dst, aux, aux2, layer);
                 if (conv_status != NPU_GRAPH_OK) return conv_status;
             }
             break;
