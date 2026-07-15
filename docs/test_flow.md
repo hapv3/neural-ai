@@ -22,7 +22,8 @@ firmware.
 | `sw/test/systolic_requant` | `systolic_requant.bin` | `test_systolic_requant` | Systolic GEMM32 with RTL per-channel requant and packed INT8 output |
 | `sw/test/matmul` | `matmul.bin` | `test_matmul` | Raw systolic register matmul regression |
 | `sw/test/afu` | `afu.bin` | `test_afu_basic` | AFU LUT/CSR, TCDM master path, e8/e16/e32 output, AFU internal IRQ |
-| `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable Spatz operator wrappers |
+| `sw/test/afu_ops` | `afu_ops_*.bin` | `test_afu_op_*` | C-callable AFU-native operator wrappers, with cocotb golden checks |
+| `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable non-AFU Spatz/C-wrapper helpers |
 | `sw/test/spatz_vector` | `basic_mem_arith.bin`, etc. | `test_spatz_vector_basic` | Direct RVV instruction groups |
 | `sw/test/micro_yolo` | `micro_yolo.elf` | `test_micro_yolo_e2e` | 96x96 raw-head Micro-YOLO graph, host-generated linebuffer job descriptors, full output compare |
 
@@ -140,10 +141,9 @@ Covered groups today:
 ### Operators
 
 ```text
-spatz_ops firmware
+spatz_ops / afu_ops firmware
   -> initialize deterministic vectors
   -> call C wrapper
-  -> compare every output lane in firmware
   -> firmware writes NPU_IRQ_HOST_NOTIFY
   -> cocotb reads TCDM output buffers for exact data check
 ```
@@ -280,6 +280,7 @@ make -C sw/test/independent_systolic
 make -C sw/test/systolic_requant
 make -C sw/test/spatz_vector
 make -C sw/test/spatz_ops
+make -C sw/test/afu_ops
 make -C sw/test/matmul
 make -C sw/test/afu
 ```

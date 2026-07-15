@@ -577,7 +577,6 @@ def check_all(dut):
     check_requant(dut)
     check_add(dut)
     check_mul(dut)
-    check_logistic(dut)
     check_maxpool(dut)
     check_upsample(dut)
     check_concat(dut)
@@ -591,6 +590,7 @@ async def run_firmware_case(
     checker,
     timeout_cycles=500000,
     pre_release=None,
+    firmware_dir="sw/test/spatz_ops",
 ):
     logging.getLogger("cocotb.tb_npu_cluster.s_axi").setLevel(logging.WARNING)
 
@@ -607,7 +607,7 @@ async def run_firmware_case(
     await reset_dut(dut)
     await load_firmware_axi(
         axi_master,
-        firmware_path(__file__, f"sw/test/spatz_ops/{fw_name}"),
+        firmware_path(__file__, f"{firmware_dir}/{fw_name}"),
     )
     if pre_release is not None:
         await pre_release(dut)
@@ -730,7 +730,7 @@ async def run_firmware_case(
 @cocotb.test()
 async def test_spatz_operator_library(dut):
     await run_firmware_case(
-        dut, "spatz_ops_test.bin", "test_spatz_operator_library", 9, check_all
+        dut, "spatz_ops_test.bin", "test_spatz_operator_library", 8, check_all
     )
 
 
@@ -757,15 +757,16 @@ async def test_spatz_op_add(dut):
 
 
 @cocotb.test()
-async def test_spatz_op_add_full(dut):
+async def test_afu_op_add_full(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_add_full.bin",
-        "test_spatz_op_add_full",
+        "afu_ops_add_full.bin",
+        "test_afu_op_add_full",
         1,
         check_add_full,
         timeout_cycles=900000,
         pre_release=preload_add_full_tcdm,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
@@ -775,47 +776,55 @@ async def test_spatz_op_mul(dut):
 
 
 @cocotb.test()
-async def test_spatz_op_mul_q7_full(dut):
+async def test_afu_op_mul_q7_full(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_mul_q7_full.bin",
-        "test_spatz_op_mul_q7_full",
+        "afu_ops_mul_q7_full.bin",
+        "test_afu_op_mul_q7_full",
         1,
         check_mul_q7_full,
         timeout_cycles=900000,
         pre_release=preload_mul_q7_full_tcdm,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
 @cocotb.test()
-async def test_spatz_op_logistic(dut):
-    await run_firmware_case(
-        dut, "spatz_ops_logistic.bin", "test_spatz_op_logistic", 1, check_logistic
-    )
-
-
-@cocotb.test()
-async def test_spatz_op_logistic_full(dut):
+async def test_afu_op_logistic(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_logistic_full.bin",
-        "test_spatz_op_logistic_full",
+        "afu_ops_logistic.bin",
+        "test_afu_op_logistic",
+        1,
+        check_logistic,
+        firmware_dir="sw/test/afu_ops",
+    )
+
+
+@cocotb.test()
+async def test_afu_op_logistic_full(dut):
+    await run_firmware_case(
+        dut,
+        "afu_ops_logistic_full.bin",
+        "test_afu_op_logistic_full",
         1,
         check_logistic_full,
         timeout_cycles=180000,
         pre_release=preload_logistic_full_tcdm,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
 @cocotb.test()
-async def test_spatz_op_clamp_relu6(dut):
+async def test_afu_op_clamp_relu6(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_clamp_relu6.bin",
-        "test_spatz_op_clamp_relu6",
+        "afu_ops_clamp_relu6.bin",
+        "test_afu_op_clamp_relu6",
         1,
         check_clamp_relu6,
         pre_release=preload_clamp_relu6_tcdm,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
@@ -841,42 +850,50 @@ async def test_spatz_op_concat(dut):
 
 
 @cocotb.test()
-async def test_spatz_op_dfl(dut):
+async def test_afu_op_dfl(dut):
     await run_firmware_case(
-        dut, "spatz_ops_dfl.bin", "test_spatz_op_dfl", 1, check_dfl
+        dut,
+        "afu_ops_dfl.bin",
+        "test_afu_op_dfl",
+        1,
+        check_dfl,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
 @cocotb.test()
-async def test_spatz_op_dfl_fused(dut):
+async def test_afu_op_dfl_fused(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_dfl_fused.bin",
-        "test_spatz_op_dfl_fused",
+        "afu_ops_dfl_fused.bin",
+        "test_afu_op_dfl_fused",
         1,
         check_dfl_fused,
         timeout_cycles=200000,
         pre_release=preload_dfl_fused_l2,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
 @cocotb.test()
-async def test_spatz_op_class_sigmoid(dut):
+async def test_afu_op_class_sigmoid(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_class_sigmoid.bin",
-        "test_spatz_op_class_sigmoid",
+        "afu_ops_class_sigmoid.bin",
+        "test_afu_op_class_sigmoid",
         1,
         check_class_sigmoid,
+        firmware_dir="sw/test/afu_ops",
     )
 
 
 @cocotb.test()
-async def test_spatz_op_global_avgpool(dut):
+async def test_afu_op_global_avgpool(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_global_avgpool.bin",
-        "test_spatz_op_global_avgpool",
+        "afu_ops_global_avgpool.bin",
+        "test_afu_op_global_avgpool",
         1,
         check_global_avgpool,
+        firmware_dir="sw/test/afu_ops",
     )
