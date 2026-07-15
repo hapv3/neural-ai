@@ -209,7 +209,6 @@ static uint32_t run_depthwise3x3_c32_requant(const npu_tensor_t *src,
         !tensor_is_c32_i8(dst) ||
         !tensor_has_layout(weight, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
         channels == 0u ||
-        (channels & 31u) != 0u ||
         dst->c != channels ||
         expected_h == 0u || expected_w == 0u ||
         dst->h != expected_h || dst->w != expected_w ||

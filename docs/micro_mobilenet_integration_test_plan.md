@@ -25,11 +25,10 @@ Existing Micro-YOLO infrastructure provides the stem Conv3x3 linebuffer path,
 AFU/vector activation ops, AFU Add, iDMA movement, and the graph/test harness.
 `NPU_OP_CONV2D1X1_C32_REQUANT` now covers the direct C32 `1x1` fast path for
 `C32->C32`. `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` now covers a linebuffer-fed
-lane-wise depthwise `3x3/s1/p1` fast path for any channel count that is a
-multiple of 32. `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT` extends the same native
-path to stride-2 downsample blocks. New work is still required for multi-C32
-pointwise tiling, native GlobalAvgPool, and planner-side tail splitting when
-`C % 32 != 0`.
+lane-wise depthwise `3x3/s1/p1` fast path for any C32-blocked channel count,
+including non-multiple-of-32 tails. `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT`
+extends the same native path to stride-2 downsample blocks. New work is still
+required for multi-C32 pointwise tiling and native GlobalAvgPool.
 
 The target implementation should stay on native accelerator paths. Scalar CPU
 loops are allowed only for golden-model generation, setup/validation code, or
@@ -94,7 +93,7 @@ first Micro-MobileNet graph.
 | Standard Conv3x3 C64->C64 | Existing systolic linebuffer + psum accumulation + requant | Emit OC32 x IC32 chunks and accumulate final chunk before requant | Reuses current dense Conv path; scheduler overhead should be tracked per tile. |
 | Pointwise Conv1x1 C32->C32 | `NPU_OP_CONV2D1X1_C32_REQUANT` using direct `systolic_gemm32_requant()` | Already covered by `sw/test/pointwise_conv` | No linebuffer/window states and no im2col scratch. |
 | Pointwise Conv1x1 multi-C32 | Same direct systolic GEMM32 path, tiled over IC/OC C32 groups | Add graph/planner wrapper for `C32->C64`, `C64->C128`, `C128->C64`, and `C64->C32` | Should be compute-dense; avoid CPU pack/copy by keeping tensors C32-blocked. |
-| Depthwise Conv3x3 S1/S2 P1, `C % 32 == 0` | RTL depthwise linebuffer path with row-ring reuse and one-start multi-group loop | Already supports C32/C64/C96-style group iteration and S2 downsample dispatch; add C128 coverage | Current 48x48 S1 PMU scales near-linearly: C32 `32524`, C64 `61476`, C96 `90428`; S2 C32 is `14122`. |
+| Depthwise Conv3x3 S1/S2 P1 | RTL depthwise linebuffer path with row-ring reuse, one-start multi-group loop, and final-group lane masking | Supports C32/C64/C96-style group iteration, odd tails such as C33/C65, and S2 downsample dispatch; add C128 coverage | Current 48x48 S1 PMU scales near-linearly for full groups; tail groups run as one masked C32 group with padding lanes forced to zero. |
 | ReLU6 / clamp after Conv/Depthwise | Existing requant clamp fields | Fold activation min/max into producer requant whenever possible | Best path is zero extra pass over activation tensor. |
 | Standalone element-wise Add | AFU Add | Reuse Micro-YOLO residual Add path on C32-blocked tensors | Native vector datapath; no scalar loop. |
 | DMA / layout movement | iDMA 1D/2D/3D helpers | Keep host fixtures and graph tensors in C32-blocked layout | Avoid runtime C-layout conversion. |
@@ -104,7 +103,7 @@ first Micro-MobileNet graph.
 | Gap | Needed update | Why it matters |
 |---|---|---|
 | Depthwise non-3x3 variants | Generalize depthwise HAL/graph op from fixed `3x3/p1` to descriptor-configured `kernel_h/kernel_w/pad_h/pad_w` if future MobileNet variants need other kernels. | The current micro graph needs 3x3 S1/S2 P1 and is covered by native dispatch. |
-| Depthwise non-multiple-of-32 tails | Host planner should split `main_C = floor(C/32)*32` plus a tail job only when `C % 32 != 0`; RTL tail support can be added later if tails become common. | Most middle MobileNet channels are multiples of 32 in this micro graph. Tail scalar code should not be in the normal path. |
+| Depthwise non-multiple-of-32 tails | Implemented in the native depthwise controller path. The final C32 group uses an effective lane count of `C % 32`; invalid lanes are not fetched/MACed and are masked to zero after requant. | Host planner can keep one C32-blocked depthwise job for odd channel counts; no scalar tail path is needed. |
 | Depthwise throughput beyond 1 tap/cycle | Optional RTL mode issuing 3 C32 taps/cycle or a small unrolled tap pipeline. | Current path is correct and memory-efficient, but depthwise active cycles are still `output_pixels * groups * 9`. This is the largest remaining depthwise speedup knob. |
 | GlobalAvgPool native reduce | Add an AFU C32 reduce-sum/avg mode: accumulate C32 lanes across spatial rows into wider accumulators, apply reciprocal/shift, clamp to INT8. | Classification heads need pool-to-1x1. A scalar implementation would be slow and should not be part of the target plan. |
 | Standalone ReLU6 if not fused | Add or expose AFU clamp-only mode for C32-blocked tensors. | Requant fusion handles Conv/Depthwise producers. A native clamp pass is still useful after Add or other non-requant producers. |
@@ -247,11 +246,11 @@ MAC path, not through dense GEMM or non-native lowering.
 
 Current implementation note: the production-facing path directly uses the
 optimized RTL mode for `3x3/s1/p1`,
-C32-blocked input/output, and channel counts that are exact multiples of 32.
-The weight layout is `group, kh, kw, lane`. The systolic controller loops over
-all C32 groups inside one accelerator start, so `C=64/96/128/...` does not need
-to be split into multiple graph/firmware invocations. If `C % 32 != 0`, the
-host planner should emit one main multiple-of-32 job and a separate tail job.
+C32-blocked input/output, including final groups where `C % 32 != 0`. The
+weight layout is `group, kh, kw, lane`, with padding lanes set to zero by host
+fixtures/descriptors. The systolic controller loops over all C32 groups inside
+one accelerator start, so `C=33/64/65/96/128/...` does not need to be split
+into multiple graph/firmware invocations.
 
 Tasks:
 
@@ -260,10 +259,11 @@ Tasks:
 | 3a | Add `systolic_depthwise3x3s1p1_c32_requant()` API |
 | 3b | Define depthwise weight layout as `kh, kw, lane` per C32 group |
 | 3c | Add graph op `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` for the C32 subset |
-| 3d | Add standalone C32, C64, and C96 tests; add C128/odd-tail coverage later |
+| 3d | Add standalone C32, C64, C96, C33-tail, and C65-tail tests; add C128 coverage later |
 | 3e | Add native stride-2 depthwise dispatch for `DW1_Down` |
+| 3f | Add native final-group tail lane masking for non-multiple-of-32 channel counts |
 
-Acceptance: standalone C32/C64/C96 `48x48` depthwise matches golden
+Acceptance: standalone C32/C64/C96 and odd-tail `48x48` depthwise matches golden
 byte-exactly. Current measured standalone PMU after row-ring reuse is:
 
 | Shape | Cycles | IFM req | OFM req |
@@ -345,11 +345,11 @@ Optimization order:
 
 2. **Operator Unit Tests**
    - Pointwise: C32, C64, C128 input/output combinations.
-   - Depthwise: C32, C64, C128 with stride 1 and stride 2.
+   - Depthwise: C32, C33, C64, C65, C128 with stride 1 and stride 2.
    - ReLU6: quantized clamp boundaries.
    - GlobalAvgPool: deterministic C32 reduce/average output through native AFU.
    - Confirm no E2E operator falls back to scalar CPU loops except explicit
-     test-only validation or tail cases.
+     test-only validation.
 
 3. **E2E RTL Simulation**
    - Cocotb loads firmware and L2 fixtures.

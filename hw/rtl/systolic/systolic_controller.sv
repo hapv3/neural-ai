@@ -347,6 +347,42 @@ module systolic_controller #(
     logic [31:0]   dw_group_output_offset;
     logic [31:0]   dw_group_weight_offset;
     logic          dw_last_group;
+    logic [5:0]    dw_group_valid_bytes;
+    logic [5:0]    cfg_linebuf_block_valid_bytes_eff;
+    logic [255:0]  requant_packed_write_data;
+
+    function automatic logic [5:0] depthwise_group_valid_bytes(
+        input logic [15:0] input_c,
+        input logic [31:0] group_idx
+    );
+        logic [31:0] group_base;
+        logic [31:0] remaining;
+        begin
+            group_base = group_idx << 5;
+            if (group_base >= {16'd0, input_c}) begin
+                depthwise_group_valid_bytes = 6'd0;
+            end else begin
+                remaining = {16'd0, input_c} - group_base;
+                depthwise_group_valid_bytes = (remaining >= 32'd32) ? 6'd32 : remaining[5:0];
+            end
+        end
+    endfunction
+
+    function automatic logic [255:0] mask_packed_lanes(
+        input logic [255:0] data,
+        input logic [5:0] valid_bytes
+    );
+        logic [255:0] result;
+        begin
+            result = '0;
+            for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
+                if (ch < valid_bytes) begin
+                    result[ch * 8 +: 8] = data[ch * 8 +: 8];
+                end
+            end
+            mask_packed_lanes = result;
+        end
+    endfunction
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
@@ -409,9 +445,16 @@ module systolic_controller #(
     assign dw_group_output_offset = dw_group_idx_q * dw_group_output_bytes;
     assign dw_group_weight_offset = dw_group_idx_q * dw_weight_group_bytes;
     assign dw_last_group = (dw_group_idx_q + 32'd1) >= dw_group_count;
+    assign dw_group_valid_bytes = depthwise_group_valid_bytes(cfg_linebuf_input_c_i, dw_group_idx_q);
+    assign cfg_linebuf_block_valid_bytes_eff = linebuf_depthwise_mode ?
+                                               dw_group_valid_bytes :
+                                               cfg_linebuf_block_valid_bytes_i;
     assign cfg_linebuf_channel_addr_offset_eff = linebuf_depthwise_mode ?
                                                  (cfg_linebuf_channel_addr_offset_i + dw_group_input_offset) :
                                                  cfg_linebuf_channel_addr_offset_i;
+    assign requant_packed_write_data = linebuf_depthwise_mode ?
+                                       mask_packed_lanes(requant_packed_data, dw_group_valid_bytes) :
+                                       requant_packed_data;
 
     function automatic input_row_t max_i8_row(
         input input_row_t lhs,
@@ -430,16 +473,21 @@ module systolic_controller #(
         input ofm_row_t acc,
         input input_row_t ifm,
         input input_row_t weight,
-        input logic clear
+        input logic clear,
+        input logic [5:0] valid_bytes
     );
         ofm_row_t result;
         logic signed [15:0] product;
         logic signed [31:0] product_ext;
         begin
             for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
-                product = $signed(ifm[ch]) * $signed(weight[ch]);
-                product_ext = {{16{product[15]}}, product};
-                result[ch] = clear ? product_ext : (acc[ch] + product_ext);
+                if (ch < valid_bytes) begin
+                    product = $signed(ifm[ch]) * $signed(weight[ch]);
+                    product_ext = {{16{product[15]}}, product};
+                    result[ch] = clear ? product_ext : (acc[ch] + product_ext);
+                end else begin
+                    result[ch] = '0;
+                end
             end
             depthwise_mac_row = result;
         end
@@ -723,7 +771,7 @@ module systolic_controller #(
         .cfg_pool_i              (cfg_linebuf_pool_i),
         .cfg_c32_fast_i          (cfg_linebuf_c32_fast_i),
         .cfg_depthwise_i         (cfg_linebuf_depthwise_i),
-        .cfg_block_valid_bytes_i (cfg_linebuf_block_valid_bytes_i),
+        .cfg_block_valid_bytes_i (cfg_linebuf_block_valid_bytes_eff),
         .cfg_channel_addr_offset_i(cfg_linebuf_channel_addr_offset_eff),
         .cfg_coalesce_k_bytes_i  (cfg_linebuf_coalesce_k_bytes_i),
         .cfg_k_seed_kh_i         (linebuf_seed_kh_eff),
@@ -1063,7 +1111,7 @@ module systolic_controller #(
                     if (requant_out_valid) begin
                         drain_state_d = DRAIN_ACCUM_REQUANT;
                         obi_o_req_o[0] = 1'b1;
-                        obi_o_wdata_o[0] = requant_packed_data;
+                        obi_o_wdata_o[0] = requant_packed_write_data;
                         if (obi_o_gnt_i[0] || requant_invalid) begin
                             requant_out_ready = 1'b1;
                             o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
@@ -1291,7 +1339,8 @@ module systolic_controller #(
                         dw_next_acc = depthwise_mac_row(dw_acc_q,
                                                         linebuf_row_data,
                                                         dw_weight_q[dw_tap_count_q],
-                                                        (dw_tap_count_q == '0));
+                                                        (dw_tap_count_q == '0),
+                                                        dw_group_valid_bytes);
                         linebuf_row_ready = 1'b1;
                         if ({27'd0, dw_tap_count_q} + 32'd1 == pool_kernel_vectors) begin
                             dw_requant_acc = dw_next_acc;
