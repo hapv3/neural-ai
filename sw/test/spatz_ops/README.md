@@ -19,6 +19,7 @@ per operator while optimization is still local:
 | `spatz_ops_mul.bin` | `spatz_mul_i8()` |
 | `spatz_ops_logistic.bin` | `npu_logistic_i8()` AFU LUT path |
 | `spatz_ops_logistic_full.bin` | AFU LUT path over a `48x48x32` ROW32 tensor, matching Micro-YOLO phase 3c activation layout |
+| `spatz_ops_clamp_relu6.bin` | `npu_clamp_i8()` AFU LUT path for standalone quantized ReLU6/clamp on C32-blocked tensors |
 | `spatz_ops_maxpool.bin` | `spatz_maxpool2d_i8()` |
 | `spatz_ops_upsample.bin` | `spatz_upsample_nearest_i8()` |
 | `spatz_ops_concat.bin` | `spatz_concat_c32_i8()` |

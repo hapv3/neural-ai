@@ -29,6 +29,7 @@
 #define SPATZ_OP_TEST_DFL_FUSED 14u
 #define SPATZ_OP_TEST_CLASS_SIGMOID 15u
 #define SPATZ_OP_TEST_GLOBAL_AVGPOOL 16u
+#define SPATZ_OP_TEST_CLAMP_RELU6 17u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -88,6 +89,8 @@
 #define CLASS_DST       ((volatile int8_t *)0x1015A000u)
 #define GAP_SRC         ((volatile int8_t *)0x1015B000u)
 #define GAP_DST         ((volatile int8_t *)0x1015D000u)
+#define CLAMP_SRC       ((volatile int8_t *)0x10160000u)
+#define CLAMP_DST       ((volatile int8_t *)0x10168000u)
 #define L2_DFL_ROW32_SRC 0x80070000u
 #define L2_DFL_EXP_LUT32 0x80071000u
 #define L2_DFL_RECIP_LUT 0x80071400u
@@ -129,6 +132,14 @@
 #define GAP_C 65u
 #define GAP_PIXELS (GAP_H * GAP_W)
 #define GAP_GROUPS ((GAP_C + 31u) / 32u)
+#define CLAMP_H 17u
+#define CLAMP_W 13u
+#define CLAMP_C 65u
+#define CLAMP_GROUPS ((CLAMP_C + 31u) / 32u)
+#define CLAMP_PHYS_C (CLAMP_GROUPS * 32u)
+#define CLAMP_BYTES (CLAMP_H * CLAMP_W * CLAMP_PHYS_C)
+#define CLAMP_MIN 0
+#define CLAMP_MAX 63
 
 static void fail(uint32_t test_id, uint32_t index, int32_t got, int32_t expected) {
     // Standard status/debug page lets cocotb report failing op, element, got, expected.
@@ -622,6 +633,20 @@ static void run_global_avgpool(void) {
     mark_pass();
 }
 
+static void run_clamp_relu6(void) {
+    SIG_STATUS = 0x30001702u;
+    if (!npu_clamp_i8((const int8_t *)CLAMP_SRC,
+                      (int8_t *)CLAMP_DST,
+                      CLAMP_BYTES,
+                      CLAMP_MIN,
+                      CLAMP_MAX)) {
+        fail(17, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
+    }
+
+    SIG_STATUS = 0x30001703u;
+    mark_pass();
+}
+
 static void run_maxpool(void) {
     for (uint32_t h = 0; h < POOL_H; h++) {
         for (uint32_t w = 0; w < POOL_W; w++) {
@@ -772,6 +797,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_GLOBAL_AVGPOOL) {
         run_global_avgpool();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_CLAMP_RELU6) {
+        run_clamp_relu6();
     }
 
     SIG_STATUS = PASS_SIGNATURE;

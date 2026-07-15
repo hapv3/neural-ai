@@ -757,6 +757,30 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_CLAMP_I8:
+            if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t count = layer->bytes ? layer->bytes : dst->bytes;
+                if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||
+                    !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
+                    src->layout != dst->layout ||
+                    src->h != dst->h || src->w != dst->w || src->c != dst->c ||
+                    src->bytes < count || dst->bytes < count ||
+                    count == 0u || layer->min_val > layer->max_val ||
+                    layer->min_val < -128 || layer->max_val > 127 ||
+                    src->addr == dst->addr) {
+                    return NPU_GRAPH_ERR_BAD_TENSOR;
+                }
+                if (!npu_clamp_i8((const int8_t *)src->addr,
+                                  (int8_t *)dst->addr,
+                                  count,
+                                  layer->min_val,
+                                  layer->max_val)) {
+                    return NPU_GRAPH_ERR_ACCEL;
+                }
+            }
+            break;
+
         case NPU_OP_MUL_I8:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
