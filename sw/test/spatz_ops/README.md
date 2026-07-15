@@ -1,9 +1,10 @@
-# Spatz Operator Wrapper Test
+# Spatz/C-Wrapper Operator Test
 
 ## Target
 
 Verify the C-callable Spatz operator library that future graph firmware will
-reuse. Scheduler code should only consume wrappers that pass this suite.
+reuse for non-AFU helper paths. AFU-native `npu_*` wrappers live under
+`sw/test/afu_ops`.
 
 ## Scenario
 
@@ -15,24 +16,16 @@ per operator while optimization is still local:
 | `spatz_ops_copy.bin` | `spatz_vec_copy_i8()` |
 | `spatz_ops_relu.bin` | `spatz_vec_relu_i8()` |
 | `spatz_ops_requant.bin` | `spatz_requant_i32_to_i8()` |
-| `spatz_ops_add.bin` | `spatz_add_i8()` |
-| `spatz_ops_mul.bin` | `spatz_mul_i8()` |
-| `spatz_ops_logistic.bin` | `npu_logistic_i8()` AFU LUT path |
-| `spatz_ops_logistic_full.bin` | AFU LUT path over a `48x48x32` ROW32 tensor, matching Micro-YOLO phase 3c activation layout |
-| `spatz_ops_clamp_relu6.bin` | `npu_clamp_i8()` AFU LUT path for standalone quantized ReLU6/clamp on C32-blocked tensors |
+| `spatz_ops_add.bin` | `spatz_add_i8()` non-AFU clamp fallback coverage |
+| `spatz_ops_mul.bin` | `spatz_mul_i8()` non-AFU multiply/requant fallback coverage |
 | `spatz_ops_maxpool.bin` | `spatz_maxpool2d_i8()` |
 | `spatz_ops_upsample.bin` | `spatz_upsample_nearest_i8()` |
 | `spatz_ops_concat.bin` | `spatz_concat_c32_i8()` |
-| `spatz_ops_dfl.bin` | `npu_dfl_softmax4_i8_q8()` AFU-assisted DFL softmax for `reg_max=4` |
-| `spatz_ops_dfl_fused.bin` | `npu_dfl_softmax4_row32_i8_q8()` fused AFU DFL path over ROW32 low 16 logits |
-| `spatz_ops_class_sigmoid.bin` | `npu_class_sigmoid_row32_high16_i8()` AFU class sigmoid over ROW32 high 16 logits |
-| `spatz_ops_global_avgpool.bin` | `npu_global_avgpool_c32_i8()` AFU native C32-blocked spatial reduce/average, including an odd-channel tail |
 
-`spatz_ops_test.bin` still runs the aggregate suite.
+`spatz_ops_test.bin` runs the aggregate non-AFU suite.
 
-Firmware self-checks every output lane and records the first failing
-test/index/got/expected tuple. Cocotb additionally reads output TCDM buffers for
-exact data comparison.
+Firmware records only dispatch failures. Cocotb reads output TCDM/L2 buffers
+for exact data comparison.
 
 ## Command
 

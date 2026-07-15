@@ -542,7 +542,7 @@ The optimized implementation is a fused AFU mode:
 Coverage:
 
 - AFU block-level test covers the fused DFL datapath.
-- `spatz_ops_dfl_fused.bin` covers the C wrapper and cluster path.
+- `afu_ops_dfl_fused.bin` covers the C wrapper and cluster path.
 - `test_micro_yolo_e2e.py` runs the graph layer and checks `L2_DFL_OUTPUT`.
 
 #### Phase 4d: Class sigmoid
@@ -568,7 +568,7 @@ Coverage:
 
 - `hw/rtl/afu/tb/tb_afu.sv` checks a 17-location unaligned-size case at block
   level.
-- `spatz_ops_class_sigmoid.bin` checks the C wrapper and cluster dispatch path.
+- `afu_ops_class_sigmoid.bin` checks the C wrapper and cluster dispatch path.
 - `test_micro_yolo_e2e.py` compares the materialized class sigmoid output
   byte-exactly against the Python golden.
 

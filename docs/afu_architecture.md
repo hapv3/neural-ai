@@ -192,7 +192,7 @@ Formula: $y_i = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$
   exp LUT and bank1 is the reciprocal LUT; LUT writes are blocked while the AFU
   is busy.
 - **Output layout:** Four Q8.8 `uint16_t` distances per location.
-- **Current coverage:** AFU block test, `spatz_ops_dfl_fused.bin`, and
+- **Current coverage:** AFU block test, `afu_ops_dfl_fused.bin`, and
   `test_micro_yolo_e2e.py`.
 
 ### 4.2.2. YOLO Class Sigmoid
@@ -203,7 +203,7 @@ Formula: $y_i = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$
 - **LUT policy:** Uses the normal active sigmoid LUT bank, so existing ping-pong
   LUT behavior is preserved for non-DFL modes.
 - **Output layout:** Compact 16 INT8 class scores per location.
-- **Current coverage:** AFU block test, `spatz_ops_class_sigmoid.bin`, and
+- **Current coverage:** AFU block test, `afu_ops_class_sigmoid.bin`, and
   `test_micro_yolo_e2e.py`.
 
 ### 4.3. LayerNorm (ViT Layer)

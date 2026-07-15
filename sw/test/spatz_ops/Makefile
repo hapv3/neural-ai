@@ -12,7 +12,7 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
 
 SRCS = start.S main.c ../../lib/spatz_ops.c ../../lib/spatz_ops.S
 
-OP_TESTS = copy relu requant add add_full mul mul_q7_full logistic logistic_full clamp_relu6 maxpool upsample concat dfl dfl_fused class_sigmoid global_avgpool
+OP_TESTS = copy relu requant add mul maxpool upsample concat
 OP_BINS = $(addprefix spatz_ops_,$(addsuffix .bin,$(OP_TESTS)))
 OP_HEXS = $(addprefix spatz_ops_,$(addsuffix .hex,$(OP_TESTS)))
 
@@ -39,23 +39,8 @@ spatz_ops_requant.elf: $(SRCS) link.ld
 spatz_ops_add.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=4 $(SRCS) -o $@
 
-spatz_ops_add_full.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=12 $(SRCS) -o $@
-
 spatz_ops_mul.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=5 $(SRCS) -o $@
-
-spatz_ops_mul_q7_full.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=11 $(SRCS) -o $@
-
-spatz_ops_logistic.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=6 $(SRCS) -o $@
-
-spatz_ops_logistic_full.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=10 $(SRCS) -o $@
-
-spatz_ops_clamp_relu6.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=17 $(SRCS) -o $@
 
 spatz_ops_maxpool.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=7 $(SRCS) -o $@
@@ -65,18 +50,6 @@ spatz_ops_upsample.elf: $(SRCS) link.ld
 
 spatz_ops_concat.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=9 $(SRCS) -o $@
-
-spatz_ops_dfl.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=13 $(SRCS) -o $@
-
-spatz_ops_dfl_fused.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=14 $(SRCS) -o $@
-
-spatz_ops_class_sigmoid.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=15 $(SRCS) -o $@
-
-spatz_ops_global_avgpool.elf: $(SRCS) link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=16 $(SRCS) -o $@
 
 spatz_ops_%.bin: spatz_ops_%.elf
 	$(OBJCOPY) -O binary $< $@
