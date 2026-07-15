@@ -153,6 +153,19 @@ async def test_depthwise_conv3x3s1p1_c64_requant(dut):
 
 
 @cocotb.test()
+async def test_depthwise_conv3x3s1p1_c33_tail_requant(dut):
+    await run_depthwise_case(
+        dut,
+        "depthwise_conv_c33_48.bin",
+        height=48,
+        width=48,
+        channels=33,
+        report_name="test_depthwise_conv3x3s1p1_c33_tail_requant",
+        stride=1,
+    )
+
+
+@cocotb.test()
 async def test_depthwise_conv3x3s1p1_c64_48_requant(dut):
     await run_depthwise_case(
         dut,
@@ -162,6 +175,19 @@ async def test_depthwise_conv3x3s1p1_c64_48_requant(dut):
         channels=64,
         report_name="test_depthwise_conv3x3s1p1_c64_48_requant",
         stride=1,
+    )
+
+
+@cocotb.test()
+async def test_depthwise_conv3x3s2p1_c65_tail_requant(dut):
+    await run_depthwise_case(
+        dut,
+        "depthwise_conv_c65_48_s2.bin",
+        height=48,
+        width=48,
+        channels=65,
+        report_name="test_depthwise_conv3x3s2p1_c65_tail_requant",
+        stride=2,
     )
 
 
