@@ -74,6 +74,18 @@ void systolic_depthwise3x3s1p1_c32_requant_channels(uint32_t input_addr,
                                                     uint32_t height,
                                                     uint32_t width,
                                                     uint32_t channels);
+void systolic_depthwise3x3_c32_requant_channels(uint32_t input_addr,
+                                                uint32_t weight_addr,
+                                                uint32_t output_addr,
+                                                uint32_t input_h,
+                                                uint32_t input_w,
+                                                uint32_t output_h,
+                                                uint32_t output_w,
+                                                uint32_t channels,
+                                                uint32_t stride_h,
+                                                uint32_t stride_w,
+                                                uint32_t pad_h,
+                                                uint32_t pad_w);
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);
 void systolic_gemm32_linebuf_requant(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m);

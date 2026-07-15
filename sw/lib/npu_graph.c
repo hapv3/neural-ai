@@ -180,17 +180,30 @@ static uint32_t run_conv2d1x1_c32_requant(const npu_tensor_t *src,
     return NPU_GRAPH_OK;
 }
 
-static uint32_t run_depthwise3x3s1p1_c32_requant(const npu_tensor_t *src,
-                                                 const npu_tensor_t *dst,
-                                                 const npu_tensor_t *weight,
-                                                 const npu_layer_t *layer) {
+static uint32_t conv3x3p1_output_dim(uint32_t input, uint32_t stride) {
+    if (input == 0u || stride == 0u) {
+        return 0u;
+    }
+    return ((input - 1u) / stride) + 1u;
+}
+
+static uint32_t run_depthwise3x3_c32_requant(const npu_tensor_t *src,
+                                             const npu_tensor_t *dst,
+                                             const npu_tensor_t *weight,
+                                             const npu_layer_t *layer,
+                                             uint32_t stride_h,
+                                             uint32_t stride_w) {
     uint32_t channels;
     uint32_t groups;
     uint32_t weight_bytes;
+    uint32_t expected_h;
+    uint32_t expected_w;
 
     channels = src ? src->c : 0u;
     groups = npu_c32_blocks(channels);
     weight_bytes = groups * 3u * 3u * 32u;
+    expected_h = conv3x3p1_output_dim(src ? (uint32_t)src->h : 0u, stride_h);
+    expected_w = conv3x3p1_output_dim(src ? (uint32_t)src->w : 0u, stride_w);
 
     if (!tensor_is_c32_i8(src) ||
         !tensor_is_c32_i8(dst) ||
@@ -198,7 +211,8 @@ static uint32_t run_depthwise3x3s1p1_c32_requant(const npu_tensor_t *src,
         channels == 0u ||
         (channels & 31u) != 0u ||
         dst->c != channels ||
-        src->h != dst->h || src->w != dst->w ||
+        expected_h == 0u || expected_w == 0u ||
+        dst->h != expected_h || dst->w != expected_w ||
         weight->bytes < weight_bytes) {
         return NPU_GRAPH_ERR_BAD_TENSOR;
     }
@@ -209,9 +223,10 @@ static uint32_t run_depthwise3x3s1p1_c32_requant(const npu_tensor_t *src,
     }
 
     configure_uniform_requant(layer);
-    systolic_depthwise3x3s1p1_c32_requant_channels(src->addr, weight->addr, dst->addr,
-                                                   (uint32_t)src->h, (uint32_t)src->w,
-                                                   channels);
+    systolic_depthwise3x3_c32_requant_channels(src->addr, weight->addr, dst->addr,
+                                               (uint32_t)src->h, (uint32_t)src->w,
+                                               (uint32_t)dst->h, (uint32_t)dst->w,
+                                               channels, stride_h, stride_w, 1u, 1u);
     systolic_requant_disable();
     return NPU_GRAPH_OK;
 }
@@ -916,7 +931,16 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
-                    run_depthwise3x3s1p1_c32_requant(src, dst, aux, layer);
+                    run_depthwise3x3_c32_requant(src, dst, aux, layer, 1u, 1u);
+                if (conv_status != NPU_GRAPH_OK) return conv_status;
+            }
+            break;
+
+        case NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT:
+            if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
+            {
+                uint32_t conv_status =
+                    run_depthwise3x3_c32_requant(src, dst, aux, layer, 2u, 2u);
                 if (conv_status != NPU_GRAPH_OK) return conv_status;
             }
             break;
