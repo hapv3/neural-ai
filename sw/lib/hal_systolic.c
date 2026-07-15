@@ -460,3 +460,50 @@ void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t o
         row += tile_m;
     }
 }
+
+void systolic_pointwise1x1_c32_multi_requant(uint32_t input_addr,
+                                             uint32_t weight_addr,
+                                             uint32_t psum_addr,
+                                             uint32_t output_addr,
+                                             uint32_t rows,
+                                             uint32_t input_c32_groups,
+                                             uint32_t output_c32_groups) {
+    const uint32_t activation_group_bytes = rows * 32u;
+    const uint32_t psum_group_bytes = rows * 32u * 4u;
+    const uint32_t weight_tile_bytes = 32u * 32u;
+
+    systolic_linebuf_disable();
+
+    for (uint32_t ocg = 0; ocg < output_c32_groups; ocg++) {
+        uint32_t out_group_addr = output_addr + (ocg * activation_group_bytes);
+        /* Weight tiles are packed as OCG-major, then ICG-major, each tile
+           containing the native GEMM32 K-major x N-minor 32x32 matrix. */
+        uint32_t oc_weight_base = weight_addr + (ocg * input_c32_groups * weight_tile_bytes);
+
+        if (input_c32_groups == 1u) {
+            systolic_gemm32_requant(oc_weight_base, input_addr, out_group_addr, rows);
+            continue;
+        }
+
+        for (uint32_t icg = 0; icg < input_c32_groups; icg++) {
+            uint32_t in_group_addr = input_addr + (icg * activation_group_bytes);
+            uint32_t tile_weight_addr = oc_weight_base + (icg * weight_tile_bytes);
+
+            if (icg == 0u) {
+                systolic_gemm32(tile_weight_addr, in_group_addr, psum_addr, rows);
+            } else if ((icg + 1u) == input_c32_groups) {
+                systolic_gemm32_accumulate_requant(tile_weight_addr,
+                                                   in_group_addr,
+                                                   psum_addr,
+                                                   out_group_addr,
+                                                   rows);
+            } else {
+                systolic_gemm32_accumulate(tile_weight_addr,
+                                           in_group_addr,
+                                           psum_addr,
+                                           psum_addr,
+                                           rows);
+            }
+        }
+    }
+}

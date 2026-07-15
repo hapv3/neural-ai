@@ -16,7 +16,7 @@ as test firmware.
 | `independent_systolic` | `independent_systolic.bin` | HAL GEMM32 for boundary `M` sizes with full INT32 output compare |
 | `matmul` | `matmul.bin` | Raw systolic register path with M=64 cocotb regression |
 | `micro_yolo` | `micro_yolo.bin` | Current Micro-YOLO raw-head, DFL, and class-sigmoid E2E firmware |
-| `pointwise_conv` | `pointwise_conv.bin` | Graph-level Conv1x1 C32 fast path over `1x32x48x48` C32-blocked input |
+| `pointwise_conv` | `pointwise_conv.bin`, `pointwise_conv_c64_c128.bin` | Graph-level Conv1x1 C32 fast path over C32-blocked tensors; covers single-group `C32->C32` and multi-group `C64->C128` |
 | `spatz_ops` | `spatz_ops_test.bin` | C-callable non-AFU Spatz/C-wrapper helpers used by graph firmware |
 | `spatz_vector` | `*.bin` per `.S` file | Direct RVV instruction coverage for integrated Spatz |
 
