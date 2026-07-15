@@ -34,6 +34,8 @@ void spatz_mul_i8_q7(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                      uint32_t count);
 uint32_t npu_logistic_i8(const int8_t *src, int8_t *dst,
                          uint32_t count, const uint8_t *lut);
+uint32_t npu_clamp_i8(const int8_t *src, int8_t *dst,
+                      uint32_t count, int32_t min_val, int32_t max_val);
 uint32_t npu_mul_q7_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                        uint32_t count);
 uint32_t npu_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,

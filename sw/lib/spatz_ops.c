@@ -61,6 +61,23 @@ uint32_t npu_logistic_i8(const int8_t *src, int8_t *dst,
     return afu_wait_done(1000000u);
 }
 
+uint32_t npu_clamp_i8(const int8_t *src, int8_t *dst,
+                      uint32_t count, int32_t min_val, int32_t max_val) {
+    if (!src || !dst || count == 0u || min_val > max_val ||
+        min_val < -128 || max_val > 127) {
+        return 0u;
+    }
+
+    for (uint32_t i = 0; i < 256u; i++) {
+        int32_t value = (i < 128u) ? (int32_t)i : ((int32_t)i - 256);
+        int32_t clamped = clamp_i32_local(value, min_val, max_val);
+        afu_load_lut_entry(i, (uint32_t)(uint8_t)(int8_t)clamped);
+    }
+
+    afu_start((uint32_t)src, (uint32_t)dst, count, NPU_AFU_MODE_E8);
+    return afu_wait_done(100000u + (count * 16u));
+}
+
 uint32_t npu_mul_q7_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                        uint32_t count) {
     afu_start_mul_q7((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst, count);

@@ -52,6 +52,8 @@ L2_DFL_RECIP_LUT = 0x80071400
 L2_DFL_ROW32_DST = 0x80072000
 CLASS_DST = 0x1015A000
 GAP_DST = 0x1015D000
+CLAMP_SRC = 0x10160000
+CLAMP_DST = 0x10168000
 
 VL = 32
 LOG_FULL_H = 48
@@ -78,6 +80,14 @@ GAP_H = 7
 GAP_W = 5
 GAP_C = 65
 GAP_PIXELS = GAP_H * GAP_W
+CLAMP_H = 17
+CLAMP_W = 13
+CLAMP_C = 65
+CLAMP_GROUPS = (CLAMP_C + 31) // 32
+CLAMP_PHYS_C = CLAMP_GROUPS * 32
+CLAMP_BYTES = CLAMP_H * CLAMP_W * CLAMP_PHYS_C
+CLAMP_MIN = 0
+CLAMP_MAX = 63
 DFL_SIDES = 4
 DFL_REG_MAX = 4
 
@@ -135,6 +145,11 @@ async def axi_read32_or_none(axi_master, addr):
 
 def c32_index(pixel, channel, pixels=CONCAT_PIXELS):
     return (((channel // 32) * pixels + pixel) * 32) + (channel % 32)
+
+
+def c32_hw_index(height, width, h, w, channel):
+    pixel = h * width + w
+    return (((channel // 32) * (height * width) + pixel) * 32) + (channel % 32)
 
 
 def pool_input_value(h, w, c):
@@ -205,6 +220,14 @@ def gap_expected_value(channel):
         for w in range(GAP_W)
     )
     return trunc_div_i32(total, GAP_PIXELS)
+
+
+def clamp_input_value(h, w, channel):
+    return ((h * 31 + w * 19 + channel * 7 + 5) & 0xFF) - 128
+
+
+def clamp_expected_value(h, w, channel):
+    return min(max(clamp_input_value(h, w, channel), CLAMP_MIN), CLAMP_MAX)
 
 
 def dfl_delta_index(value, max_value):
@@ -367,6 +390,21 @@ def check_logistic_full(dut):
         assert got == expected, f"logistic_full[{idx}] got={got} expected={expected}"
 
 
+async def preload_clamp_relu6_tcdm(dut):
+    src = []
+    for group in range(CLAMP_GROUPS):
+        for pixel in range(CLAMP_H * CLAMP_W):
+            h = pixel // CLAMP_W
+            w = pixel % CLAMP_W
+            for lane in range(32):
+                channel = (group * 32) + lane
+                src.append(clamp_input_value(h, w, channel) & 0xFF)
+
+    write_tcdm_bytes_aligned32(dut, CLAMP_SRC, src)
+    write_tcdm_bytes_aligned32(dut, CLAMP_DST, [0x55] * CLAMP_BYTES)
+    await Timer(1, "ps")
+
+
 def mul_q7_lhs_value(index):
     return as_i8((index * 19 + 7) & 0xFF)
 
@@ -519,6 +557,18 @@ def check_global_avgpool(dut):
         assert got == expected, (
             f"global_avgpool[{idx}] got={got} expected={expected}"
         )
+
+
+def check_clamp_relu6(dut):
+    for h in range(CLAMP_H):
+        for w in range(CLAMP_W):
+            for channel in range(CLAMP_PHYS_C):
+                idx = c32_hw_index(CLAMP_H, CLAMP_W, h, w, channel)
+                expected = clamp_expected_value(h, w, channel)
+                got = as_i8(read_tcdm_byte(dut, CLAMP_DST + idx))
+                assert got == expected, (
+                    f"clamp_relu6[{idx}] got={got} expected={expected}"
+                )
 
 
 def check_all(dut):
@@ -754,6 +804,18 @@ async def test_spatz_op_logistic_full(dut):
         check_logistic_full,
         timeout_cycles=180000,
         pre_release=preload_logistic_full_tcdm,
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_clamp_relu6(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_clamp_relu6.bin",
+        "test_spatz_op_clamp_relu6",
+        1,
+        check_clamp_relu6,
+        pre_release=preload_clamp_relu6_tcdm,
     )
 
 

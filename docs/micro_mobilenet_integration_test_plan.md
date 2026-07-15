@@ -30,7 +30,9 @@ including non-multiple-of-32 tails. `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT`
 extends the same native path to stride-2 downsample blocks. New work is still
 required for multi-C32 pointwise tiling and Micro-MobileNet E2E graph assembly.
 `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE` covers native C32-blocked spatial averaging
-through AFU mode 7.
+through AFU mode 7. `NPU_OP_CLAMP_I8` covers standalone quantized ReLU6/clamp
+through the AFU E8 LUT datapath when the clamp cannot be fused into producer
+requant.
 
 The target implementation should stay on native accelerator paths. Scalar CPU
 loops are allowed only for golden-model generation, setup/validation code, or
@@ -108,7 +110,7 @@ first Micro-MobileNet graph.
 | Depthwise non-multiple-of-32 tails | Implemented in the native depthwise controller path. The final C32 group uses an effective lane count of `C % 32`; invalid lanes are not fetched/MACed and are masked to zero after requant. | Host planner can keep one C32-blocked depthwise job for odd channel counts; no scalar tail path is needed. |
 | Depthwise throughput beyond 1 tap/cycle | Optional RTL mode issuing 3 C32 taps/cycle or a small unrolled tap pipeline. | Current path is correct and memory-efficient, but depthwise active cycles are still `output_pixels * groups * 9`. This is the largest remaining depthwise speedup knob. |
 | GlobalAvgPool native reduce | Implemented as AFU mode 7 plus graph op `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE`. It accumulates C32 lanes across C32-blocked spatial rows into signed 32-bit accumulators, divides by `H*W`, clamps to INT8, and writes one C32 vector per group. | Classification heads use pool-to-1x1 without scalar spatial reductions. Firmware passes `SRC2_PTR=spatial_count`; the wrapper owns dispatch only. |
-| Standalone ReLU6 if not fused | Add or expose AFU clamp-only mode for C32-blocked tensors. | Requant fusion handles Conv/Depthwise producers. A native clamp pass is still useful after Add or other non-requant producers. |
+| Standalone ReLU6 if not fused | Implemented as graph op `NPU_OP_CLAMP_I8` and wrapper `npu_clamp_i8()`, using the existing AFU E8 LUT datapath with a generated 256-entry clamp table. | Requant fusion handles Conv/Depthwise producers. Non-fused ReLU6 after Add or other producers still stays off scalar tensor loops. |
 | Pointwise multi-C32 one-start mode | Optional systolic controller mode to loop IC/OC C32 tiles internally from a host descriptor. | Current graph can tile in firmware. Native one-start tile looping would reduce register/config overhead for `C64/C128` pointwise-heavy blocks. |
 | Layer fusion | Optional RTL/SW stripe pipeline for `Depthwise -> Pointwise` and `Conv -> ReLU6`. | Avoids spilling full intermediate tensors to L2/TCDM when local capacity allows. This is a later E2E bandwidth optimization, not a correctness blocker. |
 
@@ -330,10 +332,9 @@ Optimization order:
 2. Keep pointwise direct path free of linebuffer states.
 3. Extend native depthwise dispatch beyond 3x3/p1 only if future layers need
    other kernel/pad variants.
-4. Add or expose AFU clamp-only pass for unfused ReLU6 after Add.
-5. Add graph/planner pointwise multi-C32 tiling without layout conversion.
-6. Consider 3 taps/cycle depthwise if PMU proves depthwise remains dominant.
-7. Stripe-fuse `Depthwise -> Pointwise` to avoid spilling full intermediate
+4. Add graph/planner pointwise multi-C32 tiling without layout conversion.
+5. Consider 3 taps/cycle depthwise if PMU proves depthwise remains dominant.
+6. Stripe-fuse `Depthwise -> Pointwise` to avoid spilling full intermediate
    tensors to L2 when TCDM budget allows.
 
 ---
