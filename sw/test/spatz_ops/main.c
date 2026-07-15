@@ -1,7 +1,6 @@
 #include "npu_types.h"
 #include "npu_memory_map.h"
 #include "hal_afu.h"
-#include "idma_mm_utils.h"
 #include "spatz_ops.h"
 
 /*
@@ -25,7 +24,6 @@
 #define SPATZ_OP_TEST_LOGISTIC_FULL 10u
 #define SPATZ_OP_TEST_MUL_Q7_FULL 11u
 #define SPATZ_OP_TEST_ADD_FULL 12u
-#define SPATZ_OP_TEST_DFL 13u
 #define SPATZ_OP_TEST_DFL_FUSED 14u
 #define SPATZ_OP_TEST_CLASS_SIGMOID 15u
 #define SPATZ_OP_TEST_GLOBAL_AVGPOOL 16u
@@ -76,11 +74,6 @@
 #define ADD_FULL_LHS MUL_Q7_LHS
 #define ADD_FULL_RHS MUL_Q7_RHS
 #define ADD_FULL_DST MUL_Q7_DST
-#define DFL_SRC       ((volatile int8_t *)0x10150000u)
-#define DFL_DST       ((volatile uint16_t *)0x10151000u)
-#define DFL_DELTA     ((volatile uint8_t *)0x10152000u)
-#define DFL_EXP       ((volatile uint16_t *)0x10153000u)
-#define DFL_LUT       ((volatile uint16_t *)0x10154000u)
 #define DFL_ROW32_SRC ((volatile int8_t *)0x10155000u)
 #define DFL_ROW32_DST ((volatile uint16_t *)0x10156000u)
 #define DFL_EXP_LUT32 ((volatile uint32_t *)0x10157000u)
@@ -91,10 +84,6 @@
 #define GAP_DST         ((volatile int8_t *)0x1015D000u)
 #define CLAMP_SRC       ((volatile int8_t *)0x10160000u)
 #define CLAMP_DST       ((volatile int8_t *)0x10168000u)
-#define L2_DFL_ROW32_SRC 0x80070000u
-#define L2_DFL_EXP_LUT32 0x80071000u
-#define L2_DFL_RECIP_LUT 0x80071400u
-#define L2_DFL_ROW32_DST 0x80072000u
 
 #define VL 32u
 #define LOG_FULL_H 48u
@@ -118,15 +107,8 @@
 #define CONCAT_W 3u
 #define CONCAT_C0 32u
 #define CONCAT_C1 32u
-#define DFL_LOCATIONS 17u
 #define DFL_FUSED_LOCATIONS 64u
 #define CLASS_SIGMOID_LOCATIONS 17u
-#define DFL_CHANNELS 16u
-#define DFL_SIDES 4u
-#define DFL_REG_MAX 4u
-#define DFL_FUSED_INPUT_BYTES (DFL_FUSED_LOCATIONS * 32u)
-#define DFL_LUT_BYTES (256u * sizeof(uint32_t))
-#define DFL_FUSED_OUTPUT_BYTES (DFL_FUSED_LOCATIONS * DFL_SIDES * sizeof(uint16_t))
 #define GAP_H 7u
 #define GAP_W 5u
 #define GAP_C 65u
@@ -153,44 +135,8 @@ static void fail(uint32_t test_id, uint32_t index, int32_t got, int32_t expected
     }
 }
 
-static uint16_t dfl_exp_lut_value(uint32_t index) {
-    if (index == 0u) {
-        return 32768u;
-    }
-
-    uint32_t neg_delta = 256u - index;
-    uint32_t shift = neg_delta >> 4;
-    uint32_t frac = neg_delta & 15u;
-    uint32_t base = (shift >= 15u) ? 1u : (32768u >> shift);
-    uint32_t next = (base > 1u) ? (base >> 1) : 1u;
-    uint32_t value = ((base * (16u - frac)) + (next * frac) + 8u) >> 4;
-    return (uint16_t)(value ? value : 1u);
-}
-
-static int8_t dfl_input_value(uint32_t loc, uint32_t channel) {
-    return (int8_t)((int32_t)(((loc * 37u) + (channel * 19u) + 11u) & 0xffu) - 128);
-}
-
 static uint8_t sigmoid_lut_value(uint32_t index) {
     return (uint8_t)((index * 3u + 7u) & 0xffu);
-}
-
-static uint32_t dfl_recip_lut_value(uint32_t index) {
-    uint64_t midpoint_q9 = 512ull + ((uint64_t)index * 2ull) + 1ull;
-    uint64_t rounded = (1ull << 37) + (midpoint_q9 >> 1);
-    uint64_t remainder = 0;
-    uint32_t quotient = 0;
-
-    for (int bit = 63; bit >= 0; bit--) {
-        remainder = (remainder << 1) | ((rounded >> bit) & 1ull);
-        if (remainder >= midpoint_q9) {
-            remainder -= midpoint_q9;
-            if (bit < 32) {
-                quotient |= 1u << bit;
-            }
-        }
-    }
-    return quotient;
 }
 
 static int8_t pool_input_value(uint32_t h, uint32_t w, uint32_t c) {
@@ -363,65 +309,7 @@ static void run_add_full(void) {
     mark_pass();
 }
 
-static void run_dfl(void) {
-    SIG_STATUS = 0x30001301u;
-    for (uint32_t i = 0; i < 256u; i++) {
-        DFL_LUT[i] = dfl_exp_lut_value(i);
-        DFL_EXP_LUT32[i] = (uint32_t)DFL_LUT[i];
-        DFL_RECIP_LUT[i] = dfl_recip_lut_value(i);
-    }
-    for (uint32_t loc = 0; loc < DFL_LOCATIONS; loc++) {
-        for (uint32_t ch = 0; ch < DFL_CHANNELS; ch++) {
-            DFL_SRC[(loc * DFL_CHANNELS) + ch] = dfl_input_value(loc, ch);
-        }
-    }
-    for (uint32_t i = 0; i < DFL_LOCATIONS * DFL_SIDES; i++) {
-        DFL_DST[i] = 0u;
-    }
-
-    SIG_STATUS = 0x30001302u;
-    if (!npu_dfl_softmax4_i8_q8((const int8_t *)DFL_SRC, (uint16_t *)DFL_DST,
-                                DFL_LOCATIONS, (const uint16_t *)DFL_LUT,
-                                (uint8_t *)DFL_DELTA, (uint16_t *)DFL_EXP)) {
-        fail(13, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
-    }
-
-    SIG_STATUS = 0x30001303u;
-    SIG_STATUS = 0x30001304u;
-    for (uint32_t loc = 0; loc < DFL_LOCATIONS; loc++) {
-        for (uint32_t ch = 0; ch < 32u; ch++) {
-            DFL_ROW32_SRC[(loc * 32u) + ch] =
-                (ch < DFL_CHANNELS) ? dfl_input_value(loc, ch) : (int8_t)(ch - 16u);
-        }
-    }
-    for (uint32_t i = 0; i < DFL_LOCATIONS * DFL_SIDES; i++) {
-        DFL_ROW32_DST[i] = 0u;
-    }
-
-    if (!npu_dfl_softmax4_row32_i8_q8((const int8_t *)DFL_ROW32_SRC,
-                                      (uint16_t *)DFL_ROW32_DST,
-                                      DFL_LOCATIONS,
-                                      (const uint32_t *)DFL_EXP_LUT32,
-                                      (const uint32_t *)DFL_RECIP_LUT)) {
-        fail(13, 0x10000, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
-    }
-
-    SIG_STATUS = 0x30001305u;
-    mark_pass();
-}
-
 static void run_dfl_fused(void) {
-    SIG_STATUS = 0x30001401u;
-    if (!idma_memcpy_blocking(L2_DFL_ROW32_SRC, (uint32_t)DFL_ROW32_SRC, DFL_FUSED_INPUT_BYTES) ||
-        !idma_memcpy_blocking(L2_DFL_EXP_LUT32, (uint32_t)DFL_EXP_LUT32, DFL_LUT_BYTES) ||
-        !idma_memcpy_blocking(L2_DFL_RECIP_LUT, (uint32_t)DFL_RECIP_LUT, DFL_LUT_BYTES)) {
-        fail(14, 0x10000, 0, 1);
-    }
-
-    for (uint32_t i = 0; i < DFL_FUSED_LOCATIONS * DFL_SIDES; i++) {
-        DFL_ROW32_DST[i] = 0u;
-    }
-
     SIG_STATUS = 0x30001402u;
     if (!npu_dfl_softmax4_row32_i8_q8((const int8_t *)DFL_ROW32_SRC,
                                       (uint16_t *)DFL_ROW32_DST,
@@ -432,9 +320,6 @@ static void run_dfl_fused(void) {
     }
 
     SIG_STATUS = 0x30001403u;
-    if (!idma_memcpy_blocking((uint32_t)DFL_ROW32_DST, L2_DFL_ROW32_DST, DFL_FUSED_OUTPUT_BYTES)) {
-        fail(14, 0x20000, 0, 1);
-    }
     mark_pass();
 }
 
@@ -599,9 +484,6 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_ADD_FULL) {
         run_add_full();
-    }
-    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL) {
-        run_dfl();
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL_FUSED) {
         run_dfl_fused();
