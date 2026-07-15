@@ -51,6 +51,7 @@ L2_DFL_EXP_LUT32 = 0x80071000
 L2_DFL_RECIP_LUT = 0x80071400
 L2_DFL_ROW32_DST = 0x80072000
 CLASS_DST = 0x1015A000
+GAP_DST = 0x1015D000
 
 VL = 32
 LOG_FULL_H = 48
@@ -73,6 +74,10 @@ CONCAT_PIXELS = CONCAT_H * CONCAT_W
 DFL_LOCATIONS = 17
 DFL_FUSED_LOCATIONS = 64
 CLASS_SIGMOID_LOCATIONS = 17
+GAP_H = 7
+GAP_W = 5
+GAP_C = 65
+GAP_PIXELS = GAP_H * GAP_W
 DFL_SIDES = 4
 DFL_REG_MAX = 4
 
@@ -182,6 +187,24 @@ def sigmoid_lut_value(index):
 
 def class_sigmoid_input_value(loc, channel):
     return ((loc * 29 + channel * 13 + 5) & 0xFF) - 128
+
+
+def gap_input_value(h, w, channel):
+    return ((h * 23 + w * 17 + channel * 11 + 9) & 0x7F) - 64
+
+
+def trunc_div_i32(value, divisor):
+    quotient = abs(value) // divisor
+    return -quotient if value < 0 else quotient
+
+
+def gap_expected_value(channel):
+    total = sum(
+        gap_input_value(h, w, channel)
+        for h in range(GAP_H)
+        for w in range(GAP_W)
+    )
+    return trunc_div_i32(total, GAP_PIXELS)
 
 
 def dfl_delta_index(value, max_value):
@@ -488,6 +511,16 @@ def check_class_sigmoid(dut):
             )
 
 
+def check_global_avgpool(dut):
+    for channel in range(GAP_C):
+        idx = ((channel // 32) * 32) + (channel % 32)
+        expected = gap_expected_value(channel)
+        got = as_i8(read_tcdm_byte(dut, GAP_DST + idx))
+        assert got == expected, (
+            f"global_avgpool[{idx}] got={got} expected={expected}"
+        )
+
+
 def check_all(dut):
     check_copy(dut)
     check_relu(dut)
@@ -773,4 +806,15 @@ async def test_spatz_op_class_sigmoid(dut):
         "test_spatz_op_class_sigmoid",
         1,
         check_class_sigmoid,
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_global_avgpool(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_global_avgpool.bin",
+        "test_spatz_op_global_avgpool",
+        1,
+        check_global_avgpool,
     )

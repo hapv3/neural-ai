@@ -818,6 +818,26 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
+        case NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE:
+            if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
+            if (!tensor_has_layout(src, NPU_LAYOUT_C32_BLOCKED, NPU_DTYPE_I8) ||
+                !tensor_has_layout(dst, NPU_LAYOUT_C32_BLOCKED, NPU_DTYPE_I8) ||
+                src->h == 0u || src->w == 0u || src->c == 0u ||
+                dst->h != 1u || dst->w != 1u || dst->c != src->c ||
+                src->bytes < npu_tensor_c32_bytes(src->h, src->w, src->c) ||
+                dst->bytes < npu_tensor_c32_bytes(1u, 1u, dst->c) ||
+                src->addr == dst->addr) {
+                return NPU_GRAPH_ERR_BAD_TENSOR;
+            }
+            if (!npu_global_avgpool_c32_i8((const int8_t *)src->addr,
+                                           (int8_t *)dst->addr,
+                                           src->h,
+                                           src->w,
+                                           src->c)) {
+                return NPU_GRAPH_ERR_ACCEL;
+            }
+            break;
+
         case NPU_OP_UPSAMPLE_NEAREST2X_I8:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||

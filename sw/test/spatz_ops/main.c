@@ -28,6 +28,7 @@
 #define SPATZ_OP_TEST_DFL 13u
 #define SPATZ_OP_TEST_DFL_FUSED 14u
 #define SPATZ_OP_TEST_CLASS_SIGMOID 15u
+#define SPATZ_OP_TEST_GLOBAL_AVGPOOL 16u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -85,6 +86,8 @@
 #define DFL_RECIP_LUT ((volatile uint32_t *)0x10158000u)
 #define CLASS_ROW32_SRC ((volatile int8_t *)0x10159000u)
 #define CLASS_DST       ((volatile int8_t *)0x1015A000u)
+#define GAP_SRC         ((volatile int8_t *)0x1015B000u)
+#define GAP_DST         ((volatile int8_t *)0x1015D000u)
 #define L2_DFL_ROW32_SRC 0x80070000u
 #define L2_DFL_EXP_LUT32 0x80071000u
 #define L2_DFL_RECIP_LUT 0x80071400u
@@ -121,6 +124,11 @@
 #define DFL_FUSED_INPUT_BYTES (DFL_FUSED_LOCATIONS * 32u)
 #define DFL_LUT_BYTES (256u * sizeof(uint32_t))
 #define DFL_FUSED_OUTPUT_BYTES (DFL_FUSED_LOCATIONS * DFL_SIDES * sizeof(uint16_t))
+#define GAP_H 7u
+#define GAP_W 5u
+#define GAP_C 65u
+#define GAP_PIXELS (GAP_H * GAP_W)
+#define GAP_GROUPS ((GAP_C + 31u) / 32u)
 
 static void fail(uint32_t test_id, uint32_t index, int32_t got, int32_t expected) {
     // Standard status/debug page lets cocotb report failing op, element, got, expected.
@@ -241,6 +249,26 @@ static int8_t up_input_value(uint32_t h, uint32_t w, uint32_t c) {
 
 static int8_t up_c32_input_value(uint32_t h, uint32_t w, uint32_t c) {
     return (int8_t)((int32_t)((h * 17u + w * 11u + c * 5u) % 127u) - 63);
+}
+
+static uint32_t c32_offset(uint32_t height, uint32_t width,
+                           uint32_t y, uint32_t x, uint32_t c) {
+    uint32_t pixel = y * width + x;
+    return (((c >> 5) * (height * width) + pixel) * 32u) + (c & 31u);
+}
+
+static int8_t gap_input_value(uint32_t h, uint32_t w, uint32_t c) {
+    return (int8_t)((int32_t)(((h * 23u) + (w * 17u) + (c * 11u) + 9u) & 0x7fu) - 64);
+}
+
+static int8_t expected_gap_value(uint32_t c) {
+    int32_t sum = 0;
+    for (uint32_t h = 0; h < GAP_H; h++) {
+        for (uint32_t w = 0; w < GAP_W; w++) {
+            sum += (int32_t)gap_input_value(h, w, c);
+        }
+    }
+    return (int8_t)(sum / (int32_t)GAP_PIXELS);
 }
 
 static void mark_pass(void) {
@@ -561,6 +589,39 @@ static void run_class_sigmoid(void) {
     mark_pass();
 }
 
+static void run_global_avgpool(void) {
+    SIG_STATUS = 0x30001601u;
+    for (uint32_t h = 0; h < GAP_H; h++) {
+        for (uint32_t w = 0; w < GAP_W; w++) {
+            for (uint32_t c = 0; c < GAP_C; c++) {
+                GAP_SRC[c32_offset(GAP_H, GAP_W, h, w, c)] = gap_input_value(h, w, c);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < GAP_GROUPS * 32u; i++) {
+        GAP_DST[i] = (int8_t)0x5a;
+    }
+
+    SIG_STATUS = 0x30001602u;
+    if (!npu_global_avgpool_c32_i8((const int8_t *)GAP_SRC,
+                                   (int8_t *)GAP_DST,
+                                   GAP_H,
+                                   GAP_W,
+                                   GAP_C)) {
+        fail(16, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
+    }
+
+    SIG_STATUS = 0x30001603u;
+    for (uint32_t c = 0; c < GAP_C; c++) {
+        uint32_t index = ((c >> 5) * 32u) + (c & 31u);
+        int8_t expected = expected_gap_value(c);
+        if (GAP_DST[index] != expected) {
+            fail(16, index, GAP_DST[index], expected);
+        }
+    }
+    mark_pass();
+}
+
 static void run_maxpool(void) {
     for (uint32_t h = 0; h < POOL_H; h++) {
         for (uint32_t w = 0; w < POOL_W; w++) {
@@ -708,6 +769,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_CLASS_SIGMOID) {
         run_class_sigmoid();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_GLOBAL_AVGPOOL) {
+        run_global_avgpool();
     }
 
     SIG_STATUS = PASS_SIGNATURE;

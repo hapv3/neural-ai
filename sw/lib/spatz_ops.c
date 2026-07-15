@@ -221,6 +221,24 @@ uint32_t npu_class_sigmoid_row32_high16_i8(const int8_t *src_row32, int8_t *dst,
     return afu_wait_done(100000u + (locations * 64u));
 }
 
+uint32_t npu_global_avgpool_c32_i8(const int8_t *src_c32, int8_t *dst_c32,
+                                   uint32_t input_h, uint32_t input_w,
+                                   uint32_t channels) {
+    uint32_t spatial_count = input_h * input_w;
+    uint32_t groups = (channels + 31u) >> 5;
+    uint32_t input_bytes = spatial_count * groups * 32u;
+
+    if (!src_c32 || !dst_c32 || spatial_count == 0u || channels == 0u) {
+        return 0u;
+    }
+
+    afu_start_global_avgpool_c32((uint32_t)src_c32,
+                                 (uint32_t)dst_c32,
+                                 input_bytes,
+                                 spatial_count);
+    return afu_wait_done(100000u + (spatial_count * groups * 32u));
+}
+
 void spatz_maxpool2d_i8(const int8_t *src, int8_t *dst,
                         uint32_t input_h, uint32_t input_w, uint32_t channels,
                         uint32_t kernel_h, uint32_t kernel_w,
