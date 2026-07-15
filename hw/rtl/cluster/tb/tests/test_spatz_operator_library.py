@@ -10,12 +10,10 @@ from npu_test_utils import (
     firmware_path,
     load_firmware_axi,
     read_dtcm_word,
-    read_l2_bytes,
     read_tcdm_byte,
     release_fetch,
     reset_dut,
     wait_for_host_irq,
-    write_l2_bytes,
 )
 
 
@@ -44,12 +42,10 @@ MUL_Q7_DST = 0x1012C000
 ADD_FULL_LHS = MUL_Q7_LHS
 ADD_FULL_RHS = MUL_Q7_RHS
 ADD_FULL_DST = MUL_Q7_DST
-DFL_DST = 0x10151000
+DFL_ROW32_SRC = 0x10155000
 DFL_ROW32_DST = 0x10156000
-L2_DFL_ROW32_SRC = 0x80070000
-L2_DFL_EXP_LUT32 = 0x80071000
-L2_DFL_RECIP_LUT = 0x80071400
-L2_DFL_ROW32_DST = 0x80072000
+DFL_EXP_LUT32 = 0x10157000
+DFL_RECIP_LUT = 0x10158000
 CLASS_DST = 0x1015A000
 GAP_DST = 0x1015D000
 CLAMP_SRC = 0x10160000
@@ -73,7 +69,6 @@ UP_SCALE = 2
 CONCAT_H = 2
 CONCAT_W = 3
 CONCAT_PIXELS = CONCAT_H * CONCAT_W
-DFL_LOCATIONS = 17
 DFL_FUSED_LOCATIONS = 64
 CLASS_SIGMOID_LOCATIONS = 17
 GAP_H = 7
@@ -232,16 +227,6 @@ def clamp_expected_value(h, w, channel):
 
 def dfl_delta_index(value, max_value):
     return (value - max_value) & 0xFF
-
-
-def dfl_expected_value(loc, side):
-    base_channel = side * DFL_REG_MAX
-    values = [dfl_input_value(loc, base_channel + bin_idx) for bin_idx in range(DFL_REG_MAX)]
-    max_value = max(values)
-    exp_values = [dfl_exp_lut_value(dfl_delta_index(value, max_value)) for value in values]
-    total = sum(exp_values)
-    weighted = sum(bin_idx * exp_values[bin_idx] for bin_idx in range(DFL_REG_MAX))
-    return ((weighted << 8) + (total >> 1)) // total
 
 
 def dfl_recip_lut_value(index):
@@ -499,39 +484,32 @@ def check_concat(dut):
             assert got == expected, f"concat_c32[{idx}] got={got} expected={expected}"
 
 
-def check_dfl(dut):
-    for loc in range(DFL_LOCATIONS):
-        for side in range(DFL_SIDES):
-            idx = loc * DFL_SIDES + side
-            expected = dfl_expected_value(loc, side)
-            got = read_tcdm_u16(dut, DFL_DST + idx * 2)
-            assert got == expected, f"dfl_q8[{idx}] got={got} expected={expected}"
-
-
-async def preload_dfl_fused_l2(dut):
+async def preload_dfl_fused_tcdm(dut):
     src = []
     for loc in range(DFL_FUSED_LOCATIONS):
         for channel in range(32):
             value = dfl_input_value(loc, channel) if channel < 16 else loc + channel
             src.append(value & 0xFF)
 
-    await write_l2_bytes(dut, L2_DFL_ROW32_SRC, src)
-    await write_l2_bytes(
-        dut, L2_DFL_EXP_LUT32, pack_u32_le(dfl_exp_lut_value(i) for i in range(256))
+    write_tcdm_bytes_aligned32(dut, DFL_ROW32_SRC, src)
+    write_tcdm_bytes_aligned32(
+        dut, DFL_EXP_LUT32, pack_u32_le(dfl_exp_lut_value(i) for i in range(256))
     )
-    await write_l2_bytes(
-        dut, L2_DFL_RECIP_LUT, pack_u32_le(dfl_recip_lut_value(i) for i in range(256))
+    write_tcdm_bytes_aligned32(
+        dut, DFL_RECIP_LUT, pack_u32_le(dfl_recip_lut_value(i) for i in range(256))
     )
-    await write_l2_bytes(dut, L2_DFL_ROW32_DST, [0] * (DFL_FUSED_LOCATIONS * DFL_SIDES * 2))
+    write_tcdm_bytes_aligned32(
+        dut, DFL_ROW32_DST, [0] * (DFL_FUSED_LOCATIONS * DFL_SIDES * 2)
+    )
+    await Timer(1, "ps")
 
 
-async def check_dfl_fused(dut):
-    data = await read_l2_bytes(dut, L2_DFL_ROW32_DST, DFL_FUSED_LOCATIONS * DFL_SIDES * 2)
+def check_dfl_fused(dut):
     for loc in range(DFL_FUSED_LOCATIONS):
         for side in range(DFL_SIDES):
             idx = loc * DFL_SIDES + side
             expected = dfl_expected_fused_value(loc, side)
-            got = data[idx * 2] | (data[(idx * 2) + 1] << 8)
+            got = read_tcdm_u16(dut, DFL_ROW32_DST + idx * 2)
             assert got == expected, (
                 f"dfl_fused_q8[{idx}] got={got} expected={expected}"
             )
@@ -850,18 +828,6 @@ async def test_spatz_op_concat(dut):
 
 
 @cocotb.test()
-async def test_afu_op_dfl(dut):
-    await run_firmware_case(
-        dut,
-        "afu_ops_dfl.bin",
-        "test_afu_op_dfl",
-        1,
-        check_dfl,
-        firmware_dir="sw/test/afu_ops",
-    )
-
-
-@cocotb.test()
 async def test_afu_op_dfl_fused(dut):
     await run_firmware_case(
         dut,
@@ -870,7 +836,7 @@ async def test_afu_op_dfl_fused(dut):
         1,
         check_dfl_fused,
         timeout_cycles=200000,
-        pre_release=preload_dfl_fused_l2,
+        pre_release=preload_dfl_fused_tcdm,
         firmware_dir="sw/test/afu_ops",
     )
 

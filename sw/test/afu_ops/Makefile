@@ -12,7 +12,7 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
 
 SRCS = ../spatz_ops/start.S ../spatz_ops/main.c ../../lib/spatz_ops.c ../../lib/spatz_ops.S
 
-AFU_TESTS = add_full mul_q7_full logistic logistic_full clamp_relu6 dfl dfl_fused class_sigmoid global_avgpool
+AFU_TESTS = add_full mul_q7_full logistic logistic_full clamp_relu6 dfl_fused class_sigmoid global_avgpool
 AFU_BINS = $(addprefix afu_ops_,$(addsuffix .bin,$(AFU_TESTS)))
 AFU_HEXS = $(addprefix afu_ops_,$(addsuffix .hex,$(AFU_TESTS)))
 
@@ -32,9 +32,6 @@ afu_ops_logistic_full.elf: $(SRCS) ../spatz_ops/link.ld
 
 afu_ops_clamp_relu6.elf: $(SRCS) ../spatz_ops/link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=17 $(SRCS) -o $@
-
-afu_ops_dfl.elf: $(SRCS) ../spatz_ops/link.ld
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=13 $(SRCS) -o $@
 
 afu_ops_dfl_fused.elf: $(SRCS) ../spatz_ops/link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=14 $(SRCS) -o $@

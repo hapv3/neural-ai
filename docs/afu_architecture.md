@@ -193,7 +193,10 @@ Formula: $y_i = \frac{e^{x_i - \max(x)}}{\sum e^{x_j - \max(x)}}$
   is busy.
 - **Output layout:** Four Q8.8 `uint16_t` distances per location.
 - **Current coverage:** AFU block test, `afu_ops_dfl_fused.bin`, and
-  `test_micro_yolo_e2e.py`.
+  `test_micro_yolo_e2e.py`. The standalone cluster wrapper test preloads ROW32
+  input plus exp/reciprocal LUTs directly into TCDM and checks TCDM output from
+  cocotb, so it measures the fused AFU path without firmware-side DFL setup
+  loops or iDMA copy-back noise.
 
 ### 4.2.2. YOLO Class Sigmoid
 **Models:** YOLO detection head class branch.
