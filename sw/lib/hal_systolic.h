@@ -6,7 +6,7 @@
 #define SYSTOLIC_GEMM32_K 32u
 #define SYSTOLIC_GEMM32_N 32u
 #define SYSTOLIC_GEMM32_TILE_M 1024u
-#define SYSTOLIC_GEMM32_ACCUM_TILE_M 16u
+#define SYSTOLIC_GEMM32_ACCUM_TILE_M 256u
 
 typedef struct {
     uint32_t input_base;
