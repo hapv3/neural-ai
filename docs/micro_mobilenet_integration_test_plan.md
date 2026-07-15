@@ -22,12 +22,18 @@ represented at least twice:
 Current status: **planning with first pointwise and first depthwise fast paths
 implemented**.
 Existing Micro-YOLO infrastructure provides the stem Conv3x3 linebuffer path,
-AFU/Spatz activation ops, AFU Add, iDMA movement, and the graph/test harness.
+AFU/vector activation ops, AFU Add, iDMA movement, and the graph/test harness.
 `NPU_OP_CONV2D1X1_C32_REQUANT` now covers the direct C32 `1x1` fast path for
 `C32->C32`. `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` now covers a linebuffer-fed
 lane-wise depthwise `3x3/s1/p1` fast path for any channel count that is a
 multiple of 32. New work is still required for multi-C32 pointwise tiling,
 depthwise stride-2, and planner-side tail splitting when `C % 32 != 0`.
+
+The target implementation should stay on native accelerator paths. Scalar CPU
+loops are allowed only for golden-model generation, setup/validation code, or
+very small tail handling that cannot yet be expressed by the native datapaths.
+They are not acceptable as the planned implementation for convolution,
+activation, residual, pooling, or layout movement.
 
 ---
 
@@ -41,20 +47,20 @@ the physical implementation should keep the existing ROW32/C32 packed layout.
 |---|---|---|---|---|---|
 | 0 | Input | - | RGB INT8 | 1x3x96x96 | L2 |
 | 1 | Stem_Conv | **Standard Conv2D** | K=3x3, S=2, Pad=1, C3->C32 | 1x32x48x48 | existing systolic linebuffer + requant |
-| 2 | Stem_ReLU6 | **ReLU6 / clamp** | clamp INT8 to quantized ReLU6 range | 1x32x48x48 | AFU/Spatz clamp path |
-| 3 | DW0 | **DepthwiseConv2D** | K=3x3, S=1, Pad=1, C32 groups | 1x32x48x48 | new depthwise path |
-| 4 | DW0_ReLU6 | **ReLU6 / clamp** | element-wise | 1x32x48x48 | AFU/Spatz clamp path |
+| 2 | Stem_ReLU6 | **ReLU6 / clamp** | clamp INT8 to quantized ReLU6 range | 1x32x48x48 | prefer requant clamp fusion; otherwise AFU clamp |
+| 3 | DW0 | **DepthwiseConv2D** | K=3x3, S=1, Pad=1, C32 groups | 1x32x48x48 | RTL depthwise linebuffer |
+| 4 | DW0_ReLU6 | **ReLU6 / clamp** | element-wise | 1x32x48x48 | prefer depthwise requant clamp fusion; otherwise AFU clamp |
 | 5 | PW0 | **Pointwise Conv2D** | K=1x1, S=1, C32->C32 | 1x32x48x48 | systolic direct/packed GEMM + requant |
 | 6 | Residual0_Add | **Add** | L2 + L5 | 1x32x48x48 | AFU Add |
-| 7 | DW1_Down | **DepthwiseConv2D** | K=3x3, S=2, Pad=1, C32 groups | 1x32x24x24 | new depthwise path |
+| 7 | DW1_Down | **DepthwiseConv2D** | K=3x3, S=2, Pad=1, C32 groups | 1x32x24x24 | RTL depthwise linebuffer, needs generic stride-2 dispatch |
 | 8 | PW1_Expand | **Pointwise Conv2D** | K=1x1, S=1, C32->C64 | 1x64x24x24 | systolic direct/packed GEMM, 2 OC tiles |
-| 9 | PW1_ReLU6 | **ReLU6 / clamp** | element-wise | 1x64x24x24 | AFU/Spatz clamp path |
+| 9 | PW1_ReLU6 | **ReLU6 / clamp** | element-wise | 1x64x24x24 | prefer requant clamp fusion; otherwise AFU clamp |
 | 10 | PW2_Expand | **Pointwise Conv2D** | K=1x1, S=1, C64->C128 | 1x128x24x24 | systolic direct/packed GEMM, 4 OC tiles |
-| 11 | DW2 | **DepthwiseConv2D** | K=3x3, S=1, Pad=1, C128 groups | 1x128x24x24 | new depthwise path over 4 C32 groups |
+| 11 | DW2 | **DepthwiseConv2D** | K=3x3, S=1, Pad=1, C128 groups | 1x128x24x24 | RTL depthwise linebuffer, one invocation over 4 C32 groups |
 | 12 | PW3_Project | **Pointwise Conv2D** | K=1x1, S=1, C128->C64 | 1x64x24x24 | systolic direct/packed GEMM |
 | 13 | Residual1_Add | **Add** | L8 + L12 | 1x64x24x24 | AFU Add |
 | 14 | Validate_Conv | **Standard Conv2D** | K=3x3, S=1, Pad=1, C64->C64 | 1x64x24x24 | existing systolic linebuffer/KGEN + requant |
-| 15 | GlobalAvgPool | **AveragePool2D** | pool 24x24 -> 1x1 per channel | 1x64x1x1 | Spatz/scalar first, optional AFU reduce later |
+| 15 | GlobalAvgPool | **AveragePool2D** | pool 24x24 -> 1x1 per channel | 1x64x1x1 | native AFU C32 reduce-sum/avg mode required |
 | 16 | Classifier_PW | **Pointwise Conv2D** | K=1x1, C64->C32 | 1x32x1x1 | systolic direct GEMM |
 | 17 | Output_DMA | **DMA_OUT** | write final INT8 vector | 1x32x1x1 | iDMA |
 
@@ -76,26 +82,32 @@ first Micro-MobileNet graph.
 
 ---
 
-## 2. Operator Feasibility Assessment
+## 2. Native Datapath Assessment
 
-### 2.1 Ready or Mostly Ready
+### 2.1 Reuse Existing RTL/Accelerator Paths
 
-| Op | Existing path | Notes |
-|---|---|---|
-| Standard Conv3x3 C3/C32 | `npu_conv2d_packed_run_oc32_linebuf_requant()` | Already exercised by Micro-YOLO stem/C32 convs. Need OC64 tiling in graph usage for `Validate_Conv`. |
-| Pointwise Conv1x1 C32->C32 | `NPU_OP_CONV2D1X1_C32_REQUANT` | Implemented as direct `systolic_gemm32_requant()` over C32-blocked input; no linebuffer or im2col/scratch prepare. |
-| Pointwise Conv1x1 multi-C32 | future OC/IC tiled wrapper around the direct C32 fast path | Needed for `C32->C64`, `C64->C128`, and projection layers. |
-| ReLU / clamp | `spatz_vec_relu_i8()` or simple clamp kernel | ReLU6 should use quantized clamp min/max, not floating-point runtime math. |
-| Add | `spatz_add_i8()` / AFU Add | Already used by Micro-YOLO residual. |
-| DMA | iDMA helpers | Existing L2/TCDM movement path. |
-
-### 2.2 New or Incomplete
-
-| Op | Difficulty | Recommended first path | Optimized path |
+| Op | Reuse path | Required planner/SW work | Performance note |
 |---|---|---|---|
-| DepthwiseConv2D C32 groups | High | implemented RTL linebuffer-fed path for `3x3/s1/p1`, `C % 32 == 0` | stride-2 support, non-multiple-of-32 planner split, and wider tap issue if PMU requires it |
-| GlobalAvgPool | Medium | Spatz/scalar reduction over C32 groups | vector reduction or AFU reduction mode if it becomes hot |
-| ReLU6 exact quantization | Low | clamp op using precomputed quantized `[0, 6]` range | fuse into requant when producer is Conv/depthwise |
+| Standard Conv3x3 C3->C32 | Existing systolic linebuffer + KGEN + requant | Reuse Micro-YOLO linebuffer job descriptors for stem stride-2/pad-1 RGB input | Native path; no im2col scalar prepare. |
+| Standard Conv3x3 C64->C64 | Existing systolic linebuffer + psum accumulation + requant | Emit OC32 x IC32 chunks and accumulate final chunk before requant | Reuses current dense Conv path; scheduler overhead should be tracked per tile. |
+| Pointwise Conv1x1 C32->C32 | `NPU_OP_CONV2D1X1_C32_REQUANT` using direct `systolic_gemm32_requant()` | Already covered by `sw/test/pointwise_conv` | No linebuffer/window states and no im2col scratch. |
+| Pointwise Conv1x1 multi-C32 | Same direct systolic GEMM32 path, tiled over IC/OC C32 groups | Add graph/planner wrapper for `C32->C64`, `C64->C128`, `C128->C64`, and `C64->C32` | Should be compute-dense; avoid CPU pack/copy by keeping tensors C32-blocked. |
+| Depthwise Conv3x3 S1 P1, `C % 32 == 0` | RTL depthwise linebuffer path with row-ring reuse and one-start multi-group loop | Already supports C32/C64/C96-style group iteration; add C128 coverage | Current 48x48 PMU scales near-linearly: C32 `32524`, C64 `61476`, C96 `90428`. |
+| ReLU6 / clamp after Conv/Depthwise | Existing requant clamp fields | Fold activation min/max into producer requant whenever possible | Best path is zero extra pass over activation tensor. |
+| Standalone element-wise Add | AFU Add | Reuse Micro-YOLO residual Add path on C32-blocked tensors | Native vector datapath; no scalar loop. |
+| DMA / layout movement | iDMA 1D/2D/3D helpers | Keep host fixtures and graph tensors in C32-blocked layout | Avoid runtime C-layout conversion. |
+
+### 2.2 Native RTL/AFU Updates Still Required
+
+| Gap | Needed update | Why it matters |
+|---|---|---|
+| Depthwise stride-2 dispatch | Generalize depthwise HAL/graph op from fixed `3x3/s1/p1` to descriptor-configured `kernel_h/kernel_w/stride_h/stride_w/pad_h/pad_w`; verify linebuffer row-ring behavior for stride 2. | MobileNet downsample blocks use stride-2 depthwise. The linebuffer already has stride-limit plumbing, but the graph API currently exposes only S1/P1. |
+| Depthwise non-multiple-of-32 tails | Host planner should split `main_C = floor(C/32)*32` plus a tail job only when `C % 32 != 0`; RTL tail support can be added later if tails become common. | Most middle MobileNet channels are multiples of 32 in this micro graph. Tail scalar code should not be in the normal path. |
+| Depthwise throughput beyond 1 tap/cycle | Optional RTL mode issuing 3 C32 taps/cycle or a small unrolled tap pipeline. | Current path is correct and memory-efficient, but depthwise active cycles are still `output_pixels * groups * 9`. This is the largest remaining depthwise speedup knob. |
+| GlobalAvgPool native reduce | Add an AFU C32 reduce-sum/avg mode: accumulate C32 lanes across spatial rows into wider accumulators, apply reciprocal/shift, clamp to INT8. | Classification heads need pool-to-1x1. A scalar implementation would be slow and should not be part of the target plan. |
+| Standalone ReLU6 if not fused | Add or expose AFU clamp-only mode for C32-blocked tensors. | Requant fusion handles Conv/Depthwise producers. A native clamp pass is still useful after Add or other non-requant producers. |
+| Pointwise multi-C32 one-start mode | Optional systolic controller mode to loop IC/OC C32 tiles internally from a host descriptor. | Current graph can tile in firmware. Native one-start tile looping would reduce register/config overhead for `C64/C128` pointwise-heavy blocks. |
+| Layer fusion | Optional RTL/SW stripe pipeline for `Depthwise -> Pointwise` and `Conv -> ReLU6`. | Avoids spilling full intermediate tensors to L2/TCDM when local capacity allows. This is a later E2E bandwidth optimization, not a correctness blocker. |
 
 ---
 
@@ -116,6 +128,7 @@ Implementation expectation:
 - reuse the existing systolic linebuffer/KGEN path;
 - split `C64->C64` as two input C32 chunks and two output C32 tiles;
 - final chunk performs psum accumulate + requant.
+- do not materialize im2col with scalar code.
 
 ### 3.2 Pointwise Conv2D `1x1`
 
@@ -132,10 +145,13 @@ Planned instances:
 Implementation expectation:
 
 - bypass linebuffer/window;
-- use direct C32 stream or packed prepare iDMA 2D;
+- use direct C32-blocked tensor reads;
 - map to GEMM with `M = output_h * output_w`, `K = input_c`,
   `N = output_c`;
 - use systolic requant for final INT8 output.
+- for multi-C32 pointwise, tile over IC/OC C32 groups in the graph planner
+  first; consider a controller one-start loop later if config overhead becomes
+  visible in PMU.
 
 ### 3.3 DepthwiseConv2D
 
@@ -222,12 +238,13 @@ Tasks:
 Acceptance: all pointwise instances match Python golden byte-exactly. Current
 accepted subset: `C32->C32`, `48x48`, C32-blocked input/output.
 
-### Phase 3: Depthwise Correctness Path
+### Phase 3: Native Depthwise Path
 
-Objective: unblock graph integration with a simple depthwise implementation.
+Objective: run depthwise convolution through the RTL linebuffer-fed lane-wise
+MAC path, not through dense GEMM or non-native lowering.
 
-Current implementation note: the production-facing path skips the scalar/Spatz
-lowering and directly uses the optimized RTL mode for `3x3/s1/p1`,
+Current implementation note: the production-facing path directly uses the
+optimized RTL mode for `3x3/s1/p1`,
 C32-blocked input/output, and channel counts that are exact multiples of 32.
 The weight layout is `group, kh, kw, lane`. The systolic controller loops over
 all C32 groups inside one accelerator start, so `C=64/96/128/...` does not need
@@ -241,16 +258,26 @@ Tasks:
 | 3a | Add `systolic_depthwise3x3s1p1_c32_requant()` API |
 | 3b | Define depthwise weight layout as `kh, kw, lane` per C32 group |
 | 3c | Add graph op `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` for the C32 subset |
-| 3d | Add standalone C32 and C64 tests; add C128/odd-tail coverage later |
+| 3d | Add standalone C32, C64, and C96 tests; add C128/odd-tail coverage later |
+| 3e | Add descriptor-driven stride-2 depthwise dispatch for `DW1_Down` |
 
-Acceptance: standalone C32 `48x48` and C64 `24x24` depthwise match golden
-byte-exactly. Current measured standalone C32 PMU after row-ring reuse is
-`cycles=32524`, `ifm_req=2313`, `ofm_req=2304` for `1x32x48x48`. This removes
-the previous per-tap reread pattern (`ifm_req=6825`) without increasing SRAM.
+Acceptance: standalone C32/C64/C96 `48x48` depthwise matches golden
+byte-exactly. Current measured standalone PMU after row-ring reuse is:
 
-### Phase 4: Optimized Depthwise Linebuffer Path
+| Shape | Cycles | IFM req | OFM req |
+|---|---:|---:|---:|
+| `48x48x32` | 32,524 | 2,313 | 2,304 |
+| `48x48x64` | 61,476 | 4,626 | 4,608 |
+| `48x48x96` | 90,428 | 6,939 | 6,912 |
 
-Objective: replace the correctness path with a linebuffer-fed depthwise MAC.
+This removes the previous per-tap reread pattern (`ifm_req=6825` for C32)
+without increasing SRAM. The IFM requests now track raw C32 input vectors plus
+small boundary overhead.
+
+### Phase 4: Depthwise Performance Extensions
+
+Objective: extend the existing depthwise RTL path to all MobileNet depthwise
+cases while preserving row-ring reuse and avoiding extra SRAM.
 
 Status: first version is implemented for `3x3/s1/p1`, `C % 32 == 0`.
 
@@ -258,14 +285,14 @@ Tasks:
 
 | Step | Task |
 |---|---|
-| 4a | Reuse current row-ring/window fetch for C32 tap vectors |
-| 4b | Add depthwise MAC/requant block or a dedicated RTL mode |
-| 4c | Support 1 tap C32/cycle for 3x3 kernels |
+| 4a | Keep current row-ring/window fetch for C32 tap vectors |
+| 4b | Add generic depthwise descriptors for stride/pad/kernel variants |
+| 4c | Keep 1 tap C32/cycle as the baseline 3x3 kernel path |
 | 4d | Add PMU counters for depthwise active, fill, tap wait, and store cycles |
-| 4e | Keep scalar/Spatz fallback for debug and unsupported shapes |
+| 4e | Evaluate 3 taps/cycle RTL unroll if PMU shows depthwise dominates E2E |
 
-Acceptance: depthwise optimized path matches golden and reduces PMU cycles vs
-the correctness path. Implemented optimization keeps only K resident rows in
+Acceptance: depthwise optimized path matches golden and keeps IFM requests close
+to raw input-vector traffic. Implemented optimization keeps only K resident rows in
 the existing row-ring cache, slides rows across output positions, and lets the
 existing background-fill FSM fetch the next row while the stream path emits
 current window taps. It does not add SRAM; it adds only control state for
@@ -282,22 +309,26 @@ Tasks:
 | 5a | Add `sw/test/micro_mobilenet` firmware entrypoint |
 | 5b | Add `test_micro_mobilenet_e2e.py` cocotb test |
 | 5c | Load host-generated Conv/Depthwise descriptors from L2, matching the Micro-YOLO runtime flow |
-| 5d | Compare final `1x32x1x1` output byte-exactly |
-| 5e | Print PMU per layer and aggregate by operator type |
+| 5d | Use native AFU/RTL paths for activation, Add, and GlobalAvgPool; no scalar operator implementation in the E2E hot path |
+| 5e | Compare final `1x32x1x1` output byte-exactly |
+| 5f | Print PMU per layer and aggregate by operator type |
 
 Acceptance: final output and selected intermediate checkpoints match Python
 golden with zero mismatch.
 
-### Phase 6: Optimization
+### Phase 6: Native Optimization
 
 Optimization order:
 
 1. Fuse ReLU6/clamp into Conv/Depthwise requant where possible.
 2. Keep pointwise direct path free of linebuffer states.
-3. Move depthwise from scalar/Spatz correctness path to 1 tap/cycle RTL path.
-4. Reuse linebuffer/window state across adjacent depthwise spatial tiles.
-5. Consider 3 taps/cycle depthwise if PMU proves depthwise remains dominant.
-6. Stripe-fuse `Depthwise -> Pointwise` to avoid spilling full intermediate
+3. Extend native depthwise dispatch from fixed S1/P1 to descriptor-driven
+   stride/pad/kernel fields.
+4. Add native AFU GlobalAvgPool C32 reduce-sum/avg.
+5. Add or expose AFU clamp-only pass for unfused ReLU6 after Add.
+6. Add graph/planner pointwise multi-C32 tiling without layout conversion.
+7. Consider 3 taps/cycle depthwise if PMU proves depthwise remains dominant.
+8. Stripe-fuse `Depthwise -> Pointwise` to avoid spilling full intermediate
    tensors to L2 when TCDM budget allows.
 
 ---
@@ -313,7 +344,9 @@ Optimization order:
    - Pointwise: C32, C64, C128 input/output combinations.
    - Depthwise: C32, C64, C128 with stride 1 and stride 2.
    - ReLU6: quantized clamp boundaries.
-   - GlobalAvgPool: deterministic reduced output.
+   - GlobalAvgPool: deterministic C32 reduce/average output through native AFU.
+   - Confirm no E2E operator falls back to scalar CPU loops except explicit
+     test-only validation or tail cases.
 
 3. **E2E RTL Simulation**
    - Cocotb loads firmware and L2 fixtures.
@@ -339,9 +372,12 @@ Pointwise Conv should be compute-dense and map well to the existing systolic
 array. The main risks are scheduler overhead, OC tiling, and psum accumulation
 for `IC > 32`.
 
-Depthwise Conv is the main new bottleneck. Dense GEMM lowering is not an
-acceptable optimized path because it wastes most MACs. The target design is a
-lane-wise C32 depthwise MAC fed by the existing linebuffer/window machinery.
+Depthwise Conv remains the largest native RTL bottleneck. Dense GEMM lowering is
+not an acceptable optimized path because it wastes most MACs. The implemented
+target design is a lane-wise C32 depthwise MAC fed by the existing
+linebuffer/window machinery. The next meaningful RTL upgrade is tap parallelism
+or a tighter depthwise stream pipeline, not more SRAM.
 
-GlobalAvgPool is not expected to dominate this micro graph, but it should be
-included because MobileNet classification heads depend on it.
+GlobalAvgPool is not expected to dominate this micro graph, but it must still
+use a native AFU vector-reduction path because MobileNet classification heads
+depend on it and scalar spatial reductions do not scale.

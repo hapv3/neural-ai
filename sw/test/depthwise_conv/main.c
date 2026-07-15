@@ -8,12 +8,12 @@
  */
 
 #define L2_INPUT   0x80000000u
-#define L2_WEIGHT  0x80020000u
-#define L2_OUTPUT  0x80030000u
+#define L2_WEIGHT  0x80040000u
+#define L2_OUTPUT  0x80050000u
 
 #define T_INPUT    0x10100000u
-#define T_WEIGHT   0x10113000u
-#define T_OUTPUT   0x10114000u
+#define T_OUTPUT   0x10138000u
+#define T_WEIGHT   0x10170000u
 
 #ifndef DEPTHWISE_H
 #define DEPTHWISE_H 48u

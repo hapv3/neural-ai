@@ -16,8 +16,8 @@ from npu_test_utils import (
 
 
 L2_INPUT = 0x80000000
-L2_WEIGHT = 0x80020000
-L2_OUTPUT = 0x80030000
+L2_WEIGHT = 0x80040000
+L2_OUTPUT = 0x80050000
 
 def to_i8(value):
     value &= 0xFF
@@ -141,4 +141,28 @@ async def test_depthwise_conv3x3s1p1_c64_requant(dut):
         width=24,
         channels=64,
         report_name="test_depthwise_conv3x3s1p1_c64_requant",
+    )
+
+
+@cocotb.test()
+async def test_depthwise_conv3x3s1p1_c64_48_requant(dut):
+    await run_depthwise_case(
+        dut,
+        "depthwise_conv_c64_48.bin",
+        height=48,
+        width=48,
+        channels=64,
+        report_name="test_depthwise_conv3x3s1p1_c64_48_requant",
+    )
+
+
+@cocotb.test()
+async def test_depthwise_conv3x3s1p1_c96_48_requant(dut):
+    await run_depthwise_case(
+        dut,
+        "depthwise_conv_c96_48.bin",
+        height=48,
+        width=48,
+        channels=96,
+        report_name="test_depthwise_conv3x3s1p1_c96_48_requant",
     )
