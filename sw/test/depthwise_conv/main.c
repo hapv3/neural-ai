@@ -27,12 +27,21 @@
 #define DEPTHWISE_C 32u
 #endif
 
+#ifndef DEPTHWISE_STRIDE
+#define DEPTHWISE_STRIDE 1u
+#endif
+
 #define H DEPTHWISE_H
 #define W DEPTHWISE_W
 #define C DEPTHWISE_C
-#define ROWS (H * W)
+#define STRIDE DEPTHWISE_STRIDE
+#define OUT_H (((H - 1u) / STRIDE) + 1u)
+#define OUT_W (((W - 1u) / STRIDE) + 1u)
+#define INPUT_ROWS (H * W)
+#define OUTPUT_ROWS (OUT_H * OUT_W)
 #define C32_GROUPS ((C + 31u) / 32u)
-#define ACTIVATION_BYTES (ROWS * C32_GROUPS * 32u)
+#define INPUT_BYTES (INPUT_ROWS * C32_GROUPS * 32u)
+#define OUTPUT_BYTES (OUTPUT_ROWS * C32_GROUPS * 32u)
 #define WEIGHT_BYTES (3u * 3u * C32_GROUPS * 32u)
 
 enum {
@@ -82,24 +91,26 @@ static void init_tensor(npu_tensor_t *tensor,
 }
 
 static void init_graph(void) {
-    init_tensor(&tensors[TENSOR_INPUT], T_INPUT, H, W, C, ACTIVATION_BYTES,
+    init_tensor(&tensors[TENSOR_INPUT], T_INPUT, H, W, C, INPUT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_C32_BLOCKED);
     init_tensor(&tensors[TENSOR_WEIGHT], T_WEIGHT, 3u, 3u, C, WEIGHT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32);
-    init_tensor(&tensors[TENSOR_OUTPUT], T_OUTPUT, H, W, C, ACTIVATION_BYTES,
+    init_tensor(&tensors[TENSOR_OUTPUT], T_OUTPUT, OUT_H, OUT_W, C, OUTPUT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_C32_BLOCKED);
 
     layers[L_DMA_IN_INPUT].op = NPU_OP_DMA_IN;
     layers[L_DMA_IN_INPUT].dst = TENSOR_INPUT;
     layers[L_DMA_IN_INPUT].l2_addr = L2_INPUT;
-    layers[L_DMA_IN_INPUT].bytes = ACTIVATION_BYTES;
+    layers[L_DMA_IN_INPUT].bytes = INPUT_BYTES;
 
     layers[L_DMA_IN_WEIGHT].op = NPU_OP_DMA_IN;
     layers[L_DMA_IN_WEIGHT].dst = TENSOR_WEIGHT;
     layers[L_DMA_IN_WEIGHT].l2_addr = L2_WEIGHT;
     layers[L_DMA_IN_WEIGHT].bytes = WEIGHT_BYTES;
 
-    layers[L_DEPTHWISE].op = NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT;
+    layers[L_DEPTHWISE].op = (STRIDE == 2u) ?
+                              NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT :
+                              NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT;
     layers[L_DEPTHWISE].src = TENSOR_INPUT;
     layers[L_DEPTHWISE].dst = TENSOR_OUTPUT;
     layers[L_DEPTHWISE].aux = TENSOR_WEIGHT;
@@ -111,7 +122,7 @@ static void init_graph(void) {
     layers[L_DMA_OUT].op = NPU_OP_DMA_OUT;
     layers[L_DMA_OUT].src = TENSOR_OUTPUT;
     layers[L_DMA_OUT].l2_addr = L2_OUTPUT;
-    layers[L_DMA_OUT].bytes = ACTIVATION_BYTES;
+    layers[L_DMA_OUT].bytes = OUTPUT_BYTES;
 }
 
 int main(void) {

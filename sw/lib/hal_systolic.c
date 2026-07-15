@@ -156,23 +156,40 @@ void systolic_depthwise3x3s1p1_c32_requant_channels(uint32_t input_addr,
                                                     uint32_t height,
                                                     uint32_t width,
                                                     uint32_t channels) {
-    systolic_linebuf_cfg_t cfg;
-    uint32_t row_stride = width * 32u;
-    uint32_t rows = height * width;
+    systolic_depthwise3x3_c32_requant_channels(input_addr, weight_addr, output_addr,
+                                               height, width, height, width, channels,
+                                               1u, 1u, 1u, 1u);
+}
 
-    cfg.input_base = input_addr - row_stride;
-    cfg.input_h = (uint16_t)height;
-    cfg.input_w = (uint16_t)width;
+void systolic_depthwise3x3_c32_requant_channels(uint32_t input_addr,
+                                                uint32_t weight_addr,
+                                                uint32_t output_addr,
+                                                uint32_t input_h,
+                                                uint32_t input_w,
+                                                uint32_t output_h,
+                                                uint32_t output_w,
+                                                uint32_t channels,
+                                                uint32_t stride_h,
+                                                uint32_t stride_w,
+                                                uint32_t pad_h,
+                                                uint32_t pad_w) {
+    systolic_linebuf_cfg_t cfg;
+    uint32_t row_stride = input_w * 32u;
+    uint32_t rows = output_h * output_w;
+
+    cfg.input_base = input_addr - (pad_h * row_stride);
+    cfg.input_h = (uint16_t)input_h;
+    cfg.input_w = (uint16_t)input_w;
     cfg.input_c = (uint16_t)channels;
-    cfg.output_w = (uint16_t)width;
-    cfg.stride_h = 1u;
-    cfg.stride_w = 1u;
-    cfg.pad_h = 1u;
-    cfg.pad_w = 1u;
+    cfg.output_w = (uint16_t)output_w;
+    cfg.stride_h = (uint16_t)stride_h;
+    cfg.stride_w = (uint16_t)stride_w;
+    cfg.pad_h = (uint16_t)pad_h;
+    cfg.pad_w = (uint16_t)pad_w;
     cfg.row_stride_bytes = row_stride;
     cfg.pixel_stride_bytes = 32u;
-    cfg.ow_step_bytes = 32u;
-    cfg.oh_step_bytes = row_stride;
+    cfg.ow_step_bytes = stride_w * 32u;
+    cfg.oh_step_bytes = stride_h * row_stride;
     cfg.kernel_h = 3u;
     cfg.kernel_w = 3u;
     cfg.c_base = 0u;
@@ -193,7 +210,7 @@ void systolic_depthwise3x3s1p1_c32_requant_channels(uint32_t input_addr,
 
     systolic_linebuf_config(&cfg);
     systolic_gemm32_tile_ex(weight_addr, 0u, 0u, output_addr, rows,
-                            0u, row_stride, width, 0u);
+                            0u, output_w * 32u, output_w, 0u);
     systolic_linebuf_disable();
 }
 
