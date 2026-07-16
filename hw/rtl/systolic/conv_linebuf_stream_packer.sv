@@ -431,14 +431,107 @@ module conv_linebuf_stream_packer #(
         cache_row_slot = 16'(32'(ih) % ROW_SLOTS);
     endfunction
 
+    function automatic logic [31:0] row_stride_offset(input logic [15:0] kh);
+        logic [31:0] stride_x2;
+        logic [31:0] stride_x4;
+        begin
+            stride_x2 = cfg_row_stride_bytes_i << 1;
+            stride_x4 = cfg_row_stride_bytes_i << 2;
+            unique case (kh[2:0])
+                3'd0: row_stride_offset = 32'd0;
+                3'd1: row_stride_offset = cfg_row_stride_bytes_i;
+                3'd2: row_stride_offset = stride_x2;
+                3'd3: row_stride_offset = stride_x2 + cfg_row_stride_bytes_i;
+                3'd4: row_stride_offset = stride_x4;
+                3'd5: row_stride_offset = stride_x4 + cfg_row_stride_bytes_i;
+                default: row_stride_offset = 32'd0;
+            endcase
+        end
+    endfunction
+
     function automatic logic [31:0] row_tap_addr(
         input logic [31:0] row_base,
         input logic [15:0] kh
     );
-        row_tap_addr = row_base +
-                       (32'(kh) * cfg_row_stride_bytes_i) +
-                       channel_addr_offset;
+        row_tap_addr = row_base + row_stride_offset(kh) + channel_addr_offset;
     endfunction
+
+    function automatic logic [31:0] scale_by_kernel_dim(
+        input logic [31:0] value,
+        input logic [15:0] dim
+    );
+        logic [31:0] value_x2;
+        logic [31:0] value_x4;
+        begin
+            value_x2 = value << 1;
+            value_x4 = value << 2;
+            unique case (dim[2:0])
+                3'd0: scale_by_kernel_dim = 32'd0;
+                3'd1: scale_by_kernel_dim = value;
+                3'd2: scale_by_kernel_dim = value_x2;
+                3'd3: scale_by_kernel_dim = value_x2 + value;
+                3'd4: scale_by_kernel_dim = value_x4;
+                3'd5: scale_by_kernel_dim = value_x4 + value;
+                default: scale_by_kernel_dim = 32'd0;
+            endcase
+        end
+    endfunction
+
+    function automatic logic [31:0] coalesce_kernel_bytes(
+        input logic [15:0] kernel_h,
+        input logic [15:0] kernel_w,
+        input logic [5:0] valid_bytes
+    );
+        logic [31:0] row_bytes;
+        begin
+            row_bytes = scale_by_kernel_dim({26'd0, valid_bytes}, kernel_w);
+            coalesce_kernel_bytes = scale_by_kernel_dim(row_bytes, kernel_h);
+        end
+    endfunction
+
+    task automatic divmod_small_q6(
+        input  logic [21:0] value_i,
+        input  logic [15:0] divisor_i,
+        output logic [5:0]  quotient_o,
+        output logic [21:0] remainder_o
+    );
+        logic [21:0] divisor;
+        logic [21:0] remainder;
+        logic [5:0]  quotient;
+        begin
+            divisor = (divisor_i == 16'd0) ? 22'd1 : {6'd0, divisor_i};
+            remainder = value_i;
+            quotient = '0;
+
+            if (remainder >= (divisor << 5)) begin
+                remainder = remainder - (divisor << 5);
+                quotient = quotient | 6'd32;
+            end
+            if (remainder >= (divisor << 4)) begin
+                remainder = remainder - (divisor << 4);
+                quotient = quotient | 6'd16;
+            end
+            if (remainder >= (divisor << 3)) begin
+                remainder = remainder - (divisor << 3);
+                quotient = quotient | 6'd8;
+            end
+            if (remainder >= (divisor << 2)) begin
+                remainder = remainder - (divisor << 2);
+                quotient = quotient | 6'd4;
+            end
+            if (remainder >= (divisor << 1)) begin
+                remainder = remainder - (divisor << 1);
+                quotient = quotient | 6'd2;
+            end
+            if (remainder >= divisor) begin
+                remainder = remainder - divisor;
+                quotient = quotient | 6'd1;
+            end
+
+            quotient_o = quotient;
+            remainder_o = remainder;
+        end
+    endtask
 
     function automatic input_row_t build_emit_row(
         input window_t win,
@@ -605,9 +698,12 @@ module conv_linebuf_stream_packer #(
     endtask
 
     task automatic derive_format_config;
-        logic [7:0] gen_kh;
-        logic [7:0] gen_kw;
-        logic [15:0] gen_ic;
+        logic [21:0] ic_index;
+        logic [21:0] ic_remainder;
+        logic [21:0] kw_index;
+        logic [21:0] kw_remainder;
+        logic [5:0]  ic_wrap_count;
+        logic [5:0]  kw_wrap_count;
         begin
             effective_c_base = (cfg_c32_fast_i && cfg_kgen_i) ? cfg_k_seed_ic_i : cfg_c_base_i;
             block_valid_bytes = (cfg_block_valid_bytes_i != 6'd0) ?
@@ -617,7 +713,9 @@ module conv_linebuf_stream_packer #(
                                  valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i));
             coalesce_k_bytes = (cfg_coalesce_k_bytes_i != 32'd0) ?
                                cfg_coalesce_k_bytes_i :
-                               (32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes));
+                               coalesce_kernel_bytes(cfg_kernel_h_i,
+                                                     cfg_kernel_w_i,
+                                                     block_valid_bytes);
 
             if (cfg_c32_fast_i && cfg_kgen_i) begin
                 channel_addr_offset = cfg_channel_addr_offset_i;
@@ -634,9 +732,6 @@ module conv_linebuf_stream_packer #(
                              (cfg_c_base_i[4:0] == 5'd0) &&
                              (cfg_k_seed_ic_i[4:0] == 5'd0);
 
-            gen_kh = cfg_k_seed_kh_i;
-            gen_kw = cfg_k_seed_kw_i;
-            gen_ic = cfg_k_seed_ic_i;
             if (c32_kgen_fast) begin
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
                     lane_kh[lane] = cfg_k_seed_kh_i;
@@ -645,20 +740,15 @@ module conv_linebuf_stream_packer #(
                 end
             end else begin
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    lane_kh[lane] = gen_kh;
-                    lane_kw[lane] = gen_kw;
-                    lane_ic[lane] = gen_ic;
-                    if ((gen_ic + 16'd1) == cfg_input_c_i) begin
-                        gen_ic = '0;
-                        if ((gen_kw + 8'd1) == cfg_kernel_w_i[7:0]) begin
-                            gen_kw = '0;
-                            gen_kh = gen_kh + 8'd1;
-                        end else begin
-                            gen_kw = gen_kw + 8'd1;
-                        end
-                    end else begin
-                        gen_ic = gen_ic + 16'd1;
-                    end
+                    ic_index = {6'd0, cfg_k_seed_ic_i} + 22'(lane);
+                    divmod_small_q6(ic_index, cfg_input_c_i, ic_wrap_count, ic_remainder);
+
+                    kw_index = {14'd0, cfg_k_seed_kw_i} + {16'd0, ic_wrap_count};
+                    divmod_small_q6(kw_index, cfg_kernel_w_i, kw_wrap_count, kw_remainder);
+
+                    lane_kh[lane] = cfg_k_seed_kh_i + 8'(kw_wrap_count);
+                    lane_kw[lane] = kw_remainder[7:0];
+                    lane_ic[lane] = ic_remainder[15:0];
                 end
             end
         end
