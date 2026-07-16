@@ -19,8 +19,7 @@ represented at least twice:
 - DepthwiseConv2D: at least 2 layers;
 - Pointwise Conv2D `1x1`: at least 2 layers.
 
-Current status: **planning with pointwise, depthwise, and GlobalAvgPool native
-building blocks implemented**.
+Current status: **Phase 5 E2E implemented and passing in cocotb**.
 Existing Micro-YOLO infrastructure provides the stem Conv3x3 linebuffer path,
 AFU/vector activation ops, AFU Add, iDMA movement, and the graph/test harness.
 `NPU_OP_CONV2D1X1_C32_REQUANT` now covers the direct C32 `1x1` fast path for
@@ -28,12 +27,26 @@ AFU/vector activation ops, AFU Add, iDMA movement, and the graph/test harness.
 lane-wise depthwise `3x3/s1/p1` fast path for any C32-blocked channel count,
 including non-multiple-of-32 tails. `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT`
 extends the same native path to stride-2 downsample blocks. Multi-C32
-pointwise tiling is implemented in the graph/HAL wrapper. New work is still
-required for Micro-MobileNet E2E graph assembly.
+pointwise tiling is implemented in the graph/HAL wrapper.
+`NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT` covers the native dense
+Conv3x3 multi-C32 Validate_Conv path used by the E2E graph.
 `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE` covers native C32-blocked spatial averaging
 through AFU mode 7. `NPU_OP_CLAMP_I8` covers standalone quantized ReLU6/clamp
 through the AFU E8 LUT datapath when the clamp cannot be fused into producer
 requant.
+
+Implementation and verification:
+
+- Firmware graph: `sw/test/micro_mobilenet/main.c`
+- Cocotb golden/regression: `hw/rtl/cluster/tb/tests/test_micro_mobilenet_e2e.py`
+- Latest focused run:
+
+```text
+CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
+  make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_micro_mobilenet_e2e
+
+PASS, cycles=347992
+```
 
 The target implementation should stay on native accelerator paths. Scalar CPU
 loops are allowed only for golden-model generation, setup/validation code, or
@@ -100,12 +113,12 @@ first Micro-MobileNet graph.
 | Op | Reuse path | Required planner/SW work | Notes |
 |---|---|---|---|
 | Standard Conv3x3 C3->C32 | Existing systolic linebuffer + KGEN + requant | Reuse Micro-YOLO linebuffer job descriptors for stem stride-2/pad-1 RGB input | Native path; no im2col scalar prepare. |
-| Standard Conv3x3 C64->C64 | Existing systolic linebuffer + psum accumulation + requant | Emit OC32 x IC32 chunks and accumulate final chunk before requant | Reuses current dense Conv path. Scheduler tuning belongs to Phase 6. |
-| Pointwise Conv1x1 C32->C32 | `NPU_OP_CONV2D1X1_C32_REQUANT` using direct `systolic_gemm32_requant()` | Already covered by `sw/test/pointwise_conv` | No linebuffer/window states and no im2col scratch. |
-| Pointwise Conv1x1 multi-C32 | Same direct systolic GEMM32 path, tiled over IC/OC C32 groups through `systolic_pointwise1x1_c32_multi_requant()` | Implemented graph/HAL wrapper for C32-multiple tensors; current regression covers `C32->C32` and `C64->C128` | Compute-dense path with no im2col or linebuffer states. Inputs/outputs stay C32-blocked; weights are packed `OCG -> ICG -> 32x32`. |
+| Standard Conv3x3 C64->C64 | `NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT` using systolic linebuffer + psum accumulation + requant | Implemented in graph runtime; emits OC32 x IC32 chunks and accumulates final IC chunk before requant | Reuses current dense Conv path. Scheduler tuning belongs to Phase 6. |
+| Pointwise Conv1x1 C32->C32 | `NPU_OP_CONV2D1X1_C32_REQUANT` using direct `systolic_gemm32_requant()` | Already covered by `sw/test/pointwise_conv` | No linebuffer/window states and no im2col scratch. Direct GEMM row tiles now preload the next tile into systolic shadow registers before waiting for the current tile to finish. |
+| Pointwise Conv1x1 multi-C32 | Same direct systolic GEMM32 path, tiled over IC/OC C32 groups through `systolic_pointwise1x1_c32_multi_requant()` | Implemented graph/HAL wrapper for C32-multiple tensors; current regression covers `C32->C32` and `C64->C128` | Compute-dense path with no im2col or linebuffer states. Inputs/outputs stay C32-blocked; weights are packed `OCG -> ICG -> 32x32`. Internal systolic row tiles use shadow-preload/start to reduce per-tile config bubbles. |
 | Depthwise Conv3x3 S1/S2 P1 | RTL depthwise linebuffer path with row-ring reuse, one-start multi-group loop, and final-group lane masking | Supports C32/C64/C96-style group iteration, odd tails such as C33/C65, and S2 downsample dispatch; add C128 coverage | Current 48x48 S1 PMU scales near-linearly for full groups; tail groups run as one masked C32 group with padding lanes forced to zero. |
-| ReLU6 / clamp after Conv/Depthwise | Existing requant clamp fields or AFU clamp | Use whichever existing native path is already supported by the producer graph op | New fusion work belongs to Phase 6. |
-| Standalone element-wise Add | AFU Add | Reuse Micro-YOLO residual Add path on C32-blocked tensors | Native vector datapath; no scalar loop. |
+| ReLU6 / clamp after Conv/Depthwise | Existing requant clamp fields or AFU clamp | Use whichever existing native path is already supported by the producer graph op | AFU wrappers preload shadow config before LUT fills and then launch with a single start write. New fusion work belongs to Phase 6. |
+| Standalone element-wise Add | AFU Add | Reuse Micro-YOLO residual Add path on C32-blocked tensors | Native vector datapath; no scalar loop. AFU config is written through shadow registers before start. |
 | DMA / layout movement | iDMA 1D/2D/3D helpers | Keep host fixtures and graph tensors in C32-blocked layout | Avoid runtime C-layout conversion. |
 
 ### 2.2 Native Support Status
@@ -120,6 +133,8 @@ marked Phase 6 must not block Phases 1-5.
 | Depthwise throughput beyond 1 tap/cycle | Optional RTL mode issuing multiple C32 taps/cycle or a small unrolled tap pipeline. | Phase 6 optimization |
 | GlobalAvgPool native reduce | Implemented as AFU mode 7 plus graph op `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE`. It accumulates C32 lanes across C32-blocked spatial rows into signed 32-bit accumulators, divides by `H*W`, clamps to INT8, and writes one C32 vector per group. | Phase 4 functional wiring |
 | Standalone ReLU6 if not fused | Implemented as graph op `NPU_OP_CLAMP_I8` and wrapper `npu_clamp_i8()`, using the existing AFU E8 LUT datapath with a generated 256-entry clamp table. | Phase 4 functional wiring |
+| Micro-MobileNet E2E graph | Implemented with native stem conv, depthwise, pointwise, clamp, add, multi-C32 dense conv, GlobalAvgPool, and DMA. | Phase 5 functional coverage |
+| Shadow config preload | Implemented for direct systolic GEMM row tiles and AFU wrapper calls. Linebuffer Conv paths already use one-job lookahead through systolic/linebuffer shadow registers. | Phase 6h partial optimization |
 | Pointwise RTL single-start mode | Optional systolic controller mode to loop IC/OC C32 tiles internally from a host descriptor. Current graph/HAL path already dispatches one pointwise graph op and uses a reusable psum scratch buffer, but it still issues multiple systolic starts internally. | Phase 6 optimization |
 | Layer fusion | Optional RTL/SW stripe pipeline for `Depthwise -> Pointwise` and `Conv -> ReLU6`. | Phase 6 optimization |
 
@@ -365,7 +380,7 @@ Optimization backlog:
 | 6e | Depthwise tap parallelism | Add 2- or 3-tap/cycle issue for C32 tap vectors, or a small unrolled tap pipeline. | Largest depthwise speedup knob; pursue only if depthwise active cycles dominate E2E after 6d. |
 | 6f | Standard Conv linebuffer scheduling | Revisit row/window scheduler, coalesced reads, and drain overlap for the `Validate_Conv` dense C64 path. | Use if standard Conv linebuffer states dominate PMU. |
 | 6g | Layer fusion | Stripe-fuse `Depthwise -> Pointwise` and optionally `Conv -> ReLU6` when TCDM budget allows. | Avoids spilling full intermediate tensors to L2/TCDM. Higher complexity; do after operator PMU is stable. |
-| 6h | Descriptor preloading / shadow config | Preload next layer descriptors while the current layer drains. | Reduces inter-layer bubbles if PMU shows config/start latency. |
+| 6h | Descriptor preloading / shadow config | Partially implemented in firmware wrappers: direct systolic GEMM preloads the next row tile while the current tile runs, AFU wrappers preload shadow config before LUT fill/start, and linebuffer Conv paths already preload the next job. Full graph-level next-layer weight/DMA overlap still needs double-buffered weight scratch or layer-specific lifetime analysis. | Current measured E2E gain is small, about 576 cycles, which confirms config/start is not the dominant bottleneck. Keep deeper graph-level overlap as follow-up only after clamp/linebuffer hotspots are reduced. |
 | 6i | DMA/layout tuning | Use C32-blocked host fixtures and aligned DMA transfers throughout; add 2D/3D DMA only where it avoids CPU copies. | Prevents layout conversion from masking accelerator gains. |
 | 6j | Future depthwise kernel variants | Generalize depthwise descriptors beyond `3x3/p1` only if a target MobileNet variant actually requires it. | Avoids RTL churn for kernels not used by the graph. |
 

@@ -360,6 +360,8 @@ Current low-level HAL helpers:
 - `afu_load_dfl_recip_lut_entry()`
 - `afu_preload()`
 - `afu_preload_binary()`
+- `afu_preload_class_sigmoid_row32_high16()`
+- `afu_preload_global_avgpool_c32()`
 - `afu_start_preloaded()`
 - `afu_start()`
 - `afu_start_binary()`
@@ -376,6 +378,15 @@ The preferred runtime pattern is:
 5. Firmware polls or waits for AFU done.
 6. Python/cocotb validates output in tests; firmware does not do golden checks.
 ```
+
+Current firmware wrappers follow this pattern. `npu_logistic_i8()`,
+`npu_clamp_i8()`, `npu_dfl_softmax4_row32_i8_q8()`, and
+`npu_class_sigmoid_row32_high16_i8()` write the AFU shadow config before the LUT
+fill loop, then issue only the start write after the LUT contents are ready.
+Binary Add/Mul and GlobalAvgPool also use explicit preload followed by
+`afu_start_preloaded()`. This removes late config writes from the immediate
+start path and makes the wrappers compatible with future graph-level
+non-blocking dispatch.
 
 Standalone AFU operator tests follow the same rule as the rest of the cleaned
 test suite: firmware configures and dispatches only; Python/cocotb owns input
@@ -503,6 +514,10 @@ That number is a cluster test PMU result, not a pure RTL core latency number.
 
 - Normal LUT wrappers still reload all 256 entries per standalone call. Runtime
   firmware should cache active LUT identity and skip unchanged reloads.
+- The AFU has shadow registers but no firmware job queue yet. Current wrappers
+  preload one job before start; graph-level overlap of a future AFU job with a
+  current non-AFU layer still needs scheduler support and careful LUT/weight
+  lifetime handling.
 - The production scheduler should keep using 32-byte aligned TCDM buffers until
   unaligned E16/E32 destinations are explicitly supported at the graph level.
 - `ERROR` status is not yet driven by real hardware error conditions.

@@ -53,11 +53,12 @@ void spatz_mul_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
 
 uint32_t npu_logistic_i8(const int8_t *src, int8_t *dst,
                          uint32_t count, const uint8_t *lut) {
+    afu_preload((uint32_t)src, (uint32_t)dst, count, NPU_AFU_MODE_E8);
     for (uint32_t i = 0; i < 256u; i++) {
         afu_load_lut_entry(i, (uint32_t)lut[i]);
     }
 
-    afu_start((uint32_t)src, (uint32_t)dst, count, NPU_AFU_MODE_E8);
+    afu_start_preloaded();
     return afu_wait_done(1000000u);
 }
 
@@ -68,25 +69,30 @@ uint32_t npu_clamp_i8(const int8_t *src, int8_t *dst,
         return 0u;
     }
 
+    afu_preload((uint32_t)src, (uint32_t)dst, count, NPU_AFU_MODE_E8);
     for (uint32_t i = 0; i < 256u; i++) {
         int32_t value = (i < 128u) ? (int32_t)i : ((int32_t)i - 256);
         int32_t clamped = clamp_i32_local(value, min_val, max_val);
         afu_load_lut_entry(i, (uint32_t)(uint8_t)(int8_t)clamped);
     }
 
-    afu_start((uint32_t)src, (uint32_t)dst, count, NPU_AFU_MODE_E8);
+    afu_start_preloaded();
     return afu_wait_done(100000u + (count * 16u));
 }
 
 uint32_t npu_mul_q7_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                        uint32_t count) {
-    afu_start_mul_q7((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst, count);
+    afu_preload_binary((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst,
+                       count, NPU_AFU_MODE_MUL_Q7);
+    afu_start_preloaded();
     return afu_wait_done(1000000u);
 }
 
 uint32_t npu_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                     uint32_t count) {
-    afu_start_add_i8((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst, count);
+    afu_preload_binary((uint32_t)lhs, (uint32_t)rhs, (uint32_t)dst,
+                       count, NPU_AFU_MODE_ADD_I8);
+    afu_start_preloaded();
     return afu_wait_done(1000000u);
 }
 
@@ -178,11 +184,12 @@ uint32_t npu_dfl_softmax4_i8_q8(const int8_t *src, uint16_t *dst,
         }
     }
 
+    afu_preload((uint32_t)delta_scratch, (uint32_t)exp_scratch,
+                elem_count, NPU_AFU_MODE_E16);
     for (uint32_t i = 0; i < 256u; i++) {
         afu_load_lut_entry(i, (uint32_t)exp_lut[i]);
     }
-    afu_start((uint32_t)delta_scratch, (uint32_t)exp_scratch,
-              elem_count, NPU_AFU_MODE_E16);
+    afu_start_preloaded();
     if (!afu_wait_done(dfl_afu_timeout(elem_count))) {
         return 0u;
     }
@@ -209,13 +216,14 @@ uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
         return 0u;
     }
 
+    afu_preload((uint32_t)src_row32, (uint32_t)dst,
+                input_bytes, NPU_AFU_MODE_DFL4_ROW32_Q8);
     for (uint32_t i = 0; i < 256u; i++) {
         afu_load_dfl_exp_lut_entry(i, exp_lut[i]);
         afu_load_dfl_recip_lut_entry(i, recip_lut[i]);
     }
 
-    afu_start((uint32_t)src_row32, (uint32_t)dst,
-              input_bytes, NPU_AFU_MODE_DFL4_ROW32_Q8);
+    afu_start_preloaded();
     return afu_wait_done(100000u + (locations * 128u));
 }
 
@@ -228,13 +236,14 @@ uint32_t npu_class_sigmoid_row32_high16_i8(const int8_t *src_row32, int8_t *dst,
         return 0u;
     }
 
+    afu_preload_class_sigmoid_row32_high16((uint32_t)src_row32,
+                                           (uint32_t)dst,
+                                           input_bytes);
     for (uint32_t i = 0; i < 256u; i++) {
         afu_load_lut_entry(i, (uint32_t)lut[i]);
     }
 
-    afu_start_class_sigmoid_row32_high16((uint32_t)src_row32,
-                                         (uint32_t)dst,
-                                         input_bytes);
+    afu_start_preloaded();
     return afu_wait_done(100000u + (locations * 64u));
 }
 
@@ -249,10 +258,11 @@ uint32_t npu_global_avgpool_c32_i8(const int8_t *src_c32, int8_t *dst_c32,
         return 0u;
     }
 
-    afu_start_global_avgpool_c32((uint32_t)src_c32,
-                                 (uint32_t)dst_c32,
-                                 input_bytes,
-                                 spatial_count);
+    afu_preload_global_avgpool_c32((uint32_t)src_c32,
+                                   (uint32_t)dst_c32,
+                                   input_bytes,
+                                   spatial_count);
+    afu_start_preloaded();
     return afu_wait_done(100000u + (spatial_count * groups * 32u));
 }
 
