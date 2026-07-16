@@ -21,8 +21,8 @@ MICRO_YOLO_DESC_MANIFEST_ENTRIES = 5
 MICRO_YOLO_DESC_MANIFEST_SIZE = 16 + (MICRO_YOLO_DESC_MANIFEST_ENTRIES * 16)
 DESC_KIND_LINEBUF = 1
 DESC_KIND_L2_COPY = 2
-LINEBUF_DESC_SIZE = 120
-L2_COPY_DESC_SIZE = 136
+LINEBUF_DESC_SIZE = 124
+L2_COPY_DESC_SIZE = 140
 
 
 @dataclass(frozen=True)
@@ -128,7 +128,12 @@ def valid_bytes(input_c: int, c_base: int, lane_base: int) -> int:
 def linebuf_precompute(plan: ConvPlan, input_base: int, lane_base: int = 0) -> dict[str, int]:
     block_valid_bytes = valid_bytes(plan.input_c, plan.input_c_base, lane_base)
     channel_addr_offset = plan.input_c_base
-    request_c32_fast = plan.input_c_stride == BEAT_BYTES and plan.input_c == BEAT_BYTES and plan.input_c_base == 0
+    request_c32_fast = (
+        plan.input_c_stride == BEAT_BYTES
+        and plan.input_c >= BEAT_BYTES
+        and (plan.input_c % BEAT_BYTES) == 0
+        and plan.input_c_base == 0
+    )
     c32_fast = (
         request_c32_fast
         and block_valid_bytes == BEAT_BYTES
@@ -138,10 +143,15 @@ def linebuf_precompute(plan: ConvPlan, input_base: int, lane_base: int = 0) -> d
         and (input_base & (BEAT_BYTES - 1)) == 0
         and (channel_addr_offset & (BEAT_BYTES - 1)) == 0
     )
+    c32_group_stationary = c32_fast and plan.input_c > BEAT_BYTES
     return {
         "c32_fast": 1 if c32_fast else 0,
+        "c32_group_stationary": 1 if c32_group_stationary else 0,
         "block_valid_bytes": block_valid_bytes,
-        "channel_addr_offset": channel_addr_offset,
+        "channel_addr_offset": (
+            plan.input_h * plan.row_stride_bytes
+            if c32_group_stationary else channel_addr_offset
+        ),
         "coalesce_k_bytes": plan.kernel_h * plan.kernel_w * block_valid_bytes,
     }
 
@@ -220,6 +230,8 @@ def make_linebuf(plan: ConvPlan, coalesce: int, kgen: int, k_tiles: int) -> dict
         "kgen": kgen,
         "pool": 0,
         "c32_fast": pre["c32_fast"],
+        "depthwise": 0,
+        "c32_group_stationary": pre["c32_group_stationary"],
         "block_valid_bytes": pre["block_valid_bytes"],
         "k_seed_kh": 0,
         "k_seed_kw": 0,
@@ -356,8 +368,9 @@ LINEBUF_FIELDS = [
     "stride_h", "stride_w", "pad_h", "pad_w", "row_stride_bytes",
     "pixel_stride_bytes", "ow_step_bytes", "oh_step_bytes", "kernel_h",
     "kernel_w", "c_base", "lane_base", "coalesce", "kgen", "pool",
-    "c32_fast", "block_valid_bytes", "k_seed_kh", "k_seed_kw", "k_seed_ic",
-    "k_tiles", "spatial_m", "channel_addr_offset", "coalesce_k_bytes",
+    "c32_fast", "depthwise", "c32_group_stationary", "block_valid_bytes",
+    "k_seed_kh", "k_seed_kw", "k_seed_ic", "k_tiles", "spatial_m",
+    "channel_addr_offset", "coalesce_k_bytes",
 ]
 GEMM_FIELDS = [
     "weight_addr", "ifm_addr", "psum_addr", "ofm_addr", "dim_m",
@@ -371,7 +384,7 @@ def c_u32(value: int) -> str:
 
 def pack_linebuf_cfg(fields: dict[str, int]) -> bytes:
     return struct.pack(
-        "<I8H4I12H4I",
+        "<I8H4I14H4I",
         fields["input_base"],
         fields["input_h"],
         fields["input_w"],
@@ -393,6 +406,8 @@ def pack_linebuf_cfg(fields: dict[str, int]) -> bytes:
         fields["kgen"],
         fields["pool"],
         fields["c32_fast"],
+        fields["depthwise"],
+        fields["c32_group_stationary"],
         fields["block_valid_bytes"],
         fields["k_seed_kh"],
         fields["k_seed_kw"],
