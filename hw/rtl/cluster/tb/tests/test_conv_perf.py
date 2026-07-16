@@ -34,6 +34,7 @@ L2_CONV1_C64_INPUT = 0x80060000
 L2_CONV1_C64_WEIGHT = 0x80068000
 L2_CONV1_C64_OUT = 0x80070000
 L2_CONV1_C64_STATS = 0x80078000
+L2_CONV_PERF_CONFIG = 0x8007F000
 L2_P3_BASE = 0x80080000
 P3_CASE_STRIDE = 0x00040000
 P3_C120_INPUT_ADDR = 0x81000000
@@ -289,6 +290,7 @@ CONV_PERF_GROUP_POINTWISE = 1
 CONV_PERF_GROUP_KERNELS = 2
 CONV_PERF_GROUP_REQUANT = 3
 CONV_PERF_GROUP_YOLO = 4
+CONV_PERF_CONFIG_MAGIC = 0x43504647
 
 
 def legacy_enabled():
@@ -364,6 +366,18 @@ def to_u8(value):
 
 def s32_to_bytes(value):
     return [(value >> shift) & 0xFF for shift in (0, 8, 16, 24)]
+
+
+def u32_to_bytes(value):
+    return [(value >> shift) & 0xFF for shift in (0, 8, 16, 24)]
+
+
+def conv_perf_runtime_config_bytes():
+    return (
+        u32_to_bytes(CONV_PERF_CONFIG_MAGIC)
+        + u32_to_bytes(CONV_PERF_GROUP)
+        + u32_to_bytes(CONV_PERF_CASE & 0xFFFFFFFF)
+    )
 
 
 def conv1_input_value(h, w, c):
@@ -871,6 +885,7 @@ async def boot_and_run(dut, test_file):
 
     await reset_dut(dut)
     await load_firmware_axi(axi_master, fw_path)
+    await write_l2_bytes(dut, L2_CONV_PERF_CONFIG, conv_perf_runtime_config_bytes())
     if legacy_enabled():
         await write_l2_bytes(dut, L2_CONV1_INPUT, make_conv1_input())
         await write_l2_bytes(dut, L2_CONV1_WEIGHT, make_conv1_weight_packed())
@@ -942,7 +957,7 @@ async def boot_and_run(dut, test_file):
     finally:
         monitor_stats["done"] = True
         await RisingEdge(dut.clk_i)
-        monitor_task.kill()
+        monitor_task.cancel()
         log_conv_perf_state_report(dut, monitor_stats)
 
 

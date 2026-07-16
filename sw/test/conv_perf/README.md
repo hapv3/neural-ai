@@ -44,15 +44,13 @@ env CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 For faster debug, build and run one group at a time:
 
 ```sh
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=1
+make -C sw/test/conv_perf
 env CONV_PERF_GROUP=1 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=2
 env CONV_PERF_GROUP=2 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=3
 env CONV_PERF_GROUP=3 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 ```
@@ -62,19 +60,36 @@ kernel/stride/padding/tail-K shapes, including iDMA 3D multi-spatial and Spatz
 fallback coverage. Group `3` covers final-block INT8 requant. Group `4` covers
 the YOLO-style RGB first-layer TCDM+Spatz tiled evaluation.
 
-For single-case debug, compile and run with `CONV_PERF_CASE=<case_id>`. This
-overrides `CONV_PERF_GROUP` and skips legacy cases:
+For single-case debug, build the firmware once and run with
+`CONV_PERF_CASE=<case_id>`. Cocotb writes the selector to the runtime L2 config
+block before releasing fetch; the same `conv_perf.bin` is reused for every
+case. `CONV_PERF_CASE` overrides `CONV_PERF_GROUP` and skips legacy cases:
 
 ```sh
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_CASE=6
+make -C sw/test/conv_perf
 env CONV_PERF_CASE=6 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 ```
 
+For a case sweep without rebuilding firmware between cases:
+
+```sh
+python3 hw/rtl/cluster/tb/run_cluster_tests.py \
+  --tests test_conv_perf \
+  --conv-perf-cases 0-23 \
+  --build-fw
+```
+
+The sweep uses the shared cluster Verilator binary by default and writes one
+cocotb result XML plus one log file per case under
+`hw/rtl/cluster/tb/sim/cluster_shared/`. Cases can run in parallel with
+`--jobs <N>` because case selection is now a runtime L2 config block, not a
+firmware compile-time define.
+
 For the dedicated YOLO-style first-layer evaluation:
 
 ```sh
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=4
+make -C sw/test/conv_perf
 env CONV_PERF_GROUP=4 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 ```
