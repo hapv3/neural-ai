@@ -261,37 +261,37 @@ static void init_layers(void) {
         clear_layer(&layers[i]);
     }
 
-    layers[0].op = NPU_OP_DMA_IN;
+    layers[0].op = DMA_IN;
     layers[0].dst = T_INPUT;
     layers[0].l2_addr = L2_INPUT;
     layers[0].bytes = INPUT_H * INPUT_W * INPUT_C;
 
-    layers[1].op = NPU_OP_DMA_IN;
+    layers[1].op = DMA_IN;
     layers[1].dst = T_WEIGHT0;
     layers[1].l2_addr = L2_WEIGHT0;
     layers[1].bytes = WEIGHT_BYTES;
 
-    layers[2].op = NPU_OP_DMA_IN;
+    layers[2].op = DMA_IN;
     layers[2].dst = T_WEIGHT1;
     layers[2].l2_addr = L2_WEIGHT1;
     layers[2].bytes = C2F_WEIGHT_BYTES;
 
-    layers[3].op = NPU_OP_DMA_IN;
+    layers[3].op = DMA_IN;
     layers[3].dst = T_WEIGHT2;
     layers[3].l2_addr = L2_WEIGHT2;
     layers[3].bytes = DOWN_WEIGHT_BYTES;
 
-    layers[4].op = NPU_OP_DMA_IN;
+    layers[4].op = DMA_IN;
     layers[4].dst = T_WEIGHT3;
     layers[4].l2_addr = L2_WEIGHT3;
     layers[4].bytes = HEAD_WEIGHT_BYTES;
 
-    layers[5].op = NPU_OP_DMA_IN;
+    layers[5].op = DMA_IN;
     layers[5].dst = T_SIG_LUT;
     layers[5].l2_addr = L2_SIG_LUT;
     layers[5].bytes = LUT_BYTES;
 
-    layers[6].op = NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT;
+    layers[6].op = CONV2D_RGB_LINEBUF_REQUANT;
     layers[6].src = T_INPUT;
     layers[6].dst = T_STEM;
     layers[6].aux = T_WEIGHT0;
@@ -302,13 +302,13 @@ static void init_layers(void) {
     layers[6].max_val = 127;
     set_linebuf_jobs(&layers[6], micro_yolo_lb_stem_jobs, micro_yolo_lb_stem_count);
 
-    layers[7].op = NPU_OP_LOGISTIC_LUT_I8;
+    layers[7].op = LOGISTIC_LUT_I8;
     layers[7].src = T_STEM;
     layers[7].dst = T_SIG;
     layers[7].aux = T_SIG_LUT;
     layers[7].bytes = ACT_BYTES;
 
-    layers[8].op = NPU_OP_MUL_I8;
+    layers[8].op = MUL_I8;
     layers[8].src = T_STEM;
     layers[8].dst = T_SILU;
     layers[8].aux = T_SIG;
@@ -323,12 +323,12 @@ static void init_layers(void) {
      * TCDM storage. This replaces materialized concat: the skip branch is later
      * reloaded and consumed as Head_Conv chunk 1.
      */
-    layers[9].op = NPU_OP_DMA_OUT;
+    layers[9].op = DMA_OUT;
     layers[9].src = T_SILU;
     layers[9].l2_addr = L2_SKIP;
     layers[9].bytes = ACT_BYTES;
 
-    layers[10].op = NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT;
+    layers[10].op = CONV2D_C32_LINEBUF_REQUANT;
     layers[10].src = T_SILU;
     layers[10].dst = T_OUT;
     layers[10].aux = T_WEIGHT1;
@@ -342,7 +342,7 @@ static void init_layers(void) {
     layers[10].max_val = 127;
     set_linebuf_jobs(&layers[10], micro_yolo_lb_c2f_jobs, micro_yolo_lb_c2f_count);
 
-    layers[11].op = NPU_OP_ADD_I8;
+    layers[11].op = ADD_I8;
     layers[11].src = T_OUT;
     layers[11].dst = T_OUT;
     layers[11].aux = T_SILU;
@@ -350,7 +350,7 @@ static void init_layers(void) {
     layers[11].min_val = -128;
     layers[11].max_val = 127;
 
-    layers[12].op = NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT;
+    layers[12].op = CONV2D_C32_DOWNSAMPLE_LINEBUF_REQUANT;
     layers[12].src = T_OUT;
     layers[12].dst = T_DOWN;
     layers[12].aux = T_WEIGHT2;
@@ -364,18 +364,18 @@ static void init_layers(void) {
     layers[12].max_val = 127;
     set_linebuf_jobs(&layers[12], micro_yolo_lb_down_jobs, micro_yolo_lb_down_count);
 
-    layers[13].op = NPU_OP_MAXPOOL2D5X5S1P2_I8;
+    layers[13].op = MAXPOOL2D_I8;
     layers[13].src = T_DOWN;
     layers[13].dst = T_POOL;
     layers[13].bytes = DOWN_ACT_BYTES;
 
-    layers[14].op = NPU_OP_UPSAMPLE_NEAREST2X_I8;
+    layers[14].op = UPSAMPLE_NEAREST_I8;
     layers[14].src = T_POOL;
     layers[14].dst = T_UPSAMPLE;
     layers[14].bytes = ACT_BYTES;
 
     /* Reload the preserved skip branch for logical concat bypass. */
-    layers[15].op = NPU_OP_DMA_IN;
+    layers[15].op = DMA_IN;
     layers[15].dst = T_SKIP_RELOAD;
     layers[15].l2_addr = L2_SKIP;
     layers[15].bytes = ACT_BYTES;
@@ -386,7 +386,7 @@ static void init_layers(void) {
      *   src2 = skip branch,     weight3 chunk 1 -> accumulate + requant
      * The op writes the final INT8 head output tile-by-tile to L2_OUTPUT.
      */
-    layers[16].op = NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2;
+    layers[16].op = CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2;
     layers[16].src = T_UPSAMPLE;
     layers[16].src2 = T_SKIP_RELOAD;
     layers[16].dst = T_HEAD_TILE;
@@ -410,30 +410,30 @@ static void init_layers(void) {
      *   - Run AFU-assisted exp LUT over the first 16 channels of each pixel
      *     and reduce 4 bins per side into Q8.8 distances.
      */
-    layers[17].op = NPU_OP_DMA_IN;
+    layers[17].op = DMA_IN;
     layers[17].dst = T_RAW_HEAD;
     layers[17].l2_addr = L2_OUTPUT;
     layers[17].bytes = ACT_BYTES;
 
-    layers[18].op = NPU_OP_DFL_SOFTMAX4_I8_Q8;
+    layers[18].op = DFL_SOFTMAX_I8_Q8;
     layers[18].src = T_RAW_HEAD;
     layers[18].dst = T_DFL_OUT;
     layers[18].aux = T_DFL_EXP_LUT;
     layers[18].aux2 = T_DFL_RECIP_LUT;
     layers[18].bytes = DFL_OUTPUT_BYTES;
 
-    layers[19].op = NPU_OP_DMA_OUT;
+    layers[19].op = DMA_OUT;
     layers[19].src = T_DFL_OUT;
     layers[19].l2_addr = L2_DFL_OUTPUT;
     layers[19].bytes = DFL_OUTPUT_BYTES;
 
-    layers[20].op = NPU_OP_CLASS_SIGMOID_ROW32_HIGH16_I8;
+    layers[20].op = CLASS_SIGMOID_ROW32_HIGH16_I8;
     layers[20].src = T_RAW_HEAD;
     layers[20].dst = T_CLASS_OUT;
     layers[20].aux = T_SIG_LUT;
     layers[20].bytes = CLASS_OUTPUT_BYTES;
 
-    layers[21].op = NPU_OP_DMA_OUT;
+    layers[21].op = DMA_OUT;
     layers[21].src = T_CLASS_OUT;
     layers[21].l2_addr = L2_CLASS_OUTPUT;
     layers[21].bytes = CLASS_OUTPUT_BYTES;
