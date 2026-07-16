@@ -55,6 +55,93 @@ static void systolic_gemm32_tile_ex(uint32_t weight_addr,
     REG_WRITE(REG_SYS_ACCUM_CTRL, 0u);
 }
 
+static void systolic_gemm32_preload_tile(uint32_t weight_addr,
+                                         uint32_t ifm_addr,
+                                         uint32_t psum_addr,
+                                         uint32_t ofm_addr,
+                                         uint32_t dim_m,
+                                         uint32_t accum_en,
+                                         uint32_t ofm_row_stride_bytes,
+                                         uint32_t ofm_tile_cols,
+                                         uint32_t psum_row_stride_bytes) {
+    systolic_gemm32_req_t req;
+
+    req.weight_addr = weight_addr;
+    req.ifm_addr = ifm_addr;
+    req.psum_addr = psum_addr;
+    req.ofm_addr = ofm_addr;
+    req.dim_m = dim_m;
+    req.accum_en = accum_en;
+    req.ofm_row_stride_bytes = ofm_row_stride_bytes;
+    req.ofm_tile_cols = ofm_tile_cols;
+    req.psum_row_stride_bytes = psum_row_stride_bytes;
+
+    systolic_gemm32_preload(&req);
+}
+
+static void systolic_gemm32_run_shadow_tiled(uint32_t weight_addr,
+                                             uint32_t ifm_addr,
+                                             uint32_t psum_addr,
+                                             uint32_t ofm_addr,
+                                             uint32_t dim_m,
+                                             uint32_t accum_en,
+                                             uint32_t requant_en,
+                                             uint32_t tile_m_max) {
+    uint32_t row = 0u;
+    uint32_t tile_m;
+    uint32_t ofm_row_bytes = requant_en ? 32u : (32u * 4u);
+
+    if (dim_m == 0u) {
+        return;
+    }
+
+    if (requant_en) {
+        REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
+    } else {
+        systolic_requant_disable();
+    }
+    systolic_linebuf_disable();
+
+    tile_m = dim_m;
+    if (tile_m > tile_m_max) {
+        tile_m = tile_m_max;
+    }
+    systolic_gemm32_preload_tile(weight_addr,
+                                 ifm_addr,
+                                 psum_addr,
+                                 ofm_addr,
+                                 tile_m,
+                                 accum_en,
+                                 0u,
+                                 0u,
+                                 0u);
+    systolic_gemm32_start_preloaded();
+    row += tile_m;
+
+    while (row < dim_m) {
+        tile_m = dim_m - row;
+        if (tile_m > tile_m_max) {
+            tile_m = tile_m_max;
+        }
+
+        systolic_gemm32_preload_tile(weight_addr,
+                                     ifm_addr + row * 32u,
+                                     psum_addr ? (psum_addr + row * 32u * 4u) : 0u,
+                                     ofm_addr + row * ofm_row_bytes,
+                                     tile_m,
+                                     accum_en,
+                                     0u,
+                                     0u,
+                                     0u);
+        systolic_gemm32_wait_done();
+        systolic_gemm32_start_preloaded();
+        row += tile_m;
+    }
+
+    systolic_gemm32_wait_done();
+    REG_WRITE(REG_SYS_ACCUM_CTRL, 0u);
+}
+
 static void systolic_gemm32_tile(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
     systolic_gemm32_tile_ex(weight_addr, ifm_addr, 0u, ofm_addr, dim_m, 0u, 0u, 0u, 0u);
 }
@@ -93,7 +180,8 @@ void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg) {
                            (cfg->kgen ? REG_LB_CTRL_KGEN : 0u) |
                            (cfg->pool ? REG_LB_CTRL_POOL : 0u) |
                            (cfg->c32_fast ? REG_LB_CTRL_C32_FAST : 0u) |
-                           (cfg->depthwise ? REG_LB_CTRL_DEPTHWISE : 0u));
+                           (cfg->depthwise ? REG_LB_CTRL_DEPTHWISE : 0u) |
+                           (cfg->c32_group_stationary ? REG_LB_CTRL_C32_GROUP_STATIONARY : 0u));
 }
 
 void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
@@ -125,6 +213,7 @@ void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,
     cfg.pool = 1u;
     cfg.c32_fast = 1u;
     cfg.depthwise = 0u;
+    cfg.c32_group_stationary = 0u;
     cfg.block_valid_bytes = 32u;
     cfg.k_seed_kh = 0u;
     cfg.k_seed_kw = 0u;
@@ -199,6 +288,7 @@ void systolic_depthwise3x3_c32_requant_channels(uint32_t input_addr,
     cfg.pool = 0u;
     cfg.c32_fast = 1u;
     cfg.depthwise = 1u;
+    cfg.c32_group_stationary = 0u;
     cfg.block_valid_bytes = 32u;
     cfg.k_seed_kh = 0u;
     cfg.k_seed_kw = 0u;
@@ -239,22 +329,14 @@ void systolic_requant_config_per_channel(const int32_t *bias,
 }
 
 void systolic_gemm32(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
-    uint32_t row = 0;
-    systolic_requant_disable();
-    systolic_linebuf_disable();
-
-    while (row < dim_m) {
-        uint32_t tile_m = dim_m - row;
-        if (tile_m > SYSTOLIC_GEMM32_TILE_M) {
-            tile_m = SYSTOLIC_GEMM32_TILE_M;
-        }
-
-        systolic_gemm32_tile(weight_addr,
-                             ifm_addr + row * 32u,
-                             ofm_addr + row * 32u * 4u,
-                             tile_m);
-        row += tile_m;
-    }
+    systolic_gemm32_run_shadow_tiled(weight_addr,
+                                     ifm_addr,
+                                     0u,
+                                     ofm_addr,
+                                     dim_m,
+                                     0u,
+                                     0u,
+                                     SYSTOLIC_GEMM32_TILE_M);
 }
 
 void systolic_gemm32_linebuf(uint32_t weight_addr, uint32_t ofm_addr, uint32_t dim_m) {
@@ -391,27 +473,14 @@ void systolic_gemm32_accumulate(uint32_t weight_addr,
                                 uint32_t psum_addr,
                                 uint32_t ofm_addr,
                                 uint32_t dim_m) {
-    uint32_t row = 0;
-    systolic_requant_disable();
-    systolic_linebuf_disable();
-
-    while (row < dim_m) {
-        uint32_t tile_m = dim_m - row;
-        if (tile_m > SYSTOLIC_GEMM32_ACCUM_TILE_M) {
-            tile_m = SYSTOLIC_GEMM32_ACCUM_TILE_M;
-        }
-
-        systolic_gemm32_tile_ex(weight_addr,
-                                ifm_addr + row * 32u,
-                                psum_addr + row * 32u * 4u,
-                                ofm_addr + row * 32u * 4u,
-                                tile_m,
-                                1u,
-                                0u,
-                                0u,
-                                0u);
-        row += tile_m;
-    }
+    systolic_gemm32_run_shadow_tiled(weight_addr,
+                                     ifm_addr,
+                                     psum_addr,
+                                     ofm_addr,
+                                     dim_m,
+                                     1u,
+                                     0u,
+                                     SYSTOLIC_GEMM32_ACCUM_TILE_M);
 }
 
 void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
@@ -419,46 +488,25 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
                                         uint32_t psum_addr,
                                         uint32_t ofm_addr,
                                         uint32_t dim_m) {
-    uint32_t row = 0;
-    systolic_linebuf_disable();
-    REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
-
-    while (row < dim_m) {
-        uint32_t tile_m = dim_m - row;
-        if (tile_m > SYSTOLIC_GEMM32_ACCUM_TILE_M) {
-            tile_m = SYSTOLIC_GEMM32_ACCUM_TILE_M;
-        }
-
-        systolic_gemm32_tile_ex(weight_addr,
-                                ifm_addr + row * 32u,
-                                psum_addr + row * 32u * 4u,
-                                ofm_addr + row * 32u,
-                                tile_m,
-                                1u,
-                                0u,
-                                0u,
-                                0u);
-        row += tile_m;
-    }
+    systolic_gemm32_run_shadow_tiled(weight_addr,
+                                     ifm_addr,
+                                     psum_addr,
+                                     ofm_addr,
+                                     dim_m,
+                                     1u,
+                                     1u,
+                                     SYSTOLIC_GEMM32_ACCUM_TILE_M);
 }
 
 void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
-    uint32_t row = 0;
-    systolic_linebuf_disable();
-    REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
-
-    while (row < dim_m) {
-        uint32_t tile_m = dim_m - row;
-        if (tile_m > SYSTOLIC_GEMM32_TILE_M) {
-            tile_m = SYSTOLIC_GEMM32_TILE_M;
-        }
-
-        systolic_gemm32_tile(weight_addr,
-                             ifm_addr + row * 32u,
-                             ofm_addr + row * 32u,
-                             tile_m);
-        row += tile_m;
-    }
+    systolic_gemm32_run_shadow_tiled(weight_addr,
+                                     ifm_addr,
+                                     0u,
+                                     ofm_addr,
+                                     dim_m,
+                                     0u,
+                                     1u,
+                                     SYSTOLIC_GEMM32_TILE_M);
 }
 
 void systolic_pointwise1x1_c32_multi_requant(uint32_t input_addr,

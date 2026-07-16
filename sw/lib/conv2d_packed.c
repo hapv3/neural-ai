@@ -122,6 +122,7 @@ static void linebuf_finalize_precompute(systolic_linebuf_cfg_t *cfg, uint32_t re
     cfg->coalesce_k_bytes = (uint32_t)cfg->kernel_h * (uint32_t)cfg->kernel_w *
                             (uint32_t)cfg->block_valid_bytes;
     cfg->depthwise = 0u;
+    cfg->c32_group_stationary = 0u;
     cfg->c32_fast = (uint16_t)(request_c32_fast &&
                                cfg->block_valid_bytes == SYSTOLIC_GEMM32_K &&
                                cfg->pixel_stride_bytes == SYSTOLIC_GEMM32_K &&
@@ -701,7 +702,8 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     linebuf_cfg->spatial_m = spatial_rows;
     linebuf_finalize_precompute(linebuf_cfg,
                                 (stride_c == SYSTOLIC_GEMM32_K) &&
-                                (cfg->input_c == SYSTOLIC_GEMM32_K) &&
+                                (cfg->input_c >= SYSTOLIC_GEMM32_K) &&
+                                ((cfg->input_c % SYSTOLIC_GEMM32_K) == 0u) &&
                                 (cfg->input_c_base == 0u));
 }
 
@@ -729,6 +731,22 @@ static void linebuf_job_from_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
     job->gemm.psum_row_stride_bytes = psum_row_stride_bytes;
     job->rows = spatial_rows;
     job->k_tiles = k_tiles;
+}
+
+static void linebuf_job_apply_c32_group_span(const npu_conv2d_packed_cfg_t *cfg,
+                                             npu_conv2d_linebuf_job_desc_t *job) {
+    if (!cfg || !job) {
+        return;
+    }
+
+    if (job->linebuf.c32_fast && job->linebuf.kgen &&
+        input_c_stride(cfg) == NPU_CONV2D_PACKED_K_TILE &&
+        cfg->input_c_base == 0u &&
+        cfg->input_c >= NPU_CONV2D_PACKED_K_TILE &&
+        (cfg->input_c % NPU_CONV2D_PACKED_K_TILE) == 0u) {
+        job->linebuf.channel_addr_offset = cfg->input_h * input_row_stride_bytes(cfg);
+        job->linebuf.c32_group_stationary = (uint16_t)(cfg->input_c > NPU_CONV2D_PACKED_K_TILE);
+    }
 }
 
 static void linebuf_job_preload(const npu_conv2d_linebuf_job_desc_t *job) {
@@ -1139,6 +1157,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
                                   tile_cols,
                                   0u,
                                   cur_job);
+        linebuf_job_apply_c32_group_span(cfg, cur_job);
         linebuf_job_preload(cur_job);
         systolic_gemm32_start_preloaded();
     }
@@ -1164,6 +1183,7 @@ uint32_t npu_conv2d_packed_run_oc32_linebuf_tiles_requant(const npu_conv2d_packe
                                   tile_cols,
                                   0u,
                                   next_job);
+        linebuf_job_apply_c32_group_span(cfg, next_job);
         linebuf_job_preload(next_job);
         systolic_gemm32_wait_done();
         linebuf_job_record(&total_stats, cur_job);
