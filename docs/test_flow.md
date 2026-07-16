@@ -26,6 +26,7 @@ firmware.
 | `sw/test/spatz_ops` | `spatz_ops_test.bin` | `test_spatz_operator_library` | C-callable non-AFU Spatz/C-wrapper helpers |
 | `sw/test/spatz_vector` | `basic_mem_arith.bin`, etc. | `test_spatz_vector_basic` | Direct RVV instruction groups |
 | `sw/test/micro_yolo` | `micro_yolo.elf` | `test_micro_yolo_e2e` | 96x96 raw-head Micro-YOLO graph, host-generated linebuffer job descriptors, full output compare |
+| `sw/test/micro_mobilenet` | `micro_mobilenet.bin` | `test_micro_mobilenet_e2e` | 96x96 Micro-MobileNet graph using native standard conv, depthwise, pointwise, clamp, add, GlobalAvgPool, and DMA |
 
 `sw/lib` remains shared runtime/HAL code, not a test suite.
 

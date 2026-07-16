@@ -17,6 +17,7 @@ limits, and the source files that show how to use and test the path.
 | `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | `ROW32` i8 | Supported | IC=32, OC=32, K=3x3, S=1, P=1; psum tensor required | `sw/test/micro_yolo`, `sw/test/conv_perf` |
 | `NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | `ROW32` i8 | Supported | IC=32, OC=32, K=3x3, S=2, P=1; psum tensor required | `sw/test/micro_yolo`, `sw/test/conv_perf` |
 | `NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2` | Two C32 linebuffer convs + psum accumulate + DMA tile copy | `ROW32` i8 | Supported for logical concat consumer | Exactly two C32 sources, output OC=32, writes tiles to L2 | `sw/test/micro_yolo/main.c`, `hw/rtl/cluster/tb/tests/test_micro_yolo_e2e.py` |
+| `NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT` | Multi-C32 linebuffer conv + psum accumulation + requant | `C32_BLOCKED` or single-group `ROW32` i8 | Supported | IC/OC must be multiples of 32, K=3x3, S=1, P=1; one i32 psum scratch group reused per OC group | `sw/test/micro_mobilenet`, `hw/rtl/cluster/tb/tests/test_micro_mobilenet_e2e.py` |
 | `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` | Systolic controller depthwise lane MAC + linebuffer | `C32_BLOCKED` or `ROW32` i8 | Supported | K=3x3, S=1, P=1; channel tails are masked | `sw/test/depthwise_conv`, `hw/rtl/cluster/tb/tests/test_depthwise_conv.py` |
 | `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT` | Systolic controller depthwise lane MAC + linebuffer | `C32_BLOCKED` or `ROW32` i8 | Supported | K=3x3, S=2, P=1; channel tails are masked | `sw/test/depthwise_conv`, `hw/rtl/cluster/tb/tests/test_depthwise_conv.py` |
 | `NPU_OP_SPATZ_REQUANT` | Spatz vector helper | `ROW32` i32 to `ROW32` i8 | Supported / legacy graph path | Uses software wrapper and scratch; systolic fused requant is preferred after conv | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
@@ -142,6 +143,7 @@ Graph ops:
 - `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT`
 - `NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT`
 - `NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2`
+- `NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT`
 
 Execution block:
 
@@ -158,6 +160,10 @@ Contract:
   K=3x3, stride=2, pad=1.
 - C32 paths consume `ROW32` i8 input, 32 input channels, 32 output channels,
   K=3x3, pad=1, stride 1 or 2 depending on op.
+- The multi-C32 path consumes `C32_BLOCKED` i8 tensors, loops OC32 x IC32
+  chunks in graph runtime, writes the first IC chunk to i32 psum, accumulates
+  intermediate chunks without requant, and enables requant only for the final
+  IC chunk.
 - Requant variants require `aux2` psum tensor in `ROW32` i32 layout.
 - Descriptor-based runs can use `layer.linebuf_jobs` and
   `layer.linebuf_job_count` instead of graph-side fallback tiling.
@@ -166,8 +172,9 @@ Limits:
 
 - Current graph ops are specialized 3x3/pad1 paths, not a generic Conv2D
   descriptor op.
-- OC is one C32 group per graph op. Wider output channels are emitted as
-  multiple graph jobs/weight slices by the planner.
+- Legacy C32 graph ops have one C32 output group per graph op. The multi-C32
+  graph op handles wider IC/OC channel counts internally, but still requires
+  channel counts to be exact multiples of 32.
 - Generic non-square kernels are covered in lower-level `conv_perf` regression,
   but not exposed as stable high-level graph ops.
 - For best performance, the host/Python scheduler should emit C32-aligned
@@ -177,9 +184,11 @@ Limits:
 How to use:
 
 - Micro-YOLO graph: `sw/test/micro_yolo/main.c`
+- Micro-MobileNet graph: `sw/test/micro_mobilenet/main.c`
 - Host descriptor generation: `tools/npu_linebuf_precompute.py`
 - Linebuffer architecture details: `docs/linebuffer_architecture.md`
 - Cluster regression: `hw/rtl/cluster/tb/tests/test_micro_yolo_e2e.py`
+- MobileNet E2E regression: `hw/rtl/cluster/tb/tests/test_micro_mobilenet_e2e.py`
 - Performance regression: `sw/test/conv_perf`, `hw/rtl/cluster/tb/tests/test_conv_perf.py`
 
 ### Depthwise Conv3x3 C32 Requant
@@ -247,6 +256,8 @@ Limits:
 
 - The C wrapper currently loads LUT entries through AFU MMIO before each op.
   Host/DMA LUT preload is possible but not the default wrapper contract yet.
+- AFU config is written to shadow registers before the LUT fill loop and the
+  op is launched with one `START` write after LUT contents are ready.
 
 Reference:
 

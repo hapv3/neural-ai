@@ -79,19 +79,31 @@ static inline void afu_start_add_i8(uint32_t lhs, uint32_t rhs, uint32_t dst,
     afu_start_binary(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8);
 }
 
-static inline void afu_start_class_sigmoid_row32_high16(uint32_t src, uint32_t dst,
-                                                        uint32_t input_bytes) {
-    afu_start(src, dst, input_bytes, NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16);
+static inline void afu_preload_class_sigmoid_row32_high16(uint32_t src, uint32_t dst,
+                                                          uint32_t input_bytes) {
+    afu_preload(src, dst, input_bytes, NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16);
 }
 
-static inline void afu_start_global_avgpool_c32(uint32_t src, uint32_t dst,
-                                                uint32_t input_bytes,
-                                                uint32_t spatial_count) {
+static inline void afu_start_class_sigmoid_row32_high16(uint32_t src, uint32_t dst,
+                                                        uint32_t input_bytes) {
+    afu_preload_class_sigmoid_row32_high16(src, dst, input_bytes);
+    afu_start_preloaded();
+}
+
+static inline void afu_preload_global_avgpool_c32(uint32_t src, uint32_t dst,
+                                                  uint32_t input_bytes,
+                                                  uint32_t spatial_count) {
     REG_WRITE(NPU_AFU_SRC_PTR, src);
     REG_WRITE(NPU_AFU_SRC2_PTR, spatial_count);
     REG_WRITE(NPU_AFU_DST_PTR, dst);
     REG_WRITE(NPU_AFU_LENGTH, input_bytes);
     REG_WRITE(NPU_AFU_MODE, NPU_AFU_MODE_GLOBAL_AVGPOOL_C32);
+}
+
+static inline void afu_start_global_avgpool_c32(uint32_t src, uint32_t dst,
+                                                uint32_t input_bytes,
+                                                uint32_t spatial_count) {
+    afu_preload_global_avgpool_c32(src, dst, input_bytes, spatial_count);
     afu_start_preloaded();
 }
 
