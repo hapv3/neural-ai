@@ -223,8 +223,6 @@ module conv_linebuf_stream_packer #(
     logic c32_kgen_fast;
     logic [15:0] effective_c_base;
     logic [31:0] channel_addr_offset;
-    logic [31:0] c32_group_span_bytes;
-    logic [31:0] c32_seed_group_offset;
     logic [15:0] fill_row_slot;
     logic fill_row_cached;
     logic fill_row_pending;
@@ -612,12 +610,6 @@ module conv_linebuf_stream_packer #(
         logic [15:0] gen_ic;
         begin
             effective_c_base = (cfg_c32_fast_i && cfg_kgen_i) ? cfg_k_seed_ic_i : cfg_c_base_i;
-            c32_group_span_bytes = ((cfg_c32_fast_i && cfg_kgen_i) &&
-                                    (cfg_channel_addr_offset_i != 32'd0)) ?
-                                   cfg_channel_addr_offset_i :
-                                   (32'(cfg_input_h_i) * cfg_row_stride_bytes_i);
-            c32_seed_group_offset = 32'(cfg_k_seed_ic_i[15:5]) * c32_group_span_bytes;
-
             block_valid_bytes = (cfg_block_valid_bytes_i != 6'd0) ?
                                 cfg_block_valid_bytes_i :
                                 ((cfg_c32_fast_i && cfg_kgen_i) ?
@@ -628,7 +620,7 @@ module conv_linebuf_stream_packer #(
                                (32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes));
 
             if (cfg_c32_fast_i && cfg_kgen_i) begin
-                channel_addr_offset = c32_seed_group_offset;
+                channel_addr_offset = cfg_channel_addr_offset_i;
             end else begin
                 channel_addr_offset = (cfg_channel_addr_offset_i != 32'd0) ?
                                       cfg_channel_addr_offset_i :

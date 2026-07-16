@@ -38,6 +38,14 @@ typedef struct {
     uint16_t k_seed_ic;
     uint32_t k_tiles;
     uint32_t spatial_m;
+    /*
+     * Host-precomputed channel addressing.
+     * - Normal/generic descriptors: byte offset from input_base to c_base.
+     * - C32 group-stationary descriptors: byte span between consecutive C32
+     *   channel groups. The controller keeps the current group offset in a
+     *   register and advances it with adds; the linebuffer hot path does not
+     *   multiply k_seed_ic by this span.
+     */
     uint32_t channel_addr_offset;
     uint32_t coalesce_k_bytes;
 } systolic_linebuf_cfg_t;
