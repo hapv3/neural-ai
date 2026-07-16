@@ -27,6 +27,7 @@
 #define L2_CONV1_C64_WEIGHT 0x80068000u
 #define L2_CONV1_C64_OUT    0x80070000u
 #define L2_CONV1_C64_STATS  0x80078000u
+#define L2_CONV_PERF_CONFIG 0x8007F000u
 
 #define L2_P3_BASE          0x80080000u
 #define P3_CASE_STRIDE      0x00040000u
@@ -53,6 +54,7 @@
 #define T_OUTPUT         0x10140000u
 #define T_OUTPUT_OC1     0x10150000u
 #define T_STATS          0x10178000u
+#define T_CONFIG         0x1017F000u
 #define T_C120_INPUT     0x10100000u
 #define T_C120_WEIGHT    0x10110000u
 #define T_C120_OUTPUT    0x10140000u
@@ -126,48 +128,58 @@
 #define YOLO_RGB_WEIGHT_BYTES (32u * 32u)
 #define YOLO_RGB_TILE_OUT_BYTES (YOLO_RGB_TILE_OH * YOLO_RGB_OW * 32u * 4u)
 
-#ifndef CONV_PERF_GROUP
-#define CONV_PERF_GROUP 0
-#endif
-
-#ifndef CONV_PERF_CASE
-#define CONV_PERF_CASE -1
-#endif
-
 #define CONV_PERF_GROUP_ALL       0
 #define CONV_PERF_GROUP_POINTWISE 1
 #define CONV_PERF_GROUP_KERNELS   2
 #define CONV_PERF_GROUP_REQUANT   3
 #define CONV_PERF_GROUP_YOLO      4
+#define CONV_PERF_CONFIG_MAGIC    0x43504647u
+
+static uint32_t conv_perf_group_q;
+static uint32_t conv_perf_case_q;
+static uint32_t conv_perf_case_valid_q;
+
+static void load_conv_perf_config(void) {
+    volatile uint32_t *cfg = (volatile uint32_t *)T_CONFIG;
+
+    spatz_rt_dma_1d(T_CONFIG, L2_CONV_PERF_CONFIG, 3u * sizeof(uint32_t));
+    spatz_rt_dma_wait_all();
+
+    if (cfg[0] == CONV_PERF_CONFIG_MAGIC) {
+        conv_perf_group_q = cfg[1];
+        conv_perf_case_q = cfg[2];
+        conv_perf_case_valid_q = (cfg[2] != 0xFFFFFFFFu);
+    }
+}
 
 static uint32_t should_run_legacy(void) {
-    if (CONV_PERF_CASE >= 0) {
+    if (conv_perf_case_valid_q) {
         return 0u;
     }
-    return (CONV_PERF_GROUP == CONV_PERF_GROUP_ALL) || (CONV_PERF_GROUP == CONV_PERF_GROUP_POINTWISE);
+    return (conv_perf_group_q == CONV_PERF_GROUP_ALL) || (conv_perf_group_q == CONV_PERF_GROUP_POINTWISE);
 }
 
 static uint32_t should_run_case(uint32_t case_id) {
-    if (CONV_PERF_CASE >= 0) {
-        return case_id == (uint32_t)CONV_PERF_CASE;
+    if (conv_perf_case_valid_q) {
+        return case_id == conv_perf_case_q;
     }
-    if (CONV_PERF_GROUP == CONV_PERF_GROUP_ALL) {
+    if (conv_perf_group_q == CONV_PERF_GROUP_ALL) {
         return 1u;
     }
-    if (CONV_PERF_GROUP == CONV_PERF_GROUP_POINTWISE) {
+    if (conv_perf_group_q == CONV_PERF_GROUP_POINTWISE) {
         return case_id <= P3_CASE_OC64;
     }
-    if (CONV_PERF_GROUP == CONV_PERF_GROUP_KERNELS) {
+    if (conv_perf_group_q == CONV_PERF_GROUP_KERNELS) {
         return ((case_id >= P3_CASE_3X3_P0_C32) && (case_id <= P3_CASE_3X3_C5)) ||
                (case_id == P3_CASE_LINEBUF_KGEN_3X3_C96) ||
                (case_id == P3_CASE_LINEBUF_3X3_C120) ||
                (case_id == P3_CASE_LINEBUF_KGEN_3X3_C65) ||
                (case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT);
     }
-    if (CONV_PERF_GROUP == CONV_PERF_GROUP_REQUANT) {
+    if (conv_perf_group_q == CONV_PERF_GROUP_REQUANT) {
         return case_id == P3_CASE_REQUANT;
     }
-    if (CONV_PERF_GROUP == CONV_PERF_GROUP_YOLO) {
+    if (conv_perf_group_q == CONV_PERF_GROUP_YOLO) {
         return case_id == P3_CASE_YOLO_RGB_TCDM_SPATZ;
     }
     return 0u;
@@ -925,6 +937,7 @@ static void run_conv1x1_p3(uint32_t input_addr,
 
 int main(void) {
     spatz_rt_init();
+    load_conv_perf_config();
 
     if (should_run_legacy()) {
         spatz_rt_set_phase(1, 1);

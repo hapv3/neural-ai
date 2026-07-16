@@ -216,15 +216,13 @@ performance-path gate. `conv_perf` is the only Conv2D performance-path gate.
 `test_conv_perf` can run as one full binary or as shorter focused groups:
 
 ```bash
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=1
+make -C sw/test/conv_perf
 env CONV_PERF_GROUP=1 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=2
 env CONV_PERF_GROUP=2 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 
-make -C sw/test/conv_perf clean && make -C sw/test/conv_perf CONV_PERF_GROUP=3
 env CONV_PERF_GROUP=3 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
   make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_conv_perf
 ```
@@ -232,10 +230,22 @@ env CONV_PERF_GROUP=3 CCACHE_DIR=/tmp/ccache CCACHE_TEMPDIR=/tmp/ccache-tmp \
 Group `1` covers pointwise/OC tiling, group `2` covers kernel shapes, and group
 `3` covers final-block requant.
 
-For one-case debug, compile with `CONV_PERF_CASE=<case_id>` and pass the same
-environment variable to cocotb. Example: `CONV_PERF_CASE=6` runs the L1-source
+For one-case debug, compile `conv_perf.bin` once and pass
+`CONV_PERF_CASE=<case_id>` only to cocotb. Cocotb writes the selected group/case
+into the runtime L2 config block before Snitch starts, so firmware rebuilds are
+not required between cases. Example: `CONV_PERF_CASE=6` runs the L1-source
 `Conv5x5 pad2 IC3` Spatz fallback case. Compile with `CONV_PERF_SPATZ_RECT=0`
 to compare against the older segmented Spatz fallback.
+
+For broad regression, use the cluster runner. It starts independent cocotb
+simulator processes from a shared Verilator binary for each RTL generic set,
+and can sweep `conv_perf` cases with one firmware image. Result XMLs and logs
+are written separately under `hw/rtl/cluster/tb/sim/<shared-build>/`:
+
+```bash
+python3 hw/rtl/cluster/tb/run_cluster_tests.py --build-fw --jobs 4 --tests all
+python3 hw/rtl/cluster/tb/run_cluster_tests.py --tests test_conv_perf --conv-perf-cases 0-23
+```
 
 ### Matmul
 
