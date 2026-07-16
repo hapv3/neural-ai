@@ -61,6 +61,14 @@ void *spatz_rt_memcpy(void *dst, const void *src, uint32_t num) {
     return dst;
 }
 
+__attribute__((weak)) void *memset(void *ptr, int value, uint32_t num) {
+    return spatz_rt_memset(ptr, value, num);
+}
+
+__attribute__((weak)) void *memcpy(void *dst, const void *src, uint32_t num) {
+    return spatz_rt_memcpy(dst, src, num);
+}
+
 void spatz_rt_dma_1d(uint32_t dst_addr, uint32_t src_addr, uint32_t size) {
     if (!idma_memcpy_blocking(src_addr, dst_addr, size)) {
         spatz_rt_fail_at(0x0DADu, 0, (int32_t)size, 1);
