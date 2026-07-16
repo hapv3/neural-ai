@@ -18,6 +18,18 @@ from npu_test_utils import (
 L2_INPUT = 0x80000000
 L2_WEIGHT = 0x80040000
 L2_OUTPUT = 0x80050000
+L2_CONFIG = 0x8007F000
+DEPTHWISE_CONFIG_MAGIC = 0x44574346
+
+DEPTHWISE_CASES = {
+    0: ("depthwise_conv3x3s1p1_c32_requant", 48, 48, 32, 1),
+    1: ("depthwise_conv3x3s1p1_c64_24_requant", 24, 24, 64, 1),
+    2: ("depthwise_conv3x3s1p1_c33_tail_requant", 48, 48, 33, 1),
+    3: ("depthwise_conv3x3s1p1_c64_48_requant", 48, 48, 64, 1),
+    4: ("depthwise_conv3x3s2p1_c65_tail_requant", 48, 48, 65, 2),
+    5: ("depthwise_conv3x3s1p1_c96_48_requant", 48, 48, 96, 1),
+    6: ("depthwise_conv3x3s2p1_c32_requant", 48, 48, 32, 2),
+}
 
 def to_i8(value):
     value &= 0xFF
@@ -92,7 +104,11 @@ def golden_depthwise(height, width, channels, stride=1):
     return out
 
 
-async def run_depthwise_case(dut, fw_name, height, width, channels, report_name, stride=1):
+def u32_bytes(value):
+    return [(value >> (8 * i)) & 0xFF for i in range(4)]
+
+
+async def run_depthwise_case(dut, case_id, height, width, channels, report_name, stride=1):
     clock = Clock(dut.clk_i, 1, unit="ns")
     cocotb.start_soon(clock.start())
     axi_master = AxiLiteMaster(
@@ -102,11 +118,16 @@ async def run_depthwise_case(dut, fw_name, height, width, channels, report_name,
         reset_active_level=False,
     )
 
-    fw_path = firmware_path(__file__, f"sw/test/depthwise_conv/{fw_name}")
+    fw_path = firmware_path(__file__, "sw/test/depthwise_conv/depthwise_conv.bin")
     assert os.path.exists(fw_path), "Run `make -C sw/test/depthwise_conv` first."
 
     await reset_dut(dut)
     await load_firmware_axi(axi_master, fw_path)
+    await write_l2_bytes(
+        dut,
+        L2_CONFIG,
+        u32_bytes(DEPTHWISE_CONFIG_MAGIC) + u32_bytes(case_id),
+    )
     await write_l2_bytes(dut, L2_INPUT, make_input_bytes(height, width, channels))
     await write_l2_bytes(dut, L2_WEIGHT, make_weight_bytes(channels))
     await release_fetch(dut, axi_master=axi_master)
@@ -127,91 +148,16 @@ async def run_depthwise_case(dut, fw_name, height, width, channels, report_name,
 
 
 @cocotb.test()
-async def test_depthwise_conv3x3s1p1_c32_requant(dut):
+async def test_depthwise_conv_case(dut):
+    case_id = int(os.environ.get("DEPTHWISE_CASE", "0"))
+    assert case_id in DEPTHWISE_CASES, f"unknown DEPTHWISE_CASE={case_id}"
+    report_name, height, width, channels, stride = DEPTHWISE_CASES[case_id]
     await run_depthwise_case(
         dut,
-        "depthwise_conv.bin",
-        height=48,
-        width=48,
-        channels=32,
-        report_name="test_depthwise_conv3x3s1p1_c32_requant",
-        stride=1,
-    )
-
-
-@cocotb.test()
-async def test_depthwise_conv3x3s1p1_c64_requant(dut):
-    await run_depthwise_case(
-        dut,
-        "depthwise_conv_c64.bin",
-        height=24,
-        width=24,
-        channels=64,
-        report_name="test_depthwise_conv3x3s1p1_c64_requant",
-        stride=1,
-    )
-
-
-@cocotb.test()
-async def test_depthwise_conv3x3s1p1_c33_tail_requant(dut):
-    await run_depthwise_case(
-        dut,
-        "depthwise_conv_c33_48.bin",
-        height=48,
-        width=48,
-        channels=33,
-        report_name="test_depthwise_conv3x3s1p1_c33_tail_requant",
-        stride=1,
-    )
-
-
-@cocotb.test()
-async def test_depthwise_conv3x3s1p1_c64_48_requant(dut):
-    await run_depthwise_case(
-        dut,
-        "depthwise_conv_c64_48.bin",
-        height=48,
-        width=48,
-        channels=64,
-        report_name="test_depthwise_conv3x3s1p1_c64_48_requant",
-        stride=1,
-    )
-
-
-@cocotb.test()
-async def test_depthwise_conv3x3s2p1_c65_tail_requant(dut):
-    await run_depthwise_case(
-        dut,
-        "depthwise_conv_c65_48_s2.bin",
-        height=48,
-        width=48,
-        channels=65,
-        report_name="test_depthwise_conv3x3s2p1_c65_tail_requant",
-        stride=2,
-    )
-
-
-@cocotb.test()
-async def test_depthwise_conv3x3s1p1_c96_48_requant(dut):
-    await run_depthwise_case(
-        dut,
-        "depthwise_conv_c96_48.bin",
-        height=48,
-        width=48,
-        channels=96,
-        report_name="test_depthwise_conv3x3s1p1_c96_48_requant",
-        stride=1,
-    )
-
-
-@cocotb.test()
-async def test_depthwise_conv3x3s2p1_c32_requant(dut):
-    await run_depthwise_case(
-        dut,
-        "depthwise_conv_s2.bin",
-        height=48,
-        width=48,
-        channels=32,
-        report_name="test_depthwise_conv3x3s2p1_c32_requant",
-        stride=2,
+        case_id=case_id,
+        height=height,
+        width=width,
+        channels=channels,
+        report_name=report_name,
+        stride=stride,
     )

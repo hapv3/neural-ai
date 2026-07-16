@@ -6,12 +6,12 @@ but those modules execute serially.  This runner builds one shared Verilator
 binary per RTL generic set, then launches that binary multiple times in
 parallel with different cocotb modules, result XMLs, and logs.
 
-Conv-perf case sweeps are handled specially: one `conv_perf.bin` firmware image
-is used for every case.  The cocotb host writes the requested case selector into
-L2 before releasing fetch, so a case sweep no longer needs firmware rebuilds.
-By default the sweep uses the normal shared binary and runs each case as a
-separate simulator process with its own result XML.  The firmware binary is not
-rebuilt between cases.
+Conv-perf and depthwise case sweeps are handled specially: one firmware image is
+used for every case.  The cocotb host writes the requested case selector into L2
+before releasing fetch, so a case sweep no longer needs firmware rebuilds.  By
+default the sweep uses the normal shared binary and runs each case as a separate
+simulator process with its own result XML.  The firmware binary is not rebuilt
+between cases.
 """
 
 from __future__ import annotations
@@ -152,10 +152,20 @@ def parse_case_list(value: str) -> list[int]:
     return cases
 
 
+def parse_depthwise_case_list(value: str) -> list[int]:
+    if value == "all":
+        return list(range(7))
+    cases = parse_case_list(value)
+    invalid = [case for case in cases if case < 0 or case >= 7]
+    if invalid:
+        raise SystemExit(f"Invalid depthwise case(s): {', '.join(map(str, invalid))}")
+    return cases
+
+
 def build_firmware() -> None:
     for target in sorted(FIRMWARE_TARGETS):
-        print(f"[fw] make -C {target}", flush=True)
-        subprocess.run(["make", "-C", str(REPO_ROOT / target)], check=True)
+        print(f"[fw] make -B -C {target}", flush=True)
+        subprocess.run(["make", "-B", "-C", str(REPO_ROOT / target)], check=True)
 
 
 def run_make_job(job: Job) -> int:
@@ -317,7 +327,7 @@ def run_parallel_shared(jobs: list[Job], jobs_count: int) -> int:
 def make_regular_jobs(modules: list[str]) -> list[Job]:
     jobs = []
     for module in modules:
-        if module == "test_conv_perf":
+        if module in ("test_conv_perf", "test_depthwise_conv"):
             continue
         jobs.append(Job(name=module, module=module, env=DEFAULT_OFM_ENV.get(module, {})))
     return jobs
@@ -332,6 +342,20 @@ def make_conv_perf_case_jobs(cases: list[int]) -> list[Job]:
                 module="test_conv_perf",
                 result_name=f"test_conv_perf_case_{case}.xml",
                 env={"CONV_PERF_CASE": str(case), "CONV_PERF_GROUP": "0"},
+            )
+        )
+    return jobs
+
+
+def make_depthwise_case_jobs(cases: list[int]) -> list[Job]:
+    jobs = []
+    for case in cases:
+        jobs.append(
+            Job(
+                name=f"test_depthwise_conv_case_{case}",
+                module="test_depthwise_conv",
+                result_name=f"test_depthwise_conv_case_{case}.xml",
+                env={"DEPTHWISE_CASE": str(case)},
             )
         )
     return jobs
@@ -353,6 +377,11 @@ def main() -> int:
         default="",
         help="Comma/range list, e.g. '0,1,20-23', or 'all'. Runs one conv_perf case per simulation.",
     )
+    parser.add_argument(
+        "--depthwise-cases",
+        default="",
+        help="Comma/range list, e.g. '0,1,4-6', or 'all'. Runs one depthwise case per simulation.",
+    )
     args = parser.parse_args()
 
     modules = parse_list(args.tests, all_modules)
@@ -364,6 +393,9 @@ def main() -> int:
     if "test_conv_perf" in modules or args.conv_perf_cases:
         cases = parse_case_list(args.conv_perf_cases or "all")
         jobs.extend(make_conv_perf_case_jobs(cases))
+    if "test_depthwise_conv" in modules or args.depthwise_cases:
+        cases = parse_depthwise_case_list(args.depthwise_cases or "all")
+        jobs.extend(make_depthwise_case_jobs(cases))
 
     if args.isolated_builds:
         return run_parallel_make(jobs, args.jobs)

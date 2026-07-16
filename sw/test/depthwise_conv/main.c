@@ -10,39 +10,14 @@
 #define L2_INPUT   0x80000000u
 #define L2_WEIGHT  0x80040000u
 #define L2_OUTPUT  0x80050000u
+#define L2_CONFIG  0x8007F000u
 
 #define T_INPUT    0x10100000u
 #define T_OUTPUT   0x10138000u
 #define T_WEIGHT   0x10170000u
+#define T_CONFIG   0x1017F000u
 
-#ifndef DEPTHWISE_H
-#define DEPTHWISE_H 48u
-#endif
-
-#ifndef DEPTHWISE_W
-#define DEPTHWISE_W 48u
-#endif
-
-#ifndef DEPTHWISE_C
-#define DEPTHWISE_C 32u
-#endif
-
-#ifndef DEPTHWISE_STRIDE
-#define DEPTHWISE_STRIDE 1u
-#endif
-
-#define H DEPTHWISE_H
-#define W DEPTHWISE_W
-#define C DEPTHWISE_C
-#define STRIDE DEPTHWISE_STRIDE
-#define OUT_H (((H - 1u) / STRIDE) + 1u)
-#define OUT_W (((W - 1u) / STRIDE) + 1u)
-#define INPUT_ROWS (H * W)
-#define OUTPUT_ROWS (OUT_H * OUT_W)
-#define C32_GROUPS ((C + 31u) / 32u)
-#define INPUT_BYTES (INPUT_ROWS * C32_GROUPS * 32u)
-#define OUTPUT_BYTES (OUTPUT_ROWS * C32_GROUPS * 32u)
-#define WEIGHT_BYTES (3u * 3u * C32_GROUPS * 32u)
+#define DEPTHWISE_CONFIG_MAGIC 0x44574346u
 
 enum {
     TENSOR_INPUT = 0,
@@ -61,6 +36,13 @@ enum {
 
 static npu_tensor_t tensors[TENSOR_COUNT];
 static npu_layer_t layers[LAYER_COUNT];
+
+typedef struct {
+    uint16_t h;
+    uint16_t w;
+    uint16_t c;
+    uint16_t stride;
+} depthwise_case_t;
 
 void *memset(void *dst, int value, uint32_t bytes) {
     uint8_t *ptr = (uint8_t *)dst;
@@ -90,25 +72,98 @@ static void init_tensor(npu_tensor_t *tensor,
     tensor->zero_point = 0;
 }
 
-static void init_graph(void) {
-    init_tensor(&tensors[TENSOR_INPUT], T_INPUT, H, W, C, INPUT_BYTES,
+static uint32_t c32_groups(uint32_t channels) {
+    return (channels + 31u) >> 5;
+}
+
+static uint32_t output_dim(uint32_t size, uint32_t stride) {
+    return ((size - 1u) / stride) + 1u;
+}
+
+static uint32_t input_bytes(const depthwise_case_t *cfg) {
+    return (uint32_t)cfg->h * (uint32_t)cfg->w * c32_groups(cfg->c) * 32u;
+}
+
+static uint32_t output_bytes(const depthwise_case_t *cfg) {
+    return output_dim(cfg->h, cfg->stride) *
+           output_dim(cfg->w, cfg->stride) *
+           c32_groups(cfg->c) * 32u;
+}
+
+static uint32_t weight_bytes(const depthwise_case_t *cfg) {
+    return 3u * 3u * c32_groups(cfg->c) * 32u;
+}
+
+static depthwise_case_t select_case(uint32_t case_id) {
+    depthwise_case_t cfg;
+    cfg.h = 48u;
+    cfg.w = 48u;
+    cfg.c = 32u;
+    cfg.stride = 1u;
+
+    switch (case_id) {
+    case 1u:
+        cfg.h = 24u;
+        cfg.w = 24u;
+        cfg.c = 64u;
+        break;
+    case 2u:
+        cfg.c = 33u;
+        break;
+    case 3u:
+        cfg.c = 64u;
+        break;
+    case 4u:
+        cfg.c = 65u;
+        cfg.stride = 2u;
+        break;
+    case 5u:
+        cfg.c = 96u;
+        break;
+    case 6u:
+        cfg.stride = 2u;
+        break;
+    default:
+        break;
+    }
+    return cfg;
+}
+
+static uint32_t load_case_id(void) {
+    volatile uint32_t *cfg = (volatile uint32_t *)T_CONFIG;
+    spatz_rt_dma_1d(T_CONFIG, L2_CONFIG, 2u * sizeof(uint32_t));
+    spatz_rt_dma_wait_all();
+    if (cfg[0] == DEPTHWISE_CONFIG_MAGIC) {
+        return cfg[1];
+    }
+    return 0u;
+}
+
+static void init_graph(const depthwise_case_t *cfg) {
+    uint32_t out_h = output_dim(cfg->h, cfg->stride);
+    uint32_t out_w = output_dim(cfg->w, cfg->stride);
+    uint32_t in_bytes = input_bytes(cfg);
+    uint32_t out_bytes = output_bytes(cfg);
+    uint32_t wgt_bytes = weight_bytes(cfg);
+
+    init_tensor(&tensors[TENSOR_INPUT], T_INPUT, cfg->h, cfg->w, cfg->c, in_bytes,
                 NPU_DTYPE_I8, NPU_LAYOUT_C32_BLOCKED);
-    init_tensor(&tensors[TENSOR_WEIGHT], T_WEIGHT, 3u, 3u, C, WEIGHT_BYTES,
+    init_tensor(&tensors[TENSOR_WEIGHT], T_WEIGHT, 3u, 3u, cfg->c, wgt_bytes,
                 NPU_DTYPE_I8, NPU_LAYOUT_ROW32);
-    init_tensor(&tensors[TENSOR_OUTPUT], T_OUTPUT, OUT_H, OUT_W, C, OUTPUT_BYTES,
+    init_tensor(&tensors[TENSOR_OUTPUT], T_OUTPUT, out_h, out_w, cfg->c, out_bytes,
                 NPU_DTYPE_I8, NPU_LAYOUT_C32_BLOCKED);
 
     layers[L_DMA_IN_INPUT].op = DMA_IN;
     layers[L_DMA_IN_INPUT].dst = TENSOR_INPUT;
     layers[L_DMA_IN_INPUT].l2_addr = L2_INPUT;
-    layers[L_DMA_IN_INPUT].bytes = INPUT_BYTES;
+    layers[L_DMA_IN_INPUT].bytes = in_bytes;
 
     layers[L_DMA_IN_WEIGHT].op = DMA_IN;
     layers[L_DMA_IN_WEIGHT].dst = TENSOR_WEIGHT;
     layers[L_DMA_IN_WEIGHT].l2_addr = L2_WEIGHT;
-    layers[L_DMA_IN_WEIGHT].bytes = WEIGHT_BYTES;
+    layers[L_DMA_IN_WEIGHT].bytes = wgt_bytes;
 
-    layers[L_DEPTHWISE].op = (STRIDE == 2u) ?
+    layers[L_DEPTHWISE].op = (cfg->stride == 2u) ?
                               DEPTHWISE_CONV2D_C32_DOWNSAMPLE_REQUANT :
                               DEPTHWISE_CONV2D_C32_REQUANT;
     layers[L_DEPTHWISE].src = TENSOR_INPUT;
@@ -122,13 +177,14 @@ static void init_graph(void) {
     layers[L_DMA_OUT].op = DMA_OUT;
     layers[L_DMA_OUT].src = TENSOR_OUTPUT;
     layers[L_DMA_OUT].l2_addr = L2_OUTPUT;
-    layers[L_DMA_OUT].bytes = OUTPUT_BYTES;
+    layers[L_DMA_OUT].bytes = out_bytes;
 }
 
 int main(void) {
     spatz_rt_init();
     spatz_rt_set_phase(1u, 0u);
-    init_graph();
+    depthwise_case_t cfg = select_case(load_case_id());
+    init_graph(&cfg);
 
     npu_graph_t graph;
     graph.tensors = tensors;

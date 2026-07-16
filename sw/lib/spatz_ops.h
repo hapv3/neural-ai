@@ -4,6 +4,7 @@
 #include "npu_types.h"
 
 #define SPATZ_OP_SCRATCH_I32_ADDR 0x10140000u
+#define SPATZ_OP_SCRATCH_I8_ADDR  SPATZ_OP_SCRATCH_I32_ADDR
 
 void spatz_vec_copy_i8(const int8_t *src, int8_t *dst, uint32_t count);
 void spatz_vec_zero_i8(int8_t *dst, uint32_t count);
