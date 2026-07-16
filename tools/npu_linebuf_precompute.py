@@ -144,6 +144,10 @@ def linebuf_precompute(plan: ConvPlan, input_base: int, lane_base: int = 0) -> d
         and (channel_addr_offset & (BEAT_BYTES - 1)) == 0
     )
     c32_group_stationary = c32_fast and plan.input_c > BEAT_BYTES
+    # For C32 group-stationary, channel_addr_offset is intentionally the
+    # byte span between consecutive C32 groups. RTL keeps the current group
+    # offset in a register and advances by this span, avoiding seed*span math
+    # in the linebuffer hot path.
     return {
         "c32_fast": 1 if c32_fast else 0,
         "c32_group_stationary": 1 if c32_group_stationary else 0,

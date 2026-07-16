@@ -744,6 +744,11 @@ static void linebuf_job_apply_c32_group_span(const npu_conv2d_packed_cfg_t *cfg,
         cfg->input_c_base == 0u &&
         cfg->input_c >= NPU_CONV2D_PACKED_K_TILE &&
         (cfg->input_c % NPU_CONV2D_PACKED_K_TILE) == 0u) {
+        /*
+         * C32 group-stationary descriptors pass the group span here, not the
+         * current group offset. RTL advances the active offset with registered
+         * adds when k_seed_ic crosses into the next C32 group.
+         */
         job->linebuf.channel_addr_offset = cfg->input_h * input_row_stride_bytes(cfg);
         job->linebuf.c32_group_stationary = (uint16_t)(cfg->input_c > NPU_CONV2D_PACKED_K_TILE);
     }
