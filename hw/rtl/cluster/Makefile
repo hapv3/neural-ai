@@ -13,16 +13,17 @@ REPO_ROOT=$(PWD)/../../..
 # All RTL sources declared in snitch_minimal.F (template, uses $(REPO_ROOT))
 # Expanded into snitch_expanded.F before passing to verilator.
 SNITCH_F_TEMPLATE = $(PWD)/snitch_minimal.F
-SNITCH_F_EXPANDED = $(PWD)/tb/sim/$(MODULE)/snitch_expanded.F
+SNITCH_F_EXPANDED = $(SIM_BUILD)/snitch_expanded.F
 
 # MODULE is the basename of the Python test file
 export PYTHONPATH := $(PWD)/tb:$(PWD)/tb/tests:$(PYTHONPATH)
 # Python test module
 COCOTB_TEST_MODULES ?= test_snitch_boot
 MODULE = $(COCOTB_TEST_MODULES)
+CLUSTER_SIM_NAME ?= $(MODULE)
 
 # Set build directory to tb/sim/<test_name>
-SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
+SIM_BUILD = $(PWD)/tb/sim/$(CLUSTER_SIM_NAME)
 SNITCH_F_STAMP = $(SIM_BUILD)/snitch_expanded.stamp
 
 # TOPLEVEL is the name of the toplevel module in your Verilog
