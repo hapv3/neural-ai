@@ -481,16 +481,9 @@ static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
     uint32_t c_block_bytes = input_h * input_w * 32u;
     uint32_t input_bytes = c_blocks * c_block_bytes;
     uint32_t output_bytes = rows * 32u * 4u;
-    uint32_t main_c = input_c_total;
-    uint32_t tail_c = 0u;
     uint32_t weight_offset = 0u;
 
     reset_stats(&total_stats);
-
-    if (input_c_total > 32u && ((input_c_total % 32u) != 0u)) {
-        main_c = (input_c_total / 32u) * 32u;
-        tail_c = input_c_total - main_c;
-    }
 
     spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
     spatz_rt_dma_wait_all();
@@ -517,28 +510,27 @@ static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
     cfg.input_c_stride = 32u;
     cfg.input_c_base = 0u;
 
-    for (uint32_t idx = 0u; idx < 2u; idx++) {
+    for (uint32_t c_base = 0u; c_base < input_c_total; c_base += 32u) {
         npu_conv2d_packed_stats_t slice_stats;
-        uint32_t c_base = (idx == 0u) ? 0u : main_c;
-        uint32_t c_count = (idx == 0u) ? main_c : tail_c;
         uint32_t block_idx = c_base / 32u;
+        uint32_t c_count = input_c_total - c_base;
         uint32_t status;
 
-        if (c_count == 0u) {
-            break;
+        if (c_count > 32u) {
+            c_count = 32u;
         }
 
         cfg.input_addr = T_C120_INPUT + (block_idx * c_block_bytes);
         cfg.weight_addr = T_C120_WEIGHT + weight_offset;
         cfg.input_c = c_count;
-        cfg.accumulate = (idx == 0u) ? 0u : 1u;
+        cfg.accumulate = (c_base == 0u) ? 0u : 1u;
 
         status = npu_conv2d_packed_run_oc32(&cfg, &slice_stats);
         if (status != NPU_CONV2D_PACKED_OK) {
             spatz_rt_fail_at(fail_code, c_base, (int32_t)status, NPU_CONV2D_PACKED_OK);
         }
 
-        if (idx == 0u) {
+        if (c_base == 0u) {
             copy_stats(&total_stats, &slice_stats);
         } else {
             merge_split_stats(&total_stats, &slice_stats);

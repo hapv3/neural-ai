@@ -33,6 +33,12 @@ void spatz_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
         if (npu_add_i8(lhs, rhs, dst, count)) {
             return;
         }
+    } else {
+        int8_t *scratch = (int8_t *)SPATZ_OP_SCRATCH_I8_ADDR;
+        if (npu_add_i8(lhs, rhs, scratch, count) &&
+            npu_clamp_i8(scratch, dst, count, min_val, max_val)) {
+            return;
+        }
     }
 
     for (uint32_t i = 0; i < count; i++) {

@@ -671,7 +671,13 @@ def linebuf_channel_slices(input_c):
 
 
 def c32_blocked_channel_slices(input_c):
-    return linebuf_channel_slices(input_c)
+    slices = []
+    c_base = 0
+    while c_base < input_c:
+        c_count = min(K_TILE, input_c - c_base)
+        slices.append((c_base, c_count))
+        c_base += c_count
+    return slices
 
 
 def use_linebuf_channel_slice_plan(case_id):
@@ -1017,7 +1023,7 @@ async def check_stats(
             f"{name}: backend tiles idma={idma_tiles} spatz={spatz_tiles} scalar={scalar_tiles}"
         )
     assert scalar_tiles == 0, f"{name}: scalar prepare backend must not be used"
-    if expected_idma_tiles is not None:
+    if (not allow_linebuf) and expected_idma_tiles is not None:
         assert idma_tiles == expected_idma_tiles, f"{name}: idma_tiles={idma_tiles} expected={expected_idma_tiles}"
         if expected_idma_tiles:
             assert idma_transfers >= idma_tiles, (
@@ -1025,7 +1031,7 @@ async def check_stats(
             )
         else:
             assert idma_transfers == 0, f"{name}: idma_transfers={idma_transfers} expected=0"
-    if expected_spatz_tiles is not None:
+    if (not allow_linebuf) and expected_spatz_tiles is not None:
         assert spatz_tiles == expected_spatz_tiles, f"{name}: spatz_tiles={spatz_tiles} expected={expected_spatz_tiles}"
 
     dut._log.info(

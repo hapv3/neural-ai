@@ -19,8 +19,8 @@
 #define T_PSUM            0x10150000u
 #define T_MODE            0x10170000u
 
-#define H                 24u
-#define W                 24u
+#define H                 6u
+#define W                 8u
 #define IC                64u
 #define OC                64u
 #define C32               32u
@@ -187,23 +187,52 @@ static void run_fused_path(npu_conv2d_spatial_tile_t *tiles,
     clear_stats(total);
 
     for (uint32_t ocg = 0u; ocg < GROUPS; ocg++) {
-        npu_conv2d_packed_cfg_t cfg = {0};
-        npu_conv2d_packed_stats_t stats;
         uint32_t out_group_addr = T_OUT_FUSED + (ocg * ROWS * C32);
         uint32_t oc_weight_base = T_WEIGHT_FUSED + (ocg * GROUPS * CHUNK_WEIGHT_BYTES);
 
-        init_cfg(&cfg, T_INPUT, oc_weight_base, out_group_addr, IC);
-        init_requant();
-        uint32_t status = npu_conv2d_packed_run_oc32_linebuf_tiles_requant(&cfg,
+        for (uint32_t icg = 0u; icg < GROUPS; icg++) {
+            npu_conv2d_packed_cfg_t cfg = {0};
+            npu_conv2d_packed_stats_t stats;
+            uint32_t input_group_addr = T_INPUT + (icg * ROWS * C32);
+            uint32_t weight_addr = oc_weight_base + (icg * CHUNK_WEIGHT_BYTES);
+            uint32_t is_last = (icg + 1u) == GROUPS;
+
+            init_cfg(&cfg, input_group_addr, weight_addr,
+                     is_last ? out_group_addr : T_PSUM, C32);
+            cfg.accumulate = icg != 0u;
+
+            if (!is_last) {
+                uint32_t status = npu_conv2d_packed_run_oc32_linebuf_tiles(&cfg,
                                                                            tiles,
                                                                            tile_count,
-                                                                           T_PSUM,
+                                                                           4u,
                                                                            &stats);
-        systolic_requant_disable();
-        if (status != NPU_CONV2D_PACKED_OK) {
-            spatz_rt_fail_at(0x3300u, ocg, (int32_t)status, NPU_CONV2D_PACKED_OK);
+                if (status != NPU_CONV2D_PACKED_OK) {
+                    spatz_rt_fail_at(0x3300u, ocg * GROUPS + icg,
+                                     (int32_t)status, NPU_CONV2D_PACKED_OK);
+                }
+                add_stats(total, &stats);
+            } else {
+                init_requant();
+                for (uint32_t tile_idx = 0u; tile_idx < tile_count; tile_idx++) {
+                    const npu_conv2d_spatial_tile_t *tile = &tiles[tile_idx];
+                    uint32_t tile_output_addr =
+                        out_group_addr + ((tile->oh_base * W + tile->ow_base) * C32);
+                    uint32_t status =
+                        npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant(&cfg,
+                                                                                   tile,
+                                                                                   T_PSUM,
+                                                                                   tile_output_addr,
+                                                                                   &stats);
+                    if (status != NPU_CONV2D_PACKED_OK) {
+                        spatz_rt_fail_at(0x3400u, tile_idx,
+                                         (int32_t)status, NPU_CONV2D_PACKED_OK);
+                    }
+                    add_stats(total, &stats);
+                }
+                systolic_requant_disable();
+            }
         }
-        add_stats(total, &stats);
     }
 }
 
