@@ -8,29 +8,35 @@ limits, and the source files that show how to use and test the path.
 
 | Operator / graph op | Execution block | Primary layout | Status | Main limits | Usage / tests |
 |---|---|---|---|---|---|
-| `NPU_OP_DMA_IN`, `NPU_OP_DMA_OUT` | iDMA blocking copy wrapper | Any tensor byte range | Supported | 1D blocking copy in graph path | `sw/lib/npu_graph.c`, `sw/lib/idma_mm_utils.h`, `sw/test/independent_memory` |
-| `NPU_OP_SYSTOLIC_GEMM32` | Systolic array | `ROW32` i8 input, `ROW32` i32 output | Supported | K/N fixed to 32 lanes, M from `layer.dim_m` | `sw/lib/hal_systolic.c`, `sw/test/independent_systolic` |
-| `NPU_OP_SYSTOLIC_GEMM32_REQUANT` | Systolic + RTL requant | `ROW32` i8 output | Supported | Uniform graph requant parameters across 32 lanes unless HAL is used directly | `sw/lib/npu_graph.c`, `sw/test/systolic_requant` |
-| `NPU_OP_CONV2D1X1_C32_REQUANT` | Systolic direct GEMM32 loop | `ROW32` or `C32_BLOCKED` i8 | Supported | IC/OC must be multiples of 32; multi-IC uses one i32 psum scratch tile | `sw/test/pointwise_conv`, `hw/rtl/cluster/tb/tests/test_pointwise_conv.py` |
-| `NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | input `HWC`, output `ROW32` | Supported for RGB stem | IC fixed to 3, OC fixed to 32, K=3x3, S=2, P=1 | `sw/test/micro_yolo/main.c`, `hw/rtl/cluster/tb/tests/test_micro_yolo_e2e.py` |
-| `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF` | Systolic linebuffer + KGEN | `ROW32` i8 to `ROW32` i32 | Supported | IC=32, OC=32, K=3x3, S=1, P=1, no final requant | `sw/lib/npu_graph.c`, `sw/test/conv_perf` |
-| `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | `ROW32` i8 | Supported | IC=32, OC=32, K=3x3, S=1, P=1; psum tensor required | `sw/test/micro_yolo`, `sw/test/conv_perf` |
-| `NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | `ROW32` i8 | Supported | IC=32, OC=32, K=3x3, S=2, P=1; psum tensor required | `sw/test/micro_yolo`, `sw/test/conv_perf` |
-| `NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2` | Two C32 linebuffer convs + psum accumulate + DMA tile copy | `ROW32` i8 | Supported for logical concat consumer | Exactly two C32 sources, output OC=32, writes tiles to L2 | `sw/test/micro_yolo/main.c`, `hw/rtl/cluster/tb/tests/test_micro_yolo_e2e.py` |
-| `NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT` | Multi-C32 linebuffer conv + psum accumulation + requant | `C32_BLOCKED` or single-group `ROW32` i8 | Supported | IC/OC must be multiples of 32, K=3x3, S=1, P=1; one i32 psum scratch group reused per OC group | `sw/test/micro_mobilenet`, `hw/rtl/cluster/tb/tests/test_micro_mobilenet_e2e.py` |
-| `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT` | Systolic controller depthwise lane MAC + linebuffer | `C32_BLOCKED` or `ROW32` i8 | Supported | K=3x3, S=1, P=1; channel tails are masked | `sw/test/depthwise_conv`, `hw/rtl/cluster/tb/tests/test_depthwise_conv.py` |
-| `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT` | Systolic controller depthwise lane MAC + linebuffer | `C32_BLOCKED` or `ROW32` i8 | Supported | K=3x3, S=2, P=1; channel tails are masked | `sw/test/depthwise_conv`, `hw/rtl/cluster/tb/tests/test_depthwise_conv.py` |
-| `NPU_OP_SPATZ_REQUANT` | Spatz vector helper | `ROW32` i32 to `ROW32` i8 | Supported / legacy graph path | Uses software wrapper and scratch; systolic fused requant is preferred after conv | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
-| `NPU_OP_LOGISTIC_LUT_I8` | AFU E8 LUT | Any i8 byte tensor | Supported | Requires 256-entry LUT tensor; wrapper reloads LUT before start | `sw/lib/spatz_ops.c`, `sw/test/afu_ops`, `sw/test/spatz_ops` |
-| `NPU_OP_CLAMP_I8` | AFU E8 LUT | Any i8 layout, same shape in/out | Supported | Out-of-place only; min/max in i8 range | `sw/test/afu_ops`, `hw/rtl/cluster/tb/tests/test_spatz_operator_library.py` |
-| `NPU_OP_MUL_I8` | AFU MUL_Q7 or Spatz fallback | Any i8 byte tensor | Supported | AFU fast path only for Q7 config: multiplier=1, shift=7, clamp=-128..127 | `sw/lib/spatz_ops.c`, `sw/test/afu_ops` |
-| `NPU_OP_ADD_I8` | AFU ADD_I8 or Spatz fallback | Same-shape i8 tensors | Supported | AFU fast path only for full i8 clamp; graph requires same H/W/C | `sw/lib/spatz_ops.c`, `sw/test/afu_ops` |
-| `NPU_OP_MAXPOOL2D5X5S1P2_I8` | Systolic linebuffer pool for C32, Spatz fallback otherwise | i8 | Supported | Fast path requires C=32, K=5x5, S=1, P=2, out-of-place | `sw/test/spatz_ops`, `sw/test/micro_yolo` |
-| `NPU_OP_UPSAMPLE_NEAREST2X_I8` | Spatz C32 specialized or generic wrapper | i8 | Supported | Scale fixed to 2x in graph op; out-of-place | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
-| `NPU_OP_DFL_SOFTMAX4_I8_Q8` | AFU fused DFL mode | input `ROW32` i8, output u16 Q8 | Supported | Expects 32 input lanes per location; uses channels 0..15 as 4 sides x 4 bins | `sw/test/afu_ops`, `sw/test/micro_yolo` |
-| `NPU_OP_CLASS_SIGMOID_ROW32_HIGH16_I8` | AFU class sigmoid mode | input `ROW32` i8, output packed i8 | Supported | Expects 32 input lanes; applies LUT to high 16 lanes | `sw/test/afu_ops`, `sw/test/micro_yolo` |
-| `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE` | AFU global avgpool mode | `C32_BLOCKED` i8 | Supported | Output must be 1x1 with same channel count; channels may have tail lanes | `sw/test/afu_ops`, `hw/rtl/cluster/tb/tests/test_spatz_operator_library.py` |
-| `NPU_OP_IM2COL3X3S1P1_C3_PAD32`, `NPU_OP_IM2COL3X3S2P1_C3_PAD32` | CPU firmware helper | HWC RGB to ROW32 | Legacy / avoid for new optimized paths | Scalar prepare path, kept for old fixtures | `sw/lib/npu_graph.c`, `sw/test/conv_perf` |
+| `DMA_IN`, `DMA_OUT` | iDMA blocking copy wrapper | Any tensor byte range | Supported | 1D blocking copy in graph path | `sw/lib/npu_graph.c`, `sw/lib/idma_mm_utils.h`, `sw/test/independent_memory` |
+| `RESHAPE_VIEW`, `FLATTEN_VIEW`, `SQUEEZE_VIEW`, `UNSQUEEZE_VIEW` | Host/Python planner tensor metadata | Any layout | Planner-only / zero-copy | Only valid when element order and byte storage are unchanged; no firmware graph op is emitted | Host graph builder, tensor descriptors |
+| `SLICE_VIEW`, `SPLIT_VIEW`, `STRIDED_SLICE_VIEW` | Host/Python planner tensor metadata, or address-offset views | Any layout; C32-aligned views preferred | Planner-only / partial | Fast path requires contiguous or regular-strided addressable views; non-contiguous materialization needs DMA/Spatz lowering | Host graph builder, linebuffer descriptors |
+| `TENSOR_COPY`, `LAYOUT_COPY` | iDMA 1D/2D/3D or Spatz vector copy | Any byte tensor | Supported below graph level | Graph has only L2/TCDM `DMA_IN`/`DMA_OUT`; local copy/repack is available through low-level helpers, not a stable graph op | `sw/test/independent_memory`, `sw/test/spatz_ops` |
+| `LAYOUT_CONVERT_I8`, `PACK_C32_I8`, `UNPACK_C32_I8` | Host/Python layout planner, iDMA 2D/3D pack, or Spatz copy helpers | `HWC`, `ROW32`, `C32_BLOCKED` | Partial / planner-owned | Preferred flow is to enter graph already in accelerator-native layout; generic runtime converter is not a stable graph op yet | `tools/npu_linebuf_precompute.py`, `sw/lib/conv2d_packed.c` |
+| `TRANSPOSE_I8`, `PERMUTE_I8` | Host/Python planner today; future iDMA/Spatz materialization | Any i8 tensor | Not a standalone graph op yet | Zero-copy only when representable as a view accepted by the consumer; otherwise requires explicit materialization not yet exposed through `npu_graph_run()` | Planned host/runtime lowering |
+| `CONCAT_I8` | Logical fused consumer or Spatz C32 concat helper | C32-friendly tensors | Partial | YOLO head uses fused dual-source Conv instead of materializing concat; generic N-way concat is not a graph op yet | `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2`, `spatz_concat_c32_i8()` |
+| `SYSTOLIC_GEMM32` | Systolic array | `ROW32` i8 input, `ROW32` i32 output | Supported | K/N fixed to 32 lanes, M from `layer.dim_m` | `sw/lib/hal_systolic.c`, `sw/test/independent_systolic` |
+| `SYSTOLIC_GEMM32_REQUANT` | Systolic + RTL requant | `ROW32` i8 output | Supported | Uniform graph requant parameters across 32 lanes unless HAL is used directly | `sw/lib/npu_graph.c`, `sw/test/systolic_requant` |
+| `CONV2D_POINTWISE_C32_REQUANT` | Systolic direct GEMM32 loop | `ROW32` or `C32_BLOCKED` i8 | Supported | IC/OC must be multiples of 32; multi-IC uses one i32 psum scratch tile | `sw/test/pointwise_conv`, `hw/rtl/cluster/tb/tests/test_pointwise_conv.py` |
+| `CONV2D_RGB_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | input `HWC`, output `ROW32` | Supported for RGB stem | IC fixed to 3, OC fixed to 32, K=3x3, S=2, P=1 | `sw/test/micro_yolo/main.c`, `hw/rtl/cluster/tb/tests/test_micro_yolo_e2e.py` |
+| `CONV2D_C32_LINEBUF` | Systolic linebuffer + KGEN | `ROW32` i8 to `ROW32` i32 | Supported | IC=32, OC=32, K=3x3, S=1, P=1, no final requant | `sw/lib/npu_graph.c`, `sw/test/conv_perf` |
+| `CONV2D_C32_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | `ROW32` i8 | Supported | IC=32, OC=32, K=3x3, S=1, P=1; psum tensor required | `sw/test/micro_yolo`, `sw/test/conv_perf` |
+| `CONV2D_C32_DOWNSAMPLE_LINEBUF_REQUANT` | Systolic linebuffer + KGEN + requant | `ROW32` i8 | Supported | IC=32, OC=32, K=3x3, S=2, P=1; psum tensor required | `sw/test/micro_yolo`, `sw/test/conv_perf` |
+| `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2` | Two C32 linebuffer convs + psum accumulate + DMA tile copy | `ROW32` i8 | Supported for logical concat consumer | Exactly two C32 sources, output OC=32, writes tiles to L2 | `sw/test/micro_yolo/main.c`, `hw/rtl/cluster/tb/tests/test_micro_yolo_e2e.py` |
+| `CONV2D_C32_MULTI_LINEBUF_REQUANT` | Multi-C32 linebuffer conv + psum accumulation + requant | `C32_BLOCKED` or single-group `ROW32` i8 | Supported | IC/OC must be multiples of 32, K=3x3, S=1, P=1; one i32 psum scratch group reused per OC group | `sw/test/micro_mobilenet`, `hw/rtl/cluster/tb/tests/test_micro_mobilenet_e2e.py` |
+| `DEPTHWISE_CONV2D_C32_REQUANT` | Systolic controller depthwise lane MAC + linebuffer | `C32_BLOCKED` or `ROW32` i8 | Supported | K=3x3, S=1, P=1; channel tails are masked | `sw/test/depthwise_conv`, `hw/rtl/cluster/tb/tests/test_depthwise_conv.py` |
+| `DEPTHWISE_CONV2D_C32_DOWNSAMPLE_REQUANT` | Systolic controller depthwise lane MAC + linebuffer | `C32_BLOCKED` or `ROW32` i8 | Supported | K=3x3, S=2, P=1; channel tails are masked | `sw/test/depthwise_conv`, `hw/rtl/cluster/tb/tests/test_depthwise_conv.py` |
+| `SPATZ_REQUANT` | Spatz vector helper | `ROW32` i32 to `ROW32` i8 | Supported / legacy graph path | Uses software wrapper and scratch; systolic fused requant is preferred after conv | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
+| `LOGISTIC_LUT_I8` | AFU E8 LUT | Any i8 byte tensor | Supported | Requires 256-entry LUT tensor; wrapper reloads LUT before start | `sw/lib/spatz_ops.c`, `sw/test/afu_ops`, `sw/test/spatz_ops` |
+| `CLAMP_I8` | AFU E8 LUT | Any i8 layout, same shape in/out | Supported | Out-of-place only; min/max in i8 range | `sw/test/afu_ops`, `hw/rtl/cluster/tb/tests/test_spatz_operator_library.py` |
+| `MUL_I8` | AFU MUL_Q7 or Spatz fallback | Any i8 byte tensor | Supported | AFU fast path only for Q7 config: multiplier=1, shift=7, clamp=-128..127 | `sw/lib/spatz_ops.c`, `sw/test/afu_ops` |
+| `ADD_I8` | AFU ADD_I8 or Spatz fallback | Same-shape i8 tensors | Supported | AFU fast path only for full i8 clamp; graph requires same H/W/C | `sw/lib/spatz_ops.c`, `sw/test/afu_ops` |
+| `MAXPOOL2D_I8` | Systolic linebuffer pool for C32, Spatz fallback otherwise | i8 | Supported | Fast path requires C=32, K=5x5, S=1, P=2, out-of-place | `sw/test/spatz_ops`, `sw/test/micro_yolo` |
+| `UPSAMPLE_NEAREST_I8` | Spatz C32 specialized or generic wrapper | i8 | Supported | Scale fixed to 2x in graph op; out-of-place | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
+| `DFL_SOFTMAX_I8_Q8` | AFU fused DFL mode | input `ROW32` i8, output u16 Q8 | Supported | Expects 32 input lanes per location; uses channels 0..15 as 4 sides x 4 bins | `sw/test/afu_ops`, `sw/test/micro_yolo` |
+| `CLASS_SIGMOID_ROW32_HIGH16_I8` | AFU class sigmoid mode | input `ROW32` i8, output packed i8 | Supported | Expects 32 input lanes; applies LUT to high 16 lanes | `sw/test/afu_ops`, `sw/test/micro_yolo` |
+| `GLOBAL_AVGPOOL_C32_REDUCE` | AFU global avgpool mode | `C32_BLOCKED` i8 | Supported | Output must be 1x1 with same channel count; channels may have tail lanes | `sw/test/afu_ops`, `hw/rtl/cluster/tb/tests/test_spatz_operator_library.py` |
+| `LEGACY_IM2COL_C3_PAD32`, `LEGACY_IM2COL_C3_DOWNSAMPLE_PAD32` | CPU firmware helper | HWC RGB to ROW32 | Legacy / avoid for new optimized paths | Scalar prepare path, kept for old fixtures | `sw/lib/npu_graph.c`, `sw/test/conv_perf` |
 
 ## Common Graph ABI
 
@@ -49,14 +55,123 @@ Supported layouts:
 The graph runner validates tensor metadata before dispatching an operator. The
 dispatch table lives in `sw/lib/npu_graph.c::npu_graph_run()`.
 
+Shape-only operators such as reshape, flatten, squeeze, unsqueeze, slice, and
+split are intentionally modeled as **tensor views** whenever possible. They
+should update host/Python tensor metadata and consumer descriptors rather than
+consume firmware cycles. A runtime graph op is needed only when the requested
+operation changes physical byte order or must materialize a new buffer.
+
+Layout-changing operators such as transpose, permute, C32 packing/unpacking, and
+generic concat are separate from shape-only views. The current high-performance
+policy is:
+
+- keep tensors in accelerator-native layout across graph boundaries;
+- express C32 channel slices as address/shape views;
+- fuse concat into the consuming Conv when possible;
+- use iDMA/Spatz materialization only when a later consumer cannot accept the
+  source view directly.
+
+## Tensor View And Layout Operators
+
+These operator families are listed because model graphs commonly contain
+`Reshape`, `Flatten`, `Squeeze`, `Unsqueeze`, `Slice`, `Split`, `Transpose`,
+`Permute`, `Concat`, and explicit layout conversion nodes. They are not all
+firmware graph enum values today.
+
+### Shape-Only Views
+
+Operator families:
+
+- `RESHAPE_VIEW`
+- `FLATTEN_VIEW`
+- `SQUEEZE_VIEW`
+- `UNSQUEEZE_VIEW`
+- `SLICE_VIEW`
+- `SPLIT_VIEW`
+- `STRIDED_SLICE_VIEW`
+
+Execution block:
+
+- Host/Python scheduler and tensor descriptor planner.
+- Firmware receives only the resulting tensor descriptor or accelerator job
+  descriptor.
+
+Contract:
+
+- The operation must not reorder bytes.
+- The consumer must be able to read the resulting view through base address,
+  shape, stride, channel-base, or descriptor fields.
+- C32 channel views should remain 32-byte aligned for fast linebuffer and
+  pointwise paths.
+
+Limits:
+
+- `npu_graph_run()` does not currently dispatch a no-op reshape layer. Emitting
+  one would only add firmware overhead.
+- Non-contiguous views are accepted only when the consuming operator has an
+  explicit descriptor field for that stride/pattern.
+
+### Layout Materialization
+
+Operator families:
+
+- `TENSOR_COPY`
+- `LAYOUT_COPY`
+- `LAYOUT_CONVERT_I8`
+- `PACK_C32_I8`
+- `UNPACK_C32_I8`
+- `TRANSPOSE_I8`
+- `PERMUTE_I8`
+
+Execution block:
+
+- iDMA 1D/2D/3D for regular byte-copy/repack patterns.
+- Spatz vector copy/strided-copy helpers for L1/TCDM-side irregular copies.
+- Host/Python preprocessing when the tensor enters the graph from L2/DRAM.
+
+Contract:
+
+- Use these only when a view is insufficient and a downstream accelerator
+  requires a different physical layout.
+- Prefer C32-blocked tensors for MobileNet-style middle layers and ROW32 for
+  systolic raw-head/GEMM-style paths.
+
+Limits:
+
+- There is no generic `TRANSPOSE_I8` or `LAYOUT_CONVERT_I8` graph op in
+  `npu_graph_run()` yet.
+- The current stable graph-level copy ops are `DMA_IN` and `DMA_OUT`; they move
+  byte ranges between L2 and TCDM/L1, not arbitrary tensor permutations.
+- Generic materialization should be added only with a concrete model need,
+  because it can easily dominate latency.
+
+### Concat
+
+Operator family:
+
+- `CONCAT_I8`
+
+Current support:
+
+- Optimized YOLO head avoids materialized concat with
+  `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2`.
+- Low-level `spatz_concat_c32_i8()` exists for two C32-friendly inputs in
+  `sw/lib/spatz_ops.c`, with coverage in `sw/test/spatz_ops`.
+
+Limits:
+
+- No standalone graph-level N-way concat op exists yet.
+- Prefer fused consumer scheduling when concat feeds Conv immediately, because
+  materializing concat adds full tensor read/write traffic.
+
 ## Systolic Operators
 
 ### GEMM32
 
 Graph ops:
 
-- `NPU_OP_SYSTOLIC_GEMM32`
-- `NPU_OP_SYSTOLIC_GEMM32_REQUANT`
+- `SYSTOLIC_GEMM32`
+- `SYSTOLIC_GEMM32_REQUANT`
 
 Execution block:
 
@@ -92,7 +207,7 @@ Reference tests:
 
 Graph op:
 
-- `NPU_OP_CONV2D1X1_C32_REQUANT`
+- `CONV2D_POINTWISE_C32_REQUANT`
 
 Execution block:
 
@@ -134,16 +249,16 @@ How to use:
 - Build variants: `sw/test/pointwise_conv/Makefile`
 - Golden/test: `hw/rtl/cluster/tb/tests/test_pointwise_conv.py`
 
-### Standard Conv3x3 Linebuffer
+### Standard Conv2D Linebuffer
 
 Graph ops:
 
-- `NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT`
-- `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF`
-- `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT`
-- `NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT`
-- `NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2`
-- `NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT`
+- `CONV2D_RGB_LINEBUF_REQUANT`
+- `CONV2D_C32_LINEBUF`
+- `CONV2D_C32_LINEBUF_REQUANT`
+- `CONV2D_C32_DOWNSAMPLE_LINEBUF_REQUANT`
+- `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2`
+- `CONV2D_C32_MULTI_LINEBUF_REQUANT`
 
 Execution block:
 
@@ -170,8 +285,10 @@ Contract:
 
 Limits:
 
-- Current graph ops are specialized 3x3/pad1 paths, not a generic Conv2D
-  descriptor op.
+- Current graph ops use generic datapath-oriented names, but the implemented
+  graph dispatchers are still specialized to the shape families listed in the
+  contract above. Fully descriptor-configured kernel/stride/pad selection
+  remains a planner/runtime extension.
 - Legacy C32 graph ops have one C32 output group per graph op. The multi-C32
   graph op handles wider IC/OC channel counts internally, but still requires
   channel counts to be exact multiples of 32.
@@ -191,12 +308,12 @@ How to use:
 - MobileNet E2E regression: `hw/rtl/cluster/tb/tests/test_micro_mobilenet_e2e.py`
 - Performance regression: `sw/test/conv_perf`, `hw/rtl/cluster/tb/tests/test_conv_perf.py`
 
-### Depthwise Conv3x3 C32 Requant
+### Depthwise Conv2D C32 Requant
 
 Graph ops:
 
-- `NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT`
-- `NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT`
+- `DEPTHWISE_CONV2D_C32_REQUANT`
+- `DEPTHWISE_CONV2D_C32_DOWNSAMPLE_REQUANT`
 
 Execution block:
 
@@ -241,8 +358,8 @@ The RTL is split across:
 
 Graph ops:
 
-- `NPU_OP_LOGISTIC_LUT_I8`
-- `NPU_OP_CLAMP_I8`
+- `LOGISTIC_LUT_I8`
+- `CLAMP_I8`
 
 Contract:
 
@@ -270,8 +387,8 @@ Reference:
 
 Graph ops:
 
-- `NPU_OP_ADD_I8`
-- `NPU_OP_MUL_I8`
+- `ADD_I8`
+- `MUL_I8`
 
 Contract:
 
@@ -304,7 +421,7 @@ Reference:
 
 Graph op:
 
-- `NPU_OP_DFL_SOFTMAX4_I8_Q8`
+- `DFL_SOFTMAX_I8_Q8`
 
 Execution block:
 
@@ -337,7 +454,7 @@ Reference:
 
 Graph op:
 
-- `NPU_OP_CLASS_SIGMOID_ROW32_HIGH16_I8`
+- `CLASS_SIGMOID_ROW32_HIGH16_I8`
 
 Contract:
 
@@ -360,7 +477,7 @@ Reference:
 
 Graph op:
 
-- `NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE`
+- `GLOBAL_AVGPOOL_C32_REDUCE`
 
 Contract:
 
@@ -386,7 +503,7 @@ Reference:
 
 Graph op:
 
-- `NPU_OP_MAXPOOL2D5X5S1P2_I8`
+- `MAXPOOL2D_I8`
 
 Fast path:
 
@@ -411,7 +528,7 @@ Reference:
 
 Graph op:
 
-- `NPU_OP_UPSAMPLE_NEAREST2X_I8`
+- `UPSAMPLE_NEAREST_I8`
 
 Contract:
 
@@ -434,7 +551,7 @@ Reference:
 There is no standalone graph op for concat. The optimized YOLO path avoids
 materializing concat by using:
 
-- `NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2`
+- `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2`
 
 This op computes:
 
@@ -461,8 +578,8 @@ Reference:
 The following graph ops remain available but should not be used for optimized
 YOLO/MobileNet paths unless there is no native path yet:
 
-- `NPU_OP_IM2COL3X3S1P1_C3_PAD32`
-- `NPU_OP_IM2COL3X3S2P1_C3_PAD32`
+- `LEGACY_IM2COL_C3_PAD32`
+- `LEGACY_IM2COL_C3_DOWNSAMPLE_PAD32`
 - Scalar fallback inside `spatz_add_i8()` / `spatz_mul_i8()` for non-fast-path
   clamp/requant parameters.
 - Generic `spatz_maxpool2d_i8()` and generic `spatz_upsample_nearest_i8()` when
@@ -495,7 +612,7 @@ should not be part of performance-critical E2E graphs.
 
 When adding a new graph-level operator, update these locations:
 
-1. `sw/lib/npu_graph.h`: add the `NPU_OP_*` enum value and fields needed in
+1. `sw/lib/npu_graph.h`: add the graph op enum value and fields needed in
    `npu_layer_t`.
 2. `sw/lib/npu_graph.c`: add tensor validation and dispatch.
 3. `sw/lib/hal_systolic.c` or `sw/lib/spatz_ops.c`: add the low-level wrapper.

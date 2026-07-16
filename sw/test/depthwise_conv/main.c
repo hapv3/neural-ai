@@ -98,19 +98,19 @@ static void init_graph(void) {
     init_tensor(&tensors[TENSOR_OUTPUT], T_OUTPUT, OUT_H, OUT_W, C, OUTPUT_BYTES,
                 NPU_DTYPE_I8, NPU_LAYOUT_C32_BLOCKED);
 
-    layers[L_DMA_IN_INPUT].op = NPU_OP_DMA_IN;
+    layers[L_DMA_IN_INPUT].op = DMA_IN;
     layers[L_DMA_IN_INPUT].dst = TENSOR_INPUT;
     layers[L_DMA_IN_INPUT].l2_addr = L2_INPUT;
     layers[L_DMA_IN_INPUT].bytes = INPUT_BYTES;
 
-    layers[L_DMA_IN_WEIGHT].op = NPU_OP_DMA_IN;
+    layers[L_DMA_IN_WEIGHT].op = DMA_IN;
     layers[L_DMA_IN_WEIGHT].dst = TENSOR_WEIGHT;
     layers[L_DMA_IN_WEIGHT].l2_addr = L2_WEIGHT;
     layers[L_DMA_IN_WEIGHT].bytes = WEIGHT_BYTES;
 
     layers[L_DEPTHWISE].op = (STRIDE == 2u) ?
-                              NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT :
-                              NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT;
+                              DEPTHWISE_CONV2D_C32_DOWNSAMPLE_REQUANT :
+                              DEPTHWISE_CONV2D_C32_REQUANT;
     layers[L_DEPTHWISE].src = TENSOR_INPUT;
     layers[L_DEPTHWISE].dst = TENSOR_OUTPUT;
     layers[L_DEPTHWISE].aux = TENSOR_WEIGHT;
@@ -119,7 +119,7 @@ static void init_graph(void) {
     layers[L_DEPTHWISE].min_val = -128;
     layers[L_DEPTHWISE].max_val = 127;
 
-    layers[L_DMA_OUT].op = NPU_OP_DMA_OUT;
+    layers[L_DMA_OUT].op = DMA_OUT;
     layers[L_DMA_OUT].src = TENSOR_OUTPUT;
     layers[L_DMA_OUT].l2_addr = L2_OUTPUT;
     layers[L_DMA_OUT].bytes = OUTPUT_BYTES;

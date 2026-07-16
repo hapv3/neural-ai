@@ -165,7 +165,7 @@ static void clear_layer(npu_layer_t *layer) {
 }
 
 static void set_dma_in(uint32_t layer, uint32_t tensor, uint32_t l2_addr, uint32_t bytes) {
-    layers[layer].op = NPU_OP_DMA_IN;
+    layers[layer].op = DMA_IN;
     layers[layer].dst = tensor;
     layers[layer].l2_addr = l2_addr;
     layers[layer].bytes = bytes;
@@ -223,13 +223,13 @@ static void init_graph(npu_graph_t *graph) {
     set_dma_in(L_DMA_IN_INPUT, T_INPUT, L2_INPUT, INPUT_BYTES);
 
     set_dma_in(L_DMA_W_STEM, T_WEIGHT, L2_W_STEM, STEM_WEIGHT_BYTES);
-    layers[L_STEM_CONV].op = NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT;
+    layers[L_STEM_CONV].op = CONV2D_RGB_LINEBUF_REQUANT;
     layers[L_STEM_CONV].src = T_INPUT;
     layers[L_STEM_CONV].dst = T_A_48_C32_ROW32;
     layers[L_STEM_CONV].aux = T_WEIGHT;
     set_requant(&layers[L_STEM_CONV], -128, 127);
 
-    layers[L_STEM_CLAMP].op = NPU_OP_CLAMP_I8;
+    layers[L_STEM_CLAMP].op = CLAMP_I8;
     layers[L_STEM_CLAMP].src = T_A_48_C32_ROW32;
     layers[L_STEM_CLAMP].dst = T_B_48_C32_ROW32;
     layers[L_STEM_CLAMP].bytes = ACT48_C32_BYTES;
@@ -237,13 +237,13 @@ static void init_graph(npu_graph_t *graph) {
     layers[L_STEM_CLAMP].max_val = 6;
 
     set_dma_in(L_DMA_W_DW0, T_WEIGHT, L2_W_DW0, DW32_WEIGHT_BYTES);
-    layers[L_DW0].op = NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT;
+    layers[L_DW0].op = DEPTHWISE_CONV2D_C32_REQUANT;
     layers[L_DW0].src = T_B_48_C32_ROW32;
     layers[L_DW0].dst = T_A_48_C32_ROW32;
     layers[L_DW0].aux = T_WEIGHT;
     set_requant(&layers[L_DW0], -128, 127);
 
-    layers[L_DW0_CLAMP].op = NPU_OP_CLAMP_I8;
+    layers[L_DW0_CLAMP].op = CLAMP_I8;
     layers[L_DW0_CLAMP].src = T_A_48_C32_ROW32;
     layers[L_DW0_CLAMP].dst = T_C_48_C32_ROW32;
     layers[L_DW0_CLAMP].bytes = ACT48_C32_BYTES;
@@ -251,14 +251,14 @@ static void init_graph(npu_graph_t *graph) {
     layers[L_DW0_CLAMP].max_val = 6;
 
     set_dma_in(L_DMA_W_PW0, T_WEIGHT, L2_W_PW0, PW32_32_WEIGHT_BYTES);
-    layers[L_PW0].op = NPU_OP_CONV2D1X1_C32_REQUANT;
+    layers[L_PW0].op = CONV2D_POINTWISE_C32_REQUANT;
     layers[L_PW0].src = T_C_48_C32;
     layers[L_PW0].dst = T_A_48_C32;
     layers[L_PW0].aux = T_WEIGHT;
     layers[L_PW0].aux2 = T_PSUM;
     set_requant(&layers[L_PW0], -128, 127);
 
-    layers[L_RESIDUAL0].op = NPU_OP_ADD_I8;
+    layers[L_RESIDUAL0].op = ADD_I8;
     layers[L_RESIDUAL0].src = T_A_48_C32;
     layers[L_RESIDUAL0].aux = T_B_48_C32;
     layers[L_RESIDUAL0].dst = T_A_48_C32;
@@ -267,21 +267,21 @@ static void init_graph(npu_graph_t *graph) {
     layers[L_RESIDUAL0].max_val = 127;
 
     set_dma_in(L_DMA_W_DW1, T_WEIGHT, L2_W_DW1, DW32_WEIGHT_BYTES);
-    layers[L_DW1].op = NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT;
+    layers[L_DW1].op = DEPTHWISE_CONV2D_C32_DOWNSAMPLE_REQUANT;
     layers[L_DW1].src = T_A_48_C32;
     layers[L_DW1].dst = T_B_24_C32;
     layers[L_DW1].aux = T_WEIGHT;
     set_requant(&layers[L_DW1], -128, 127);
 
     set_dma_in(L_DMA_W_PW1, T_WEIGHT, L2_W_PW1, PW32_64_WEIGHT_BYTES);
-    layers[L_PW1].op = NPU_OP_CONV2D1X1_C32_REQUANT;
+    layers[L_PW1].op = CONV2D_POINTWISE_C32_REQUANT;
     layers[L_PW1].src = T_B_24_C32;
     layers[L_PW1].dst = T_C_24_C64;
     layers[L_PW1].aux = T_WEIGHT;
     layers[L_PW1].aux2 = T_PSUM;
     set_requant(&layers[L_PW1], -128, 127);
 
-    layers[L_PW1_CLAMP].op = NPU_OP_CLAMP_I8;
+    layers[L_PW1_CLAMP].op = CLAMP_I8;
     layers[L_PW1_CLAMP].src = T_C_24_C64;
     layers[L_PW1_CLAMP].dst = T_A_24_C64;
     layers[L_PW1_CLAMP].bytes = ACT24_C64_BYTES;
@@ -289,7 +289,7 @@ static void init_graph(npu_graph_t *graph) {
     layers[L_PW1_CLAMP].max_val = 6;
 
     set_dma_in(L_DMA_W_PW2, T_WEIGHT, L2_W_PW2, PW64_128_WEIGHT_BYTES);
-    layers[L_PW2].op = NPU_OP_CONV2D1X1_C32_REQUANT;
+    layers[L_PW2].op = CONV2D_POINTWISE_C32_REQUANT;
     layers[L_PW2].src = T_A_24_C64;
     layers[L_PW2].dst = T_D_24_C128;
     layers[L_PW2].aux = T_WEIGHT;
@@ -297,21 +297,21 @@ static void init_graph(npu_graph_t *graph) {
     set_requant(&layers[L_PW2], -128, 127);
 
     set_dma_in(L_DMA_W_DW2, T_WEIGHT, L2_W_DW2, DW128_WEIGHT_BYTES);
-    layers[L_DW2].op = NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT;
+    layers[L_DW2].op = DEPTHWISE_CONV2D_C32_REQUANT;
     layers[L_DW2].src = T_D_24_C128;
     layers[L_DW2].dst = T_C_24_C128;
     layers[L_DW2].aux = T_WEIGHT;
     set_requant(&layers[L_DW2], -128, 127);
 
     set_dma_in(L_DMA_W_PW3, T_WEIGHT, L2_W_PW3, PW128_64_WEIGHT_BYTES);
-    layers[L_PW3].op = NPU_OP_CONV2D1X1_C32_REQUANT;
+    layers[L_PW3].op = CONV2D_POINTWISE_C32_REQUANT;
     layers[L_PW3].src = T_C_24_C128;
     layers[L_PW3].dst = T_B_24_C64;
     layers[L_PW3].aux = T_WEIGHT;
     layers[L_PW3].aux2 = T_PSUM;
     set_requant(&layers[L_PW3], -128, 127);
 
-    layers[L_RESIDUAL1].op = NPU_OP_ADD_I8;
+    layers[L_RESIDUAL1].op = ADD_I8;
     layers[L_RESIDUAL1].src = T_B_24_C64;
     layers[L_RESIDUAL1].aux = T_A_24_C64;
     layers[L_RESIDUAL1].dst = T_B_24_C64;
@@ -320,7 +320,7 @@ static void init_graph(npu_graph_t *graph) {
     layers[L_RESIDUAL1].max_val = 127;
 
     set_dma_in(L_DMA_W_VALIDATE, T_WEIGHT, L2_W_VALIDATE, CONV64_64_WEIGHT_BYTES);
-    layers[L_VALIDATE_CONV].op = NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT;
+    layers[L_VALIDATE_CONV].op = CONV2D_C32_MULTI_LINEBUF_REQUANT;
     layers[L_VALIDATE_CONV].src = T_B_24_C64;
     layers[L_VALIDATE_CONV].dst = T_C_24_C64;
     layers[L_VALIDATE_CONV].aux = T_WEIGHT;
@@ -329,19 +329,19 @@ static void init_graph(npu_graph_t *graph) {
     layers[L_VALIDATE_CONV].dim_n = MID_W;
     set_requant(&layers[L_VALIDATE_CONV], -128, 127);
 
-    layers[L_GLOBAL_AVG].op = NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE;
+    layers[L_GLOBAL_AVG].op = GLOBAL_AVGPOOL_C32_REDUCE;
     layers[L_GLOBAL_AVG].src = T_C_24_C64;
     layers[L_GLOBAL_AVG].dst = T_A_1_C64;
 
     set_dma_in(L_DMA_W_CLASSIFIER, T_WEIGHT, L2_W_CLASSIFIER, PW64_32_WEIGHT_BYTES);
-    layers[L_CLASSIFIER].op = NPU_OP_CONV2D1X1_C32_REQUANT;
+    layers[L_CLASSIFIER].op = CONV2D_POINTWISE_C32_REQUANT;
     layers[L_CLASSIFIER].src = T_A_1_C64;
     layers[L_CLASSIFIER].dst = T_B_1_C32;
     layers[L_CLASSIFIER].aux = T_WEIGHT;
     layers[L_CLASSIFIER].aux2 = T_PSUM;
     set_requant(&layers[L_CLASSIFIER], -128, 127);
 
-    layers[L_DMA_OUT].op = NPU_OP_DMA_OUT;
+    layers[L_DMA_OUT].op = DMA_OUT;
     layers[L_DMA_OUT].src = T_B_1_C32;
     layers[L_DMA_OUT].l2_addr = L2_OUTPUT;
     layers[L_DMA_OUT].bytes = 32u;

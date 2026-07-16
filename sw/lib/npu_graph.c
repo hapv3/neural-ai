@@ -838,7 +838,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
         npu_graph_trace(i, layer->op, 1);
 
         switch (layer->op) {
-        case NPU_OP_DMA_IN:
+        case DMA_IN:
             if (!dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (layer->bytes > dst->bytes) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
@@ -847,7 +847,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_DMA_OUT:
+        case DMA_OUT:
             if (!src) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (layer->bytes > src->bytes) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
@@ -856,7 +856,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_IM2COL3X3S1P1_C3_PAD32:
+        case LEGACY_IM2COL_C3_PAD32:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_layout(src, NPU_LAYOUT_HWC, NPU_DTYPE_I8) ||
                 !tensor_has_layout(dst, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
@@ -867,7 +867,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             npu_im2col3x3s1p1_c3_pad32((const int8_t *)src->addr, (int8_t *)dst->addr);
             break;
 
-        case NPU_OP_IM2COL3X3S2P1_C3_PAD32:
+        case LEGACY_IM2COL_C3_DOWNSAMPLE_PAD32:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t output_h = ((uint32_t)src->h + 1u) / 2u;
@@ -884,7 +884,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
                                         (int8_t *)dst->addr);
             break;
 
-        case NPU_OP_SYSTOLIC_GEMM32:
+        case SYSTOLIC_GEMM32:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_layout(src, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
                 !tensor_has_layout(aux, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
@@ -898,7 +898,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             systolic_gemm32(aux->addr, src->addr, dst->addr, layer->dim_m);
             break;
 
-        case NPU_OP_SYSTOLIC_GEMM32_REQUANT:
+        case SYSTOLIC_GEMM32_REQUANT:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_layout(src, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
                 !tensor_has_layout(aux, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
@@ -914,7 +914,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             systolic_requant_disable();
             break;
 
-        case NPU_OP_CONV2D3X3S2P1_C3_LINEBUF_REQUANT:
+        case CONV2D_RGB_LINEBUF_REQUANT:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_layout(src, NPU_LAYOUT_HWC, NPU_DTYPE_I8) ||
                 !tensor_has_layout(aux, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||
@@ -972,7 +972,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_LOGISTIC_LUT_I8:
+        case LOGISTIC_LUT_I8:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t count = layer->bytes ? layer->bytes : dst->bytes;
@@ -989,7 +989,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CLAMP_I8:
+        case CLAMP_I8:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t count = layer->bytes ? layer->bytes : dst->bytes;
@@ -1013,7 +1013,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_MUL_I8:
+        case MUL_I8:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t count = layer->bytes ? layer->bytes : dst->bytes;
@@ -1037,7 +1037,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_ADD_I8:
+        case ADD_I8:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t count = layer->bytes ? layer->bytes : dst->bytes;
@@ -1055,7 +1055,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_MAXPOOL2D5X5S1P2_I8:
+        case MAXPOOL2D_I8:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||
                 !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
@@ -1074,7 +1074,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_GLOBAL_AVGPOOL_C32_REDUCE:
+        case GLOBAL_AVGPOOL_C32_REDUCE:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_layout(src, NPU_LAYOUT_C32_BLOCKED, NPU_DTYPE_I8) ||
                 !tensor_has_layout(dst, NPU_LAYOUT_C32_BLOCKED, NPU_DTYPE_I8) ||
@@ -1094,7 +1094,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_UPSAMPLE_NEAREST2X_I8:
+        case UPSAMPLE_NEAREST_I8:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_dtype(src, NPU_DTYPE_I8) ||
                 !tensor_has_dtype(dst, NPU_DTYPE_I8) ||
@@ -1110,7 +1110,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
                                       src->h, src->w, src->c, 2u, 2u);
             break;
 
-        case NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2:
+        case CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2:
             if (!src || !src2 || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1120,7 +1120,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_DFL_SOFTMAX4_I8_Q8:
+        case DFL_SOFTMAX_I8_Q8:
             if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t locations = (uint32_t)src->h * src->w;
@@ -1144,7 +1144,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CLASS_SIGMOID_ROW32_HIGH16_I8:
+        case CLASS_SIGMOID_ROW32_HIGH16_I8:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t locations = (uint32_t)src->h * src->w;
@@ -1167,7 +1167,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF:
+        case CONV2D_C32_LINEBUF:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1176,7 +1176,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT:
+        case CONV2D_C32_LINEBUF_REQUANT:
             if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1185,7 +1185,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT:
+        case CONV2D_C32_DOWNSAMPLE_LINEBUF_REQUANT:
             if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1194,7 +1194,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CONV2D3X3S1P1_C32_MULTI_LINEBUF_REQUANT:
+        case CONV2D_C32_MULTI_LINEBUF_REQUANT:
             if (!src || !dst || !aux || !aux2) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1203,7 +1203,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_CONV2D1X1_C32_REQUANT:
+        case CONV2D_POINTWISE_C32_REQUANT:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status = run_conv2d1x1_c32_requant(src, dst, aux, aux2, layer);
@@ -1211,7 +1211,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_DEPTHWISE3X3S1P1_C32_REQUANT:
+        case DEPTHWISE_CONV2D_C32_REQUANT:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1220,7 +1220,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_DEPTHWISE3X3S2P1_C32_REQUANT:
+        case DEPTHWISE_CONV2D_C32_DOWNSAMPLE_REQUANT:
             if (!src || !dst || !aux) return NPU_GRAPH_ERR_BAD_TENSOR;
             {
                 uint32_t conv_status =
@@ -1229,7 +1229,7 @@ uint32_t npu_graph_run(const npu_graph_t *graph) {
             }
             break;
 
-        case NPU_OP_SPATZ_REQUANT:
+        case SPATZ_REQUANT:
             if (!src || !dst) return NPU_GRAPH_ERR_BAD_TENSOR;
             if (!tensor_has_layout(src, NPU_LAYOUT_ROW32, NPU_DTYPE_I32) ||
                 !tensor_has_layout(dst, NPU_LAYOUT_ROW32, NPU_DTYPE_I8) ||

@@ -364,11 +364,11 @@ Graph/runtime entries used by the active Phase 3 path:
 |---|---|---|
 | `npu_tensor_t` / `npu_layer_t` | 3a+ | Shared graph tensor/layer ABI for firmware-side scheduling. |
 | `npu_layer_t.src2` | 3j | Second input tensor for fused logical Concat consumers. |
-| `NPU_OP_CONV2D3X3S1P1_C32_LINEBUF_REQUANT` | 3d | C32 conv + final requant path for C2f. |
-| `NPU_OP_CONV2D3X3S2P1_C32_LINEBUF_REQUANT` | 3f | C32 stride-2 conv + final requant path for downsample. |
-| `NPU_OP_MAXPOOL5X5S1P2_C32_LINEBUF` | 3g | SPPF-style 5x5 pool through the linebuffer pool datapath. |
-| `NPU_OP_UPSAMPLE_NEAREST2X_I8` | 3h | nearest-neighbor 2x graph op. |
-| `NPU_OP_CONV2D3X3S1P1_C32X2_LINEBUF_REQUANT_L2` | 3j | fused logical Concat + Head_Conv. |
+| `CONV2D_C32_LINEBUF_REQUANT` | 3d | C32 conv + final requant path for C2f. |
+| `CONV2D_C32_DOWNSAMPLE_LINEBUF_REQUANT` | 3f | C32 stride-2 conv + final requant path for downsample. |
+| `MAXPOOL2D_I8` | 3g | SPPF-style 5x5 pool through the linebuffer pool datapath. |
+| `UPSAMPLE_NEAREST_I8` | 3h | nearest-neighbor 2x graph op. |
+| `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2` | 3j | fused logical Concat + Head_Conv. |
 | `spatz_upsample_nearest2x_c32_i8()` | 3h | C32 fast path: one vector load, four vector stores. |
 | `systolic_gemm32_linebuf_ktiles_accumulate_requant_strided()` | 3j | final chunk accumulates external psum and requants in the systolic controller. |
 | `npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant()` | 3j | per-spatial-tile final Head_Conv chunk helper. |

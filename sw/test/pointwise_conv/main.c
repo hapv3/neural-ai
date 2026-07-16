@@ -95,17 +95,17 @@ static void init_graph(void) {
     init_tensor(&tensors[TENSOR_PSUM], T_PSUM, H, W, 32u, PSUM_BYTES,
                 NPU_DTYPE_I32, NPU_LAYOUT_ROW32);
 
-    layers[L_DMA_IN_INPUT].op = NPU_OP_DMA_IN;
+    layers[L_DMA_IN_INPUT].op = DMA_IN;
     layers[L_DMA_IN_INPUT].dst = TENSOR_INPUT;
     layers[L_DMA_IN_INPUT].l2_addr = L2_INPUT;
     layers[L_DMA_IN_INPUT].bytes = INPUT_BYTES;
 
-    layers[L_DMA_IN_WEIGHT].op = NPU_OP_DMA_IN;
+    layers[L_DMA_IN_WEIGHT].op = DMA_IN;
     layers[L_DMA_IN_WEIGHT].dst = TENSOR_WEIGHT;
     layers[L_DMA_IN_WEIGHT].l2_addr = L2_WEIGHT;
     layers[L_DMA_IN_WEIGHT].bytes = WEIGHT_BYTES;
 
-    layers[L_POINTWISE].op = NPU_OP_CONV2D1X1_C32_REQUANT;
+    layers[L_POINTWISE].op = CONV2D_POINTWISE_C32_REQUANT;
     layers[L_POINTWISE].src = TENSOR_INPUT;
     layers[L_POINTWISE].dst = TENSOR_OUTPUT;
     layers[L_POINTWISE].aux = TENSOR_WEIGHT;
@@ -115,7 +115,7 @@ static void init_graph(void) {
     layers[L_POINTWISE].min_val = -128;
     layers[L_POINTWISE].max_val = 127;
 
-    layers[L_DMA_OUT].op = NPU_OP_DMA_OUT;
+    layers[L_DMA_OUT].op = DMA_OUT;
     layers[L_DMA_OUT].src = TENSOR_OUTPUT;
     layers[L_DMA_OUT].l2_addr = L2_OUTPUT;
     layers[L_DMA_OUT].bytes = OUTPUT_BYTES;
