@@ -238,6 +238,7 @@ module systolic_controller #(
     logic          cfg_linebuf_pool_i;
     logic          cfg_linebuf_c32_fast_i;
     logic          cfg_linebuf_depthwise_i;
+    logic          cfg_linebuf_c32_group_stationary_i;
     logic [31:0]   cfg_linebuf_input_base_i;
     logic [15:0]   cfg_linebuf_input_h_i;
     logic [15:0]   cfg_linebuf_input_w_i;
@@ -270,6 +271,7 @@ module systolic_controller #(
     logic [7:0]    linebuf_seed_kw_eff;
     logic [7:0]    linebuf_seed_kh_eff;
     logic          linebuf_kgen_multi;
+    logic          linebuf_c32_group_stationary;
     logic          linebuf_pool_mode;
     logic          linebuf_depthwise_mode;
     logic          accum_active;
@@ -401,6 +403,13 @@ module systolic_controller #(
     assign linebuf_spatial_m = (cfg_linebuf_spatial_m_i != 32'd0) ? cfg_linebuf_spatial_m_i : cfg_sys_dim_m_i;
     assign linebuf_kgen_multi = cfg_linebuf_en_i && cfg_linebuf_coalesce_i && cfg_linebuf_kgen_i &&
                                 (cfg_linebuf_k_tiles_i > 32'd1);
+    assign linebuf_c32_group_stationary = linebuf_kgen_multi &&
+                                          cfg_linebuf_c32_fast_i &&
+                                          cfg_linebuf_c32_group_stationary_i &&
+                                          (cfg_linebuf_lane_base_i == 6'd0) &&
+                                          (cfg_linebuf_block_valid_bytes_eff == 6'(ARRAY_DIM)) &&
+                                          (cfg_linebuf_input_c_i >= 16'(ARRAY_DIM)) &&
+                                          (cfg_linebuf_input_c_i[4:0] == 5'd0);
     assign linebuf_pool_mode = cfg_linebuf_en_i && cfg_linebuf_pool_i;
     assign linebuf_depthwise_mode = cfg_linebuf_en_i && cfg_linebuf_depthwise_i;
     assign linebuf_has_next_k_tile = linebuf_kgen_multi && ((k_tile_idx_q + 32'd1) < cfg_linebuf_k_tiles_i);
@@ -540,15 +549,92 @@ module systolic_controller #(
         end
     endfunction
 
+    function automatic void advance_k_seed32_c32_group_stationary(
+        input  logic [7:0]  kh_i,
+        input  logic [7:0]  kw_i,
+        input  logic [15:0] ic_i,
+        input  logic [15:0] input_c_i,
+        input  logic [15:0] kernel_h_i,
+        input  logic [15:0] kernel_w_i,
+        output logic [7:0]  kh_o,
+        output logic [7:0]  kw_o,
+        output logic [15:0] ic_o
+    );
+        logic [7:0]  kh;
+        logic [7:0]  kw;
+        logic [15:0] ic;
+        begin
+            kh = kh_i;
+            kw = kw_i;
+            ic = {ic_i[15:5], 5'b0};
+            if ((kw + 8'd1) == kernel_w_i[7:0]) begin
+                kw = '0;
+                if ((kh + 8'd1) == kernel_h_i[7:0]) begin
+                    kh = '0;
+                    if ((ic + 16'(ARRAY_DIM)) >= input_c_i) begin
+                        ic = '0;
+                    end else begin
+                        ic = ic + 16'(ARRAY_DIM);
+                    end
+                end else begin
+                    kh = kh + 8'd1;
+                end
+            end else begin
+                kw = kw + 8'd1;
+            end
+            kh_o = kh;
+            kw_o = kw;
+            ic_o = ic;
+        end
+    endfunction
+
+    function automatic void advance_linebuf_k_seed(
+        input  logic        c32_group_stationary_i,
+        input  logic [7:0]  kh_i,
+        input  logic [7:0]  kw_i,
+        input  logic [15:0] ic_i,
+        input  logic [15:0] input_c_i,
+        input  logic [15:0] kernel_h_i,
+        input  logic [15:0] kernel_w_i,
+        output logic [7:0]  kh_o,
+        output logic [7:0]  kw_o,
+        output logic [15:0] ic_o
+    );
+        begin
+            if (c32_group_stationary_i) begin
+                advance_k_seed32_c32_group_stationary(kh_i,
+                                                      kw_i,
+                                                      ic_i,
+                                                      input_c_i,
+                                                      kernel_h_i,
+                                                      kernel_w_i,
+                                                      kh_o,
+                                                      kw_o,
+                                                      ic_o);
+            end else begin
+                advance_k_seed32(kh_i,
+                                 kw_i,
+                                 ic_i,
+                                 input_c_i,
+                                 kernel_w_i,
+                                 kh_o,
+                                 kw_o,
+                                 ic_o);
+            end
+        end
+    endfunction
+
     always_comb begin
-        advance_k_seed32(k_seed_kh_q,
-                         k_seed_kw_q,
-                         k_seed_ic_q,
-                         cfg_linebuf_input_c_i,
-                         cfg_linebuf_kernel_w_i,
-                         k_seed_kh_next,
-                         k_seed_kw_next,
-                         k_seed_ic_next);
+        advance_linebuf_k_seed(linebuf_c32_group_stationary,
+                               k_seed_kh_q,
+                               k_seed_kw_q,
+                               k_seed_ic_q,
+                               cfg_linebuf_input_c_i,
+                               cfg_linebuf_kernel_h_i,
+                               cfg_linebuf_kernel_w_i,
+                               k_seed_kh_next,
+                               k_seed_kw_next,
+                               k_seed_ic_next);
     end
 
     always_comb begin
@@ -704,6 +790,7 @@ module systolic_controller #(
         .cfg_linebuf_pool_o (cfg_linebuf_pool_i),
         .cfg_linebuf_c32_fast_o(cfg_linebuf_c32_fast_i),
         .cfg_linebuf_depthwise_o(cfg_linebuf_depthwise_i),
+        .cfg_linebuf_c32_group_stationary_o(cfg_linebuf_c32_group_stationary_i),
         .cfg_linebuf_kgen_o (cfg_linebuf_kgen_i),
         .cfg_linebuf_input_base_o(cfg_linebuf_input_base_i),
         .cfg_linebuf_input_h_o(cfg_linebuf_input_h_i),
@@ -1506,14 +1593,16 @@ module systolic_controller #(
 
                 if (accum_active) begin
                     if (psum_buf_overlap_next_safe) begin
-                        advance_k_seed32(k_seed_kh_q,
-                                         k_seed_kw_q,
-                                         k_seed_ic_q,
-                                         cfg_linebuf_input_c_i,
-                                         cfg_linebuf_kernel_w_i,
-                                         k_seed_kh_d,
-                                         k_seed_kw_d,
-                                         k_seed_ic_d);
+                        advance_linebuf_k_seed(linebuf_c32_group_stationary,
+                                               k_seed_kh_q,
+                                               k_seed_kw_q,
+                                               k_seed_ic_q,
+                                               cfg_linebuf_input_c_i,
+                                               cfg_linebuf_kernel_h_i,
+                                               cfg_linebuf_kernel_w_i,
+                                               k_seed_kh_d,
+                                               k_seed_kw_d,
+                                               k_seed_ic_d);
                         k_tile_idx_d = k_tile_idx_q + 32'd1;
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
@@ -1529,14 +1618,16 @@ module systolic_controller #(
                         state_d = COMPUTE;
                     end else if (drain_cnt_q == 0 && ofm_fifo_empty) begin
                         if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
-                            advance_k_seed32(k_seed_kh_q,
-                                             k_seed_kw_q,
-                                             k_seed_ic_q,
-                                             cfg_linebuf_input_c_i,
-                                             cfg_linebuf_kernel_w_i,
-                                             k_seed_kh_d,
-                                             k_seed_kw_d,
-                                             k_seed_ic_d);
+                            advance_linebuf_k_seed(linebuf_c32_group_stationary,
+                                                   k_seed_kh_q,
+                                                   k_seed_kw_q,
+                                                   k_seed_ic_q,
+                                                   cfg_linebuf_input_c_i,
+                                                   cfg_linebuf_kernel_h_i,
+                                                   cfg_linebuf_kernel_w_i,
+                                                   k_seed_kh_d,
+                                                   k_seed_kw_d,
+                                                   k_seed_ic_d);
                             k_tile_idx_d = k_tile_idx_q + 32'd1;
                             i_ptr_d = cfg_sys_ifm_ptr_i;
                             o_ptr_d = cfg_sys_ofm_ptr_i;
@@ -1552,14 +1643,16 @@ module systolic_controller #(
                     end
                 end else begin
                     if (psum_buf_overlap_next_safe) begin
-                        advance_k_seed32(k_seed_kh_q,
-                                         k_seed_kw_q,
-                                         k_seed_ic_q,
-                                         cfg_linebuf_input_c_i,
-                                         cfg_linebuf_kernel_w_i,
-                                         k_seed_kh_d,
-                                         k_seed_kw_d,
-                                         k_seed_ic_d);
+                        advance_linebuf_k_seed(linebuf_c32_group_stationary,
+                                               k_seed_kh_q,
+                                               k_seed_kw_q,
+                                               k_seed_ic_q,
+                                               cfg_linebuf_input_c_i,
+                                               cfg_linebuf_kernel_h_i,
+                                               cfg_linebuf_kernel_w_i,
+                                               k_seed_kh_d,
+                                               k_seed_kw_d,
+                                               k_seed_ic_d);
                         k_tile_idx_d = k_tile_idx_q + 32'd1;
                         i_ptr_d = cfg_sys_ifm_ptr_i;
                         o_ptr_d = cfg_sys_ofm_ptr_i;
@@ -1575,14 +1668,16 @@ module systolic_controller #(
                         state_d = COMPUTE;
                     end else if (drain_cnt_q == 0 && ofm_fifo_empty) begin
                         if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
-                            advance_k_seed32(k_seed_kh_q,
-                                             k_seed_kw_q,
-                                             k_seed_ic_q,
-                                             cfg_linebuf_input_c_i,
-                                             cfg_linebuf_kernel_w_i,
-                                             k_seed_kh_d,
-                                             k_seed_kw_d,
-                                             k_seed_ic_d);
+                            advance_linebuf_k_seed(linebuf_c32_group_stationary,
+                                                   k_seed_kh_q,
+                                                   k_seed_kw_q,
+                                                   k_seed_ic_q,
+                                                   cfg_linebuf_input_c_i,
+                                                   cfg_linebuf_kernel_h_i,
+                                                   cfg_linebuf_kernel_w_i,
+                                                   k_seed_kh_d,
+                                                   k_seed_kw_d,
+                                                   k_seed_ic_d);
                             k_tile_idx_d = k_tile_idx_q + 32'd1;
                             i_ptr_d = cfg_sys_ifm_ptr_i;
                             o_ptr_d = cfg_sys_ofm_ptr_i;

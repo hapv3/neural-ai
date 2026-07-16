@@ -31,6 +31,7 @@ typedef struct {
     uint16_t pool;
     uint16_t c32_fast;
     uint16_t depthwise;
+    uint16_t c32_group_stationary;
     uint16_t block_valid_bytes;
     uint16_t k_seed_kh;
     uint16_t k_seed_kw;

@@ -221,7 +221,10 @@ module conv_linebuf_stream_packer #(
     logic row_ring_mode;
     logic c32_blocked_mode;
     logic c32_kgen_fast;
+    logic [15:0] effective_c_base;
     logic [31:0] channel_addr_offset;
+    logic [31:0] c32_group_span_bytes;
+    logic [31:0] c32_seed_group_offset;
     logic [15:0] fill_row_slot;
     logic fill_row_cached;
     logic fill_row_pending;
@@ -453,22 +456,36 @@ module conv_linebuf_stream_packer #(
         logic [7:0] gen_kw;
         logic [15:0] gen_ic;
         begin
+            effective_c_base = (cfg_c32_fast_i && cfg_kgen_i) ? cfg_k_seed_ic_i : cfg_c_base_i;
+            c32_group_span_bytes = ((cfg_c32_fast_i && cfg_kgen_i) &&
+                                    (cfg_channel_addr_offset_i != 32'd0)) ?
+                                   cfg_channel_addr_offset_i :
+                                   (32'(cfg_input_h_i) * cfg_row_stride_bytes_i);
+            c32_seed_group_offset = 32'(cfg_k_seed_ic_i[15:5]) * c32_group_span_bytes;
+
             block_valid_bytes = (cfg_block_valid_bytes_i != 6'd0) ?
                                 cfg_block_valid_bytes_i :
-                                valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i);
+                                ((cfg_c32_fast_i && cfg_kgen_i) ?
+                                 valid_c_bytes(cfg_input_c_i, cfg_k_seed_ic_i, cfg_lane_base_i) :
+                                 valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i));
             coalesce_k_bytes = (cfg_coalesce_k_bytes_i != 32'd0) ?
                                cfg_coalesce_k_bytes_i :
                                (32'(cfg_kernel_h_i) * 32'(cfg_kernel_w_i) * 32'(block_valid_bytes));
 
-            channel_addr_offset = (cfg_channel_addr_offset_i != 32'd0) ?
-                                  cfg_channel_addr_offset_i :
-                                  {16'd0, cfg_c_base_i};
+            if (cfg_c32_fast_i && cfg_kgen_i) begin
+                channel_addr_offset = c32_seed_group_offset;
+            end else begin
+                channel_addr_offset = (cfg_channel_addr_offset_i != 32'd0) ?
+                                      cfg_channel_addr_offset_i :
+                                      {16'd0, cfg_c_base_i};
+            end
             c32_blocked_mode = cfg_c32_fast_i &&
                                (cfg_block_valid_bytes_i == 6'(BEAT_BYTES)) &&
-                               (cfg_channel_addr_offset_i[BYTE_SEL_BITS-1:0] == '0);
+                               (channel_addr_offset[BYTE_SEL_BITS-1:0] == '0);
             c32_kgen_fast = c32_blocked_mode && cfg_coalesce_i && cfg_kgen_i &&
                              (cfg_lane_base_i == 6'd0) &&
-                             (cfg_c_base_i[4:0] == 5'd0);
+                             (cfg_c_base_i[4:0] == 5'd0) &&
+                             (cfg_k_seed_ic_i[4:0] == 5'd0);
 
             gen_kh = cfg_k_seed_kh_i;
             gen_kw = cfg_k_seed_kw_i;
@@ -477,7 +494,7 @@ module conv_linebuf_stream_packer #(
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
                     lane_kh[lane] = cfg_k_seed_kh_i;
                     lane_kw[lane] = cfg_k_seed_kw_i;
-                    lane_ic[lane] = cfg_c_base_i + 16'(lane);
+                    lane_ic[lane] = cfg_k_seed_ic_i + 16'(lane);
                 end
             end else begin
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
@@ -505,7 +522,7 @@ module conv_linebuf_stream_packer #(
             row_cache_full_mode = cfg_coalesce_i && cfg_kgen_i &&
                                   (cfg_k_tiles_i > 32'd1) &&
                                   (cfg_input_h_i <= K_MAX[15:0]);
-            row_cache_reuse = row_cache_full_q && (cfg_c_base_i == cached_c_base_q);
+            row_cache_reuse = row_cache_full_q && (effective_c_base == cached_c_base_q);
             row_ring_mode = (cfg_depthwise_i || (cfg_coalesce_i && cfg_kgen_i)) &&
                             !row_cache_full_q &&
                             (cfg_kernel_h_i <= K_MAX[15:0]) &&
@@ -968,7 +985,7 @@ module conv_linebuf_stream_packer #(
 
     task automatic invalidate_row_tracking_if_needed;
         begin
-            if (!(row_ring_mode && (cfg_c_base_i == cached_c_base_q))) begin
+            if (!(row_ring_mode && (effective_c_base == cached_c_base_q))) begin
                 row_slot_valid_q <= '0;
                 row_fetch_active_q <= '0;
                 row_fetch_done_q <= '0;
@@ -1025,7 +1042,7 @@ module conv_linebuf_stream_packer #(
                 bypass_vectors_q <= '0;
                 k_tile_idx_q <= '0;
                 row_cache_full_q <= row_cache_full_mode;
-                cached_c_base_q <= cfg_c_base_i;
+                cached_c_base_q <= effective_c_base;
                 row_slot_valid_q <= '0;
                 row_fetch_active_q <= '0;
                 row_fetch_done_q <= '0;
@@ -1145,7 +1162,7 @@ module conv_linebuf_stream_packer #(
                         if (prefetch_active_q) begin
                             prefetch_active_q <= 1'b0;
                             prefetch_ready_q <= 1'b1;
-                            prefetched_c_base_q <= cfg_c_base_i;
+                            prefetched_c_base_q <= effective_c_base;
                             state_q <= CH_STREAM_DONE;
                         end else begin
                             window_kw_q <= '0;
@@ -1364,10 +1381,10 @@ module conv_linebuf_stream_packer #(
                                 prefetch_active_q <= 1'b0;
                                 prefetch_ready_q <= 1'b0;
                                 if (row_cache_reuse ||
-                                    (prefetch_ready_q && (prefetched_c_base_q == cfg_c_base_i))) begin
+                                    (prefetch_ready_q && (prefetched_c_base_q == effective_c_base))) begin
                                     state_q <= CH_WINDOW_REQ;
                                 end else begin
-                                    cached_c_base_q <= cfg_c_base_i;
+                                    cached_c_base_q <= effective_c_base;
                                     state_q <= CH_ENSURE;
                                 end
                             end else if (prefetch_i && !prefetch_active_q && !prefetch_ready_q &&
@@ -1376,7 +1393,7 @@ module conv_linebuf_stream_packer #(
                                 invalidate_row_tracking_if_needed();
                                 bg_state_q <= BG_IDLE;
                                 bg_started_for_row_q <= 1'b0;
-                                cached_c_base_q <= cfg_c_base_i;
+                                cached_c_base_q <= effective_c_base;
                                 prefetch_active_q <= 1'b1;
                                 state_q <= CH_ENSURE;
                             end
