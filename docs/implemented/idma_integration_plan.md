@@ -17,8 +17,8 @@ Thay thế khối `dma_engine.sv` (FSM tự code, chạy từng beat rất chậ
 
 iDMA có thiết kế rất linh hoạt. Dựa trên source code từ `hw/magia/hw/tile/idma_ctrl_mm.sv`, chúng ta sẽ sử dụng cấu hình **Memory-Mapped (MM)**. 
 
-Tuy nhiên, dải địa chỉ MMIO hiện tại của NPU Cluster (`0x2000_0000`) đang được dùng chung cho cả khối điều khiển Systolic Array (`cluster_ctrl_regs`). Do đó, ta sẽ sử dụng một bộ **MMIO Demux** để chia không gian này:
-- `0x2000_0000 -> 0x2000_00FF`: Dành cho `cluster_ctrl_regs` (điều khiển Systolic Array).
+Tuy nhiên, dải địa chỉ MMIO hiện tại của NPU Cluster (`0x2000_0000`) đang được dùng chung cho cả khối điều khiển Systolic Array (`systolic_ctrl_regs`). Do đó, ta sẽ sử dụng một bộ **MMIO Demux** để chia không gian này:
+- `0x2000_0000 -> 0x2000_0FFF`: Dành cho `systolic_ctrl_regs` (điều khiển Systolic Array, linebuffer, requant; offset thấp không dùng trả zero).
 - `0x2000_1000 -> 0x2000_1FFF`: Map thẳng vào Config Frontend của `iDMA` (idma_ctrl_mm).
 
 Về Backend:
@@ -45,8 +45,8 @@ Về Backend:
                           | (0x2000_0000)                  | (0x2000_1000)
                           v                                v
 +------------------------------------+   +-------------------------------------------------------------+
-|        cluster_ctrl_regs           |   |                 idma_ctrl_mm (iDMA Wrapper)                 |
-| (Điều khiển Systolic Array, v.v)   |   |                                                             |
+|        systolic_ctrl_regs          |   |                 idma_ctrl_mm (iDMA Wrapper)                 |
+| (Systolic/linebuffer/requant CSRs) |   |                                                             |
 +------------------------------------+   |  +-------------------------------------------------------+  |
                                          |  |                 idma_obi_ctrl_decoder                 |  |
                                          |  +---------------------------+---------------------------+  |

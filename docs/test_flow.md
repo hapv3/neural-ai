@@ -17,7 +17,7 @@ firmware.
 | `sw/test/pmu` | `pmu.bin` | `test_pmu_basic` | Host AXI-Lite PMU control, snapshot, fixed counters, Snitch/TCDM event smoke |
 | `sw/test/conv_perf` | `conv_perf.bin` | `test_conv_perf` | Packed Conv2D scheduler, iDMA/RVV backend checks, exact output compare, cycle stats in L2 |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
-| `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | Legacy DMA/TCDM smoke alias for current iDMA MMIO path |
+| `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | iDMA MMIO/TCDM smoke for current 1D/2D/3D path |
 | `sw/test/independent_systolic` | `independent_systolic.bin` | `test_independent_systolic` | GEMM32 for boundary `M` sizes, full INT32 compare |
 | `sw/test/systolic_requant` | `systolic_requant.bin` | `test_systolic_requant` | Systolic GEMM32 with RTL per-channel requant and packed INT8 output |
 | `sw/test/matmul` | `matmul.bin` | `test_matmul` | Raw systolic register matmul regression |
