@@ -214,6 +214,16 @@ Required decisions:
 
 - Activation tensors with `C <= 32`: store as one C32 block with zero-padded tail.
 - Activation tensors with `C > 32`: store as C32-blocked blocks, not compact NCHW.
+- RGB model input is an exception to the internal C32 policy. The first
+  `Conv_Stem` keeps the current raw `HWC` C3 input contract and uses the
+  dedicated RGB linebuffer descriptor path (`input_c=3`, `input_c_stride=3`).
+  Python/host must not pre-pack the RGB input into C32 for this path unless a
+  future stem-specific performance tradeoff explicitly changes the contract.
+- Middle and later Conv layers should use C32-aligned fast-path descriptors.
+  Their producer OFM tensors should already be written in `ROW32` or
+  `C32_BLOCKED` padded layout, and weights should be compiler/host-packed with
+  padded lanes set to zero. Firmware should dispatch these descriptors without
+  runtime channel packing or padding.
 - Concat along C: prefer bypassing materialization when the consumer is Conv.
   Materialized fallback must produce C32-blocked output blocks directly.
 - Conv consumers: use the C32-chunk descriptor path for `IC=64` and larger.

@@ -31,10 +31,6 @@
 
 #define L2_P3_BASE          0x80080000u
 #define P3_CASE_STRIDE      0x00040000u
-#define P3_C120_INPUT_ADDR  0x81000000u
-#define P3_C120_WEIGHT_ADDR 0x81110000u
-#define P3_C120_OUT_ADDR    0x81120000u
-#define P3_C120_STATS_ADDR  0x81240000u
 #define P3_C120_C32B_INPUT_ADDR  0x81300000u
 #define P3_C120_C32B_WEIGHT_ADDR 0x81410000u
 #define P3_C120_C32B_OUT_ADDR    0x81420000u
@@ -43,10 +39,10 @@
 #define P3_C32T_WEIGHT_ADDR      0x81610000u
 #define P3_C32T_OUT_ADDR         0x81620000u
 #define P3_C32T_STATS_ADDR       0x81630000u
-#define P3_INPUT_ADDR(id)   (((id) == 20u) ? P3_C120_INPUT_ADDR : (((id) == 22u) ? P3_C120_C32B_INPUT_ADDR : (((id) == 23u) ? P3_C32T_INPUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u))))
-#define P3_WEIGHT_ADDR(id)  (((id) == 20u) ? P3_C120_WEIGHT_ADDR : (((id) == 22u) ? P3_C120_C32B_WEIGHT_ADDR : (((id) == 23u) ? P3_C32T_WEIGHT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u))))
-#define P3_OUT_ADDR(id)     (((id) == 20u) ? P3_C120_OUT_ADDR : (((id) == 22u) ? P3_C120_C32B_OUT_ADDR : (((id) == 23u) ? P3_C32T_OUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u))))
-#define P3_STATS_ADDR(id)   (((id) == 20u) ? P3_C120_STATS_ADDR : (((id) == 22u) ? P3_C120_C32B_STATS_ADDR : (((id) == 23u) ? P3_C32T_STATS_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u))))
+#define P3_INPUT_ADDR(id)   (((id) == 22u) ? P3_C120_C32B_INPUT_ADDR : (((id) == 23u) ? P3_C32T_INPUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x0000u)))
+#define P3_WEIGHT_ADDR(id)  (((id) == 22u) ? P3_C120_C32B_WEIGHT_ADDR : (((id) == 23u) ? P3_C32T_WEIGHT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3000u)))
+#define P3_OUT_ADDR(id)     (((id) == 22u) ? P3_C120_C32B_OUT_ADDR : (((id) == 23u) ? P3_C32T_OUT_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x10000u)))
+#define P3_STATS_ADDR(id)   (((id) == 22u) ? P3_C120_C32B_STATS_ADDR : (((id) == 23u) ? P3_C32T_STATS_ADDR : (L2_P3_BASE + ((id) * P3_CASE_STRIDE) + 0x3E000u)))
 
 #define T_INPUT          0x10100000u
 #define T_WEIGHT         0x10102000u
@@ -113,7 +109,9 @@
 #define P3_CASE_LINEBUF_3X3_C3 17u
 #define P3_CASE_LINEBUF_KGEN_3X3_C32 18u
 #define P3_CASE_LINEBUF_KGEN_3X3_C96 19u
-#define P3_CASE_LINEBUF_3X3_C120 20u
+/* Case ID 20 was the raw IC120 slow-path regression. It is reserved; case 22
+ * covers the production C32-padded IC120 flow.
+ */
 #define P3_CASE_LINEBUF_KGEN_3X3_C65 21u
 #define P3_CASE_LINEBUF_3X3_C120_C32B 22u
 #define P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT 23u
@@ -164,7 +162,7 @@ static uint32_t should_run_case(uint32_t case_id) {
         return case_id == conv_perf_case_q;
     }
     if (conv_perf_group_q == CONV_PERF_GROUP_ALL) {
-        return 1u;
+        return case_id != 20u;
     }
     if (conv_perf_group_q == CONV_PERF_GROUP_POINTWISE) {
         return case_id <= P3_CASE_OC64;
@@ -172,8 +170,8 @@ static uint32_t should_run_case(uint32_t case_id) {
     if (conv_perf_group_q == CONV_PERF_GROUP_KERNELS) {
         return ((case_id >= P3_CASE_3X3_P0_C32) && (case_id <= P3_CASE_3X3_C5)) ||
                (case_id == P3_CASE_LINEBUF_KGEN_3X3_C96) ||
-               (case_id == P3_CASE_LINEBUF_3X3_C120) ||
                (case_id == P3_CASE_LINEBUF_KGEN_3X3_C65) ||
+               (case_id == P3_CASE_LINEBUF_3X3_C120_C32B) ||
                (case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT);
     }
     if (conv_perf_group_q == CONV_PERF_GROUP_REQUANT) {
@@ -478,18 +476,17 @@ static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
     npu_conv2d_packed_stats_t total_stats;
     uint32_t rows = output_h * output_w;
     uint32_t c_blocks = (input_c_total + 31u) / 32u;
+    uint32_t physical_c = c_blocks * 32u;
     uint32_t c_block_bytes = input_h * input_w * 32u;
     uint32_t input_bytes = c_blocks * c_block_bytes;
     uint32_t output_bytes = rows * 32u * 4u;
-    uint32_t weight_offset = 0u;
+    uint32_t weight_bytes = k_tiles_for(physical_c, kernel_h, kernel_w) * 32u * 32u;
 
     reset_stats(&total_stats);
 
     spatz_rt_dma_1d(T_C120_INPUT, P3_INPUT_ADDR(case_id), input_bytes);
     spatz_rt_dma_wait_all();
-    spatz_rt_dma_1d(T_C120_WEIGHT,
-                    P3_WEIGHT_ADDR(case_id),
-                    k_tiles_for(input_c_total, kernel_h, kernel_w) * 32u * 32u);
+    spatz_rt_dma_1d(T_C120_WEIGHT, P3_WEIGHT_ADDR(case_id), weight_bytes);
     spatz_rt_dma_wait_all();
 
     init_cfg(&cfg,
@@ -498,7 +495,7 @@ static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
              T_C120_OUTPUT,
              input_h,
              input_w,
-             32u,
+             physical_c,
              output_h,
              output_w,
              kernel_h,
@@ -509,33 +506,11 @@ static void run_oc32_case_c32_blocked_slices(uint32_t case_id,
              pad_w);
     cfg.input_c_stride = 32u;
     cfg.input_c_base = 0u;
+    cfg.accumulate = 0u;
 
-    for (uint32_t c_base = 0u; c_base < input_c_total; c_base += 32u) {
-        npu_conv2d_packed_stats_t slice_stats;
-        uint32_t block_idx = c_base / 32u;
-        uint32_t c_count = input_c_total - c_base;
-        uint32_t status;
-
-        if (c_count > 32u) {
-            c_count = 32u;
-        }
-
-        cfg.input_addr = T_C120_INPUT + (block_idx * c_block_bytes);
-        cfg.weight_addr = T_C120_WEIGHT + weight_offset;
-        cfg.input_c = c_count;
-        cfg.accumulate = (c_base == 0u) ? 0u : 1u;
-
-        status = npu_conv2d_packed_run_oc32(&cfg, &slice_stats);
-        if (status != NPU_CONV2D_PACKED_OK) {
-            spatz_rt_fail_at(fail_code, c_base, (int32_t)status, NPU_CONV2D_PACKED_OK);
-        }
-
-        if (c_base == 0u) {
-            copy_stats(&total_stats, &slice_stats);
-        } else {
-            merge_split_stats(&total_stats, &slice_stats);
-        }
-        weight_offset += k_tiles_for(c_count, kernel_h, kernel_w) * 32u * 32u;
+    uint32_t status = npu_conv2d_packed_run_oc32(&cfg, &total_stats);
+    if (status != NPU_CONV2D_PACKED_OK) {
+        spatz_rt_fail_at(fail_code, physical_c, (int32_t)status, NPU_CONV2D_PACKED_OK);
     }
 
     spatz_rt_dma_1d(P3_OUT_ADDR(case_id), T_C120_OUTPUT, output_bytes);
@@ -1106,27 +1081,6 @@ int main(void) {
                                       96u,
                                       0u,
                                       0xC9E1u);
-        spatz_rt_pass_step();
-    }
-
-    if (should_run_case(P3_CASE_LINEBUF_3X3_C120)) {
-        spatz_rt_set_phase(25, P3_CASE_LINEBUF_3X3_C120);
-        run_oc32_case_channel_slices(P3_CASE_LINEBUF_3X3_C120,
-                                      0u,
-                                      P3_C120_H,
-                                      P3_C120_W,
-                                      120u,
-                                      P3_C120_H,
-                                      P3_C120_W,
-                                      3u,
-                                      3u,
-                                      1u,
-                                      1u,
-                                      1u,
-                                      1u,
-                                      96u,
-                                      24u,
-                                      0xC9E2u);
         spatz_rt_pass_step();
     }
 

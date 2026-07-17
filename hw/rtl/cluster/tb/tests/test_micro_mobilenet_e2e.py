@@ -238,6 +238,22 @@ def make_conv3x3_weight_bytes(tag, input_c, output_c):
     return data
 
 
+def assert_micro_mobilenet_layout_contract():
+    # RGB stem remains raw HWC C3. All tensors after the stem use ROW32 or
+    # C32-blocked storage, and all middle-layer weights are already C32-padded.
+    assert len(make_input_bytes()) == INPUT_H * INPUT_W * 3
+
+    stem_weight = make_stem_weight_bytes()
+    assert len(stem_weight) == 32 * 32
+    assert all(value == 0 for value in stem_weight[27 * 32:])
+
+    assert len(make_depthwise_weight_bytes(tag=0, channels=32)) == 3 * 3 * 32
+    assert len(make_depthwise_weight_bytes(tag=2, channels=128)) == 4 * 3 * 3 * 32
+    assert len(make_pointwise_weight_bytes(tag=1, input_c=32, output_c=64)) == 2 * 32 * 32
+    assert len(make_pointwise_weight_bytes(tag=2, input_c=64, output_c=128)) == 4 * 2 * 32 * 32
+    assert len(make_conv3x3_weight_bytes(tag=4, input_c=64, output_c=64)) == 2 * 2 * 3 * 3 * 32 * 32
+
+
 def zeros_c32(height, width, channels):
     return [0] * (height * width * c32_groups(channels) * 32)
 
@@ -404,6 +420,7 @@ async def test_micro_mobilenet_e2e_native_ops(dut):
     fw_path = firmware_path(__file__, "sw/test/micro_mobilenet/micro_mobilenet.bin")
     assert os.path.exists(fw_path), "Run `make -C sw/test/micro_mobilenet` first."
 
+    assert_micro_mobilenet_layout_contract()
     await reset_dut(dut)
     await load_firmware_axi(axi_master, fw_path)
     await write_fixtures(dut)

@@ -12,7 +12,7 @@ limits, and the source files that show how to use and test the path.
 | `RESHAPE_VIEW`, `FLATTEN_VIEW`, `SQUEEZE_VIEW`, `UNSQUEEZE_VIEW` | Host/Python planner tensor metadata | Any layout | Planner-only / zero-copy | Only valid when element order and byte storage are unchanged; no firmware graph op is emitted | Host graph builder, tensor descriptors |
 | `SLICE_VIEW`, `SPLIT_VIEW`, `STRIDED_SLICE_VIEW` | Host/Python planner tensor metadata, or address-offset views | Any layout; C32-aligned views preferred | Planner-only / partial | Fast path requires contiguous or regular-strided addressable views; non-contiguous materialization needs DMA/Spatz lowering | Host graph builder, linebuffer descriptors |
 | `TENSOR_COPY`, `LAYOUT_COPY` | iDMA 1D/2D/3D or Spatz vector copy | Any byte tensor | Supported below graph level | Graph has only L2/TCDM `DMA_IN`/`DMA_OUT`; local copy/repack is available through low-level helpers, not a stable graph op | `sw/test/independent_memory`, `sw/test/spatz_ops` |
-| `LAYOUT_CONVERT_I8`, `PACK_C32_I8`, `UNPACK_C32_I8` | Host/Python layout planner, iDMA 2D/3D pack, or Spatz copy helpers | `HWC`, `ROW32`, `C32_BLOCKED` | Partial / planner-owned | Preferred flow is to enter graph already in accelerator-native layout; generic runtime converter is not a stable graph op yet | `tools/npu_linebuf_precompute.py`, `sw/lib/conv2d_packed.c` |
+| `LAYOUT_CONVERT_I8`, `PACK_C32_I8`, `UNPACK_C32_I8` | Host/Python layout planner, iDMA 2D/3D pack, or Spatz copy helpers | `HWC`, `ROW32`, `C32_BLOCKED` | Partial / planner-owned | RGB stem stays raw HWC C3; middle-layer activations/weights should enter graph already C32-padded. Generic runtime converter is not a stable graph op yet | `tools/npu_linebuf_precompute.py`, `sw/lib/conv2d_packed.c` |
 | `TRANSPOSE_I8`, `PERMUTE_I8` | Host/Python planner today; future iDMA/Spatz materialization | Any i8 tensor | Not a standalone graph op yet | Zero-copy only when representable as a view accepted by the consumer; otherwise requires explicit materialization not yet exposed through `npu_graph_run()` | Planned host/runtime lowering |
 | `CONCAT_I8` | Logical fused consumer or Spatz C32 concat helper | C32-friendly tensors | Partial | YOLO head uses fused dual-source Conv instead of materializing concat; generic N-way concat is not a graph op yet | `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2`, `spatz_concat_c32_i8()` |
 | `SYSTOLIC_GEMM32` | Systolic array | `ROW32` i8 input, `ROW32` i32 output | Supported | K/N fixed to 32 lanes, M from `layer.dim_m` | `sw/lib/hal_systolic.c`, `sw/test/independent_systolic` |
@@ -48,7 +48,7 @@ Supported layouts:
 
 | Layout | Meaning | Byte size helper | Typical users |
 |---|---|---|---|
-| `NPU_LAYOUT_HWC` | Pixel-major H/W/C tensor | `npu_tensor_hwc_bytes()` | RGB input/stem only |
+| `NPU_LAYOUT_HWC` | Pixel-major H/W/C tensor | `npu_tensor_hwc_bytes()` | RGB input/stem only; do not pre-pack the current RGB stem into C32 |
 | `NPU_LAYOUT_ROW32` | Row-major M rows x 32 lanes | `npu_tensor_row32_bytes()` or `npu_tensor_i32_row32_bytes()` | GEMM, linebuffer conv, raw YOLO head |
 | `NPU_LAYOUT_C32_BLOCKED` | Channel group-major C32 blocks: `[c_group][pixel][lane]` | `npu_tensor_c32_bytes()` | Pointwise, depthwise, MobileNet-style tensors |
 
