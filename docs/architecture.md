@@ -232,7 +232,7 @@ Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không ph�
 | `0x1010_0000 – 0x1015_FFFF` | 384 KB | **I-TCDM logical window** | Weights và IFM tiles cho compute engines. |
 | `0x1017_F000 – 0x1017_FFFF` | 4 KB | **TCDM command staging window** | Reserved local command-stream staging buffer. Host does not write this directly; Snitch refills this window from L2 through iDMA as descriptor offsets advance. |
 | `0x1020_0000 – 0x1021_FFFF` | 128 KB | **O-TCDM logical window** | OFM / INT32 accumulator writeback. |
-| `0x2000_0000 – 0x2000_FFFF` | 64 KB | **MMIO / CSR** | `cluster_ctrl_regs`, iDMA, interrupt controller, AFU/accelerator control. |
+| `0x2000_0000 – 0x2000_FFFF` | 64 KB | **MMIO / CSR** | Systolic control, iDMA, interrupt controller, AFU/accelerator control. |
 | `0x8000_0000+` | External | **L2 / AXI sim memory** | Testbench/external memory chứa input/output buffers. |
 
 > **Tại sao tách I-TCM và D-TCM?**  
@@ -242,7 +242,7 @@ Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không ph�
 
 | Address | Block | Role |
 |---------|-------|------|
-| `0x2000_0000` | `cluster_ctrl_regs` | Legacy DMA and Systolic control/status registers. |
+| `0x2000_0000` | `systolic_ctrl_regs` | Systolic control/status, linebuffer, and requant registers. Unused low offsets return zero. |
 | `0x2000_1000` | `npu_idma_ctrl_mm` | iDMA-compatible 1D/2D/3D transfer configuration. |
 | `0x2000_2000` | `npu_interrupt_ctrl` | Internal done-event IRQ and firmware-driven host completion. |
 | `0x2000_3000` | `afu` | LUT activation unit. Offset `0x000..0x3ff` is LUT SRAM; offset `0x400+` is status/src/dst/length/mode CSR. |
@@ -351,7 +351,7 @@ npu_systolic_array
   -> packed row write: 32 bytes to O-TCDM
 ```
 
-Default reset and the raw HAL path keep requant disabled, so debug and accumulator tests still observe full INT32 results. Firmware enables requant only through `systolic_gemm32_requant()` after programming the qparam arrays in `cluster_ctrl_regs`.
+Default reset and the raw HAL path keep requant disabled, so debug and accumulator tests still observe full INT32 results. Firmware enables requant only through `systolic_gemm32_requant()` after programming the qparam arrays in `systolic_ctrl_regs`.
 
 | Mode | Row size | Write ports | Use case |
 |------|----------|-------------|----------|
@@ -379,7 +379,7 @@ Detailed walkthrough: [Boot Flow](boot_flow.md).
 
 5. Snitch thực thi firmware:
    - Khởi tạo private D-TCM (stack setup, `.data`, `.bss`)
-   - Cấu hình cluster_ctrl_regs qua Snitch D-Bus → D-side demux → MMIO
+   - Configure MMIO CSRs through Snitch D-Bus → D-side demux → MMIO
    - (Phase 3B-A) Trigger DMA để load weight/IFM vào Data TCDM
    - (Phase 3B-A) Dispatch lệnh tới Systolic Array
    - (Phase 3B-B) Dispatch lệnh RVV tới Spatz

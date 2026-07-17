@@ -41,7 +41,7 @@ from test_independent_memory import (
 @cocotb.test()
 async def test_dma_tcm_path(dut):
     """
-    Legacy DMA/TCDM smoke gate for the current cluster.
+    iDMA MMIO/TCDM smoke gate for the current cluster.
 
     The old version drove an APB test environment that no longer exists. The
     current architecture boots Snitch from I-TCM, lets firmware program iDMA

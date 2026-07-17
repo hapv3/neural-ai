@@ -194,14 +194,14 @@ Implemented files:
 
 - `hw/rtl/systolic/requant_pipeline.sv`: 32-lane combinational requant packer.
 - `hw/rtl/systolic/systolic_controller.sv`: selects raw INT32 bypass or packed INT8 requant mode.
-- `hw/rtl/cluster/cluster_ctrl_regs.sv`: exposes per-channel qparams through MMIO.
+- `hw/rtl/systolic/systolic_ctrl_regs.sv`: exposes per-channel qparams through MMIO.
 - `sw/lib/hal_systolic.c`: provides raw GEMM and requant GEMM HAL entry points.
 - `sw/test/systolic_requant`: firmware test for packed output mode.
 - `hw/rtl/cluster/tb/tests/test_systolic_requant.py`: cocotb byte-exact golden check.
 
 ### 4.1. MMIO register map
 
-All offsets are relative to `cluster_ctrl_regs` at `0x2000_0000`.
+All offsets are relative to the systolic control window at `0x2000_0000`.
 
 | Offset | Name | Meaning |
 |--------|------|---------|

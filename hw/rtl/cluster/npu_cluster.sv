@@ -437,10 +437,10 @@ module npu_cluster #(
     logic [MMIO_DATA_WIDTH-1:0] ctrl_wdata;
     logic                      ctrl_rvalid;
     logic [MMIO_DATA_WIDTH-1:0] ctrl_rdata;
-    logic                      dma_ctrl_req;
-    logic                      dma_ctrl_gnt;
-    logic                      dma_ctrl_rvalid;
-    logic [MMIO_DATA_WIDTH-1:0] dma_ctrl_rdata;
+    logic                      ctrl_unused_req;
+    logic                      ctrl_unused_gnt;
+    logic                      ctrl_unused_rvalid;
+    logic [MMIO_DATA_WIDTH-1:0] ctrl_unused_rdata;
     logic                      systolic_ctrl_req;
     logic                      systolic_ctrl_gnt;
     logic                      systolic_ctrl_rvalid;
@@ -669,10 +669,6 @@ module npu_cluster #(
         .m4_rdata_i   (snitch_cmd_rdata)
     );
 
-    logic        cfg_dma_start;
-    logic [31:0] cfg_dma_src_addr;
-    logic [31:0] cfg_dma_dst_addr;
-    logic [31:0] cfg_dma_length;
     logic        cfg_dma_done;
 
     logic        cfg_sys_done;
@@ -708,33 +704,21 @@ module npu_cluster #(
 
     assign ctrl_systolic_sel = ((ctrl_addr & 32'hFFFF) >= 32'h0100) &&
                                ((ctrl_addr & 32'hFFFF) < 32'h0580);
-    assign dma_ctrl_req = ctrl_req && !ctrl_systolic_sel;
+    assign ctrl_unused_req = ctrl_req && !ctrl_systolic_sel;
     assign systolic_ctrl_req = ctrl_req && ctrl_systolic_sel;
-    assign ctrl_gnt = ctrl_systolic_sel ? systolic_ctrl_gnt : dma_ctrl_gnt;
-    assign ctrl_rvalid = systolic_ctrl_rvalid | dma_ctrl_rvalid;
-    assign ctrl_rdata = systolic_ctrl_rvalid ? systolic_ctrl_rdata : dma_ctrl_rdata;
+    assign ctrl_unused_gnt = 1'b1;
+    assign ctrl_unused_rdata = '0;
+    assign ctrl_gnt = ctrl_systolic_sel ? systolic_ctrl_gnt : ctrl_unused_gnt;
+    assign ctrl_rvalid = systolic_ctrl_rvalid | ctrl_unused_rvalid;
+    assign ctrl_rdata = systolic_ctrl_rvalid ? systolic_ctrl_rdata : ctrl_unused_rdata;
 
-    cluster_ctrl_regs #(
-        .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .DATA_WIDTH(MMIO_DATA_WIDTH)
-    ) u_ctrl_regs (
-        .clk_i              (clk_i),
-        .rst_ni             (rst_ni),
-        .req_i              (dma_ctrl_req),
-        .gnt_o              (dma_ctrl_gnt),
-        .addr_i             (ctrl_addr),
-        .we_i               (ctrl_we),
-        .be_i               (ctrl_be),
-        .wdata_i            (ctrl_wdata),
-        .rvalid_o           (dma_ctrl_rvalid),
-        .rdata_o            (dma_ctrl_rdata),
-
-        .cfg_dma_start_o    (cfg_dma_start),
-        .cfg_dma_src_addr_o (cfg_dma_src_addr),
-        .cfg_dma_dst_addr_o (cfg_dma_dst_addr),
-        .cfg_dma_length_o   (cfg_dma_length),
-        .cfg_dma_done_i     (cfg_dma_done)
-    );
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            ctrl_unused_rvalid <= 1'b0;
+        end else begin
+            ctrl_unused_rvalid <= ctrl_unused_req && ctrl_unused_gnt;
+        end
+    end
 
     npu_interrupt_ctrl #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),

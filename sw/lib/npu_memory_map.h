@@ -31,13 +31,6 @@
 #define NPU_CMD_TCDM_BASE 0x1017F000u
 #define NPU_CMD_TCDM_SIZE 0x00001000u
 
-// Legacy DMA Configuration Registers
-#define REG_DMA_START   (NPU_CTRL_BASE + 0x00)
-#define REG_DMA_SRC     (NPU_CTRL_BASE + 0x20)
-#define REG_DMA_DST     (NPU_CTRL_BASE + 0x40)
-#define REG_DMA_LEN     (NPU_CTRL_BASE + 0x60)
-#define REG_DMA_DONE    (NPU_CTRL_BASE + 0x80)
-
 // PULP iDMA reg32_3d-compatible MMIO register window.
 // Keep these offsets aligned with hw/idma/target/rtl/idma_reg32_3d_reg_pkg.sv.
 #define IDMA_DIR_AXI2OBI            0u
