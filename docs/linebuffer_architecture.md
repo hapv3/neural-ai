@@ -156,9 +156,12 @@ Unaligned vectors are handled by `merge_beats`: if a 32-byte vector crosses a
 Firmware/Python host must distinguish the raw input layout from the NPU
 internal layout:
 
-- Boundary input from camera/model loader may be default NHWC/RGB. The first
-  layer may use a tail/raw path or a dedicated DMA/repack path because `IC=3`
-  is small.
+- Boundary input from camera/model loader may be default NHWC/RGB. The current
+  RGB stem keeps this raw HWC C3 contract and uses the dedicated RGB linebuffer
+  descriptor path (`input_c=3`, `input_c_stride=3`). Do not pre-pack the
+  existing RGB stem into C32 in the Python host flow. A dedicated iDMA
+  pre-zero/repack path may be evaluated later as a separate stem-only tradeoff,
+  but it is not the current scheduler contract.
 - After the first layer, systolic OFM should be treated as an internal
   **C32-blocked/block-major** tensor, not compact full-C NHWC:
   `block[cblk][spatial][32C]`.

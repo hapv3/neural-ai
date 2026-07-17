@@ -44,6 +44,8 @@ DEFAULT_OFM_ENV = {
     },
 }
 
+CONV_PERF_ACTIVE_CASES = tuple(case for case in range(24) if case != 20)
+
 GENERIC_ENV_KEYS = (
     "SYSTOLIC_OFM_FIFO_DEPTH",
     "SYSTOLIC_OTCDM_STALL_PERIOD",
@@ -138,7 +140,7 @@ def parse_list(value: str, all_values: list[str]) -> list[str]:
 
 def parse_case_list(value: str) -> list[int]:
     if value == "all":
-        return list(range(24))
+        return list(CONV_PERF_ACTIVE_CASES)
     cases: list[int] = []
     for item in value.split(","):
         item = item.strip()
@@ -149,7 +151,8 @@ def parse_case_list(value: str) -> list[int]:
             cases.extend(range(int(first), int(last) + 1))
         else:
             cases.append(int(item))
-    return cases
+    active = set(CONV_PERF_ACTIVE_CASES)
+    return [case for case in cases if case in active]
 
 
 def parse_depthwise_case_list(value: str) -> list[int]:

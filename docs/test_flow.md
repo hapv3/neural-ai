@@ -247,6 +247,10 @@ python3 hw/rtl/cluster/tb/run_cluster_tests.py --build-fw --jobs 4 --tests all
 python3 hw/rtl/cluster/tb/run_cluster_tests.py --tests test_conv_perf --conv-perf-cases 0-23
 ```
 
+`conv_perf` case ID 20 is reserved for the removed raw IC120 slow-path
+regression. The runner filters it out from `all` and numeric ranges; case 22 is
+the active C32-padded IC120 coverage.
+
 ### Matmul
 
 ```text

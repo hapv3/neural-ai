@@ -37,10 +37,6 @@ L2_CONV1_C64_STATS = 0x80078000
 L2_CONV_PERF_CONFIG = 0x8007F000
 L2_P3_BASE = 0x80080000
 P3_CASE_STRIDE = 0x00040000
-P3_C120_INPUT_ADDR = 0x81000000
-P3_C120_WEIGHT_ADDR = 0x81110000
-P3_C120_OUT_ADDR = 0x81120000
-P3_C120_STATS_ADDR = 0x81240000
 P3_C120_C32B_INPUT_ADDR = 0x81300000
 P3_C120_C32B_WEIGHT_ADDR = 0x81410000
 P3_C120_C32B_OUT_ADDR = 0x81420000
@@ -85,7 +81,8 @@ P3_CASE_YOLO_RGB_TCDM_SPATZ = 16
 P3_CASE_LINEBUF_3X3_C3 = 17
 P3_CASE_LINEBUF_KGEN_3X3_C32 = 18
 P3_CASE_LINEBUF_KGEN_3X3_C96 = 19
-P3_CASE_LINEBUF_3X3_C120 = 20
+# Case ID 20 was the raw IC120 slow-path regression. Keep the ID reserved; use
+# case 22 for production C32-padded IC120 coverage.
 P3_CASE_LINEBUF_KGEN_3X3_C65 = 21
 P3_CASE_LINEBUF_3X3_C120_C32B = 22
 P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT = 23
@@ -205,25 +202,6 @@ P3_CASES = {
         0,
         False,
     ),
-    P3_CASE_LINEBUF_3X3_C120: (
-        "linebuffer full-height split conv3x3 IC120",
-        P3_C120_H,
-        P3_C120_W,
-        120,
-        P3_C120_H,
-        P3_C120_W,
-        3,
-        3,
-        1,
-        1,
-        1,
-        1,
-        32,
-        34,
-        0,
-        0,
-        False,
-    ),
     P3_CASE_LINEBUF_KGEN_3X3_C65: (
         "linebuffer KGEN small-cache conv3x3 IC65",
         4,
@@ -257,7 +235,7 @@ P3_CASES = {
         1,
         1,
         32,
-        34,
+        36,
         0,
         0,
         False,
@@ -309,7 +287,6 @@ def p3_case_enabled(case_id):
     if CONV_PERF_GROUP == CONV_PERF_GROUP_KERNELS:
         return (P3_CASE_3X3_P0_C32 <= case_id <= P3_CASE_3X3_C5) or (
             case_id == P3_CASE_LINEBUF_KGEN_3X3_C96
-            or case_id == P3_CASE_LINEBUF_3X3_C120
             or case_id == P3_CASE_LINEBUF_KGEN_3X3_C65
             or case_id == P3_CASE_LINEBUF_3X3_C120_C32B
             or case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT
@@ -335,7 +312,6 @@ def p3_case_is_linebuf(case_id):
         P3_CASE_LINEBUF_3X3_C3,
         P3_CASE_LINEBUF_KGEN_3X3_C32,
         P3_CASE_LINEBUF_KGEN_3X3_C96,
-        P3_CASE_LINEBUF_3X3_C120,
         P3_CASE_LINEBUF_KGEN_3X3_C65,
         P3_CASE_LINEBUF_3X3_C120_C32B,
         P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT,
@@ -464,8 +440,6 @@ def golden_conv3():
 
 
 def p3_input_addr(case_id):
-    if case_id == P3_CASE_LINEBUF_3X3_C120:
-        return P3_C120_INPUT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_INPUT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
@@ -474,8 +448,6 @@ def p3_input_addr(case_id):
 
 
 def p3_weight_addr(case_id):
-    if case_id == P3_CASE_LINEBUF_3X3_C120:
-        return P3_C120_WEIGHT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_WEIGHT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
@@ -484,8 +456,6 @@ def p3_weight_addr(case_id):
 
 
 def p3_out_addr(case_id):
-    if case_id == P3_CASE_LINEBUF_3X3_C120:
-        return P3_C120_OUT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_OUT_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
@@ -494,8 +464,6 @@ def p3_out_addr(case_id):
 
 
 def p3_stats_addr(case_id):
-    if case_id == P3_CASE_LINEBUF_3X3_C120:
-        return P3_C120_STATS_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C120_C32B:
         return P3_C120_C32B_STATS_ADDR
     if case_id == P3_CASE_LINEBUF_3X3_C32_TILED_REQUANT:
@@ -671,19 +639,21 @@ def linebuf_channel_slices(input_c):
 
 
 def c32_blocked_channel_slices(input_c):
+    # Keep weights packed per physical C32 group, including the final padded
+    # group. RTL group-stationary consumes tiles in group-spatial order:
+    # C0 kh/kw sweep, then C32, then C64, etc. Lanes beyond logical input_c
+    # are zeroed by make_p3_weight_packed_channel_slice().
     slices = []
     c_base = 0
     while c_base < input_c:
-        c_count = min(K_TILE, input_c - c_base)
-        slices.append((c_base, c_count))
-        c_base += c_count
+        slices.append((c_base, K_TILE))
+        c_base += K_TILE
     return slices
 
 
 def use_linebuf_channel_slice_plan(case_id):
     return case_id in (
         P3_CASE_LINEBUF_KGEN_3X3_C96,
-        P3_CASE_LINEBUF_3X3_C120,
         P3_CASE_LINEBUF_KGEN_3X3_C65,
         P3_CASE_LINEBUF_3X3_C120_C32B,
     )
@@ -723,40 +693,6 @@ def golden_p3_case(case_id):
         _spatz,
         requant_output,
     ) = P3_CASES[case_id]
-    if case_id == P3_CASE_LINEBUF_3X3_C120:
-        import numpy as np
-
-        h = np.arange(input_h, dtype=np.int32)[:, None, None]
-        w = np.arange(input_w, dtype=np.int32)[None, :, None]
-        c = np.arange(input_c, dtype=np.int32)[None, None, :]
-        input_data = ((h * 13 + w * 7 + c * 5) % 19) - 9
-
-        kh_axis = np.arange(kernel_h, dtype=np.int32)[:, None, None, None]
-        kw_axis = np.arange(kernel_w, dtype=np.int32)[None, :, None, None]
-        c_axis = np.arange(input_c, dtype=np.int32)[None, None, :, None]
-        oc_axis = np.arange(oc_count, dtype=np.int32)[None, None, None, :]
-        weight = ((kh_axis * 17 + kw_axis * 11 + c_axis * 7 + oc_axis * 3) % 17) - 8
-
-        out_arr = np.zeros((output_h, output_w, oc_count), dtype=np.int32)
-        for kh in range(kernel_h):
-            oh0 = max(0, pad_h - kh)
-            oh1 = min(output_h, input_h + pad_h - kh)
-            if oh0 >= oh1:
-                continue
-            ih0 = oh0 + kh - pad_h
-            ih1 = oh1 + kh - pad_h
-            for kw in range(kernel_w):
-                ow0 = max(0, pad_w - kw)
-                ow1 = min(output_w, input_w + pad_w - kw)
-                if ow0 >= ow1:
-                    continue
-                iw0 = ow0 + kw - pad_w
-                iw1 = ow1 + kw - pad_w
-                tile = input_data[ih0:ih1, iw0:iw1, :].reshape(-1, input_c)
-                prod = tile @ weight[kh, kw, :, :]
-                out_arr[oh0:oh1, ow0:ow1, :] += prod.reshape(oh1 - oh0, ow1 - ow0, oc_count)
-        return out_arr.astype("<i4", copy=False).tobytes()
-
     out = []
     for oh in range(output_h):
         for ow in range(output_w):
@@ -950,7 +886,7 @@ async def boot_and_run(dut, test_file):
     monitor_task = cocotb.start_soon(monitor_conv_perf_states(dut, monitor_stats))
     await release_fetch(dut, axi_master=axi_master)
     try:
-        timeout_cycles = 50000000 if CONV_PERF_CASE == P3_CASE_LINEBUF_3X3_C120 else 1600000
+        timeout_cycles = 1600000
         await wait_for_host_irq(dut, timeout_cycles=timeout_cycles, axi_master=axi_master, report_name="test_conv_perf")
     except AssertionError as exc:
         status = read_dtcm_word(dut, STATUS_BASE + 0x00)

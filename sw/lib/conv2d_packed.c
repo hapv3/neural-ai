@@ -173,7 +173,15 @@ static uint32_t is_linebuf_coalesce_supported(const npu_conv2d_packed_cfg_t *cfg
 }
 
 static uint32_t is_linebuf_kgen_channel_block_safe(const npu_conv2d_packed_cfg_t *cfg) {
-    return cfg->input_c == NPU_CONV2D_PACKED_K_TILE;
+    if (cfg->input_c == NPU_CONV2D_PACKED_K_TILE) {
+        return 1u;
+    }
+    /* Multi-C32 KGEN is only correct for C32-blocked input; raw IC96/IC120
+     * still uses the tiled fallback until generic KGEN multi-tile is fixed. */
+    return cfg->input_c > NPU_CONV2D_PACKED_K_TILE &&
+           (cfg->input_c % NPU_CONV2D_PACKED_K_TILE) == 0u &&
+           input_c_stride(cfg) == NPU_CONV2D_PACKED_K_TILE &&
+           cfg->input_c_base == 0u;
 }
 
 static uint32_t is_linebuf_kgen_supported(const npu_conv2d_packed_cfg_t *cfg,
@@ -674,7 +682,8 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     uint32_t stride_c = input_c_stride(cfg);
     uint32_t row_stride_bytes = input_row_stride_bytes(cfg);
     uint32_t c32_fast_safe = (stride_c == SYSTOLIC_GEMM32_K) &&
-                             (cfg->input_c == SYSTOLIC_GEMM32_K) &&
+                             (cfg->input_c >= SYSTOLIC_GEMM32_K) &&
+                             ((cfg->input_c % SYSTOLIC_GEMM32_K) == 0u) &&
                              (cfg->input_c_base == 0u);
 
     linebuf_cfg->input_base = cfg->input_addr + cfg->input_c_base - (cfg->pad_h * row_stride_bytes);
@@ -703,6 +712,14 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     linebuf_cfg->k_tiles = k_tiles;
     linebuf_cfg->spatial_m = spatial_rows;
     linebuf_finalize_precompute(linebuf_cfg, c32_fast_safe);
+    if (linebuf_cfg->c32_fast && kgen &&
+        stride_c == SYSTOLIC_GEMM32_K &&
+        cfg->input_c_base == 0u &&
+        cfg->input_c > SYSTOLIC_GEMM32_K &&
+        ((cfg->input_c % SYSTOLIC_GEMM32_K) == 0u)) {
+        linebuf_cfg->channel_addr_offset = cfg->input_h * row_stride_bytes;
+        linebuf_cfg->c32_group_stationary = 1u;
+    }
 }
 
 static void linebuf_job_from_tile_cfg(const npu_conv2d_packed_cfg_t *cfg,
@@ -740,14 +757,15 @@ static void linebuf_job_apply_c32_group_span(const npu_conv2d_packed_cfg_t *cfg,
     if (job->linebuf.c32_fast && job->linebuf.kgen &&
         input_c_stride(cfg) == NPU_CONV2D_PACKED_K_TILE &&
         cfg->input_c_base == 0u &&
-        cfg->input_c == NPU_CONV2D_PACKED_K_TILE) {
+        cfg->input_c >= NPU_CONV2D_PACKED_K_TILE &&
+        (cfg->input_c % NPU_CONV2D_PACKED_K_TILE) == 0u) {
         /*
          * C32 group-stationary descriptors pass the group span here, not the
          * current group offset. RTL advances the active offset with registered
          * adds when k_seed_ic crosses into the next C32 group.
          */
         job->linebuf.channel_addr_offset = cfg->input_h * input_row_stride_bytes(cfg);
-        job->linebuf.c32_group_stationary = 0u;
+        job->linebuf.c32_group_stationary = (uint16_t)(cfg->input_c > NPU_CONV2D_PACKED_K_TILE);
     }
 }
 

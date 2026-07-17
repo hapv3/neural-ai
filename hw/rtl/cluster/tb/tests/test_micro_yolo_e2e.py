@@ -29,6 +29,7 @@ from npu_linebuf_precompute import (
     MICRO_YOLO_DESC_L2_BASE,
     micro_yolo_descriptor_blobs,
     micro_yolo_descriptor_manifest,
+    micro_yolo_jobs,
 )
 
 
@@ -109,6 +110,38 @@ def micro_yolo_linebuf_blobs():
 def micro_yolo_linebuf_manifest_and_blobs():
     blobs = micro_yolo_linebuf_blobs()
     return micro_yolo_descriptor_manifest(blobs), blobs
+
+
+def assert_micro_yolo_linebuf_layout_contract():
+    jobs = micro_yolo_jobs(
+        c2f_tile_oh=tile_env("MICRO_YOLO_C2F_TILE_OH"),
+        c2f_tile_ow=tile_env("MICRO_YOLO_C2F_TILE_OW"),
+        down_tile_oh=tile_env("MICRO_YOLO_DOWN_TILE_OH"),
+        down_tile_ow=tile_env("MICRO_YOLO_DOWN_TILE_OW"),
+        head_tile_oh=tile_env("MICRO_YOLO_HEAD_TILE_OH"),
+        head_tile_ow=tile_env("MICRO_YOLO_HEAD_TILE_OW"),
+    )
+
+    stem_lb = jobs["STEM"][0]["linebuf"]
+    assert stem_lb["input_c"] == 3
+    assert stem_lb["pixel_stride_bytes"] == 3
+    assert stem_lb["block_valid_bytes"] == 3
+    assert stem_lb["c32_fast"] == 0
+
+    for name in ("C2F", "DOWN", "HEAD0"):
+        lb = jobs[name][0]["linebuf"]
+        assert lb["input_c"] == 32, name
+        assert lb["pixel_stride_bytes"] == 32, name
+        assert lb["row_stride_bytes"] % 32 == 0, name
+        assert lb["block_valid_bytes"] == 32, name
+        assert lb["c32_fast"] == 1, name
+
+    head1_lb = jobs["HEAD1_L2"][0]["job"]["linebuf"]
+    assert head1_lb["input_c"] == 32
+    assert head1_lb["pixel_stride_bytes"] == 32
+    assert head1_lb["row_stride_bytes"] % 32 == 0
+    assert head1_lb["block_valid_bytes"] == 32
+    assert head1_lb["c32_fast"] == 1
 
 
 def pmu_direct_snapshot(dut):
@@ -489,6 +522,7 @@ async def test_micro_yolo_e2e(dut):
     )
     assert os.path.exists(fw_path), "Missing firmware. Run `make -C sw/test/micro_yolo` first."
 
+    assert_micro_yolo_linebuf_layout_contract()
     await reset_dut(dut)
     await write_l2_bytes(dut, L2_INPUT, [to_u8(value) for value in input_hwc])
     await write_l2_bytes(dut, L2_WEIGHT0, [to_u8(value) for value in weight0])
