@@ -104,6 +104,7 @@ $(REPO_ROOT)/hw/spatz/hw/ip/snitch/src/snitch.sv
 $(REPO_ROOT)/hw/rtl/cluster/npu_cluster_pkg.sv
 $(REPO_ROOT)/hw/rtl/cluster/cluster_sram_bank.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_arbiter_2to1.sv
+$(REPO_ROOT)/hw/rtl/cluster/obi_req_register_slice.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to4.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_demux_1to5.sv
 $(REPO_ROOT)/hw/rtl/cluster/obi_narrow_to_wide.sv

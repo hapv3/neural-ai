@@ -10,7 +10,8 @@ module obi_demux_1to4 #(
     parameter logic [ADDR_WIDTH-1:0] M2_BASE = 32'h1010_0000,
     parameter logic [ADDR_WIDTH-1:0] M2_MASK = 32'hFFF0_0000,
     parameter logic [ADDR_WIDTH-1:0] M3_BASE = 32'h2000_0000,
-    parameter logic [ADDR_WIDTH-1:0] M3_MASK = 32'hFFFF_0000
+    parameter logic [ADDR_WIDTH-1:0] M3_MASK = 32'hFFFF_0000,
+    parameter bit M0_REQ_REGISTER = 1'b0
 )(
     input  logic clk_i,
     input  logic rst_ni,
@@ -70,6 +71,14 @@ module obi_demux_1to4 #(
     logic outstanding_q;
     logic selected_rvalid;
     logic accept_req;
+    logic m0_req_raw;
+    logic m0_gnt_raw;
+    logic [ADDR_WIDTH-1:0] m0_addr_raw;
+    logic m0_we_raw;
+    logic [(DATA_WIDTH/8)-1:0] m0_be_raw;
+    logic [DATA_WIDTH-1:0] m0_wdata_raw;
+    logic m0_rvalid_raw;
+    logic [DATA_WIDTH-1:0] m0_rdata_raw;
 
     assign sel_m0 = ((slv_addr_i & M0_MASK) == (M0_BASE & M0_MASK));
     assign sel_m1 = ((slv_addr_i & M1_MASK) == (M1_BASE & M1_MASK));
@@ -77,34 +86,73 @@ module obi_demux_1to4 #(
     assign sel_m3 = ((slv_addr_i & M3_MASK) == (M3_BASE & M3_MASK));
 
     // Request Routing
-    assign m0_req_o   = slv_req_i & sel_m0 & !outstanding_q;
+    assign m0_req_raw = slv_req_i & sel_m0 & !outstanding_q;
     assign m1_req_o   = slv_req_i & sel_m1 & !outstanding_q;
     assign m2_req_o   = slv_req_i & sel_m2 & !outstanding_q;
     assign m3_req_o   = slv_req_i & sel_m3 & !outstanding_q;
 
-    assign m0_addr_o  = slv_addr_i;
+    assign m0_addr_raw = slv_addr_i;
     assign m1_addr_o  = slv_addr_i;
     assign m2_addr_o  = slv_addr_i;
     assign m3_addr_o  = slv_addr_i;
 
-    assign m0_we_o    = slv_we_i;
+    assign m0_we_raw = slv_we_i;
     assign m1_we_o    = slv_we_i;
     assign m2_we_o    = slv_we_i;
     assign m3_we_o    = slv_we_i;
 
-    assign m0_be_o    = slv_be_i;
+    assign m0_be_raw = slv_be_i;
     assign m1_be_o    = slv_be_i;
     assign m2_be_o    = slv_be_i;
     assign m3_be_o    = slv_be_i;
 
-    assign m0_wdata_o = slv_wdata_i;
+    assign m0_wdata_raw = slv_wdata_i;
     assign m1_wdata_o = slv_wdata_i;
     assign m2_wdata_o = slv_wdata_i;
     assign m3_wdata_o = slv_wdata_i;
 
+    generate
+        if (M0_REQ_REGISTER) begin : gen_m0_req_slice
+            obi_req_register_slice #(
+                .ADDR_WIDTH (ADDR_WIDTH),
+                .DATA_WIDTH (DATA_WIDTH)
+            ) u_m0_req_slice (
+                .clk_i        (clk_i),
+                .rst_ni       (rst_ni),
+
+                .slv_req_i    (m0_req_raw),
+                .slv_gnt_o    (m0_gnt_raw),
+                .slv_addr_i   (m0_addr_raw),
+                .slv_we_i     (m0_we_raw),
+                .slv_be_i     (m0_be_raw),
+                .slv_wdata_i  (m0_wdata_raw),
+                .slv_rvalid_o (m0_rvalid_raw),
+                .slv_rdata_o  (m0_rdata_raw),
+
+                .mst_req_o    (m0_req_o),
+                .mst_gnt_i    (m0_gnt_i),
+                .mst_addr_o   (m0_addr_o),
+                .mst_we_o     (m0_we_o),
+                .mst_be_o     (m0_be_o),
+                .mst_wdata_o  (m0_wdata_o),
+                .mst_rvalid_i (m0_rvalid_i),
+                .mst_rdata_i  (m0_rdata_i)
+            );
+        end else begin : gen_m0_passthrough
+            assign m0_req_o = m0_req_raw;
+            assign m0_gnt_raw = m0_gnt_i;
+            assign m0_addr_o = m0_addr_raw;
+            assign m0_we_o = m0_we_raw;
+            assign m0_be_o = m0_be_raw;
+            assign m0_wdata_o = m0_wdata_raw;
+            assign m0_rvalid_raw = m0_rvalid_i;
+            assign m0_rdata_raw = m0_rdata_i;
+        end
+    endgenerate
+
     // Grant Routing
     assign slv_gnt_o  = !outstanding_q &&
-                        ((sel_m0 & m0_gnt_i) | (sel_m1 & m1_gnt_i) |
+                        ((sel_m0 & m0_gnt_raw) | (sel_m1 & m1_gnt_i) |
                          (sel_m2 & m2_gnt_i) | (sel_m3 & m3_gnt_i));
     assign accept_req = slv_req_i && slv_gnt_o;
 
@@ -128,8 +176,8 @@ module obi_demux_1to4 #(
         slv_rdata_o  = '0;
         case (out_sel_q)
             2'b00: begin
-                slv_rvalid_o = m0_rvalid_i;
-                slv_rdata_o  = m0_rdata_i;
+                slv_rvalid_o = m0_rvalid_raw;
+                slv_rdata_o  = m0_rdata_raw;
             end
             2'b01: begin
                 slv_rvalid_o = m1_rvalid_i;

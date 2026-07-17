@@ -27,70 +27,165 @@ module npu_pmu #(
     localparam logic [ADDR_WIDTH-1:0] REG_NUM_COUNTER = 32'h0008;
     localparam logic [ADDR_WIDTH-1:0] REG_COUNTER_BASE = 32'h0100;
 
-    logic [NUM_COUNTERS-1:0][63:0] counter_q;
-    logic [NUM_COUNTERS-1:0][63:0] snapshot_q;
     logic [NUM_COUNTERS-1:0] overflow_q;
+    logic [NUM_COUNTERS-1:0][DATA_WIDTH-1:0] counter_read_data;
     logic enable_q;
     logic snapshot_valid_q;
-    logic [ADDR_WIDTH-1:0] r_addr_q;
+    logic write_resp_q;
+    logic read_pending_s0_q;
+    logic read_pending_s1_q;
+    logic read_pending_s2_q;
+    logic [DATA_WIDTH-1:0] read_data_d;
+    logic [DATA_WIDTH-1:0] read_counter_data;
     logic [ADDR_WIDTH-1:0] wr_local_addr;
-    logic [ADDR_WIDTH-1:0] rd_local_addr;
-    logic [ADDR_WIDTH-1:0] rd_counter_offset;
-    logic [31:0] rd_counter_idx;
-    logic [63:0] rd_counter_value;
-    logic ctrl_write;
-    logic [31:0] ctrl_wdata;
+    logic [31:0] read_counter_idx;
+    logic [NUM_COUNTERS-1:0] read_counter_sel_d;
+    logic [NUM_COUNTERS-1:0] read_counter_sel_q;
+    logic [NUM_COUNTERS-1:0] read_counter_high_q;
+    logic [NUM_COUNTERS-1:0] read_snapshot_q;
+    logic read_ctrl_s0_q;
+    logic read_status_s0_q;
+    logic read_num_counter_s0_q;
+    logic read_ctrl_s1_q;
+    logic read_status_s1_q;
+    logic read_num_counter_s1_q;
+    logic read_ctrl_s2_q;
+    logic read_status_s2_q;
+    logic read_num_counter_s2_q;
+    logic ctrl_write_d;
+    logic ctrl_write_q;
+    logic [2:0] ctrl_bits_d;
+    logic [2:0] ctrl_bits_q;
+    logic ctrl_clear_q;
+    logic ctrl_snapshot_q;
+    /* verilator lint_off UNUSEDSIGNAL */
+    logic [DATA_WIDTH-4:0] unused_wdata;
+    /* verilator lint_on UNUSEDSIGNAL */
 
     assign gnt_o = 1'b1;
-    assign wr_local_addr = addr_i & ADDR_WIDTH'(32'h0000_0FFF);
-    assign rd_local_addr = r_addr_q & ADDR_WIDTH'(32'h0000_0FFF);
-    assign rd_counter_offset = rd_local_addr - REG_COUNTER_BASE;
-    assign rd_counter_idx = 32'(rd_counter_offset >> 3);
+    assign wr_local_addr = (addr_i & ~(ADDR_WIDTH'(DATA_BYTES - 1))) &
+                           ADDR_WIDTH'(32'h0000_0FFF);
+    assign read_counter_idx = 32'((wr_local_addr - REG_COUNTER_BASE) >> 3);
+    assign ctrl_clear_q = ctrl_write_q && ctrl_bits_q[1];
+    assign ctrl_snapshot_q = ctrl_write_q && !ctrl_bits_q[1] && ctrl_bits_q[2];
+    assign unused_wdata = wdata_i[DATA_WIDTH-1:3];
+
+    for (genvar idx = 0; idx < NUM_COUNTERS; idx++) begin : gen_counters
+        npu_pmu_counter #(
+            .INC_WIDTH  (INC_WIDTH),
+            .DATA_WIDTH (DATA_WIDTH)
+        ) u_counter (
+            .clk_i           (clk_i),
+            .rst_ni          (rst_ni),
+            .ctrl_write_i    (ctrl_write_q),
+            .ctrl_enable_i   (ctrl_bits_q[0]),
+            .ctrl_clear_i    (ctrl_clear_q),
+            .ctrl_snapshot_i (ctrl_snapshot_q),
+            .read_sel_i      (read_counter_sel_q[idx]),
+            .read_high_i     (read_counter_high_q[idx]),
+            .read_snapshot_i (read_snapshot_q[idx]),
+            .event_inc_i     (event_inc_i[idx]),
+            .read_data_o     (counter_read_data[idx]),
+            .overflow_o      (overflow_q[idx])
+        );
+    end
 
     always_comb begin
-        ctrl_write = req_i && gnt_o && we_i && (|be_i) && (wr_local_addr == REG_CTRL);
-        ctrl_wdata = wdata_i[31:0];
+        ctrl_write_d = req_i && gnt_o && we_i && (|be_i) && (wr_local_addr == REG_CTRL);
+        ctrl_bits_d = wdata_i[2:0];
+    end
+
+    always_comb begin
+        read_counter_sel_d = '0;
+        if (req_i && gnt_o && !we_i &&
+            (wr_local_addr >= REG_COUNTER_BASE) &&
+            (wr_local_addr < (REG_COUNTER_BASE + (NUM_COUNTERS * 8)))) begin
+            for (int idx = 0; idx < NUM_COUNTERS; idx++) begin
+                read_counter_sel_d[idx] = (read_counter_idx == 32'(idx));
+            end
+        end
+    end
+
+    always_comb begin
+        read_counter_data = '0;
+        for (int idx = 0; idx < NUM_COUNTERS; idx++) begin
+            read_counter_data |= counter_read_data[idx];
+        end
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-            counter_q        <= '0;
-            snapshot_q       <= '0;
-            overflow_q       <= '0;
             enable_q         <= 1'b0;
             snapshot_valid_q <= 1'b0;
-            r_addr_q         <= '0;
+            write_resp_q     <= 1'b0;
+            read_pending_s0_q <= 1'b0;
+            read_pending_s1_q <= 1'b0;
+            read_pending_s2_q <= 1'b0;
+            read_counter_sel_q <= '0;
+            read_counter_high_q <= '0;
+            read_snapshot_q  <= '0;
+            ctrl_write_q     <= 1'b0;
+            ctrl_bits_q      <= '0;
+            read_ctrl_s0_q   <= 1'b0;
+            read_status_s0_q <= 1'b0;
+            read_num_counter_s0_q <= 1'b0;
+            read_ctrl_s1_q   <= 1'b0;
+            read_status_s1_q <= 1'b0;
+            read_num_counter_s1_q <= 1'b0;
+            read_ctrl_s2_q   <= 1'b0;
+            read_status_s2_q <= 1'b0;
+            read_num_counter_s2_q <= 1'b0;
             rvalid_o         <= 1'b0;
+            rdata_o          <= '0;
         end else begin
+            rvalid_o <= read_pending_s2_q || write_resp_q;
+            if (read_pending_s2_q) begin
+                rdata_o <= read_data_d;
+            end else if (write_resp_q) begin
+                rdata_o <= '0;
+            end
+            read_pending_s2_q <= read_pending_s1_q;
+            read_ctrl_s2_q <= read_ctrl_s1_q;
+            read_status_s2_q <= read_status_s1_q;
+            read_num_counter_s2_q <= read_num_counter_s1_q;
+
+            read_pending_s1_q <= read_pending_s0_q;
+            read_ctrl_s1_q <= read_ctrl_s0_q;
+            read_status_s1_q <= read_status_s0_q;
+            read_num_counter_s1_q <= read_num_counter_s0_q;
+
+            read_pending_s0_q <= 1'b0;
+            read_ctrl_s0_q <= 1'b0;
+            read_status_s0_q <= 1'b0;
+            read_num_counter_s0_q <= 1'b0;
+            read_counter_sel_q <= '0;
+            read_counter_high_q <= '0;
+            read_snapshot_q <= '0;
+            write_resp_q <= 1'b0;
+            ctrl_write_q <= ctrl_write_d;
+            ctrl_bits_q <= ctrl_bits_d;
+
             if (req_i && gnt_o) begin
-                if (!we_i) begin
-                    r_addr_q <= addr_i & ~(32'(DATA_BYTES - 1));
-                end
-                rvalid_o <= 1'b1;
-            end else begin
-                rvalid_o <= 1'b0;
-            end
-
-            if (ctrl_write) begin
-                enable_q <= ctrl_wdata[0];
-            end
-
-            if (ctrl_write && ctrl_wdata[1]) begin
-                counter_q        <= '0;
-                snapshot_q       <= '0;
-                overflow_q       <= '0;
-                snapshot_valid_q <= 1'b0;
-            end else begin
-                if (enable_q) begin
+                if (we_i) begin
+                    write_resp_q <= 1'b1;
+                end else begin
+                    read_pending_s0_q <= 1'b1;
+                    read_ctrl_s0_q <= (wr_local_addr == REG_CTRL);
+                    read_status_s0_q <= (wr_local_addr == REG_STATUS);
+                    read_num_counter_s0_q <= (wr_local_addr == REG_NUM_COUNTER);
+                    read_counter_sel_q <= read_counter_sel_d;
                     for (int idx = 0; idx < NUM_COUNTERS; idx++) begin
-                        logic [64:0] next_counter;
-                        next_counter = {1'b0, counter_q[idx]} + 65'(event_inc_i[idx]);
-                        counter_q[idx] <= next_counter[63:0];
-                        overflow_q[idx] <= overflow_q[idx] | next_counter[64];
+                        read_counter_high_q[idx] <= read_counter_sel_d[idx] && wr_local_addr[2];
+                        read_snapshot_q[idx] <= read_counter_sel_d[idx] && snapshot_valid_q;
                     end
                 end
-                if (ctrl_write && ctrl_wdata[2]) begin
-                    snapshot_q <= counter_q;
+            end
+
+            if (ctrl_write_q) begin
+                enable_q <= ctrl_bits_q[0];
+                if (ctrl_bits_q[1]) begin
+                    snapshot_valid_q <= 1'b0;
+                end else if (ctrl_bits_q[2]) begin
                     snapshot_valid_q <= 1'b1;
                 end
             end
@@ -98,32 +193,97 @@ module npu_pmu #(
     end
 
     always_comb begin
-        rd_counter_value = '0;
-        if (rd_counter_idx < NUM_COUNTERS) begin
-            rd_counter_value = snapshot_valid_q ? snapshot_q[rd_counter_idx] : counter_q[rd_counter_idx];
-        end
-
-        rdata_o = '0;
-        if (rvalid_o) begin
-            unique case (rd_local_addr)
-                REG_CTRL: begin
-                    rdata_o[31:0] = {29'd0, snapshot_valid_q, 1'b0, enable_q};
-                end
-                REG_STATUS: begin
-                    rdata_o[31:0] = overflow_q[31:0];
-                end
-                REG_NUM_COUNTER: begin
-                    rdata_o[31:0] = 32'(NUM_COUNTERS);
-                end
-                default: begin
-                    if (rd_local_addr >= REG_COUNTER_BASE &&
-                        rd_local_addr < (REG_COUNTER_BASE + (NUM_COUNTERS * 8))) begin
-                        rdata_o[31:0] = rd_local_addr[2] ? rd_counter_value[63:32] :
-                                                           rd_counter_value[31:0];
-                    end
-                end
-            endcase
+        read_data_d = '0;
+        if (read_ctrl_s2_q) begin
+            read_data_d[31:0] = {29'd0, snapshot_valid_q, 1'b0, enable_q};
+        end else if (read_status_s2_q) begin
+            read_data_d[31:0] = overflow_q[31:0];
+        end else if (read_num_counter_s2_q) begin
+            read_data_d[31:0] = 32'(NUM_COUNTERS);
+        end else begin
+            read_data_d = read_counter_data;
         end
     end
 
 endmodule
+
+/* verilator lint_off DECLFILENAME */
+(* keep_hierarchy = "yes" *)
+module npu_pmu_counter #(
+    parameter int unsigned INC_WIDTH = 16,
+    parameter int unsigned DATA_WIDTH = 32
+)(
+    input  logic                  clk_i,
+    input  logic                  rst_ni,
+    input  logic                  ctrl_write_i,
+    input  logic                  ctrl_enable_i,
+    input  logic                  ctrl_clear_i,
+    input  logic                  ctrl_snapshot_i,
+    input  logic                  read_sel_i,
+    input  logic                  read_high_i,
+    input  logic                  read_snapshot_i,
+    input  logic [INC_WIDTH-1:0]  event_inc_i,
+    output logic [DATA_WIDTH-1:0] read_data_o,
+    output logic                  overflow_o
+);
+
+    logic enable_q;
+    logic clear_q;
+    logic snapshot_cmd_q;
+    logic read_sel_q;
+    logic read_high_q;
+    logic read_snapshot_q;
+    logic [63:0] counter_q;
+    logic [63:0] snapshot_q;
+    logic [64:0] next_counter;
+    logic [63:0] selected_counter;
+
+    assign next_counter = {1'b0, counter_q} + 65'(event_inc_i);
+    assign selected_counter = read_snapshot_q ? snapshot_q : counter_q;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            enable_q    <= 1'b0;
+            clear_q     <= 1'b0;
+            snapshot_cmd_q <= 1'b0;
+            read_sel_q  <= 1'b0;
+            read_high_q <= 1'b0;
+            read_snapshot_q <= 1'b0;
+            counter_q   <= '0;
+            snapshot_q  <= '0;
+            read_data_o <= '0;
+            overflow_o  <= 1'b0;
+        end else begin
+            clear_q        <= ctrl_clear_i;
+            snapshot_cmd_q <= ctrl_snapshot_i;
+            read_sel_q     <= read_sel_i;
+            read_high_q    <= read_high_i;
+            read_snapshot_q <= read_snapshot_i;
+
+            if (ctrl_write_i) begin
+                enable_q <= ctrl_enable_i;
+            end
+
+            if (clear_q) begin
+                counter_q   <= '0;
+                snapshot_q  <= '0;
+                overflow_o <= 1'b0;
+            end else begin
+                if (enable_q) begin
+                    counter_q  <= next_counter[63:0];
+                    overflow_o <= overflow_o | next_counter[64];
+                end
+                if (snapshot_cmd_q) begin
+                    snapshot_q <= counter_q;
+                end
+            end
+
+            read_data_o <= '0;
+            if (read_sel_q) begin
+                read_data_o <= read_high_q ? selected_counter[63:32] : selected_counter[31:0];
+            end
+        end
+    end
+
+endmodule
+/* verilator lint_on DECLFILENAME */

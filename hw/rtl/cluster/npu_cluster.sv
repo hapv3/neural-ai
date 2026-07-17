@@ -169,7 +169,8 @@ module npu_cluster #(
         .M0_BASE (32'h1000_0000), .M0_MASK (32'hFFFF_8000), // I-TCM boot window
         .M1_BASE (32'h2000_4000), .M1_MASK (32'hFFFF_F000), // Host PMU window
         .M2_BASE (32'h2000_5000), .M2_MASK (32'hFFFF_F000), // Host command-control window
-        .M3_BASE (32'hFFFF_1000), .M3_MASK (32'hFFFF_F000)  // Unused/error sink
+        .M3_BASE (32'hFFFF_1000), .M3_MASK (32'hFFFF_F000), // Unused/error sink
+        .M0_REQ_REGISTER(1'b1)
     ) u_host_axi_demux_1to4 (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
