@@ -1095,8 +1095,7 @@ module systolic_controller #(
     );
 
     systolic_ctrl_regs #(
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .DATA_WIDTH(CFG_DATA_WIDTH)
+        .ADDR_WIDTH(ADDR_WIDTH)
     ) i_systolic_ctrl_regs (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
