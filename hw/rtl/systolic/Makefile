@@ -2,7 +2,7 @@
 
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
-VERILATOR_JOBS ?= 8
+VERILATOR_JOBS ?= 4
 
 PWD=$(shell pwd)
 REPO_ROOT=$(PWD)/../../..
@@ -33,8 +33,8 @@ VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
 	$(PWD)/requant_pipeline.sv \
 	$(PWD)/npu_systolic_array.sv \
-	$(PWD)/conv_channel_linebuf_packer.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv \
+	$(PWD)/depthwise_mac_engine.sv \
 	$(PWD)/systolic_ctrl_regs.sv \
 	$(PWD)/systolic_controller.sv \
 	$(PWD)/tb/tb_systolic_controller.sv
