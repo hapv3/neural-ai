@@ -325,6 +325,7 @@ static void run_dfl_fused(void) {
 
 static void run_class_sigmoid(void) {
     SIG_STATUS = 0x30001501u;
+#if SPATZ_OP_TEST_ID != SPATZ_OP_TEST_CLASS_SIGMOID
     for (uint32_t i = 0; i < 256u; i++) {
         LOG_LUT[i] = sigmoid_lut_value(i);
     }
@@ -337,6 +338,7 @@ static void run_class_sigmoid(void) {
     for (uint32_t i = 0; i < CLASS_SIGMOID_LOCATIONS * 16u; i++) {
         CLASS_DST[i] = 0;
     }
+#endif
 
     SIG_STATUS = 0x30001502u;
     if (!npu_class_sigmoid_row32_high16_i8((const int8_t *)CLASS_ROW32_SRC,
@@ -352,6 +354,7 @@ static void run_class_sigmoid(void) {
 
 static void run_global_avgpool(void) {
     SIG_STATUS = 0x30001601u;
+#if SPATZ_OP_TEST_ID != SPATZ_OP_TEST_GLOBAL_AVGPOOL
     for (uint32_t h = 0; h < GAP_H; h++) {
         for (uint32_t w = 0; w < GAP_W; w++) {
             for (uint32_t c = 0; c < GAP_C; c++) {
@@ -362,6 +365,7 @@ static void run_global_avgpool(void) {
     for (uint32_t i = 0; i < GAP_GROUPS * 32u; i++) {
         GAP_DST[i] = (int8_t)0x5a;
     }
+#endif
 
     SIG_STATUS = 0x30001602u;
     if (!npu_global_avgpool_c32_i8((const int8_t *)GAP_SRC,

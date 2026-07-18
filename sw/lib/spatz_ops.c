@@ -259,11 +259,14 @@ uint32_t npu_global_avgpool_c32_i8(const int8_t *src_c32, int8_t *dst_c32,
     uint32_t spatial_count = input_h * input_w;
     uint32_t groups = (channels + 31u) >> 5;
     uint32_t input_bytes = spatial_count * groups * 32u;
+    uint32_t recip_q31;
 
     if (!src_c32 || !dst_c32 || spatial_count == 0u || channels == 0u) {
         return 0u;
     }
 
+    recip_q31 = (uint32_t)((1ull << 31) / (uint64_t)spatial_count);
+    afu_load_lut_entry(0u, recip_q31);
     afu_preload_global_avgpool_c32((uint32_t)src_c32,
                                    (uint32_t)dst_c32,
                                    input_bytes,

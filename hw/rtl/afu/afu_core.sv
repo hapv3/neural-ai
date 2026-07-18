@@ -51,7 +51,7 @@ module afu_core #(
     localparam logic [2:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 3'd6;
     localparam logic [2:0] MODE_GLOBAL_AVGPOOL_C32 = 3'd7;
 
-    typedef enum logic [3:0] {
+    typedef enum logic [4:0] {
         ST_IDLE,
         ST_READ_IN,
         ST_PROCESS,
@@ -59,11 +59,17 @@ module afu_core #(
         ST_DFL_EXP_REQ,
         ST_DFL_EXP_WAIT,
         ST_DFL_RECIP_WAIT,
+        ST_DFL_MUL_WRITE,
+        ST_DFL_WRITE,
         ST_DFL_PUSH,
         ST_CLASS_LUT_REQ,
         ST_CLASS_LUT_WAIT,
         ST_CLASS_PUSH,
         ST_GAP_ACCUM,
+        ST_GAP_RECIP_REQ,
+        ST_GAP_RECIP_WAIT,
+        ST_GAP_MUL_WRITE,
+        ST_GAP_WRITE,
         ST_GAP_PUSH,
         ST_DONE
     } state_e;
@@ -95,6 +101,22 @@ module afu_core #(
     logic       p1_flush_mid_q, p1_flush_mid_n;
     logic       p1_flush_done_q, p1_flush_done_n;
 
+    logic       mul_p2_valid_q, mul_p2_valid_n;
+    logic [5:0] mul_p2_num_valid_lanes_q, mul_p2_num_valid_lanes_n;
+    logic signed [15:0] mul_p2_product_q [32];
+    logic signed [15:0] mul_p2_product_n [32];
+    logic [31:0] mul_p2_dst_addr_q, mul_p2_dst_addr_n;
+    logic        mul_p2_flush_mid_q, mul_p2_flush_mid_n;
+    logic        mul_p2_flush_done_q, mul_p2_flush_done_n;
+
+    logic       mul_p3_valid_q, mul_p3_valid_n;
+    logic [5:0] mul_p3_num_valid_lanes_q, mul_p3_num_valid_lanes_n;
+    logic signed [15:0] mul_p3_shifted_q [32];
+    logic signed [15:0] mul_p3_shifted_n [32];
+    logic [31:0] mul_p3_dst_addr_q, mul_p3_dst_addr_n;
+    logic        mul_p3_flush_mid_q, mul_p3_flush_mid_n;
+    logic        mul_p3_flush_done_q, mul_p3_flush_done_n;
+
     logic s2_stall;
     logic s2_flush_mid_completed;
     logic s2_flush_done_completed;
@@ -106,10 +128,16 @@ module afu_core #(
     logic [5:0]  rhs_avail;
     logic [5:0]  max_lanes_1, max_lanes_2, max_lanes_3, max_lanes_4;
     logic [5:0]  num_valid_lanes;
+    logic        mul_p3_will_pop;
+    logic        mul_p2_can_advance;
 
-    assign s2_stall = wfifo_full_i && p1_valid_q &&
-                      ((cfg_mode_i == MODE_MUL_Q7) || (cfg_mode_i == MODE_ADD_I8) ||
-                       p1_flush_mid_q || (p1_flush_done_q && out_be_q != 0));
+    assign mul_p3_will_pop = mul_p3_valid_q && !wfifo_full_i;
+    assign mul_p2_can_advance = mul_p2_valid_q && (!mul_p3_valid_q || mul_p3_will_pop);
+    assign s2_stall = (cfg_mode_i == MODE_MUL_Q7) ?
+                      (p1_valid_q && mul_p2_valid_q && !mul_p2_can_advance) :
+                      (wfifo_full_i && p1_valid_q &&
+                       ((cfg_mode_i == MODE_ADD_I8) ||
+                        p1_flush_mid_q || (p1_flush_done_q && out_be_q != 0)));
 
     // SRAM LUT Instances
     logic s1_sram_req;
@@ -124,6 +152,7 @@ module afu_core #(
     logic        lut_pending_q;
     logic        dfl_exp_req;
     logic        dfl_recip_req;
+    logic        gap_recip_req;
     logic        class_lut_req;
     logic [7:0]  dfl_exp_idx [LUT_LANES];
     logic [7:0]  dfl_recip_idx;
@@ -146,6 +175,7 @@ module afu_core #(
     logic [31:0] dfl_s2_next_elem_cnt;
     logic [31:0] dfl_s2_next_dst_addr;
     logic        dfl_s2_flush_output;
+    logic [15:0] dfl_round_value_q, dfl_round_value_n;
     logic        class_s1_final_group;
     logic [31:0] class_s1_next_elem_cnt;
     logic [31:0] class_s1_next_dst_addr;
@@ -161,11 +191,20 @@ module afu_core #(
     logic [31:0] gap_next_elem_cnt;
     logic        gap_group_done;
     logic        gap_final_input;
+    logic [63:0] gap_mul_product_q [32];
+    logic [63:0] gap_mul_product_n [32];
+    logic        gap_mul_negative_q [32];
+    logic        gap_mul_negative_n [32];
+    logic signed [31:0] gap_avg_q [32];
+    logic signed [31:0] gap_avg_n [32];
+    logic [58:0] dfl_mul_product_q, dfl_mul_product_n;
+
+    localparam int unsigned GAP_RECIP_SHIFT = 31;
 
     assign gap_spatial_count = cfg_src2_ptr_i;
     assign gap_next_elem_cnt = elem_cnt_q + 32'd32;
     assign gap_group_done = ((gap_row_count_q + 32'd1) >= gap_spatial_count);
-    assign gap_final_input = (gap_next_elem_cnt >= cfg_length_i);
+    assign gap_final_input = (elem_cnt_q >= cfg_length_i);
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -220,22 +259,34 @@ module afu_core #(
         end
     endfunction
 
-    function automatic logic [7:0] mul_q7_byte(
+    function automatic logic signed [15:0] mul_q7_product(
         input logic [7:0] lhs_u8,
         input logic [7:0] rhs_u8
     );
         logic signed [7:0] lhs_i8;
         logic signed [7:0] rhs_i8;
-        logic signed [15:0] product_i16;
-        logic signed [15:0] shifted_i16;
-        logic signed [8:0] clamped_i9;
         begin
             lhs_i8 = $signed(lhs_u8);
             rhs_i8 = $signed(rhs_u8);
-            product_i16 = lhs_i8 * rhs_i8;
-            shifted_i16 = product_i16 >>> 7;
-            clamped_i9 = clamp_i8(shifted_i16);
-            mul_q7_byte = clamped_i9[7:0];
+            mul_q7_product = lhs_i8 * rhs_i8;
+        end
+    endfunction
+
+    function automatic logic signed [15:0] mul_q7_shifted(
+        input logic signed [15:0] product_i16
+    );
+        begin
+            mul_q7_shifted = product_i16 >>> 7;
+        end
+    endfunction
+
+    function automatic logic [7:0] i8_byte_from_i16(
+        input logic signed [15:0] value
+    );
+        logic signed [8:0] clamped_i9;
+        begin
+            clamped_i9 = clamp_i8(value);
+            i8_byte_from_i16 = clamped_i9[7:0];
         end
     endfunction
 
@@ -256,22 +307,25 @@ module afu_core #(
         end
     endfunction
 
-    function automatic logic [7:0] avg_i8_byte(
-        input logic signed [31:0] sum,
+    function automatic logic signed [31:0] avg_i32_from_product(
+        input logic [63:0] product,
+        input logic        negative,
+        input logic [31:0] abs_sum,
         input logic [31:0] count
     );
-        logic signed [31:0] avg;
-        logic signed [15:0] avg16;
-        logic signed [8:0] clamped_i9;
+        logic [31:0] quotient;
+        logic [31:0] product_back;
+        logic        correction;
         begin
-            if (count == 32'd0) begin
-                avg = '0;
+            quotient = 32'(product >> GAP_RECIP_SHIFT);
+            product_back = quotient * count;
+            correction = (count != 32'd0) && ((product_back + count) <= abs_sum);
+            quotient = quotient + {31'd0, correction};
+            if (negative) begin
+                avg_i32_from_product = -$signed({1'b0, quotient[30:0]});
             end else begin
-                avg = sum / $signed({1'b0, count[30:0]});
+                avg_i32_from_product = $signed({1'b0, quotient[30:0]});
             end
-            avg16 = avg[15:0];
-            clamped_i9 = clamp_i8(avg16);
-            avg_i8_byte = clamped_i9[7:0];
         end
     endfunction
 
@@ -282,8 +336,8 @@ module afu_core #(
     );
         logic [5:0] byte_idx;
         begin
-            byte_idx = ({4'd0, side} * 6'd4) + {4'd0, bin};
-            select_dfl_byte = data[byte_idx * 8 +: 8];
+            byte_idx = {2'd0, side, 2'b00} + {4'd0, bin};
+            select_dfl_byte = data[{byte_idx[4:0], 3'b000} +: 8];
         end
     endfunction
 
@@ -332,24 +386,21 @@ module afu_core #(
         end
     endfunction
 
-    function automatic logic [15:0] dfl_q8_from_recip(
-        input logic [18:0] weighted,
-        input logic [31:0] recip_q28,
+    function automatic logic [15:0] dfl_q8_from_product(
+        input logic [58:0] product,
         input logic [4:0]  sum_shift
     );
-        logic [63:0] product;
-        logic [63:0] rounded;
+        logic [58:0] rounded;
         logic [5:0]  total_shift;
-        logic [63:0] round_add;
+        logic [58:0] round_add;
         begin
-            product = ({37'd0, weighted} << 8) * {32'd0, recip_q28};
             total_shift = 6'd28 + {1'b0, sum_shift};
-            round_add = 64'd1 << (total_shift - 6'd1);
+            round_add = 59'd1 << (total_shift - 6'd1);
             rounded = (product + round_add) >> total_shift;
-            if (rounded > 64'hFFFF) begin
-                dfl_q8_from_recip = 16'hFFFF;
+            if (rounded > 59'hFFFF) begin
+                dfl_q8_from_product = 16'hFFFF;
             end else begin
-                dfl_q8_from_recip = rounded[15:0];
+                dfl_q8_from_product = rounded[15:0];
             end
         end
     endfunction
@@ -370,13 +421,15 @@ module afu_core #(
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),
                 .req_i   ({(dfl_exp_req && i < 4) ||
+                           (gap_recip_req && i == 0 && !active_lut_bank_q) ||
                            (class_lut_req && !active_lut_bank_q) ||
                            (s1_sram_req && !active_lut_bank_q),
                            lut_we_i && ((lut_fixed_bank_i && !lut_bank_i) ||
                                         (!lut_fixed_bank_i && !stage_lut_bank_q))}),
                 .we_i    ({1'b0,        1'b1}),
                 .addr_i  ({dfl_exp_req ? dfl_exp_idx[i] :
-                            (class_lut_req ? class_lut_idx[i] : lut_idx_s1[i]), lut_addr_i}),
+                            (gap_recip_req ? 8'd0 :
+                             (class_lut_req ? class_lut_idx[i] : lut_idx_s1[i])), lut_addr_i}),
                 .wdata_i ({32'd0,       lut_wdata_i}),
                 .be_i    ({4'b1111,     lut_be_i}),
                 .rdata_o ({lut_rdata_bank0[i], lut_rdata_dummy_bank0[i]})
@@ -391,13 +444,15 @@ module afu_core #(
                 .clk_i   (clk_i),
                 .rst_ni  (rst_ni),
                 .req_i   ({(dfl_recip_req && i == 0) ||
+                           (gap_recip_req && i == 0 && active_lut_bank_q) ||
                            (class_lut_req && active_lut_bank_q) ||
                            (s1_sram_req && active_lut_bank_q),
                            lut_we_i && ((lut_fixed_bank_i && lut_bank_i) ||
                                         (!lut_fixed_bank_i && stage_lut_bank_q))}),
                 .we_i    ({1'b0,        1'b1}),
                 .addr_i  ({dfl_recip_req && i == 0 ? dfl_recip_idx :
-                            (class_lut_req ? class_lut_idx[i] : lut_idx_s1[i]), lut_addr_i}),
+                            (gap_recip_req ? 8'd0 :
+                             (class_lut_req ? class_lut_idx[i] : lut_idx_s1[i])), lut_addr_i}),
                 .wdata_i ({32'd0,       lut_wdata_i}),
                 .be_i    ({4'b1111,     lut_be_i}),
                 .rdata_o ({lut_rdata_bank1[i], lut_rdata_dummy_bank1[i]})
@@ -407,7 +462,521 @@ module afu_core #(
 
     // removed duplicate wfifo_data_o assignment
 
-    // Stage 1 Logic
+    state_e stream_state_n;
+    logic [31:0] stream_src_addr_n, stream_rhs_addr_n, stream_dst_addr_n, stream_elem_cnt_n;
+    logic [255:0] stream_in_buf_n, stream_rhs_buf_n;
+    logic stream_rfifo_pop, stream_rhs_rfifo_pop, stream_s1_sram_req;
+    logic stream_p1_valid_n, stream_p1_flush_mid_n, stream_p1_flush_done_n;
+    logic [5:0] stream_p1_num_valid_lanes_n;
+    logic [255:0] stream_p1_lhs_data_n, stream_p1_rhs_data_n;
+    logic [31:0] stream_p1_src_addr_n, stream_p1_rhs_addr_n, stream_p1_dst_addr_n;
+
+    state_e dfl_state_n;
+    logic [31:0] dfl_elem_cnt_n, dfl_dst_addr_n;
+    logic [1:0]  dfl_side_next;
+    logic [17:0] dfl_sum_next;
+    logic [18:0] dfl_weighted_next;
+    logic [4:0]  dfl_shift_next;
+    logic [58:0] dfl_mul_product_next;
+    logic [15:0] dfl_round_value_next;
+    logic        dfl_exp_req_next, dfl_recip_req_next;
+    logic [7:0]  dfl_recip_idx_next;
+    logic [7:0]  dfl_exp_idx_next [LUT_LANES];
+
+    state_e class_state_n;
+    logic [31:0] class_elem_cnt_n, class_dst_addr_n;
+    logic [1:0]  class_group_next;
+    logic        class_lut_req_next;
+    logic [7:0]  class_lut_idx_next [LUT_LANES];
+
+    state_e gap_state_n;
+    logic [31:0] gap_elem_cnt_n, gap_row_count_next;
+    logic [255:0] gap_in_buf_next;
+    logic         gap_rfifo_pop_next;
+    logic signed [31:0] gap_acc_next [32];
+    logic [63:0] gap_mul_product_next [32];
+    logic        gap_mul_negative_next [32];
+    logic signed [31:0] gap_avg_next [32];
+    logic        gap_recip_req_next;
+
+    // Stream/process path: generic LUT, ADD_I8 and MUL_Q7 input scheduling.
+    always_comb begin
+        stream_state_n = state_q;
+        stream_src_addr_n = src_addr_q;
+        stream_rhs_addr_n = rhs_addr_q;
+        stream_dst_addr_n = dst_addr_q;
+        stream_elem_cnt_n = elem_cnt_q;
+        stream_in_buf_n = in_buf_q;
+        stream_rhs_buf_n = rhs_buf_q;
+        stream_rfifo_pop = 1'b0;
+        stream_rhs_rfifo_pop = 1'b0;
+        stream_s1_sram_req = 1'b0;
+
+        stream_p1_valid_n = 1'b0;
+        stream_p1_flush_mid_n = 1'b0;
+        stream_p1_flush_done_n = 1'b0;
+        stream_p1_num_valid_lanes_n = '0;
+        stream_p1_lhs_data_n = p1_lhs_data_q;
+        stream_p1_rhs_data_n = p1_rhs_data_q;
+        stream_p1_src_addr_n = src_addr_q;
+        stream_p1_rhs_addr_n = rhs_addr_q;
+        stream_p1_dst_addr_n = dst_addr_q;
+
+        remaining_elems = '0;
+        in_avail = '0;
+        out_avail_bytes = '0;
+        out_avail_elems = '0;
+        rhs_avail = '0;
+        max_lanes_1 = '0;
+        max_lanes_2 = '0;
+        max_lanes_3 = '0;
+        max_lanes_4 = '0;
+        num_valid_lanes = '0;
+
+        unique case (state_q)
+            ST_IDLE: begin
+                // waiting for start
+            end
+
+            ST_READ_IN: begin
+                if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
+                    if (!rfifo_empty_i && !rhs_rfifo_empty_i) begin
+                        stream_in_buf_n = rfifo_data_i;
+                        stream_rhs_buf_n = rhs_rfifo_data_i;
+                        stream_rfifo_pop = 1'b1;
+                        stream_rhs_rfifo_pop = 1'b1;
+                        stream_state_n = ST_PROCESS;
+                    end
+                end else if (!rfifo_empty_i) begin
+                    stream_in_buf_n = rfifo_data_i;
+                    stream_rfifo_pop = 1'b1;
+                    if (cfg_mode_i == MODE_DFL4_ROW32_Q8) begin
+                        stream_state_n = ST_DFL_EXP_REQ;
+                    end else if (cfg_mode_i == MODE_CLASS_SIGMOID_ROW32_HIGH16) begin
+                        stream_state_n = ST_CLASS_LUT_REQ;
+                    end else if (cfg_mode_i == MODE_GLOBAL_AVGPOOL_C32) begin
+                        stream_state_n = (gap_spatial_count == 32'd0) ? ST_DONE : ST_GAP_ACCUM;
+                    end else begin
+                        stream_state_n = ST_PROCESS;
+                    end
+                end
+            end
+
+            ST_PROCESS: begin
+                remaining_elems = cfg_length_i - elem_cnt_q;
+                stream_p1_src_addr_n = src_addr_q;
+                stream_p1_rhs_addr_n = rhs_addr_q;
+                stream_p1_dst_addr_n = dst_addr_q;
+
+                if (remaining_elems == 0) begin
+                    stream_state_n = ST_DONE;
+                end else if (!s2_stall) begin
+                    in_avail = 6'd32 - {1'b0, src_addr_q[4:0]};
+                    rhs_avail = 6'd32 - {1'b0, rhs_addr_q[4:0]};
+                    out_avail_bytes = 6'd32 - {1'b0, dst_addr_q[4:0]};
+
+                    unique case (cfg_mode_i)
+                        MODE_8BIT:  out_avail_elems = out_avail_bytes;
+                        MODE_16BIT: out_avail_elems = {1'b0, out_avail_bytes[5:1]};
+                        MODE_32BIT: out_avail_elems = {2'b0, out_avail_bytes[5:2]};
+                        MODE_MUL_Q7: out_avail_elems = out_avail_bytes;
+                        MODE_ADD_I8: out_avail_elems = out_avail_bytes;
+                        default:    out_avail_elems = out_avail_bytes;
+                    endcase
+
+                    if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
+                        max_lanes_1 = (remaining_elems > 32) ? 6'd32 : 6'(remaining_elems);
+                    end else begin
+                        max_lanes_1 = (LUT_LANES < remaining_elems) ? LUT_LANES[5:0] :
+                                      (remaining_elems > 6'd31 ? 6'd31 : 6'(remaining_elems));
+                    end
+                    max_lanes_2 = (max_lanes_1 < in_avail) ? max_lanes_1 : in_avail;
+                    max_lanes_3 = ((cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) &&
+                                   rhs_avail < max_lanes_2) ? rhs_avail : max_lanes_2;
+                    max_lanes_4 = (max_lanes_3 < out_avail_elems) ? max_lanes_3 : out_avail_elems;
+                    num_valid_lanes = max_lanes_4;
+
+                    if (num_valid_lanes > 0) begin
+                        stream_s1_sram_req = (cfg_mode_i != MODE_MUL_Q7 && cfg_mode_i != MODE_ADD_I8);
+                        stream_p1_num_valid_lanes_n = num_valid_lanes;
+                        stream_p1_valid_n = 1'b1;
+                        stream_p1_lhs_data_n = in_buf_q;
+                        stream_p1_rhs_data_n = rhs_buf_q;
+
+                        stream_src_addr_n = src_addr_q + 32'(num_valid_lanes);
+                        stream_rhs_addr_n = rhs_addr_q + 32'(num_valid_lanes);
+                        stream_elem_cnt_n = elem_cnt_q + 32'(num_valid_lanes);
+
+                        if (cfg_mode_i == MODE_8BIT || cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
+                            stream_dst_addr_n = dst_addr_q + 32'(num_valid_lanes);
+                        end else if (cfg_mode_i == MODE_16BIT) begin
+                            stream_dst_addr_n = dst_addr_q + 32'(num_valid_lanes * 2);
+                        end else begin
+                            stream_dst_addr_n = dst_addr_q + 32'(num_valid_lanes * 4);
+                        end
+
+                        if (cfg_mode_i == MODE_MUL_Q7) begin
+                            if (stream_elem_cnt_n == cfg_length_i) begin
+                                stream_p1_flush_done_n = 1'b1;
+                                stream_state_n = ST_WAIT_FLUSH;
+                            end else begin
+                                if (stream_dst_addr_n[4:0] == 5'd0) begin
+                                    stream_p1_flush_mid_n = 1'b1;
+                                end
+                                if ((stream_src_addr_n[4:0] == 5'd0) || (stream_rhs_addr_n[4:0] == 5'd0)) begin
+                                    stream_state_n = ST_READ_IN;
+                                end else begin
+                                    stream_state_n = ST_PROCESS;
+                                end
+                            end
+                        end else if (cfg_mode_i == MODE_ADD_I8) begin
+                            if (stream_elem_cnt_n == cfg_length_i) begin
+                                stream_p1_flush_done_n = 1'b1;
+                                stream_state_n = ST_WAIT_FLUSH;
+                            end else begin
+                                if (stream_dst_addr_n[4:0] == 5'd0) begin
+                                    stream_p1_flush_mid_n = 1'b1;
+                                end
+                                if ((stream_src_addr_n[4:0] == 5'd0) || (stream_rhs_addr_n[4:0] == 5'd0)) begin
+                                    stream_state_n = ST_READ_IN;
+                                end else begin
+                                    stream_state_n = ST_PROCESS;
+                                end
+                            end
+                        end else if (stream_dst_addr_n[4:0] == 0) begin
+                            stream_p1_flush_mid_n = 1'b1;
+                            stream_state_n = (stream_src_addr_n[4:0] == 0) ? ST_READ_IN : ST_PROCESS;
+                        end else if (stream_elem_cnt_n == cfg_length_i) begin
+                            stream_p1_flush_done_n = 1'b1;
+                            stream_state_n = ST_WAIT_FLUSH;
+                        end else if (stream_src_addr_n[4:0] == 0) begin
+                            stream_state_n = ST_READ_IN;
+                        end
+                    end
+                end
+            end
+
+            ST_WAIT_FLUSH: begin
+                if (cfg_mode_i == MODE_MUL_Q7) begin
+                    if (s2_flush_done_completed) begin
+                        stream_state_n = ST_DONE;
+                    end
+                end else if (s2_flush_mid_completed) begin
+                    if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
+                        if (((src_addr_q[4:0] == 0) || (rhs_addr_q[4:0] == 0)) && elem_cnt_q < cfg_length_i) begin
+                            stream_state_n = ST_READ_IN;
+                        end else begin
+                            stream_state_n = ST_PROCESS;
+                        end
+                    end else if (src_addr_q[4:0] == 0 && elem_cnt_q < cfg_length_i) begin
+                        stream_state_n = ST_READ_IN;
+                    end else begin
+                        stream_state_n = ST_PROCESS;
+                    end
+                end else if (s2_flush_done_completed) begin
+                    stream_state_n = ST_DONE;
+                end
+            end
+
+            ST_DONE: begin
+                // waiting for next start
+            end
+
+            default: ;
+        endcase
+    end
+
+    // DFL fused-softmax path.
+    always_comb begin
+        logic [1:0] dfl_next_side;
+        logic signed [7:0] dfl_next_max_value;
+
+        dfl_next_side = dfl_side_q + 2'd1;
+        dfl_next_max_value = '0;
+        dfl_state_n = state_q;
+        dfl_elem_cnt_n = elem_cnt_q;
+        dfl_dst_addr_n = dst_addr_q;
+        dfl_side_next = dfl_side_q;
+        dfl_sum_next = dfl_sum_q;
+        dfl_weighted_next = dfl_weighted_q;
+        dfl_shift_next = dfl_shift_q;
+        dfl_mul_product_next = dfl_mul_product_q;
+        dfl_round_value_next = dfl_round_value_q;
+        dfl_exp_req_next = 1'b0;
+        dfl_recip_req_next = 1'b0;
+        dfl_recip_idx_next = 8'd0;
+        dfl_s1_max_value = '0;
+        dfl_s1_sum_value = '0;
+        dfl_s1_weighted_value = '0;
+        dfl_s1_next_elem_cnt = '0;
+        dfl_s1_next_dst_addr = '0;
+        dfl_s1_flush_output = 1'b0;
+        dfl_s1_final_location = 1'b0;
+        for (int i = 0; i < LUT_LANES; i++) begin
+            dfl_exp_idx_next[i] = 8'd0;
+        end
+
+        unique case (state_q)
+            ST_DFL_EXP_REQ: begin
+                dfl_s1_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_side_q, 2'd0),
+                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd1),
+                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd2),
+                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd3));
+                for (int i = 0; i < LUT_LANES; i++) begin
+                    dfl_exp_idx_next[i] = select_dfl_byte(in_buf_q, dfl_side_q, 2'(i)) -
+                                          dfl_s1_max_value[7:0];
+                end
+                dfl_exp_req_next = 1'b1;
+                dfl_state_n = ST_DFL_EXP_WAIT;
+            end
+
+            ST_DFL_EXP_WAIT: begin
+                dfl_s1_sum_value = {2'd0, lut_rdata_bank0[0][15:0]} +
+                                   {2'd0, lut_rdata_bank0[1][15:0]} +
+                                   {2'd0, lut_rdata_bank0[2][15:0]} +
+                                   {2'd0, lut_rdata_bank0[3][15:0]};
+                dfl_s1_weighted_value = {3'd0, lut_rdata_bank0[1][15:0]} +
+                                        ({2'd0, lut_rdata_bank0[2][15:0]} << 1) +
+                                        ({2'd0, lut_rdata_bank0[3][15:0]} * 19'd3);
+                dfl_sum_next = dfl_s1_sum_value;
+                dfl_weighted_next = dfl_s1_weighted_value;
+                dfl_shift_next = msb_pos18(dfl_s1_sum_value);
+                dfl_recip_idx_next = recip_index_from_sum(dfl_s1_sum_value);
+                dfl_recip_req_next = 1'b1;
+                dfl_state_n = ST_DFL_RECIP_WAIT;
+            end
+
+            ST_DFL_RECIP_WAIT: begin
+                dfl_mul_product_next = ({32'd0, dfl_weighted_q, 8'd0}) *
+                                       {27'd0, lut_rdata_bank1[0]};
+                dfl_state_n = ST_DFL_MUL_WRITE;
+            end
+
+            ST_DFL_MUL_WRITE: begin
+                dfl_round_value_next = dfl_q8_from_product(dfl_mul_product_q, dfl_shift_q);
+                dfl_state_n = ST_DFL_WRITE;
+            end
+
+            ST_DFL_WRITE: begin
+                dfl_s1_final_location = (dfl_side_q == 2'd3);
+                dfl_s1_next_elem_cnt = elem_cnt_q + (dfl_s1_final_location ? 32'd32 : 32'd0);
+                dfl_s1_next_dst_addr = dst_addr_q + (dfl_s1_final_location ? 32'd8 : 32'd0);
+                dfl_s1_flush_output = dfl_s1_final_location &&
+                                      ((dfl_s1_next_dst_addr[4:0] == 5'd0) ||
+                                       (dfl_s1_next_elem_cnt >= cfg_length_i));
+
+                if (dfl_s1_flush_output && wfifo_full_i) begin
+                    dfl_elem_cnt_n = dfl_s1_next_elem_cnt;
+                    dfl_dst_addr_n = dfl_s1_next_dst_addr;
+                    dfl_side_next = 2'd0;
+                    dfl_state_n = ST_DFL_PUSH;
+                end else if (dfl_s1_final_location) begin
+                    dfl_elem_cnt_n = dfl_s1_next_elem_cnt;
+                    dfl_dst_addr_n = dfl_s1_next_dst_addr;
+                    dfl_side_next = 2'd0;
+                    dfl_state_n = (dfl_s1_next_elem_cnt >= cfg_length_i) ? ST_DONE : ST_READ_IN;
+                end else begin
+                    dfl_next_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_next_side, 2'd0),
+                                                 select_dfl_byte(in_buf_q, dfl_next_side, 2'd1),
+                                                 select_dfl_byte(in_buf_q, dfl_next_side, 2'd2),
+                                                 select_dfl_byte(in_buf_q, dfl_next_side, 2'd3));
+                    for (int i = 0; i < LUT_LANES; i++) begin
+                        dfl_exp_idx_next[i] = select_dfl_byte(in_buf_q, dfl_next_side, 2'(i)) -
+                                              dfl_next_max_value[7:0];
+                    end
+                    dfl_exp_req_next = 1'b1;
+                    dfl_side_next = dfl_next_side;
+                    dfl_state_n = ST_DFL_EXP_WAIT;
+                end
+            end
+
+            ST_DFL_PUSH: begin
+                if (!wfifo_full_i) begin
+                    dfl_state_n = (elem_cnt_q >= cfg_length_i) ? ST_DONE : ST_READ_IN;
+                end
+            end
+
+            default: ;
+        endcase
+    end
+
+    // Class sigmoid row32 path.
+    always_comb begin
+        logic [1:0] class_next_group;
+
+        class_next_group = class_group_q + 2'd1;
+        class_state_n = state_q;
+        class_elem_cnt_n = elem_cnt_q;
+        class_dst_addr_n = dst_addr_q;
+        class_group_next = class_group_q;
+        class_lut_req_next = 1'b0;
+        class_s1_final_group = 1'b0;
+        class_s1_next_elem_cnt = '0;
+        class_s1_next_dst_addr = '0;
+        class_s1_flush_output = 1'b0;
+        for (int i = 0; i < LUT_LANES; i++) begin
+            class_lut_idx_next[i] = 8'd0;
+        end
+
+        unique case (state_q)
+            ST_CLASS_LUT_REQ: begin
+                for (int i = 0; i < LUT_LANES; i++) begin
+                    class_lut_idx_next[i] = select_input_byte(
+                        in_buf_q,
+                        {1'b0, 5'd16 + {1'b0, class_group_q, 2'b00} + 5'(i)}
+                    );
+                end
+                class_lut_req_next = 1'b1;
+                class_state_n = ST_CLASS_LUT_WAIT;
+            end
+
+            ST_CLASS_LUT_WAIT: begin
+                class_s1_final_group = (class_group_q == 2'd3);
+                class_s1_next_elem_cnt = elem_cnt_q + (class_s1_final_group ? 32'd32 : 32'd0);
+                class_s1_next_dst_addr = dst_addr_q + (class_s1_final_group ? 32'd16 : 32'd0);
+                class_s1_flush_output = class_s1_final_group &&
+                                        ((class_s1_next_dst_addr[4:0] == 5'd0) ||
+                                         (class_s1_next_elem_cnt >= cfg_length_i));
+
+                if (class_s1_flush_output && wfifo_full_i) begin
+                    class_elem_cnt_n = class_s1_next_elem_cnt;
+                    class_dst_addr_n = class_s1_next_dst_addr;
+                    class_group_next = 2'd0;
+                    class_state_n = ST_CLASS_PUSH;
+                end else if (class_s1_final_group) begin
+                    class_elem_cnt_n = class_s1_next_elem_cnt;
+                    class_dst_addr_n = class_s1_next_dst_addr;
+                    class_group_next = 2'd0;
+                    class_state_n = (class_s1_next_elem_cnt >= cfg_length_i) ? ST_DONE : ST_READ_IN;
+                end else begin
+                    for (int i = 0; i < LUT_LANES; i++) begin
+                        class_lut_idx_next[i] = select_input_byte(
+                            in_buf_q,
+                            {1'b0, 5'd16 + {1'b0, class_next_group, 2'b00} + 5'(i)}
+                        );
+                    end
+                    class_lut_req_next = 1'b1;
+                    class_group_next = class_next_group;
+                    class_state_n = ST_CLASS_LUT_WAIT;
+                end
+            end
+
+            ST_CLASS_PUSH: begin
+                if (!wfifo_full_i) begin
+                    class_state_n = (elem_cnt_q >= cfg_length_i) ? ST_DONE : ST_READ_IN;
+                end
+            end
+
+            default: ;
+        endcase
+    end
+
+    // GlobalAvgPool C32 path.
+    always_comb begin
+        gap_state_n = state_q;
+        gap_elem_cnt_n = elem_cnt_q;
+        gap_row_count_next = gap_row_count_q;
+        gap_in_buf_next = in_buf_q;
+        gap_rfifo_pop_next = 1'b0;
+        gap_recip_req_next = 1'b0;
+        for (int i = 0; i < 32; i++) begin
+            gap_acc_next[i] = gap_acc_q[i];
+            gap_mul_product_next[i] = gap_mul_product_q[i];
+            gap_mul_negative_next[i] = gap_mul_negative_q[i];
+            gap_avg_next[i] = gap_avg_q[i];
+        end
+
+        unique case (state_q)
+            ST_GAP_ACCUM: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_acc_next[i] = gap_acc_q[i] +
+                                      {{24{in_buf_q[i * 8 + 7]}}, in_buf_q[i * 8 +: 8]};
+                end
+                gap_elem_cnt_n = gap_next_elem_cnt;
+
+                if (gap_group_done) begin
+                    gap_row_count_next = '0;
+                    gap_recip_req_next = 1'b1;
+                    gap_state_n = ST_GAP_RECIP_WAIT;
+                end else begin
+                    gap_row_count_next = gap_row_count_q + 32'd1;
+                    if (!rfifo_empty_i) begin
+                        gap_in_buf_next = rfifo_data_i;
+                        gap_rfifo_pop_next = 1'b1;
+                        gap_state_n = ST_GAP_ACCUM;
+                    end else begin
+                        gap_state_n = ST_READ_IN;
+                    end
+                end
+            end
+
+            ST_GAP_RECIP_REQ: begin
+                gap_recip_req_next = 1'b1;
+                gap_state_n = ST_GAP_RECIP_WAIT;
+            end
+
+            ST_GAP_RECIP_WAIT: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_mul_negative_next[i] = gap_acc_q[i][31];
+                    gap_mul_product_next[i] = (gap_acc_q[i][31] ?
+                                               64'(-gap_acc_q[i]) :
+                                               64'(gap_acc_q[i])) *
+                                              64'(active_lut_bank_q ? lut_rdata_bank1[0] :
+                                                                     lut_rdata_bank0[0]);
+                end
+                gap_state_n = ST_GAP_MUL_WRITE;
+            end
+
+            ST_GAP_MUL_WRITE: begin
+                if (gap_spatial_count != 32'd0) begin
+                    for (int i = 0; i < 32; i++) begin
+                        gap_avg_next[i] = avg_i32_from_product(
+                            gap_mul_product_q[i],
+                            gap_mul_negative_q[i],
+                            gap_acc_q[i][31] ? 32'(-gap_acc_q[i]) : 32'(gap_acc_q[i]),
+                            gap_spatial_count
+                        );
+                    end
+                end
+                gap_state_n = ST_GAP_WRITE;
+            end
+
+            ST_GAP_WRITE: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_acc_next[i] = '0;
+                end
+                if (wfifo_full_i) begin
+                    gap_state_n = ST_GAP_PUSH;
+                end else if (gap_final_input) begin
+                    gap_state_n = ST_DONE;
+                end else if (!rfifo_empty_i) begin
+                    gap_in_buf_next = rfifo_data_i;
+                    gap_rfifo_pop_next = 1'b1;
+                    gap_state_n = ST_GAP_ACCUM;
+                end else begin
+                    gap_state_n = ST_READ_IN;
+                end
+            end
+
+            ST_GAP_PUSH: begin
+                if (!wfifo_full_i) begin
+                    if (gap_final_input) begin
+                        gap_state_n = ST_DONE;
+                    end else if (!rfifo_empty_i) begin
+                        gap_in_buf_next = rfifo_data_i;
+                        gap_rfifo_pop_next = 1'b1;
+                        gap_state_n = ST_GAP_ACCUM;
+                    end else begin
+                        gap_state_n = ST_READ_IN;
+                    end
+                end
+            end
+
+            default: ;
+        endcase
+    end
+
+    // Stage 1 feature mux.
     always_comb begin
         state_n = state_q;
         src_addr_n = src_addr_q;
@@ -434,40 +1003,24 @@ module afu_core #(
         dfl_sum_n = dfl_sum_q;
         dfl_weighted_n = dfl_weighted_q;
         dfl_shift_n = dfl_shift_q;
+        dfl_mul_product_n = dfl_mul_product_q;
+        dfl_round_value_n = dfl_round_value_q;
         dfl_exp_req = 1'b0;
         dfl_recip_req = 1'b0;
+        gap_recip_req = 1'b0;
         class_lut_req = 1'b0;
         dfl_recip_idx = 8'd0;
-        dfl_s1_max_value = '0;
-        dfl_s1_sum_value = '0;
-        dfl_s1_weighted_value = '0;
-        dfl_s1_next_elem_cnt = '0;
-        dfl_s1_next_dst_addr = '0;
-        dfl_s1_flush_output = 1'b0;
-        dfl_s1_final_location = 1'b0;
-        class_s1_final_group = 1'b0;
-        class_s1_next_elem_cnt = '0;
-        class_s1_next_dst_addr = '0;
-        class_s1_flush_output = 1'b0;
         gap_row_count_n = gap_row_count_q;
         for (int i = 0; i < 32; i++) begin
             gap_acc_n[i] = gap_acc_q[i];
+            gap_mul_product_n[i] = gap_mul_product_q[i];
+            gap_mul_negative_n[i] = gap_mul_negative_q[i];
+            gap_avg_n[i] = gap_avg_q[i];
         end
         for (int i = 0; i < LUT_LANES; i++) begin
             dfl_exp_idx[i] = 8'd0;
             class_lut_idx[i] = 8'd0;
         end
-
-        remaining_elems = '0;
-        in_avail = '0;
-        out_avail_bytes = '0;
-        out_avail_elems = '0;
-        rhs_avail = '0;
-        max_lanes_1 = '0;
-        max_lanes_2 = '0;
-        max_lanes_3 = '0;
-        max_lanes_4 = '0;
-        num_valid_lanes = '0;
 
         if (cfg_start_i) begin
             elem_cnt_n = '0;
@@ -479,9 +1032,14 @@ module afu_core #(
             dfl_sum_n = '0;
             dfl_weighted_n = '0;
             dfl_shift_n = '0;
+            dfl_mul_product_n = '0;
+            dfl_round_value_n = '0;
             gap_row_count_n = '0;
             for (int i = 0; i < 32; i++) begin
                 gap_acc_n[i] = '0;
+                gap_mul_product_n[i] = '0;
+                gap_mul_negative_n[i] = 1'b0;
+                gap_avg_n[i] = '0;
             end
             if (cfg_length_i == 0) begin
                 state_n = ST_DONE;
@@ -490,281 +1048,73 @@ module afu_core #(
             end
         end else begin
             unique case (state_q)
-                ST_IDLE: begin
-                    // waiting for start
+                ST_IDLE, ST_READ_IN, ST_PROCESS, ST_WAIT_FLUSH, ST_DONE: begin
+                    state_n = stream_state_n;
+                    src_addr_n = stream_src_addr_n;
+                    rhs_addr_n = stream_rhs_addr_n;
+                    dst_addr_n = stream_dst_addr_n;
+                    elem_cnt_n = stream_elem_cnt_n;
+                    in_buf_n = stream_in_buf_n;
+                    rhs_buf_n = stream_rhs_buf_n;
+                    rfifo_pop_o = stream_rfifo_pop;
+                    rhs_rfifo_pop_o = stream_rhs_rfifo_pop;
+                    s1_sram_req = stream_s1_sram_req;
+                    p1_valid_n = stream_p1_valid_n;
+                    p1_flush_mid_n = stream_p1_flush_mid_n;
+                    p1_flush_done_n = stream_p1_flush_done_n;
+                    p1_num_valid_lanes_n = stream_p1_num_valid_lanes_n;
+                    p1_lhs_data_n = stream_p1_lhs_data_n;
+                    p1_rhs_data_n = stream_p1_rhs_data_n;
+                    p1_src_addr_n = stream_p1_src_addr_n;
+                    p1_rhs_addr_n = stream_p1_rhs_addr_n;
+                    p1_dst_addr_n = stream_p1_dst_addr_n;
                 end
 
-            ST_READ_IN: begin
-                if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
-                    if (!rfifo_empty_i && !rhs_rfifo_empty_i) begin
-                        in_buf_n = rfifo_data_i;
-                        rhs_buf_n = rhs_rfifo_data_i;
-                        rfifo_pop_o = 1'b1;
-                        rhs_rfifo_pop_o = 1'b1;
-                        state_n = ST_PROCESS;
+                ST_DFL_EXP_REQ, ST_DFL_EXP_WAIT, ST_DFL_RECIP_WAIT,
+                ST_DFL_MUL_WRITE, ST_DFL_WRITE, ST_DFL_PUSH: begin
+                    state_n = dfl_state_n;
+                    elem_cnt_n = dfl_elem_cnt_n;
+                    dst_addr_n = dfl_dst_addr_n;
+                    dfl_side_n = dfl_side_next;
+                    dfl_sum_n = dfl_sum_next;
+                    dfl_weighted_n = dfl_weighted_next;
+                    dfl_shift_n = dfl_shift_next;
+                    dfl_mul_product_n = dfl_mul_product_next;
+                    dfl_round_value_n = dfl_round_value_next;
+                    dfl_exp_req = dfl_exp_req_next;
+                    dfl_recip_req = dfl_recip_req_next;
+                    dfl_recip_idx = dfl_recip_idx_next;
+                    for (int i = 0; i < LUT_LANES; i++) begin
+                        dfl_exp_idx[i] = dfl_exp_idx_next[i];
                     end
-                end else if (!rfifo_empty_i) begin
-                    in_buf_n = rfifo_data_i;
-                    rfifo_pop_o = 1'b1;
-                    if (cfg_mode_i == MODE_DFL4_ROW32_Q8) begin
-                        state_n = ST_DFL_EXP_REQ;
-                    end else if (cfg_mode_i == MODE_CLASS_SIGMOID_ROW32_HIGH16) begin
-                        state_n = ST_CLASS_LUT_REQ;
-                    end else if (cfg_mode_i == MODE_GLOBAL_AVGPOOL_C32) begin
-                        state_n = (gap_spatial_count == 32'd0) ? ST_DONE : ST_GAP_ACCUM;
-                    end else begin
-                        state_n = ST_PROCESS;
+                end
+
+                ST_CLASS_LUT_REQ, ST_CLASS_LUT_WAIT, ST_CLASS_PUSH: begin
+                    state_n = class_state_n;
+                    elem_cnt_n = class_elem_cnt_n;
+                    dst_addr_n = class_dst_addr_n;
+                    class_group_n = class_group_next;
+                    class_lut_req = class_lut_req_next;
+                    for (int i = 0; i < LUT_LANES; i++) begin
+                        class_lut_idx[i] = class_lut_idx_next[i];
                     end
                 end
-            end
 
-            ST_GAP_ACCUM: begin
-                for (int i = 0; i < 32; i++) begin
-                    gap_acc_n[i] = gap_acc_q[i] +
-                                   {{24{in_buf_q[i * 8 + 7]}}, in_buf_q[i * 8 +: 8]};
-                end
-                elem_cnt_n = gap_next_elem_cnt;
-
-                if (gap_group_done) begin
-                    gap_row_count_n = '0;
+                ST_GAP_ACCUM, ST_GAP_RECIP_REQ, ST_GAP_RECIP_WAIT,
+                ST_GAP_MUL_WRITE, ST_GAP_WRITE, ST_GAP_PUSH: begin
+                    state_n = gap_state_n;
+                    elem_cnt_n = gap_elem_cnt_n;
+                    in_buf_n = gap_in_buf_next;
+                    rfifo_pop_o = gap_rfifo_pop_next;
+                    gap_row_count_n = gap_row_count_next;
+                    gap_recip_req = gap_recip_req_next;
                     for (int i = 0; i < 32; i++) begin
-                        gap_acc_n[i] = '0;
-                    end
-                    if (wfifo_full_i) begin
-                        state_n = ST_GAP_PUSH;
-                    end else if (gap_final_input) begin
-                        state_n = ST_DONE;
-                    end else begin
-                        state_n = ST_READ_IN;
-                    end
-                end else begin
-                    gap_row_count_n = gap_row_count_q + 32'd1;
-                    state_n = ST_READ_IN;
-                end
-            end
-
-            ST_GAP_PUSH: begin
-                if (!wfifo_full_i) begin
-                    if (elem_cnt_q >= cfg_length_i) begin
-                        state_n = ST_DONE;
-                    end else begin
-                        state_n = ST_READ_IN;
+                        gap_acc_n[i] = gap_acc_next[i];
+                        gap_mul_product_n[i] = gap_mul_product_next[i];
+                        gap_mul_negative_n[i] = gap_mul_negative_next[i];
+                        gap_avg_n[i] = gap_avg_next[i];
                     end
                 end
-            end
-
-            ST_CLASS_LUT_REQ: begin
-                for (int i = 0; i < LUT_LANES; i++) begin
-                    class_lut_idx[i] = select_input_byte(
-                        in_buf_q,
-                        {1'b0, 5'd16 + {1'b0, class_group_q, 2'b00} + 5'(i)}
-                    );
-                end
-                class_lut_req = 1'b1;
-                state_n = ST_CLASS_LUT_WAIT;
-            end
-
-            ST_CLASS_LUT_WAIT: begin
-                class_s1_final_group = (class_group_q == 2'd3);
-                class_s1_next_elem_cnt = elem_cnt_q + (class_s1_final_group ? 32'd32 : 32'd0);
-                class_s1_next_dst_addr = dst_addr_q + (class_s1_final_group ? 32'd16 : 32'd0);
-                class_s1_flush_output = class_s1_final_group &&
-                                        ((class_s1_next_dst_addr[4:0] == 5'd0) ||
-                                         (class_s1_next_elem_cnt >= cfg_length_i));
-
-                if (class_s1_flush_output && wfifo_full_i) begin
-                    elem_cnt_n = class_s1_next_elem_cnt;
-                    dst_addr_n = class_s1_next_dst_addr;
-                    class_group_n = 2'd0;
-                    state_n = ST_CLASS_PUSH;
-                end else begin
-                    if (class_s1_final_group) begin
-                        elem_cnt_n = class_s1_next_elem_cnt;
-                        dst_addr_n = class_s1_next_dst_addr;
-                        class_group_n = 2'd0;
-                        if (class_s1_next_elem_cnt >= cfg_length_i) begin
-                            state_n = ST_DONE;
-                        end else begin
-                            state_n = ST_READ_IN;
-                        end
-                    end else begin
-                        class_group_n = class_group_q + 2'd1;
-                        state_n = ST_CLASS_LUT_REQ;
-                    end
-                end
-            end
-
-            ST_CLASS_PUSH: begin
-                if (!wfifo_full_i) begin
-                    if (elem_cnt_q >= cfg_length_i) begin
-                        state_n = ST_DONE;
-                    end else begin
-                        state_n = ST_READ_IN;
-                    end
-                end
-            end
-
-            ST_DFL_EXP_REQ: begin
-                dfl_s1_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_side_q, 2'd0),
-                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd1),
-                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd2),
-                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd3));
-                for (int i = 0; i < LUT_LANES; i++) begin
-                    dfl_exp_idx[i] = select_dfl_byte(in_buf_q, dfl_side_q, 2'(i)) - dfl_s1_max_value[7:0];
-                end
-                dfl_exp_req = 1'b1;
-                state_n = ST_DFL_EXP_WAIT;
-            end
-
-            ST_DFL_EXP_WAIT: begin
-                dfl_s1_sum_value = {2'd0, lut_rdata_bank0[0][15:0]} +
-                                   {2'd0, lut_rdata_bank0[1][15:0]} +
-                                   {2'd0, lut_rdata_bank0[2][15:0]} +
-                                   {2'd0, lut_rdata_bank0[3][15:0]};
-                dfl_s1_weighted_value = {3'd0, lut_rdata_bank0[1][15:0]} +
-                                        ({2'd0, lut_rdata_bank0[2][15:0]} << 1) +
-                                        ({2'd0, lut_rdata_bank0[3][15:0]} * 19'd3);
-                dfl_sum_n = dfl_s1_sum_value;
-                dfl_weighted_n = dfl_s1_weighted_value;
-                dfl_shift_n = msb_pos18(dfl_s1_sum_value);
-                dfl_recip_idx = recip_index_from_sum(dfl_s1_sum_value);
-                dfl_recip_req = 1'b1;
-                state_n = ST_DFL_RECIP_WAIT;
-            end
-
-            ST_DFL_RECIP_WAIT: begin
-                dfl_s1_final_location = (dfl_side_q == 2'd3);
-                dfl_s1_next_elem_cnt = elem_cnt_q + (dfl_s1_final_location ? 32'd32 : 32'd0);
-                dfl_s1_next_dst_addr = dst_addr_q + (dfl_s1_final_location ? 32'd8 : 32'd0);
-                dfl_s1_flush_output = dfl_s1_final_location &&
-                                      ((dfl_s1_next_dst_addr[4:0] == 5'd0) ||
-                                       (dfl_s1_next_elem_cnt >= cfg_length_i));
-
-                if (dfl_s1_flush_output && wfifo_full_i) begin
-                    elem_cnt_n = dfl_s1_next_elem_cnt;
-                    dst_addr_n = dfl_s1_next_dst_addr;
-                    dfl_side_n = 2'd0;
-                    state_n = ST_DFL_PUSH;
-                end else begin
-                    if (dfl_s1_final_location) begin
-                        elem_cnt_n = dfl_s1_next_elem_cnt;
-                        dst_addr_n = dfl_s1_next_dst_addr;
-                        dfl_side_n = 2'd0;
-                        if (dfl_s1_next_elem_cnt >= cfg_length_i) begin
-                            state_n = ST_DONE;
-                        end else begin
-                            state_n = ST_READ_IN;
-                        end
-                    end else begin
-                        dfl_side_n = dfl_side_q + 2'd1;
-                        state_n = ST_DFL_EXP_REQ;
-                    end
-                end
-            end
-
-            ST_DFL_PUSH: begin
-                if (!wfifo_full_i) begin
-                    if (elem_cnt_q >= cfg_length_i) begin
-                        state_n = ST_DONE;
-                    end else begin
-                        state_n = ST_READ_IN;
-                    end
-                end
-            end
-
-            ST_PROCESS: begin
-                remaining_elems = cfg_length_i - elem_cnt_q;
-                p1_src_addr_n = src_addr_q;
-                p1_rhs_addr_n = rhs_addr_q;
-                p1_dst_addr_n = dst_addr_q;
-
-                if (remaining_elems == 0) begin
-                    state_n = ST_DONE;
-                end else if (!s2_stall) begin
-                    in_avail = 6'd32 - {1'b0, src_addr_q[4:0]};
-                    rhs_avail = 6'd32 - {1'b0, rhs_addr_q[4:0]};
-                    out_avail_bytes = 6'd32 - {1'b0, dst_addr_q[4:0]};
-
-                    unique case (cfg_mode_i)
-                        MODE_8BIT:  out_avail_elems = out_avail_bytes;
-                        MODE_16BIT: out_avail_elems = {1'b0, out_avail_bytes[5:1]};
-                        MODE_32BIT: out_avail_elems = {2'b0, out_avail_bytes[5:2]};
-                        MODE_MUL_Q7: out_avail_elems = out_avail_bytes;
-                        MODE_ADD_I8: out_avail_elems = out_avail_bytes;
-                        default:    out_avail_elems = out_avail_bytes;
-                    endcase
-
-                    if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
-                        max_lanes_1 = (remaining_elems > 32) ? 6'd32 : 6'(remaining_elems);
-                    end else begin
-                        max_lanes_1 = (LUT_LANES < remaining_elems) ? LUT_LANES[5:0] : (remaining_elems > 6'd31 ? 6'd31 : 6'(remaining_elems));
-                    end
-                    max_lanes_2 = (max_lanes_1 < in_avail) ? max_lanes_1 : in_avail;
-                    max_lanes_3 = ((cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) &&
-                                   rhs_avail < max_lanes_2) ? rhs_avail : max_lanes_2;
-                    max_lanes_4 = (max_lanes_3 < out_avail_elems) ? max_lanes_3 : out_avail_elems;
-                    num_valid_lanes = max_lanes_4;
-
-                    if (num_valid_lanes > 0) begin
-                        s1_sram_req = (cfg_mode_i != MODE_MUL_Q7 && cfg_mode_i != MODE_ADD_I8);
-                        p1_num_valid_lanes_n = num_valid_lanes;
-                        p1_valid_n = 1'b1;
-                        p1_lhs_data_n = in_buf_q;
-                        p1_rhs_data_n = rhs_buf_q;
-
-                        src_addr_n = src_addr_q + 32'(num_valid_lanes);
-                        rhs_addr_n = rhs_addr_q + 32'(num_valid_lanes);
-                        elem_cnt_n = elem_cnt_q + 32'(num_valid_lanes);
-
-                        if (cfg_mode_i == MODE_8BIT || cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
-                            dst_addr_n = dst_addr_q + 32'(num_valid_lanes);
-                        end else if (cfg_mode_i == MODE_16BIT) begin
-                            dst_addr_n = dst_addr_q + 32'(num_valid_lanes * 2);
-                        end else begin
-                            dst_addr_n = dst_addr_q + 32'(num_valid_lanes * 4);
-                        end
-
-                        if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
-                            if (elem_cnt_n == cfg_length_i) begin
-                                p1_flush_done_n = 1'b1;
-                            end else begin
-                                p1_flush_mid_n = 1'b1;
-                            end
-                            state_n = ST_WAIT_FLUSH;
-                        end else if (dst_addr_n[4:0] == 0) begin
-                            p1_flush_mid_n = 1'b1;
-                            state_n = ST_WAIT_FLUSH;
-                        end else if (elem_cnt_n == cfg_length_i) begin
-                            p1_flush_done_n = 1'b1;
-                            state_n = ST_WAIT_FLUSH;
-                        end else if (src_addr_n[4:0] == 0) begin
-                            state_n = ST_READ_IN;
-                        end
-                    end
-                end
-            end
-
-            ST_WAIT_FLUSH: begin
-                if (s2_flush_mid_completed) begin
-                    if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
-                        if (((src_addr_q[4:0] == 0) || (rhs_addr_q[4:0] == 0)) && elem_cnt_q < cfg_length_i) begin
-                            state_n = ST_READ_IN;
-                        end else begin
-                            state_n = ST_PROCESS;
-                        end
-                    end else if (src_addr_q[4:0] == 0 && elem_cnt_q < cfg_length_i) begin
-                        state_n = ST_READ_IN;
-                    end else begin
-                        state_n = ST_PROCESS;
-                    end
-                end else if (s2_flush_done_completed) begin
-                    state_n = ST_DONE;
-                end
-            end
-            
-            ST_DONE: begin
-                // Waiting for new start
-            end
 
                 default: ;
             endcase
@@ -781,6 +1131,15 @@ module afu_core #(
     // We must save lut_rdata_ports when S2 stalls.
     logic [31:0] s2_lut_rdata_saved_q [LUT_LANES];
     logic        s2_lut_rdata_saved_valid_q;
+    logic [255:0] gap_wb_out_buf;
+    logic [31:0]  gap_wb_out_be;
+    logic         gap_wb_push_now;
+    logic [255:0] dfl_wb_out_buf;
+    logic [31:0]  dfl_wb_out_be;
+    logic         dfl_wb_push_now;
+    logic [255:0] class_wb_out_buf;
+    logic [31:0]  class_wb_out_be;
+    logic         class_wb_push_now;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -796,21 +1155,84 @@ module afu_core #(
         end
     end
 
+    always_comb begin : p_gap_writeback_comb
+        gap_wb_out_buf = out_buf_q;
+        gap_wb_out_be = out_be_q;
+        gap_wb_push_now = 1'b0;
+
+        if (state_q == ST_GAP_WRITE && gap_spatial_count != 32'd0) begin
+            for (int i = 0; i < 32; i++) begin
+                gap_wb_out_buf[i * 8 +: 8] = i8_byte_from_i16(gap_avg_q[i][15:0]);
+                gap_wb_out_be[i] = 1'b1;
+            end
+            gap_wb_push_now = !wfifo_full_i;
+        end else if (state_q == ST_GAP_PUSH) begin
+            gap_wb_push_now = !wfifo_full_i;
+        end
+    end
+
+    always_comb begin : p_dfl_writeback_comb
+        dfl_s2_out_value = dfl_round_value_q;
+        dfl_s2_out_off = dst_addr_q[4:0] + {2'd0, dfl_side_q, 1'b0};
+        dfl_s2_final_location = (dfl_side_q == 2'd3);
+        dfl_s2_next_elem_cnt = elem_cnt_q + (dfl_s2_final_location ? 32'd32 : 32'd0);
+        dfl_s2_next_dst_addr = dst_addr_q + (dfl_s2_final_location ? 32'd8 : 32'd0);
+        dfl_s2_flush_output = dfl_s2_final_location &&
+                              ((dfl_s2_next_dst_addr[4:0] == 5'd0) ||
+                               (dfl_s2_next_elem_cnt >= cfg_length_i));
+
+        dfl_wb_out_buf = out_buf_q;
+        dfl_wb_out_be = out_be_q;
+        dfl_wb_push_now = 1'b0;
+
+        if (state_q == ST_DFL_WRITE) begin
+            dfl_wb_out_buf[dfl_s2_out_off * 8 +: 16] = dfl_s2_out_value;
+            dfl_wb_out_be[dfl_s2_out_off +: 2] = 2'b11;
+            dfl_wb_push_now = dfl_s2_flush_output && !wfifo_full_i;
+        end else if (state_q == ST_DFL_PUSH) begin
+            dfl_wb_push_now = !wfifo_full_i;
+        end
+    end
+
+    always_comb begin : p_class_writeback_comb
+        logic [31:0] lut_val_class;
+
+        lut_val_class = '0;
+        class_s2_final_group = (class_group_q == 2'd3);
+        class_s2_next_elem_cnt = elem_cnt_q + (class_s2_final_group ? 32'd32 : 32'd0);
+        class_s2_next_dst_addr = dst_addr_q + (class_s2_final_group ? 32'd16 : 32'd0);
+        class_s2_flush_output = class_s2_final_group &&
+                                ((class_s2_next_dst_addr[4:0] == 5'd0) ||
+                                 (class_s2_next_elem_cnt >= cfg_length_i));
+
+        class_wb_out_buf = out_buf_q;
+        class_wb_out_be = out_be_q;
+        class_wb_push_now = 1'b0;
+
+        if (state_q == ST_CLASS_LUT_WAIT) begin
+            for (int i = 0; i < LUT_LANES; i++) begin
+                lut_val_class = active_lut_bank_q ? lut_rdata_bank1[i] : lut_rdata_bank0[i];
+                class_wb_out_buf[(dst_addr_q[4:0] + {1'b0, class_group_q, 2'b00} + 5'(i)) * 8 +: 8] =
+                    lut_val_class[7:0];
+                class_wb_out_be[dst_addr_q[4:0] + {1'b0, class_group_q, 2'b00} + 5'(i)] = 1'b1;
+            end
+            class_wb_push_now = class_s2_flush_output && !wfifo_full_i;
+        end else if (state_q == ST_CLASS_PUSH) begin
+            class_wb_push_now = !wfifo_full_i;
+        end
+    end
+
     always_comb begin
         logic [31:0] lut_val;
         logic [4:0]  cur_out_off;
+        logic        mul_p3_pop;
+        logic        mul_p2_advance_s2;
+        logic        mul_p1_advance_s2;
         lut_val = '0;
         cur_out_off = '0;
-        dfl_s2_out_value = '0;
-        dfl_s2_out_off = '0;
-        dfl_s2_final_location = 1'b0;
-        dfl_s2_next_elem_cnt = '0;
-        dfl_s2_next_dst_addr = '0;
-        dfl_s2_flush_output = 1'b0;
-        class_s2_final_group = 1'b0;
-        class_s2_next_elem_cnt = '0;
-        class_s2_next_dst_addr = '0;
-        class_s2_flush_output = 1'b0;
+        mul_p3_pop = 1'b0;
+        mul_p2_advance_s2 = 1'b0;
+        mul_p1_advance_s2 = 1'b0;
         
         s2_flush_mid_completed = 1'b0;
         s2_flush_done_completed = 1'b0;
@@ -818,6 +1240,20 @@ module afu_core #(
         out_buf_n = out_buf_q;
         out_be_n  = out_be_q;
         out_base_n = out_base_q;
+        mul_p2_valid_n = mul_p2_valid_q;
+        mul_p2_num_valid_lanes_n = mul_p2_num_valid_lanes_q;
+        mul_p2_dst_addr_n = mul_p2_dst_addr_q;
+        mul_p2_flush_mid_n = mul_p2_flush_mid_q;
+        mul_p2_flush_done_n = mul_p2_flush_done_q;
+        mul_p3_valid_n = mul_p3_valid_q;
+        mul_p3_num_valid_lanes_n = mul_p3_num_valid_lanes_q;
+        mul_p3_dst_addr_n = mul_p3_dst_addr_q;
+        mul_p3_flush_mid_n = mul_p3_flush_mid_q;
+        mul_p3_flush_done_n = mul_p3_flush_done_q;
+        for (int i = 0; i < 32; i++) begin
+            mul_p2_product_n[i] = mul_p2_product_q[i];
+            mul_p3_shifted_n[i] = mul_p3_shifted_q[i];
+        end
         
         s2_out_buf_comb = out_buf_q;
         s2_out_be_comb  = out_be_q;
@@ -826,108 +1262,162 @@ module afu_core #(
             out_base_n = cfg_dst_ptr_i;
             out_buf_n  = '0;
             out_be_n   = '0;
-        end else if (state_q == ST_GAP_ACCUM) begin
-            if (gap_group_done) begin
-                for (int i = 0; i < 32; i++) begin
-                    s2_out_buf_comb[i * 8 +: 8] = avg_i8_byte(
-                        gap_acc_q[i] + {{24{in_buf_q[i * 8 + 7]}}, in_buf_q[i * 8 +: 8]},
-                        gap_spatial_count
-                    );
-                    s2_out_be_comb[i] = 1'b1;
-                end
-
+            mul_p2_valid_n = 1'b0;
+            mul_p2_num_valid_lanes_n = '0;
+            mul_p2_dst_addr_n = '0;
+            mul_p2_flush_mid_n = 1'b0;
+            mul_p2_flush_done_n = 1'b0;
+            mul_p3_valid_n = 1'b0;
+            mul_p3_num_valid_lanes_n = '0;
+            mul_p3_dst_addr_n = '0;
+            mul_p3_flush_mid_n = 1'b0;
+            mul_p3_flush_done_n = 1'b0;
+            for (int i = 0; i < 32; i++) begin
+                mul_p2_product_n[i] = '0;
+                mul_p3_shifted_n[i] = '0;
+            end
+        end else if (state_q == ST_GAP_WRITE) begin
+            if (gap_spatial_count != 32'd0) begin
+                s2_out_buf_comb = gap_wb_out_buf;
+                s2_out_be_comb = gap_wb_out_be;
                 if (!wfifo_full_i) begin
-                    wfifo_push_o = 1'b1;
+                    wfifo_push_o = gap_wb_push_now;
                     out_buf_n = '0;
                     out_be_n = '0;
                 end else begin
-                    out_buf_n = s2_out_buf_comb;
-                    out_be_n = s2_out_be_comb;
+                    out_buf_n = gap_wb_out_buf;
+                    out_be_n = gap_wb_out_be;
                 end
             end
         end else if (state_q == ST_GAP_PUSH) begin
+            s2_out_buf_comb = gap_wb_out_buf;
+            s2_out_be_comb = gap_wb_out_be;
             if (!wfifo_full_i) begin
-                wfifo_push_o = 1'b1;
+                wfifo_push_o = gap_wb_push_now;
                 out_buf_n = '0;
                 out_be_n = '0;
             end
         end else if (state_q == ST_CLASS_LUT_WAIT) begin
-            class_s2_final_group = (class_group_q == 2'd3);
-            class_s2_next_elem_cnt = elem_cnt_q + (class_s2_final_group ? 32'd32 : 32'd0);
-            class_s2_next_dst_addr = dst_addr_q + (class_s2_final_group ? 32'd16 : 32'd0);
-            class_s2_flush_output = class_s2_final_group &&
-                                    ((class_s2_next_dst_addr[4:0] == 5'd0) ||
-                                     (class_s2_next_elem_cnt >= cfg_length_i));
-
-            s2_out_buf_comb = out_buf_q;
-            s2_out_be_comb = out_be_q;
-            for (int i = 0; i < LUT_LANES; i++) begin
-                cur_out_off = dst_addr_q[4:0] + {1'b0, class_group_q, 2'b00} + 5'(i);
-                lut_val = active_lut_bank_q ? lut_rdata_bank1[i] : lut_rdata_bank0[i];
-                s2_out_buf_comb[cur_out_off * 8 +: 8] = lut_val[7:0];
-                s2_out_be_comb[cur_out_off] = 1'b1;
-            end
-
+            s2_out_buf_comb = class_wb_out_buf;
+            s2_out_be_comb = class_wb_out_be;
             if (class_s2_flush_output && !wfifo_full_i) begin
-                wfifo_push_o = 1'b1;
+                wfifo_push_o = class_wb_push_now;
                 out_buf_n = '0;
                 out_be_n = '0;
             end else begin
-                out_buf_n = s2_out_buf_comb;
-                out_be_n = s2_out_be_comb;
+                out_buf_n = class_wb_out_buf;
+                out_be_n = class_wb_out_be;
             end
-        end else if (state_q == ST_DFL_RECIP_WAIT) begin
-            dfl_s2_out_value = dfl_q8_from_recip(dfl_weighted_q, lut_rdata_bank1[0], dfl_shift_q);
-            dfl_s2_out_off = dst_addr_q[4:0] + {2'd0, dfl_side_q, 1'b0};
-            dfl_s2_final_location = (dfl_side_q == 2'd3);
-            dfl_s2_next_elem_cnt = elem_cnt_q + (dfl_s2_final_location ? 32'd32 : 32'd0);
-            dfl_s2_next_dst_addr = dst_addr_q + (dfl_s2_final_location ? 32'd8 : 32'd0);
-            dfl_s2_flush_output = dfl_s2_final_location &&
-                                  ((dfl_s2_next_dst_addr[4:0] == 5'd0) ||
-                                   (dfl_s2_next_elem_cnt >= cfg_length_i));
-
-            s2_out_buf_comb = out_buf_q;
-            s2_out_be_comb = out_be_q;
-            s2_out_buf_comb[dfl_s2_out_off * 8 +: 16] = dfl_s2_out_value;
-            s2_out_be_comb[dfl_s2_out_off +: 2] = 2'b11;
-
+        end else if (state_q == ST_DFL_WRITE) begin
+            s2_out_buf_comb = dfl_wb_out_buf;
+            s2_out_be_comb = dfl_wb_out_be;
             if (dfl_s2_flush_output && !wfifo_full_i) begin
-                wfifo_push_o = 1'b1;
+                wfifo_push_o = dfl_wb_push_now;
                 out_buf_n = '0;
                 out_be_n = '0;
             end else begin
-                out_buf_n = s2_out_buf_comb;
-                out_be_n = s2_out_be_comb;
+                out_buf_n = dfl_wb_out_buf;
+                out_be_n = dfl_wb_out_be;
             end
         end else if (state_q == ST_DFL_PUSH) begin
+            s2_out_buf_comb = dfl_wb_out_buf;
+            s2_out_be_comb = dfl_wb_out_be;
             if (!wfifo_full_i) begin
-                wfifo_push_o = 1'b1;
+                wfifo_push_o = dfl_wb_push_now;
                 out_buf_n = '0;
                 out_be_n = '0;
             end
         end else if (state_q == ST_CLASS_PUSH) begin
+            s2_out_buf_comb = class_wb_out_buf;
+            s2_out_be_comb = class_wb_out_be;
             if (!wfifo_full_i) begin
-                wfifo_push_o = 1'b1;
+                wfifo_push_o = class_wb_push_now;
                 out_buf_n = '0;
                 out_be_n = '0;
             end
+        end else if (cfg_mode_i == MODE_MUL_Q7) begin
+            if (mul_p3_valid_q) begin
+                s2_out_buf_comb = out_buf_q;
+                s2_out_be_comb = out_be_q;
+                for (int i = 0; i < 32; i++) begin
+                    if (i < mul_p3_num_valid_lanes_q) begin
+                        cur_out_off = mul_p3_dst_addr_q[4:0] + 5'(i);
+                        s2_out_buf_comb[cur_out_off * 8 +: 8] =
+                            i8_byte_from_i16(mul_p3_shifted_q[i]);
+                        s2_out_be_comb[cur_out_off] = 1'b1;
+                    end
+                end
+
+                if (!wfifo_full_i) begin
+                    mul_p3_pop = 1'b1;
+                    if (mul_p3_flush_mid_q) begin
+                        wfifo_push_o = 1'b1;
+                        out_buf_n = '0;
+                        out_be_n  = '0;
+                        out_base_n = out_base_q + 32;
+                        s2_flush_mid_completed = 1'b1;
+                    end else if (mul_p3_flush_done_q) begin
+                        if (s2_out_be_comb != 0) begin
+                            wfifo_push_o = 1'b1;
+                        end
+                        out_buf_n = '0;
+                        out_be_n  = '0;
+                        s2_flush_done_completed = 1'b1;
+                    end else begin
+                        out_buf_n = s2_out_buf_comb;
+                        out_be_n  = s2_out_be_comb;
+                    end
+                end
+            end
+
+            mul_p2_advance_s2 = mul_p2_valid_q && (!mul_p3_valid_q || mul_p3_pop);
+            if (mul_p2_advance_s2) begin
+                mul_p3_valid_n = 1'b1;
+                mul_p3_num_valid_lanes_n = mul_p2_num_valid_lanes_q;
+                mul_p3_dst_addr_n = mul_p2_dst_addr_q;
+                mul_p3_flush_mid_n = mul_p2_flush_mid_q;
+                mul_p3_flush_done_n = mul_p2_flush_done_q;
+                for (int i = 0; i < 32; i++) begin
+                    if (i < mul_p2_num_valid_lanes_q) begin
+                        mul_p3_shifted_n[i] = mul_q7_shifted(mul_p2_product_q[i]);
+                    end else begin
+                        mul_p3_shifted_n[i] = '0;
+                    end
+                end
+                mul_p2_valid_n = 1'b0;
+            end else if (mul_p3_pop) begin
+                mul_p3_valid_n = 1'b0;
+            end
+
+            mul_p1_advance_s2 = p1_valid_q && !s2_stall &&
+                                (!mul_p2_valid_q || mul_p2_advance_s2);
+            if (mul_p1_advance_s2) begin
+                mul_p2_valid_n = 1'b1;
+                mul_p2_num_valid_lanes_n = p1_num_valid_lanes_q;
+                mul_p2_dst_addr_n = p1_dst_addr_q;
+                mul_p2_flush_mid_n = p1_flush_mid_q;
+                mul_p2_flush_done_n = p1_flush_done_q;
+                for (int i = 0; i < 32; i++) begin
+                    if (i < p1_num_valid_lanes_q) begin
+                        mul_p2_product_n[i] = mul_q7_product(
+                            select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
+                            select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
+                        );
+                    end else begin
+                        mul_p2_product_n[i] = '0;
+                    end
+                end
+            end
         end else if (p1_valid_q && !s2_stall) begin
             // Process lanes directly into combinational buffer
-            if (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8) begin
+            if (cfg_mode_i == MODE_ADD_I8) begin
                 for (int i = 0; i < 32; i++) begin
                     if (i < p1_num_valid_lanes_q) begin
                         cur_out_off = p1_dst_addr_q[4:0] + 5'(i);
-                        if (cfg_mode_i == MODE_MUL_Q7) begin
-                            s2_out_buf_comb[cur_out_off * 8 +: 8] = mul_q7_byte(
-                                select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
-                                select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
-                            );
-                        end else begin
-                            s2_out_buf_comb[cur_out_off * 8 +: 8] = add_i8_byte(
-                                select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
-                                select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
-                            );
-                        end
+                        s2_out_buf_comb[cur_out_off * 8 +: 8] = add_i8_byte(
+                            select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
+                            select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
+                        );
                         s2_out_be_comb[cur_out_off] = 1'b1;
                     end
                 end
@@ -953,7 +1443,10 @@ module afu_core #(
                 end
             end
 
-            if (p1_flush_mid_q) begin
+            if (cfg_mode_i == MODE_MUL_Q7) begin
+                // MUL_Q7 completion is reported when the registered product
+                // stage is packed and accepted by the write FIFO.
+            end else if (p1_flush_mid_q) begin
                 wfifo_push_o = 1'b1;
                 out_buf_n = '0;
                 out_be_n  = '0;
@@ -973,7 +1466,7 @@ module afu_core #(
         end
     end
 
-    always_ff @(posedge clk_i or negedge rst_ni) begin
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_common_regs
         if (!rst_ni) begin
             state_q    <= ST_IDLE;
             src_addr_q <= '0;
@@ -982,19 +1475,77 @@ module afu_core #(
             elem_cnt_q <= '0;
             in_buf_q   <= '0;
             rhs_buf_q  <= '0;
+        end else begin
+            state_q    <= state_n;
+            src_addr_q <= src_addr_n;
+            rhs_addr_q <= rhs_addr_n;
+            dst_addr_q <= dst_addr_n;
+            elem_cnt_q <= elem_cnt_n;
+            in_buf_q   <= in_buf_n;
+            rhs_buf_q  <= rhs_buf_n;
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_writeback_regs
+        if (!rst_ni) begin
             out_base_q <= '0;
             out_buf_q  <= '0;
             out_be_q   <= '0;
+        end else begin
+            out_base_q <= out_base_n;
+            out_buf_q  <= out_buf_n;
+            out_be_q   <= out_be_n;
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_dfl_regs
+        if (!rst_ni) begin
             dfl_side_q <= '0;
-            class_group_q <= '0;
             dfl_sum_q <= '0;
             dfl_weighted_q <= '0;
             dfl_shift_q <= '0;
+            dfl_mul_product_q <= '0;
+            dfl_round_value_q <= '0;
+        end else begin
+            dfl_side_q <= dfl_side_n;
+            dfl_sum_q <= dfl_sum_n;
+            dfl_weighted_q <= dfl_weighted_n;
+            dfl_shift_q <= dfl_shift_n;
+            dfl_mul_product_q <= dfl_mul_product_n;
+            dfl_round_value_q <= dfl_round_value_n;
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_class_regs
+        if (!rst_ni) begin
+            class_group_q <= '0;
+        end else begin
+            class_group_q <= class_group_n;
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_gap_regs
+        if (!rst_ni) begin
             gap_row_count_q <= '0;
             for (int i = 0; i < 32; i++) begin
                 gap_acc_q[i] <= '0;
+                gap_mul_product_q[i] <= '0;
+                gap_mul_negative_q[i] <= 1'b0;
+                gap_avg_q[i] <= '0;
             end
-            
+        end else begin
+            gap_row_count_q <= gap_row_count_n;
+            for (int i = 0; i < 32; i++) begin
+                gap_acc_q[i] <= gap_acc_n[i];
+                gap_mul_product_q[i] <= gap_mul_product_n[i];
+                gap_mul_negative_q[i] <= gap_mul_negative_n[i];
+                gap_avg_q[i] <= gap_avg_n[i];
+            end
+        end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_stage1_regs
+        if (!rst_ni) begin
             p1_valid_q <= 1'b0;
             p1_num_valid_lanes_q <= '0;
             p1_lhs_data_q <= '0;
@@ -1004,38 +1555,49 @@ module afu_core #(
             p1_dst_addr_q <= '0;
             p1_flush_mid_q <= 1'b0;
             p1_flush_done_q <= 1'b0;
-        end else begin
-            state_q    <= state_n;
-            src_addr_q <= src_addr_n;
-            rhs_addr_q <= rhs_addr_n;
-            dst_addr_q <= dst_addr_n;
-            elem_cnt_q <= elem_cnt_n;
-            in_buf_q   <= in_buf_n;
-            rhs_buf_q  <= rhs_buf_n;
-            
-            out_base_q <= out_base_n;
-            out_buf_q  <= out_buf_n;
-            out_be_q   <= out_be_n;
-            dfl_side_q <= dfl_side_n;
-            class_group_q <= class_group_n;
-            dfl_sum_q <= dfl_sum_n;
-            dfl_weighted_q <= dfl_weighted_n;
-            dfl_shift_q <= dfl_shift_n;
-            gap_row_count_q <= gap_row_count_n;
-            for (int i = 0; i < 32; i++) begin
-                gap_acc_q[i] <= gap_acc_n[i];
-            end
+        end else if (!s2_stall) begin
+            p1_valid_q <= p1_valid_n;
+            p1_num_valid_lanes_q <= p1_num_valid_lanes_n;
+            p1_lhs_data_q <= p1_lhs_data_n;
+            p1_rhs_data_q <= p1_rhs_data_n;
+            p1_src_addr_q <= p1_src_addr_n;
+            p1_rhs_addr_q <= p1_rhs_addr_n;
+            p1_dst_addr_q <= p1_dst_addr_n;
+            p1_flush_mid_q <= p1_flush_mid_n;
+            p1_flush_done_q <= p1_flush_done_n;
+        end
+    end
 
-            if (!s2_stall) begin
-                p1_valid_q <= p1_valid_n;
-                p1_num_valid_lanes_q <= p1_num_valid_lanes_n;
-                p1_lhs_data_q <= p1_lhs_data_n;
-                p1_rhs_data_q <= p1_rhs_data_n;
-                p1_src_addr_q <= p1_src_addr_n;
-                p1_rhs_addr_q <= p1_rhs_addr_n;
-                p1_dst_addr_q <= p1_dst_addr_n;
-                p1_flush_mid_q <= p1_flush_mid_n;
-                p1_flush_done_q <= p1_flush_done_n;
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_mul_pipeline_regs
+        if (!rst_ni) begin
+            mul_p2_valid_q <= 1'b0;
+            mul_p2_num_valid_lanes_q <= '0;
+            mul_p2_dst_addr_q <= '0;
+            mul_p2_flush_mid_q <= 1'b0;
+            mul_p2_flush_done_q <= 1'b0;
+            mul_p3_valid_q <= 1'b0;
+            mul_p3_num_valid_lanes_q <= '0;
+            mul_p3_dst_addr_q <= '0;
+            mul_p3_flush_mid_q <= 1'b0;
+            mul_p3_flush_done_q <= 1'b0;
+            for (int i = 0; i < 32; i++) begin
+                mul_p2_product_q[i] <= '0;
+                mul_p3_shifted_q[i] <= '0;
+            end
+        end else begin
+            mul_p2_valid_q <= mul_p2_valid_n;
+            mul_p2_num_valid_lanes_q <= mul_p2_num_valid_lanes_n;
+            mul_p2_dst_addr_q <= mul_p2_dst_addr_n;
+            mul_p2_flush_mid_q <= mul_p2_flush_mid_n;
+            mul_p2_flush_done_q <= mul_p2_flush_done_n;
+            mul_p3_valid_q <= mul_p3_valid_n;
+            mul_p3_num_valid_lanes_q <= mul_p3_num_valid_lanes_n;
+            mul_p3_dst_addr_q <= mul_p3_dst_addr_n;
+            mul_p3_flush_mid_q <= mul_p3_flush_mid_n;
+            mul_p3_flush_done_q <= mul_p3_flush_done_n;
+            for (int i = 0; i < 32; i++) begin
+                mul_p2_product_q[i] <= mul_p2_product_n[i];
+                mul_p3_shifted_q[i] <= mul_p3_shifted_n[i];
             end
         end
     end

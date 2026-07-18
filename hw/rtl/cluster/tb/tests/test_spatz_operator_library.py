@@ -32,6 +32,7 @@ DST_REQUANT = 0x10100500
 ADD_DST = 0x10100800
 MUL_DST = 0x10100B00
 LOG_DST = 0x10100D00
+LOG_LUT = 0x10100E00
 POOL_DST = 0x10101200
 UP_DST = 0x10101500
 CONCAT_DST = 0x10101C00
@@ -46,7 +47,9 @@ DFL_ROW32_SRC = 0x10155000
 DFL_ROW32_DST = 0x10156000
 DFL_EXP_LUT32 = 0x10157000
 DFL_RECIP_LUT = 0x10158000
+CLASS_ROW32_SRC = 0x10159000
 CLASS_DST = 0x1015A000
+GAP_SRC = 0x1015B000
 GAP_DST = 0x1015D000
 CLAMP_SRC = 0x10160000
 CLAMP_DST = 0x10168000
@@ -75,6 +78,7 @@ GAP_H = 7
 GAP_W = 5
 GAP_C = 65
 GAP_PIXELS = GAP_H * GAP_W
+GAP_GROUPS = (GAP_C + 31) // 32
 CLAMP_H = 17
 CLAMP_W = 13
 CLAMP_C = 65
@@ -515,6 +519,20 @@ def check_dfl_fused(dut):
             )
 
 
+async def preload_class_sigmoid_tcdm(dut):
+    src = []
+    for loc in range(CLASS_SIGMOID_LOCATIONS):
+        for channel in range(32):
+            src.append(class_sigmoid_input_value(loc, channel) & 0xFF)
+
+    write_tcdm_bytes_aligned32(dut, CLASS_ROW32_SRC, src)
+    write_tcdm_bytes_aligned32(dut, LOG_LUT, [sigmoid_lut_value(i) for i in range(256)])
+    class_dst_bytes = CLASS_SIGMOID_LOCATIONS * 16
+    class_dst_aligned_bytes = ((class_dst_bytes + 31) // 32) * 32
+    write_tcdm_bytes_aligned32(dut, CLASS_DST, [0] * class_dst_aligned_bytes)
+    await Timer(1, "ps")
+
+
 def check_class_sigmoid(dut):
     for loc in range(CLASS_SIGMOID_LOCATIONS):
         for cls in range(16):
@@ -525,6 +543,19 @@ def check_class_sigmoid(dut):
             assert got == expected, (
                 f"class_sigmoid[{idx}] got={got} expected={expected}"
             )
+
+
+async def preload_global_avgpool_tcdm(dut):
+    src = [0] * (GAP_PIXELS * GAP_GROUPS * 32)
+    for h in range(GAP_H):
+        for w in range(GAP_W):
+            for channel in range(GAP_C):
+                idx = c32_hw_index(GAP_H, GAP_W, h, w, channel)
+                src[idx] = gap_input_value(h, w, channel) & 0xFF
+
+    write_tcdm_bytes_aligned32(dut, GAP_SRC, src)
+    write_tcdm_bytes_aligned32(dut, GAP_DST, [0x5A] * (GAP_GROUPS * 32))
+    await Timer(1, "ps")
 
 
 def check_global_avgpool(dut):
@@ -850,6 +881,7 @@ async def test_afu_op_class_sigmoid(dut):
         1,
         check_class_sigmoid,
         firmware_dir="sw/test/afu_ops",
+        pre_release=preload_class_sigmoid_tcdm,
     )
 
 
@@ -862,4 +894,5 @@ async def test_afu_op_global_avgpool(dut):
         1,
         check_global_avgpool,
         firmware_dir="sw/test/afu_ops",
+        pre_release=preload_global_avgpool_tcdm,
     )
