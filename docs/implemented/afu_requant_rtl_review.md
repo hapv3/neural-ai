@@ -1,34 +1,33 @@
-# Báo cáo Code Review: Khối AFU & Requantization
+# Code Review Report: AFU and Requantization Blocks
 
-Xin chúc mừng! Bạn đã tích hợp thành công hai mảnh ghép phần cứng quan trọng nhất để gỡ nút thắt cổ chai cho hệ thống `neural-ai`. Việc tách bạch **Requantization (tính toán tuyến tính)** cắm thẳng vào Systolic Array và **AFU (tính toán phi tuyến tính qua LUT)** thành một bộ tăng tốc riêng là một quyết định kiến trúc cực kỳ chuẩn xác và chuyên nghiệp.
-
-Dưới đây là phần Review chi tiết mã nguồn RTL (`requant_pipeline.sv` và `afu_core.sv`) cùng với các đề xuất tối ưu (Performance/Synthesis):
+This review covers the RTL source for `requant_pipeline.sv` and `afu_core.sv`, with optimization suggestions for performance and synthesis.
 
 ---
 
 ## 1. Module `requant_pipeline.sv`
 
 > [!SUCCESS]
-> **Điểm sáng:** 
-> - Logic tính toán chuẩn xác cho luồng Requantization chuẩn của TensorFlow Lite (cộng Bias, nhân Multiplier, dịch phải có làm tròn Rounding, cộng Zero Point và Kẹp Clamp).
-> - Sử dụng vòng lặp `for` để bung (unroll) phần cứng song song cho cả 32 cột của Systolic Array.
+> **Strengths:**
+> - The logic matches the standard TensorFlow Lite requantization flow: add bias, multiply by multiplier, right shift with rounding, add zero point, and clamp.
+> - The `for` loop unrolls parallel hardware for all 32 Systolic Array columns.
 
 > [!WARNING]
-> **Vấn đề Timing & Diện tích (Critical Path & Area):**
-> Mã nguồn hiện tại đang viết dưới dạng `always_comb` (tổ hợp hoàn toàn). Trong 1 chu kỳ xung nhịp, mạch phải thực hiện 32 phép cộng 64-bit, 32 phép nhân 64-bit, 32 phép dịch bit (barrel shifter), và 32 cụm so sánh kẹp giá trị. 
-> 
-> **Hậu quả khi tổng hợp (Synthesis):**
-> - Không thể nào đạt được xung nhịp cao (ví dụ 500MHz) vì đường trễ (Critical Path) quá dài.
-> - Phép nhân `scaled = biased * 64'($signed(multiplier_i[i]))` ép Synthesizer đúc ra các khối nhân 64x64 siêu to khổng lồ, làm "cháy" tài nguyên DSP của chip.
+> **Timing and area risk:**
+> The current source is written as a fully combinational `always_comb` block. In one clock cycle, the circuit must perform 32 64-bit additions, 32 64-bit multiplications, 32 barrel shifts, and 32 clamp comparison groups.
+>
+> **Synthesis consequences:**
+> - High clocks such as 500 MHz are unlikely because the critical path is too long.
+> - The expression `scaled = biased * 64'($signed(multiplier_i[i]))` pushes the synthesizer toward very large 64x64 multipliers, consuming excessive DSP resources.
 
 > [!TIP]
-> **Đề xuất sửa đổi (Action Items):**
-> 1. **Cắt nhỏ Pipeline (Pipelining):** Phải nhét thêm ít nhất 2 đến 3 tầng thanh ghi (`always_ff`) vào giữa các bước. Ví dụ: Tầng 1 (Add Bias + Multiply) -> Tầng 2 (Shift + Add Zero Point) -> Tầng 3 (Clamp).
-> 2. **Ép kiểu phép nhân (Multiplication Casting):** Vì `biased` chỉ khoảng 33-bit và `multiplier` là 32-bit. Hãy ép kiểu phép nhân thành `34-bit * 32-bit` thay vì `64 * 64` để tiết kiệm DSP: 
+> **Action items:**
+> 1. **Pipeline the datapath:** Add at least 2 to 3 `always_ff` register stages between steps, for example Stage 1 (add bias + multiply) -> Stage 2 (shift + add zero point) -> Stage 3 (clamp).
+> 2. **Constrain multiplication width:** `biased` needs roughly 33 bits and `multiplier` is 32 bits. Cast the multiply as `34-bit * 32-bit` instead of `64 * 64` to save DSP resources:
+>
 > ```verilog
 > logic signed [33:0] biased_34;
 > biased_34 = 34'($signed(acc_i[i])) + 34'($signed(bias_i[i]));
-> scaled = 64'(biased_34) * 64'($signed(multiplier_i[i])); // Công cụ tổng hợp sẽ tối ưu tốt hơn
+> scaled = 64'(biased_34) * 64'($signed(multiplier_i[i])); // Synthesis tools can optimize this better.
 > ```
 
 ---
@@ -36,28 +35,30 @@ Dưới đây là phần Review chi tiết mã nguồn RTL (`requant_pipeline.sv
 ## 2. Module `afu_core.sv`
 
 > [!SUCCESS]
-> **Điểm sáng:** 
-> - Thiết kế State Machine (FSM) phân chia 2 Pipeline Stages (`ST_PROCESS` và Stage 2) khá rõ ràng.
-> - Kỹ thuật `Pipeline hazard fix` (lưu lại rdata của SRAM khi S2 bị stall) được implement rất cứng cáp, giải quyết đúng bản chất độ trễ 1-cycle của `tc_sram`.
-> - Hỗ trợ tốt các mode giải nén dữ liệu `MODE_8BIT`, `16BIT`, `32BIT`.
+> **Strengths:**
+> - The FSM separates the two pipeline stages (`ST_PROCESS` and Stage 2) clearly.
+> - The pipeline-hazard fix that stores SRAM `rdata` when S2 stalls is robust and correctly handles the 1-cycle `tc_sram` latency.
+> - Data-unpacking modes `MODE_8BIT`, `MODE_16BIT`, and `MODE_32BIT` are supported cleanly.
 
 > [!CAUTION]
-> **Vấn đề diện tích (Logic Area) ở đoạn dịch bit dữ liệu vào:**
-> Dòng số 86: `assign shift_in  = in_buf_q >> {in_off_s1, 3'd0};`
-> Bạn đang yêu cầu chip thiết kế một bộ **256-bit Barrel Shifter** (dịch phải mảng 256 bit với độ dịch tùy biến lên tới 31 bytes). Bộ Shifter này tốn một lượng khổng lồ các cổng logic (MUX) và làm chậm đáng kể Critical Path của Stage 1.
+> **Logic-area risk in input byte selection:**
+> Line 86, `assign shift_in = in_buf_q >> {in_off_s1, 3'd0};`, asks synthesis to build a **256-bit barrel shifter** with a dynamic shift up to 31 bytes. This shifter consumes a large amount of mux logic and can significantly lengthen the Stage 1 critical path.
 
 > [!TIP]
-> **Đề xuất sửa đổi (Action Items):**
-> Mặc dù logic chạy đúng, nhưng để tối ưu trên chip Edge, thay vì dùng một bộ 256-bit Shifter, bạn có thể cân nhắc dùng một mảng MUX (Multiplexer) đơn giản chỉ chắt lọc ra đúng `LUT_LANES` (ví dụ 4 byte) thay vì dịch toàn bộ 256-bit.
+> **Action item:**
+> The logic is functionally correct, but for edge silicon area/timing it is better to replace the 256-bit shifter with a small mux array that selects only the required `LUT_LANES` bytes, for example 4 bytes, instead of shifting all 32 bytes:
+>
 > ```verilog
-> // Ví dụ tối ưu thay vì shift toàn bộ 256 bit
+> // Example direction: select the required bytes instead of shifting all 256 bits.
 > for (genvar i = 0; i < LUT_LANES; i++) begin
 >     logic [4:0] byte_idx;
 >     assign byte_idx = in_off_s1 + 5'(i);
->     assign lut_idx_s1[i] = in_buf_q[byte_idx * 8 +: 8]; // Dùng array index
+>     assign lut_idx_s1[i] = in_buf_q[byte_idx * 8 +: 8];
 > end
 > ```
-> *Cú pháp array indexing với biến ở trên có thể phải sửa lại một chút tùy tool tổng hợp, nhưng ý tưởng cốt lõi là chỉ MUX đúng 4 bytes cần thiết thay vì dịch 32 bytes.*
+>
+> Some tools may require minor syntax changes for variable array indexing, but the core idea is to mux only the required bytes instead of shifting 32 bytes.
 
-## Tóm tắt Review
-Code viết logic cực tốt, không thấy xuất hiện Bug logic nghiêm trọng nào gây sai lệch dữ liệu. Bạn có thể chốt phương án kiến trúc này. Tuy nhiên, nếu mang bộ RTL này đi tổng hợp (Synthesis) thành silicon thực tế, bạn **bắt buộc phải chia thêm Pipeline Stage** cho khối `requant_pipeline` để tránh rớt xung nhịp.
+## Review Summary
+
+The logic is structurally sound and no serious data-corruption bug is apparent from this review. The main silicon-readiness issue is timing: `requant_pipeline` should be split into additional pipeline stages before synthesis.

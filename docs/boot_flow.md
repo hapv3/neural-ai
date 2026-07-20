@@ -1,7 +1,7 @@
 # NPU Cluster Boot Flow
 
-**Scope**: Per-cluster Snitch boot through host AXI4-Lite  
-**Baseline**: Phase 3B-A with interrupt-driven test completion
+**Scope**: Per-cluster Snitch boot through host AXI4-Lite
+**Baseline**: Current cluster boot flow with interrupt-driven test completion
 
 ---
 

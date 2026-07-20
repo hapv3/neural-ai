@@ -254,7 +254,7 @@ Descriptor memory placement policy for P0/P1:
   future hardware descriptor prefetch.
 - Snitch reads each descriptor into local scalar variables before starting the
   corresponding iDMA/compute operation. This avoids descriptor fetch traffic
-  overlapping the hot compute/data movement phase.
+  overlapping the hot compute/data movement stage.
 - A single descriptor must fit in the 4 KB staging window. If the window is too
   small, firmware fails with `BAD_CMD_BAD_SIZE`.
 - Command streams larger than 4 KB are legal and are consumed by L2
@@ -712,7 +712,7 @@ for oc_tile in 0..OC step 32:
         store INT32 psum tile
 ```
 
-Phase 0 implements psum accumulation in a parallel systolic output drain engine.
+The initial implementation adds psum accumulation in a parallel systolic output drain engine.
 The main FSM continues loading weights and feeding IFM rows while the drain
 engine consumes OFM FIFO rows, reads the previous psum row from TCDM, adds it,
 then either writes the accumulated INT32 row back or feeds the accumulated row
@@ -750,9 +750,9 @@ The verification plan must cover the packed Conv2D operator family, not only
 - Depthwise/grouped Conv as separate functional paths; they are not the
   performance target for dense systolic GEMM.
 
-## Implementation Phases
+## Implementation Roadmap
 
-### P0: GEMM K-Block Foundation
+### Baseline: GEMM K-Block Foundation
 
 - Add systolic MMIO fields for psum pointer and accumulation enable.
 - Add controller support for `OFM + previous_psum -> OFM`.
@@ -773,10 +773,10 @@ Active Conv2D verification lives in `sw/test/conv_perf` and
 removed path. If prepare performance is insufficient, add a new
 wide-segment extractor architecture instead of reviving byte-serial lowering.
 
-### P3: Packed Conv2D Functional Completeness
+### Functional Completeness: Packed Conv2D
 
 Goal: turn the software+iDMA+Spatz packed prepare path into a reusable Conv2D
-operator backend for model layers. There is no active direct-Conv2D RTL dependency for this phase.
+operator backend for model layers. There is no active direct-Conv2D RTL dependency for this workstream.
 
 Features to complete:
 
@@ -810,13 +810,13 @@ Features to complete:
   - L1/TCDM source tensors use Spatz RVV pack until an L1-side DMA/backend is
     introduced.
   - Scalar prepare must remain disabled for performance tests.
-- **Unsupported in P3**:
+- **Unsupported in this workstream**:
   - Depthwise/grouped conv are tracked as separate paths; dense systolic Conv2D
     should not claim them.
   - No performance overlap, no line buffer, no weight reuse cache.
   - Dilation greater than `1` remains out of scope.
 
-P3 implementation status:
+Functional-completeness implementation status:
 
 - **Pointwise coverage**:
   - Conv1x1 `IC=1`, `IC=3`, `IC=31`, `IC=32`, `IC=33`, `IC=64`, `OC=32`
@@ -852,7 +852,7 @@ P3 implementation status:
   - Existing `test_independent_systolic`, `test_systolic_requant`, and
     `test_dma_tcm` must continue passing.
 
-P3 known limits:
+Known limits:
 
 - Dilation greater than `1` remains unsupported by policy.
 - True asymmetric top/bottom or left/right padding needs an API/register
@@ -860,10 +860,10 @@ P3 known limits:
 - Depthwise/grouped convolution remains a separate path, not dense systolic
   Conv2D.
 
-### P4: Packed Prepare Performance
+### Packed Prepare Performance
 
 Goal: improve throughput without changing the correctness contract established
-in P3.
+in the functional-completeness baseline.
 
 Features to complete:
 
@@ -885,14 +885,14 @@ Features to complete:
     reduced safely.
   - Add counters for packed prepare cycles, iDMA wait cycles, Spatz pack cycles,
     systolic active cycles, OFM FIFO stalls, TCDM grant stalls, and DMA wait cycles.
-- **Unsupported in P4**:
+- **Unsupported in this workstream**:
   - Re-architecting the MAC array or adding a full line-buffer direct-conv
     engine is out of scope unless packed prepare measurements cannot meet target.
 
-P4 required tests:
+Required tests:
 
 - **Performance invariant tests**:
-  - Run the same P3 correctness suite and compare output bit-exactly while
+  - Run the same correctness suite and compare output bit-exactly while
     checking backend tile counters.
   - Randomized bounded Conv1x1 and Conv3x3 fixtures with `M` crossing tile
     boundaries.
@@ -910,11 +910,11 @@ P4 required tests:
     Conv3x3, and Conv3x3 with `IC=32`.
   - Record packed prepare breakdown: iDMA wait, Spatz pack, systolic active,
     OFM drain wait.
-  - Compare against current `test_conv_perf` baseline before accepting P4 changes.
+  - Compare against current `test_conv_perf` baseline before accepting performance changes.
 
 ## Initial Limits
 
-- Phase 0 supports INT32 accumulation and fused requant on the final accumulated
+- The baseline supports INT32 accumulation and fused requant on the final accumulated
   K-block.
 - Accumulation mode uses small `Mtile` until the systolic output path has true
   output backpressure.

@@ -1,7 +1,7 @@
 # Systolic Array Architecture Specification
 
-**Version**: Phase 3B-A — Matrix Engine Integrated in Cluster  
-**Last Updated**: 2026-07-08  
+**Version**: Current cluster baseline with integrated Matrix Engine
+**Last Updated**: 2026-07-08
 
 ---
 
@@ -38,11 +38,11 @@ graph TD
 
 ### 2.1 Systolic Array Core
 - **Array Dimension (`ARRAY_DIM`)**: $32 \times 32$ Processing Elements (PEs).
-- **Arithmetic Precision**: 
+- **Arithmetic Precision**:
   - **Inputs**: INT8 ($1 \times 256$-bit vector containing 32 elements).
   - **Outputs/Accumulators**: INT32 ($1 \times 1024$-bit vector containing 32 elements).
 - **Dataflow Pattern**: Weight-Stationary.
-  - Weights are loaded into internal PE registers during the `LOAD_WEIGHTS` phase.
+  - Weights are loaded into internal PE registers during the `LOAD_WEIGHTS` stage.
   - Activation (IFM) streams flow horizontally through the array.
   - Partial sums flow vertically down the array, accumulating column results.
 - **Array Flush Latency**: 64 cycles ($2 \times \text{ARRAY\_DIM}$). Activations take 32 cycles to propagate, and the final results take another 32 cycles to drain out of the pipeline.
@@ -229,7 +229,7 @@ All registers are 32-bit wide, mapped to the cluster control aperture.
      block as an independent view with `input_c=32`, `input_c_base=0`,
      `lane_base=0`, `pixel_stride_bytes=32`, and 32-byte aligned base/offset.
 5. **Memory Port Bandwidth Limit**:
-   - Because the 256-bit OBI Read Port is shared between weights and IFM, the hardware cannot execute at 1 cycle/compute in situations where weights must be loaded continuously. 
-   - The execution speed is bounded by: 
+   - Because the 256-bit OBI Read Port is shared between weights and IFM, the hardware cannot execute at 1 cycle/compute in situations where weights must be loaded continuously.
+   - The execution speed is bounded by:
      $$\text{Theoretical Cycles} \ge \max(\text{Compute\_Cycles}, \text{Weight\_Load\_Cycles}) + \text{Overhead}$$
      Making the practical limit $\approx 2\times$ Compute Cycles for weight-heavy tiles.

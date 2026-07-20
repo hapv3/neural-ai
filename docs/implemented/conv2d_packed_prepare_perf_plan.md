@@ -80,7 +80,7 @@ benefit.
 
 - Dilation greater than `1` remains unsupported.
 - Depthwise/grouped convolution is a separate operator path.
-- Full hardware line-buffer/direct-conv engine is not part of this phase.
+- Full hardware line-buffer/direct-conv engine is not part of this implementation scope.
 
 ## Verification Gates
 

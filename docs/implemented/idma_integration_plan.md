@@ -1,29 +1,33 @@
 # iDMA Integration Architecture Plan
 
-**Date:** 2026-06-20  
+**Date:** 2026-06-20
 **Target:** Replace the custom `dma_engine` with PULP `iDMA` in `npu_cluster.sv`
 
 ---
 
-## 1. Mục tiêu (Goals)
+## 1. Goals
 
-Thay thế khối `dma_engine.sv` (FSM tự code, chạy từng beat rất chậm) bằng submodule `iDMA` của PULP Platform. `iDMA` hỗ trợ 16 burst transfer tối đa, pipelining, queueing và 2D strided transfer, giúp tăng tốc độ di chuyển dữ liệu (Weight, IFM, OFM) giữa L2 và L1 (TCDM) gấp nhiều lần.
+Replace the custom `dma_engine.sv` block, a hand-written FSM that transfers one beat at a time and is very slow, with the PULP Platform `iDMA` submodule. `iDMA` supports burst transfers up to 16 beats, pipelining, queueing, and 2D strided transfers, greatly improving movement of weights, IFM, and OFM between L2 and L1/TCDM.
 
 > [!IMPORTANT]
-> **Lý do cốt lõi (The Killer Feature): On-the-fly Im2Col cho 3x3 CONV2D**
-> Bản thân Systolic Array 32x32 rất kém trong việc xử lý convolution 2D vì nó yêu cầu dữ liệu phải được làm phẳng (Im2Col). Nếu để Snitch Core tự làm Im2Col bằng phần mềm thì cực kỳ chậm và lãng phí bộ nhớ TCDM. 
-> iDMA giải quyết triệt để vấn đề này nhờ tính năng **2D strided transfer** (`idma_nd_midend`). Nó có thể đọc nhảy bước (strided read) 3x3 patches từ L2 Memory và ghi tuần tự (sequential write) vào L1 TCDM. Nghĩa là iDMA thực hiện **On-the-fly Im2Col** hoàn toàn bằng phần cứng. Kết hợp với chiến thuật Double-Buffering (Ping-Pong), iDMA hoàn toàn che giấu được độ trễ di chuyển dữ liệu, giúp Systolic Array đạt 100% hiệu suất cho các mô hình YOLO/ResNet!
-## 2. Lựa chọn Frontend & Backend
+> **Core reason: on-the-fly Im2Col for 3x3 Conv2D**
+> The 32x32 Systolic Array is inefficient for direct 2D convolution unless the data is flattened into Im2Col form. If Snitch performs Im2Col in software, it is extremely slow and wastes TCDM memory.
+>
+> `iDMA` solves this with **2D strided transfer** support (`idma_nd_midend`). It can perform strided reads of 3x3 patches from L2 memory and sequential writes into L1 TCDM. In effect, iDMA performs on-the-fly Im2Col in hardware. Combined with ping-pong double buffering, iDMA can hide data-movement latency and let the Systolic Array approach full utilization for YOLO/ResNet-style workloads.
 
-iDMA có thiết kế rất linh hoạt. Dựa trên source code từ `hw/magia/hw/tile/idma_ctrl_mm.sv`, chúng ta sẽ sử dụng cấu hình **Memory-Mapped (MM)**. 
+## 2. Frontend and Backend Choice
 
-Tuy nhiên, dải địa chỉ MMIO hiện tại của NPU Cluster (`0x2000_0000`) đang được dùng chung cho cả khối điều khiển Systolic Array (`systolic_ctrl_regs`). Do đó, ta sẽ sử dụng một bộ **MMIO Demux** để chia không gian này:
-- `0x2000_0000 -> 0x2000_0FFF`: Dành cho `systolic_ctrl_regs` (điều khiển Systolic Array, linebuffer, requant; offset thấp không dùng trả zero).
-- `0x2000_1000 -> 0x2000_1FFF`: Map thẳng vào Config Frontend của `iDMA` (idma_ctrl_mm).
+iDMA is flexible. Based on source code from `hw/magia/hw/tile/idma_ctrl_mm.sv`, this design uses the **memory-mapped (MM)** configuration.
 
-Về Backend:
-- **Data Backend 1 (AXI2OBI):** Chuyên fetch dữ liệu từ L2 (AXI Read) ghi vào L1 TCDM (OBI Write).
-- **Data Backend 2 (OBI2AXI):** Chuyên đẩy kết quả từ L1 TCDM (OBI Read) ra ngoài L2 (AXI Write).
+The current NPU cluster MMIO aperture (`0x2000_0000`) is shared with the Systolic Array control block (`systolic_ctrl_regs`). A local **MMIO demux** splits this space:
+
+- `0x2000_0000 -> 0x2000_0FFF`: `systolic_ctrl_regs` for Systolic Array, linebuffer, and requant control. Unused low offsets return zero.
+- `0x2000_1000 -> 0x2000_1FFF`: Directly mapped to the `iDMA` config frontend (`idma_ctrl_mm`).
+
+Backend split:
+
+- **Data Backend 1 (AXI2OBI):** Fetches data from L2 through AXI read and writes it into L1 TCDM through OBI.
+- **Data Backend 2 (OBI2AXI):** Reads results from L1 TCDM through OBI and writes them back to L2 through AXI write.
 
 ## 3. Detailed Architecture Diagram
 
@@ -57,8 +61,6 @@ Về Backend:
                                          |   |         (Fetch Weight, IFM)             |               |
                                          |   |                                         |               |
                                          |   |  +---------------+  +----------------+  |               |
-                                         |   |  | AXI4 Master   |  | OBI Master     |  |               |
-                                         |   |  | (Read Port)   |  | (Write Port)   |  |               |
 |   |  +---------------+  +----------------+  |   |  +---------------+   +---------------+   |   |
 |   +----------|-------------------|----------+   +----------|-------------------|-----------+   |
 |              |                   |                         |                   |               |
@@ -71,14 +73,16 @@ Về Backend:
         +-------------+    +-----------------------------------------+    +-------------+
 ```
 
-## 4. Các thay đổi cụ thể trên RTL (`npu_cluster.sv`)
+## 4. Required RTL Changes (`npu_cluster.sv`)
 
-### 4.1. Xóa bỏ `dma_engine.sv`
-- Xóa instantiation của `u_dma_engine`.
-- Xóa các logic MMIO cũ tự code (`cfg_dma_src_addr`, `cfg_dma_length`,...).
+### 4.1. Remove `dma_engine.sv`
 
-### 4.2. Khởi tạo `idma_ctrl_mm`
-Sử dụng `idma_ctrl_mm` (lấy từ MAGIA hoặc tạo một wrapper tương tự cho NPU) với các parameter tương ứng với kiến trúc NPU (AXI 256-bit, OBI 256-bit).
+- Remove the `u_dma_engine` instantiation.
+- Remove the old hand-written MMIO logic such as `cfg_dma_src_addr`, `cfg_dma_length`, and related signals.
+
+### 4.2. Instantiate `idma_ctrl_mm`
+
+Use `idma_ctrl_mm`, either imported from MAGIA or wrapped similarly for this NPU, with parameters matching the NPU architecture: 256-bit AXI, 256-bit OBI, and 32-bit addresses.
 
 ```systemverilog
 idma_ctrl_mm #(
@@ -86,18 +90,18 @@ idma_ctrl_mm #(
 ) u_idma (
     .clk_i            (clk_i),
     .rst_ni           (rst_ni),
-    
-    // MMIO Config (từ OBI Demux)
+
+    // MMIO Config (from OBI Demux)
     .obi_req_i        (mmio_obi_req),
     .obi_rsp_o        (mmio_obi_rsp),
-    
+
     // L2 AXI Interfaces
     .axi_read_req_o   (idma_axi_read_req),
     .axi_read_rsp_i   (idma_axi_read_rsp),
     .axi_write_req_o  (idma_axi_write_req),
     .axi_write_rsp_i  (idma_axi_write_rsp),
-    
-    // L1 OBI Interfaces (vào TCDM Interconnect)
+
+    // L1 OBI Interfaces (into TCDM Interconnect)
     .obi_read_req_o   (idma_obi_read_req),
     .obi_read_rsp_i   (idma_obi_read_rsp),
     .obi_write_req_o  (idma_obi_write_req),
@@ -105,16 +109,23 @@ idma_ctrl_mm #(
 );
 ```
 
-### 4.3. Cập nhật AXI Interconnect (L2)
-- iDMA xuất ra 2 kênh AXI riêng biệt (một cho Read từ L2->L1, một cho Write từ L1->L2).
-- Nếu NPU Cluster hiện tại chỉ phơi (expose) 1 cổng AXI Master ra ngoài, ta cần sử dụng một **AXI Multiplexer** (ví dụ: `axi_demux` hoặc `axi_mux` tùy chiều) để gộp 2 kênh Read/Write này lại trước khi đẩy ra cổng `axi_aw_...`, `axi_ar_...` của cụm. 
-- *May mắn là AXI chia sẵn kênh AR (Address Read) và AW (Address Write) hoàn toàn độc lập, nên ta chỉ cần nối trực tiếp idma_axi_read vào các tín hiệu AR/R và idma_axi_write vào các tín hiệu AW/W/B của NPU Cluster!*
+### 4.3. Update the L2 AXI Interconnect
 
-### 4.4. Tương tác với Firmware
-Vì iDMA sử dụng một Register File phức tạp hơn `dma_engine` cũ (có channel config, status, transfer IDs, 2D stride), chúng ta sẽ cần mang file header C `idma_mm_utils.h` (hoặc tương đương) từ thư viện phần mềm của PULP sang để firmware Snitch có thể gọi API điều khiển.
+- iDMA exports two separate AXI channels: one read channel for L2 -> L1 and one write channel for L1 -> L2.
+- If the current NPU cluster exposes only one AXI master port externally, an **AXI multiplexer** such as `axi_demux` or `axi_mux` may be needed to combine the read/write paths before the cluster `axi_aw_*` and `axi_ar_*` pins.
+- AXI already separates AR (address read) and AW (address write), so the simplest wiring connects `idma_axi_read` directly to AR/R signals and `idma_axi_write` directly to AW/W/B signals.
+
+### 4.4. Firmware Interaction
+
+Because iDMA uses a more complex register file than the old `dma_engine` (channel config, status, transfer IDs, 2D strides), firmware needs a C helper header such as `idma_mm_utils.h` from the PULP software library, or an equivalent local wrapper, so Snitch firmware can program transfers safely.
 
 ---
 
-## 5. Đánh giá (Review)
+## 5. Review Notes
 
-Anh hãy review xem kiến trúc thay thế này đã hợp lý chưa. Nếu OK, em sẽ lập **Implementation Plan** cho Phase 4 bao gồm cả nâng cấp TCDM (theo bài học từ MAGIA) và thay máu DMA bằng iDMA này.
+This replacement architecture is reasonable if the following are preserved:
+
+- The MMIO sub-map remains explicit and does not alias Systolic control registers.
+- The two iDMA backends are connected to the correct L2 and TCDM directions.
+- Firmware gets a typed helper API instead of open-coded register pokes for every transfer shape.
+- TCDM arbitration is upgraded or tuned so the faster DMA does not starve compute ports.

@@ -1,6 +1,6 @@
 # NPU Cluster Test Flow
 
-**Scope**: Current cluster verification after DMA/TCDM and Spatz integration work.  
+**Scope**: Current cluster verification after DMA/TCDM and Spatz integration work.
 **Firmware layout**: all standalone test firmware lives under `sw/test/<name>`.
 
 ---

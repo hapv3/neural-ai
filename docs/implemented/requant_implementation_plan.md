@@ -16,7 +16,7 @@ Requantization is high priority for:
 3. **Fused post-processing:** Bias, BN/folded scale, clamp, ReLU/ReLU6, and signed/unsigned output ranges can be handled in one pass.
 4. **Graph scheduler correctness:** The scheduler needs a precise operator contract so hardware/Spatz/Snitch fallback all produce identical bytes.
 
-The current implementation intentionally moves directly to RTL fusion because YOLO/CNN chaining benefits immediately from avoiding the intermediate `M × 32 × INT32` activation writeback. Spatz/C parity remains useful as a fallback and cross-check, but it is no longer the required first phase.
+The current implementation intentionally moves directly to RTL fusion because YOLO/CNN chaining benefits immediately from avoiding the intermediate `M × 32 × INT32` activation writeback. Spatz/C parity remains useful as a fallback and cross-check, but it is no longer the required first stage.
 
 ---
 
@@ -31,7 +31,7 @@ For each output element/channel:
 | `acc` | signed `int32` | Systolic accumulator output. |
 | `bias` | signed `int32` | Optional fused bias. Use `0` when disabled. |
 | `multiplier` | signed `int32` | Fixed-point scale multiplier. Usually non-negative for normal quantization. |
-| `shift` | unsigned `uint8` | Right shift amount after multiply. Valid range `0..31` for Phase 0. |
+| `shift` | unsigned `uint8` | Right shift amount after multiply. Valid range `0..31` for the baseline implementation. |
 | `zero_point` | signed `int32` | Output zero-point. Use `0` for symmetric signed INT8. |
 | `clamp_min` | signed `int32` | Final minimum output value. |
 | `clamp_max` | signed `int32` | Final maximum output value. |
@@ -48,7 +48,7 @@ clamped     = clamp(with_zp, clamp_min, clamp_max)
 out_byte    = low 8 bits of clamped after range guarantee
 ```
 
-Phase 0 requires every implementation to match this formula exactly.
+The baseline implementation requires every implementation to match this formula exactly.
 
 ### 2.2. Rounding mode
 
@@ -80,7 +80,7 @@ The final clamp range defines both activation and output dtype semantics:
 | ReLU6 signed INT8 | quantized `0` | quantized `6` clipped to `127` | Requires model-provided scale. |
 | Unsigned INT8 | `0` | `255` | Store byte as `uint8`; consumers must agree. |
 
-Phase 0 default is signed INT8. Unsigned output is allowed only when the layer explicitly sets `clamp_min=0`, `clamp_max=255`, and the tensor dtype/layout marks the output as unsigned.
+The baseline default is signed INT8. Unsigned output is allowed only when the layer explicitly sets `clamp_min=0`, `clamp_max=255`, and the tensor dtype/layout marks the output as unsigned.
 
 ### 2.4. Per-tensor vs per-channel
 
@@ -109,13 +109,13 @@ typedef struct {
 } npu_requant_qparams32_t;
 ```
 
-`clamp_min/max` are shared in Phase 0. Per-channel clamp can be added later if a model requires it.
+`clamp_min/max` are shared in the baseline. Per-channel clamp can be added later if a model requires it.
 
 ### 2.5. Overflow rules
 
 - `acc + bias` must be evaluated in `int64`.
 - `biased * multiplier` must be evaluated in `int64`.
-- `shift > 31` is invalid in Phase 0 and must fail the test/operator rather than silently producing a value.
+- `shift > 31` is invalid in the baseline and must fail the test/operator rather than silently producing a value.
 - `multiplier < 0` is not expected for normal quantization. The golden model supports it, but RTL may reject it unless a real model requires it.
 - The final value must be clamped before byte packing; no wraparound is allowed before clamp.
 
@@ -242,7 +242,7 @@ This mode is intended for Conv/GEMM layers where the next consumer expects INT8 
 
 ## 5. Follow-Up Roadmap
 
-### Phase 1/P0 — RTL correctness and legacy bypass protection
+### RTL correctness and legacy bypass protection
 
 Goal: prove the fused hardware path and protect existing INT32 behavior.
 
@@ -256,7 +256,7 @@ Acceptance:
 - `test_systolic_requant` passes for multiple boundary `M` values.
 - `test_independent_systolic` and `test_matmul` still pass in raw bypass mode.
 
-### Phase 2/P0 — Spatz/C fallback parity
+### Spatz/C fallback parity
 
 Goal: unblock graph correctness without new RTL risk.
 
@@ -272,7 +272,7 @@ Acceptance:
 - Python golden and firmware output match byte-for-byte.
 - Graph scheduler only uses requant modes that have passed tests.
 
-### Phase 3/P0 — Graph integration
+### Graph integration
 
 Goal: make micro-model E2E correct before optimizing bandwidth.
 
@@ -286,7 +286,7 @@ Acceptance:
 - Micro-YOLO output matches Python golden.
 - Existing independent systolic tests still compare full INT32 output.
 
-### Phase 4/P1 — Performance measurement
+### Performance measurement
 
 Goal: prove whether hardware requant is necessary.
 
@@ -302,7 +302,7 @@ Acceptance:
 - Baseline document shows the cost of software/Spatz requant.
 - Hardware requant is only approved if it removes a measured bottleneck.
 
-### Phase 5/P2 — Hardware requant extensions
+### Hardware requant extensions
 
 Recommended architecture if RTL is needed:
 

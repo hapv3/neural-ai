@@ -1,9 +1,5 @@
 # YOLO NPU Architecture Specification
 
-**Version**: Phase 3B-A — Matrix Engine Integrated in Cluster  
-**Last Updated**: 2026-06-25
-
----
 
 ## 1. Architectural Overview
 
@@ -12,8 +8,8 @@ The YOLO NPU is a heterogeneous compute architecture designed to achieve 10 TOPS
 To achieve high-performance matrix and vector operations, the architecture integrates 5 parallel **NPU Clusters**. Each cluster features:
 
 1. **Control Core (Snitch)**: A RISC-V RV32IMAC scalar core. Boots from local I-TCM firmware, controls and dispatches compute commands to the Matrix and Vector engines via OBI.
-2. **Matrix Engine** *(Phase 3B-A)*: A 32×32 INT8 Systolic Array optimized for Dense MatMul / Conv2D.
-3. **Vector Engine** *(Phase 3B-B)*: A Spatz RVV co-processor for Depthwise Conv, Element-wise arithmetic, reductions, and vectorized post-processing.
+2. **Matrix Engine**: A 32×32 INT8 Systolic Array optimized for Dense MatMul / Conv2D.
+3. **Vector Engine**: A Spatz RVV co-processor for Depthwise Conv, element-wise arithmetic, reductions, and vectorized post-processing.
 4. **Shared Data TCDM**: A 256-bit wide L1 data memory shared between the Systolic Array, Vector Engine, and DMA.
 5. **DMA Engine**: Handles burst data movement between AXI external memory (L2/DRAM) and Data TCDM autonomously, without involving Snitch.
 6. **AFU**: A LUT-based activation/function unit for tensor-wide nonlinear lookup transforms.
@@ -21,10 +17,10 @@ To achieve high-performance matrix and vector operations, the architecture integ
 
 ### L1 vs. L2 Memory Model
 
-- **L1** là toàn bộ memory local trong cluster: I-TCM, Snitch D-TCM, Shared Data TCDM SRAM, và MMIO/CSR aperture.
-- **L2** là external memory phía ngoài cluster, được truy cập qua AXI4 master của DMA hoặc AXI4-Lite host/testbench port.
-- Snitch chỉ điều phối bằng firmware và CSR; đường dữ liệu tile lớn đi qua DMA để tránh scalar core phải copy từng word.
-- DMA hiện hỗ trợ các hướng copy chính: **L2→L1** để load weights/IFM, **L1→L2** để writeback OFM, và **L1→L1** để copy/rearrange dữ liệu trong local memories.
+- **L1** is all cluster-local memory: I-TCM, Snitch D-TCM, Shared Data TCDM SRAM, and the MMIO/CSR aperture.
+- **L2** is external memory outside the cluster, accessed through the DMA AXI4 master or the AXI4-Lite host/testbench port.
+- Snitch only orchestrates work through firmware and CSRs; large tile data paths go through DMA so the scalar core does not copy individual words.
+- DMA currently supports the main copy directions: **L2 -> L1** for weights/IFM, **L1 -> L2** for OFM writeback, and **L1 -> L1** for local copy/repacking inside local memories.
 
 ---
 
@@ -94,53 +90,53 @@ To achieve high-performance matrix and vector operations, the architecture integ
 
 | ID | Name | Protocol | Width | Description |
 |----|------|----------|-------|-------------|
-| A  | Snitch I-Fetch | OBI | 32-bit | Instruction fetch path từ Snitch tới `u_itcm_arbiter`. |
-| B  | Host AXI4-Lite Slave | AXI4-Lite | 32-bit | Host/testbench nạp firmware vào I-TCM và truy cập host-visible status/control windows như PMU hoặc command-control. Không dùng host frontend path để access D-TCM hoặc Shared TCDM trực tiếp. |
+| A  | Snitch I-Fetch | OBI | 32-bit | Instruction fetch path from Snitch to `u_itcm_arbiter`. |
+| B  | Host AXI4-Lite Slave | AXI4-Lite | 32-bit | Host/testbench loads firmware into I-TCM and accesses explicit host-visible status/control windows such as PMU or command-control. The host frontend path does not directly access D-TCM or Shared TCDM. |
 | C  | AXI-to-OBI Host Bridge | AXI4-Lite→OBI | 32-bit | Converts host AXI-Lite transactions into OBI requests, then decodes to I-TCM or explicitly exposed host-visible status/control windows. |
-| D  | Snitch D-Bus | OBI | 32-bit | Bus dữ liệu của Snitch tới private D-TCM, Shared Data TCDM window và MMIO. Không arbitrate với host AXI path. |
-| E  | D-side OBI Demux | OBI Demux | 32-bit control side | Decode Snitch D-Bus access tới D-TCM, Shared Data TCDM window và MMIO; không decode I-TCM. |
-| F  | `u_itcm_arbiter` | OBI Arbiter 2→1 | 32-bit | Phân giải giữa host AXI boot bridge access vào I-TCM và Snitch I-fetch. |
-| G  | DMA AXI Master | AXI4 | 256-bit | DMA tự load dữ liệu từ L2/DRAM vào Data TCDM |
-| H  | Shared Data TCDM Interconnect | OBI/TCDM | 256-bit | Data path lớn cho DMA, Systolic, Spatz và shared SRAM; không kéo xuống 32-bit. |
+| D  | Snitch D-Bus | OBI | 32-bit | Snitch data bus to private D-TCM, the Shared Data TCDM window, and MMIO. It does not arbitrate with the host AXI path. |
+| E  | D-side OBI Demux | OBI Demux | 32-bit control side | Decodes Snitch D-Bus accesses to D-TCM, the Shared Data TCDM window, and MMIO; it does not decode I-TCM. |
+| F  | `u_itcm_arbiter` | OBI Arbiter 2->1 | 32-bit | Arbitrates between host AXI boot-bridge access to I-TCM and Snitch I-fetch. |
+| G  | DMA AXI Master | AXI4 | 256-bit | DMA autonomously loads data from L2/DRAM into Data TCDM. |
+| H  | Shared Data TCDM Interconnect | OBI/TCDM | 256-bit | Wide data path for DMA, Systolic, Spatz, and shared SRAM; it is not reduced to 32-bit. |
 | I  | Interrupt Controller | OBI MMIO + pins | 32-bit regs | Snitch writes `HOST_NOTIFY`; block asserts `irq_o`. Hardware done events can wake Snitch through `snitch_irq_o.mcip`. |
 | J  | AFU | OBI MMIO + OBI/TCDM master | 32-bit control, 256-bit data | LUT activation/function unit. Snitch programs LUT/CSR; AFU reads/writes Shared Data TCDM autonomously. |
 
 ### Arbiter Naming Clarification
 
-RTL hiện tại tách rõ boot instruction path và Snitch data path:
+The current RTL clearly separates the boot instruction path from the Snitch data path:
 
-- **`u_itcm_arbiter`** là I-TCM arbiter. `m0` nhận host AXI transactions decoded to the I-TCM boot window; `m1` nhận Snitch I-fetch.
-- **D-side demux** nhận trực tiếp Snitch D-Bus 32-bit và decode D-TCM, Shared Data TCDM window, MMIO, plus error sink.
-- **Legacy `u_sys_arbiter` path đã bỏ**: host không còn frontend access vào D-TCM hoặc Shared TCDM; debug/readback dùng TB backdoor. Host-visible MMIO chỉ nên là các control/status block được expose rõ ràng như PMU hoặc command-control.
+- **`u_itcm_arbiter`** is the I-TCM arbiter. `m0` receives host AXI transactions decoded to the I-TCM boot window; `m1` receives Snitch I-fetch.
+- **D-side demux** receives the 32-bit Snitch D-Bus directly and decodes D-TCM, the Shared Data TCDM window, MMIO, plus the error sink.
+- **Legacy `u_sys_arbiter` path removed**: the host no longer has frontend access to D-TCM or Shared TCDM; debug/readback uses testbench backdoor access. Host-visible MMIO should only cover explicit control/status blocks such as PMU or command-control.
 
 ### Width Partitioning Direction
 
-Kiến trúc hiện tại tách hai miền width:
+The current architecture separates two width domains:
 
-- **Address width**: giữ thống nhất 32-bit physical address trên AXI-Lite/OBI nội bộ của cluster. Width refactor bên dưới là **data bus width**, không đổi memory map.
+- **Address width**: keep one 32-bit physical address convention across AXI-Lite/OBI inside the cluster. The width partitioning below refers to **data bus width**, not memory-map changes.
 - **Host side 32-bit**: host AXI-Lite physical, AXI-to-OBI host bridge, I-TCM boot window, and selected host-visible status/control windows.
-- **Snitch control side 32-bit**: Snitch D-Bus, D-TCM và MMIO đều native 32-bit vì Snitch chỉ làm firmware control/scheduler.
-- **Compute/data side 256-bit**: Shared Data TCDM interconnect, DMA data path, Systolic ports, Spatz vector data movement, và SRAM banking cho tensor tiles.
-- **Boundary adapter**: chỉ dùng adapter tại boundary `Snitch D-Bus 32-bit → Shared Data TCDM 256-bit`. Không kéo Shared Data TCDM xuống 32-bit.
-- **Snitch D-TCM private**: host AXI-Lite không cần frontend access vào D-TCM. Debug/readback D-TCM trong verification dùng testbench backdoor function, không dùng memory-mapped host path.
+- **Snitch control side 32-bit**: Snitch D-Bus, D-TCM, and MMIO are native 32-bit because Snitch acts only as firmware control/scheduler.
+- **Compute/data side 256-bit**: Shared Data TCDM interconnect, DMA data path, Systolic ports, Spatz vector data movement, and SRAM banking for tensor tiles.
+- **Boundary adapter**: use an adapter only at the `Snitch D-Bus 32-bit -> Shared Data TCDM 256-bit` boundary. Do not reduce Shared Data TCDM to 32-bit.
+- **Snitch D-TCM private**: host AXI-Lite does not need frontend access to D-TCM. D-TCM debug/readback in verification uses a testbench backdoor function, not a memory-mapped host path.
 - **Command stream placement**: host writes command streams to L2/DRAM, then programs a small host-visible command-control register block. Firmware uses a fixed 4 KB Shared TCDM staging window and refills it from L2 with iDMA while dispatching descriptors.
 
 ---
 
 ## 3. Interrupt and Completion Architecture
 
-`npu_interrupt_ctrl` là block MMIO 32-bit nằm trong aperture control của cluster. Nó tách hai miền event:
+`npu_interrupt_ctrl` is a 32-bit MMIO block inside the cluster control aperture. It separates two event domains:
 
-1. **Internal interrupt domain**: DMA/Systolic/AFU/Spatz done events được latch vào `INT_PENDING`. Nếu bit tương ứng được bật trong `INT_ENABLE`, controller kéo `snitch_irq_o.mcip` để đánh thức Snitch. Đây là nền tảng cho firmware `wfi`/trap handler ở phase sau.
-2. **External host completion domain**: firmware ghi `NPU_IRQ_HOST_NOTIFY`; controller latch `HOST_STATUS` nội bộ, set external pending bit và assert `irq_o` ra ngoài cluster. Verification hiện dùng `irq_o` làm completion event và kiểm tra data output ở L2/TCDM.
+1. **Internal interrupt domain**: DMA/Systolic/AFU/Spatz done events are latched into `INT_PENDING`. If the corresponding bit is enabled in `INT_ENABLE`, the controller asserts `snitch_irq_o.mcip` to wake Snitch. This is the foundation for firmware `wfi`/trap-handler support.
+2. **External host completion domain**: firmware writes `NPU_IRQ_HOST_NOTIFY`; the controller latches `HOST_STATUS` internally, sets the external pending bit, and asserts cluster `irq_o`. Verification currently uses `irq_o` as the completion event and checks output data in L2/TCDM.
 
 ### Interrupt Register Map
 
 | Offset | Register | Direction | Role |
 |--------|----------|-----------|------|
-| `0x00` | `NPU_IRQ_INT_ENABLE` | Snitch RW | Enable internal event bits vào Snitch IRQ. |
+| `0x00` | `NPU_IRQ_INT_ENABLE` | Snitch RW | Enable internal event bits into Snitch IRQ. |
 | `0x04` | `NPU_IRQ_INT_PENDING` | Snitch R | Latched DMA/Systolic/AFU/Spatz done events. |
-| `0x08` | `NPU_IRQ_INT_CLEAR` | Snitch W1C | Clear internal pending bits sau trap/handler. |
+| `0x08` | `NPU_IRQ_INT_CLEAR` | Snitch W1C | Clear internal pending bits after trap/handler service. |
 | `0x0c` | `NPU_IRQ_EXT_ENABLE` | Snitch RW | Enable host completion IRQ. Reset default enables host done. |
 | `0x10` | `NPU_IRQ_EXT_PENDING` | Snitch R | Latched host completion pending bit. |
 | `0x14` | `NPU_IRQ_EXT_CLEAR` | Snitch W1C | Clear external pending bit if firmware/host-control path needs reuse. |
@@ -198,24 +194,24 @@ Kiến trúc hiện tại tách hai miền width:
 +------------------------------------------------------------------------------------------------+
 ```
 
-### 4.1 Cấu trúc Data FIFOs
-Mạch điều khiển Systolic Array (`systolic_controller.sv`) sử dụng kiến trúc bất đồng bộ một phần (Decoupled I/O) thông qua các hàng đợi FIFO:
-- **IFM & Weight FIFOs (Input):** Nạp dữ liệu song song từ giao tiếp OBI I-TCDM. Chức năng chính là che giấu độ trễ (latency hiding) của mạng Interconnect, đảm bảo dữ liệu đưa vào Input Skewing luôn có sẵn mà không làm đình trệ pipeline tính toán bên trong mảng PE.
-- **OFM FIFO (Output):** Các giá trị PSum sau khi đi qua Output Deskewing sẽ được đẩy vào OFM FIFO trước khi ghi ngược ra O-TCDM. Bộ đệm này sử dụng cơ chế Backpressure (`almost_full`) để cho phép Hệ thống Writeback có thể chủ động stall (khi băng thông TCDM nghẽn) mà không làm mất dữ liệu đầu ra của Array.
+### 4.1 Data FIFO Structure
+The Systolic Array controller (`systolic_controller.sv`) uses a partially decoupled I/O architecture through FIFO queues:
+- **IFM & Weight FIFOs (Input):** Load data in parallel from the OBI I-TCDM interface. Their main role is latency hiding for the interconnect, ensuring that data entering input skewing is available without stalling the PE-array compute pipeline.
+- **OFM FIFO (Output):** PSum values that pass through output deskewing are pushed into the OFM FIFO before being written back to O-TCDM. This buffer uses backpressure (`almost_full`) so the writeback system can intentionally stall when TCDM bandwidth is congested without losing array output data.
 
 ## 5. Data TCDM SRAM Micro-Architecture (Detailed)
 
-> **Lưu ý Kiến trúc (Architecture Update):**
-> Kiến trúc TCDM Interconnect đã được nâng cấp sang mô hình phân nhóm (Grouped Tree Topology) học hỏi từ dự án MAGIA để giảm Priority Starvation và Bank Conflict.
-> Chi tiết thiết kế đã implemented xem tại: [implemented/tcdm_interconnect_upgrade.md](implemented/tcdm_interconnect_upgrade.md).
+> **Architecture Update:**
+> The TCDM interconnect has been upgraded to a grouped tree topology inspired by the MAGIA project to reduce priority starvation and bank conflicts.
+> The detailed design is tracked in [implemented/tcdm_interconnect_upgrade.md](implemented/tcdm_interconnect_upgrade.md).
 
-Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không phải cache: mọi tile được firmware/DMA đặt vào địa chỉ rõ ràng, deterministic latency, và arbitration được xử lý bởi TCDM interconnect.
+Shared Data TCDM is the main L1 data scratchpad for the compute path. It is not a cache: firmware/DMA places every tile at an explicit address, latency is deterministic, and arbitration is handled by the TCDM interconnect.
 
-*(Chi tiết về kiến trúc TCDM hiện tại và phương án nâng cấp sang mô hình phân nhóm Grouped Tree Topology đã được chuyển sang tài liệu chuyên đề: [implemented/tcdm_interconnect_upgrade.md](implemented/tcdm_interconnect_upgrade.md))*
+*(Details on the current TCDM architecture and the grouped tree topology upgrade live in the dedicated document: [implemented/tcdm_interconnect_upgrade.md](implemented/tcdm_interconnect_upgrade.md).)*
 
 #### Current Logical Buffers
 
-| Buffer | Address | Region | Vai trò |
+| Buffer | Address | Region | Role |
 |--------|---------|--------|---------|
 | `WEIGHT_PING_ADDR` | `0x1011_0000` | I-TCDM | 32×32 INT8 weight tile |
 | `IFM_PING_ADDR` | `0x1012_0000` | I-TCDM | M×32 INT8 IFM tile |
@@ -227,16 +223,16 @@ Shared Data TCDM là L1 data scratchpad chính cho compute path. Nó không ph�
 
 | Address Range | Size | Region | Role |
 |---------------|------|--------|------|
-| `0x1000_0000 – 0x1000_7FFF` | 32 KB | **I-TCM** | Firmware Snitch instruction memory. Target host AXI-Lite boot path đi trực tiếp tới `u_itcm_arbiter`; Snitch fetch đi qua I-fetch port. |
-| `0x1000_8000 – 0x1000_FFFF` | 32 KB | **Snitch D-TCM** | Private data của Snitch: stack, `.data`, `.bss`, scalar state. Không expose trên AXI-Lite host path sau refactor; debug dùng TB backdoor. |
-| `0x1010_0000 – 0x1015_FFFF` | 384 KB | **I-TCDM logical window** | Weights và IFM tiles cho compute engines. |
+| `0x1000_0000 – 0x1000_7FFF` | 32 KB | **I-TCM** | Snitch firmware instruction memory. The target host AXI-Lite boot path goes directly to `u_itcm_arbiter`; Snitch fetch uses the I-fetch port. |
+| `0x1000_8000 – 0x1000_FFFF` | 32 KB | **Snitch D-TCM** | Snitch private data: stack, `.data`, `.bss`, and scalar state. It is not exposed on the AXI-Lite host path after the refactor; debug uses a testbench backdoor. |
+| `0x1010_0000 – 0x1015_FFFF` | 384 KB | **I-TCDM logical window** | Weights and IFM tiles for compute engines. |
 | `0x1017_F000 – 0x1017_FFFF` | 4 KB | **TCDM command staging window** | Reserved local command-stream staging buffer. Host does not write this directly; Snitch refills this window from L2 through iDMA as descriptor offsets advance. |
 | `0x1020_0000 – 0x1021_FFFF` | 128 KB | **O-TCDM logical window** | OFM / INT32 accumulator writeback. |
 | `0x2000_0000 – 0x2000_FFFF` | 64 KB | **MMIO / CSR** | Systolic control, iDMA, interrupt controller, AFU/accelerator control. |
-| `0x8000_0000+` | External | **L2 / AXI sim memory** | Testbench/external memory chứa input/output buffers. |
+| `0x8000_0000+` | External | **L2 / AXI sim memory** | Testbench/external memory that contains input/output buffers. |
 
-> **Tại sao tách I-TCM và D-TCM?**  
-> Harvard Architecture: Snitch fetch lệnh qua I-Fetch (không cạnh tranh băng thông với D-Bus). D-TCM private đảm bảo latency cố định cho stack/local vars và không cần host frontend access trong normal boot/inference path.
+> **Why separate I-TCM and D-TCM?**
+> Harvard architecture: Snitch fetches instructions through I-Fetch, which does not compete with D-Bus bandwidth. Private D-TCM gives fixed latency for stack/local variables and does not need host frontend access during the normal boot/inference path.
 
 ### MMIO Sub-Map
 
@@ -365,28 +361,28 @@ Default reset and the raw HAL path keep requant disabled, so debug and accumulat
 Detailed walkthrough: [Boot Flow](boot_flow.md).
 
 ```
-1. Host ghi firmware vào I-TCM qua AXI4-Lite Slave (cổng B/H)
+1. Host writes firmware into I-TCM through the AXI4-Lite slave (port B/H)
    → AXI-to-OBI bridge
    → u_itcm_arbiter
    → I-TCM SRAM
-   
+
 2. Host de-assert reset and then asserts `fetch_enable_i`
 
 3. Snitch core reset → PC = 0x1000_0000 (BootAddr)
 
-4. Snitch fetch instruction từ I-TCM:
+4. Snitch fetches instructions from I-TCM:
    Snitch I-Fetch → u_itcm_arbiter → I-TCM SRAM
 
-5. Snitch thực thi firmware:
-   - Khởi tạo private D-TCM (stack setup, `.data`, `.bss`)
+5. Snitch executes firmware:
+   - Initializes private D-TCM (stack setup, `.data`, `.bss`)
    - Configure MMIO CSRs through Snitch D-Bus → D-side demux → MMIO
-   - (Phase 3B-A) Trigger DMA để load weight/IFM vào Data TCDM
-   - (Phase 3B-A) Dispatch lệnh tới Systolic Array
-   - (Phase 3B-B) Dispatch lệnh RVV tới Spatz
+   - Triggers DMA to load weights/IFM into Data TCDM
+   - Dispatches commands to the Systolic Array
+   - Dispatches RVV commands to Spatz
    - Dispatch AFU LUT transforms through MMIO and internal AFU done interrupt
 
-6. Firmware ghi completion status vào `NPU_IRQ_HOST_NOTIFY`
-   → `npu_interrupt_ctrl` latch `HOST_STATUS` nội bộ và assert `irq_o` cho host/testbench
+6. Firmware writes completion status to `NPU_IRQ_HOST_NOTIFY`
+   → `npu_interrupt_ctrl` latches `HOST_STATUS` internally and asserts `irq_o` for host/testbench
 ```
 
 ---
@@ -430,63 +426,63 @@ Testbench waits `irq_o`; host AXI path is used only for I-TCM boot and explicit 
 
 ## 10. SRAM Allocation Analysis
 
-Mục tiêu ban đầu của top-level là **2.5 MB SRAM on-chip**. Tuy nhiên, cấu hình Phase 3B-A hiện tại ưu tiên tính đúng architecture và verification trong 1 cluster trước: mỗi cluster đang dùng Data TCDM physical 512 KB cộng với local I/D-TCM. Khi lên Phase 4, cần re-balance lại SRAM để khớp budget cuối.
+The original top-level target was **2.5 MB of on-chip SRAM**. The current cluster baseline prioritizes architectural correctness and single-cluster verification first: each cluster currently uses a physical 512 KB Data TCDM plus local I/D-TCM. The top-level integration work must rebalance SRAM to match the final budget.
 
 ### A. Current Implemented Per-Cluster SRAM
 
-| Bank | Size | Address / Region | Vai trò |
+| Bank | Size | Address / Region | Role |
 |------|------|------------------|---------|
 | I-TCM | 32 KB | `0x1000_0000` | Cluster firmware |
 | Snitch D-TCM | 32 KB | `0x1000_8000` | Private scalar data |
 | I-TCDM | 384 KB | `0x1010_0000` logical window | Weights + IFM tiles |
 | O-TCDM | 128 KB | `0x1020_0000` logical window | OFM / INT32 accumulator |
-| **Total per cluster** | **576 KB** | 32 + 32 + 512 KB | Current Phase 3B-A implementation |
+| **Total per cluster** | **576 KB** | 32 + 32 + 512 KB | Current implemented cluster baseline |
 
 ### B. Logical Buffer Plan
 
-| Buffer | Size target | Region | Vai trò |
+| Buffer | Size target | Region | Role |
 |--------|-------------|--------|---------|
 | Weight Buffer | 2 × 128 KB | I-TCDM | Ping-pong weight stationary |
 | IFM Buffer | 2 × 50 KB | I-TCDM | Input feature map tiles |
 | OFM Buffer | 2 × 50 KB | O-TCDM | Output / INT32 accumulator |
 
-**Memory Latency Hiding**: Double-buffering (Ping-Pong) cho phép DMA prefetch tile kế tiếp vào Bank 1 trong khi Systolic Array xử lý Bank 0 → hardware utilization ~100%.
+**Memory Latency Hiding**: Double-buffering (ping-pong) allows DMA to prefetch the next tile into Bank 1 while the Systolic Array processes Bank 0, targeting near-full hardware utilization.
 
-> **Phase 4 sizing note**: Nếu giữ 5 cluster với 576 KB/cluster thì riêng cluster-local SRAM là 2880 KB, vượt mục tiêu 2.5 MB. Vì vậy Phase 4 cần chọn một trong các hướng: giảm TCDM per cluster, giảm số cluster, hoặc cập nhật lại SRAM budget mục tiêu.
+> **Top-level sizing note**: With 5 clusters at 576 KB per cluster, cluster-local SRAM alone is 2880 KB, above the 2.5 MB target. Top-level integration must choose one of these directions: reduce TCDM per cluster, reduce cluster count, or update the target SRAM budget.
 
 ---
 
-## 11. Development Phases
+## 11. Development Status
 
-| Phase | Nội dung | Trạng thái |
-|-------|----------|-----------|
-| 1 | DMA Engine + AXI interface | ✅ Done |
-| 2 | Data TCDM Interconnect (N-bank crossbar) | ✅ Done |
-| 2.5 | AXI→OBI bridge, DMA-to-TCM test | ✅ Done |
-| **3A** | **Snitch Core Integration: I-TCM, D-TCM isolation, Boot via AXI** | **✅ Done** |
-| 3B-A | Systolic Array + Matrix Engine cluster integration | ✅ Done |
-| 3B-B | Spatz Vector Engine integration (1 GHz cluster) | ⬜ Planned |
-| 4 | Top-Level: 5-cluster integration + Manager Snitch | ⬜ Planned |
-| 5 | Full YOLO layer end-to-end simulation | ⬜ Planned |
+| Area | Content | Status |
+|------|---------|--------|
+| DMA and AXI | DMA Engine + AXI interface | Done |
+| Shared memory fabric | Data TCDM Interconnect (N-bank crossbar) | Done |
+| Host bridge | AXI-to-OBI bridge, DMA-to-TCM test | Done |
+| Snitch cluster control | Snitch Core integration: I-TCM, D-TCM isolation, boot via AXI | Done |
+| Matrix compute | Systolic Array + Matrix Engine cluster integration | Done |
+| Vector compute | Spatz Vector Engine integration (1 GHz cluster) | Planned |
+| Top-level scaling | 5-cluster integration + Manager Snitch | Planned |
+| Model E2E | Full YOLO layer end-to-end simulation | Planned |
 
 ---
 
 ## 12. Hardware Verification Plan
 
 ### Unit Testing (Block-Level)
-- **Snitch Boot TB** (`test_snitch_boot`): Nạp firmware qua AXI4-Lite vào I-TCM, release fetch, xác nhận host IRQ. *(Passed)*
-- **I-TCM Arbiter TB**: Kiểm tra ưu tiên AXI vs Snitch, không có collision. *(Passed)*
-- **D-side OBI Demux TB**: Kiểm tra address decoding chính xác (D-TCM / Data TCDM / MMIO / error sink). *(Passed)*
-- **Matrix Engine TB** *(Phase 3B-A)*: Verify 32×32 Systolic Array vs Python golden model. *(Passed)*
-- **Cluster MatMul TB** *(Phase 3B-A)*: Snitch firmware trigger DMA, Systolic Array compute, OFM writeback; M=64 raw-register regression. *(Passed)*
+- **Snitch Boot TB** (`test_snitch_boot`): Load firmware through AXI4-Lite into I-TCM, release fetch, and confirm host IRQ. *(Passed)*
+- **I-TCM Arbiter TB**: Check AXI vs. Snitch priority with no collisions. *(Passed)*
+- **D-side OBI Demux TB**: Check correct address decoding for D-TCM / Data TCDM / MMIO / error sink. *(Passed)*
+- **Matrix Engine TB**: Verify the 32×32 Systolic Array against the Python golden model. *(Passed)*
+- **Cluster MatMul TB**: Snitch firmware triggers DMA, Systolic Array compute, and OFM writeback; M=64 raw-register regression. *(Passed)*
 - **AFU Cluster TB**: Snitch firmware programs AFU LUT/control, verifies e8/e16/e32 output and AFU internal interrupt. *(Passed)*
-- **Spatz Vector TB** *(Phase 3B-B)*: Test RVV instructions.
+- **Spatz Vector TB**: Test RVV instructions.
 
 ### Cluster-Level Verification
-- **TCDM Arbitration**: Snitch, Spatz, Systolic Array đồng thời access Data TCDM → không deadlock.
-- **Firmware Dispatch**: Snitch firmware trigger DMA, DMA load data, Systolic Array compute.
+- **TCDM Arbitration**: Snitch, Spatz, and Systolic Array access Data TCDM concurrently with no deadlock.
+- **Firmware Dispatch**: Snitch firmware triggers DMA, DMA loads data, and the Systolic Array computes.
 
 ### Top-Level Integration
-- **5-Cluster TB**: Tất cả 5 cluster chạy đồng thời, Manager Snitch phân chia tiling.
-- **End-to-End**: Mô phỏng full YOLO layer (Conv2D 3×3): External Memory → DMA → TCDM → Compute → Writeback.
-- **Performance Profiling**: Đo cycle count thực tế → tính TOPS thực tế vs mục tiêu 10 TOPS.
+- **5-Cluster TB**: All 5 clusters run concurrently, with Manager Snitch distributing tiling.
+- **End-to-End**: Simulate a full YOLO layer (Conv2D 3×3): External Memory → DMA → TCDM → Compute → Writeback.
+- **Performance Profiling**: Measure real cycle counts and compute actual TOPS against the 10 TOPS target.
