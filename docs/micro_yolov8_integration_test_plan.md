@@ -156,7 +156,7 @@ include weights or INT32 psum scratch. Therefore the test uses a hybrid
   accumulate+requant for the second C32 chunk.
 - The final head INT8 output is produced tile-by-tile in TCDM and copied to L2.
 
-Current TCDM allocation after 3j is approximately:
+Current TCDM allocation after the raw-head checkpoint is approximately:
 
 | Allocation | Bytes |
 |---|---:|
@@ -178,14 +178,14 @@ the scratch allocator becomes lifetime-aware.
 
 ---
 
-## 4. Implementation Phase Breakdown
+## 4. Implementation Roadmap
 
 The implementation is staged so each milestone has one dominant failure mode.
 Operator unit tests prove the kernels, then graph integration starts from a
 minimal Conv-only graph and adds data movement, layout, and scheduler lifetime
 one step at a time.
 
-### Phase 1: Operator Library Unit Tests
+### Milestone 1: Operator Library Unit Tests
 
 Objective: implement each missing non-Conv operator independently before it is
 allowed into the full graph scheduler.
@@ -205,7 +205,7 @@ Acceptance: each operator has a deterministic Python golden and byte-exact RTL
 cluster test coverage. Fused DFL and class sigmoid are now enabled after the
 raw-head INT8 layer in the Micro-YOLO E2E graph.
 
-### Phase 2: Tensor Layout and Graph Runtime Contract
+### Milestone 2: Tensor Layout and Graph Runtime Contract
 
 Objective: define layout and lifetime rules before introducing the full
 96x96 topology. This prevents graph bugs from being hidden inside ad hoc copies.
@@ -255,7 +255,7 @@ Required decisions:
 | 2d | Document qparam propagation for Requant/SiLU/Add/Mul | `docs/micro_yolov8_integration_test_plan.md` |
 | 2e | Emit C32-aligned Conv2D linebuffer/GEMM job descriptors from Python host | Python command generator / graph export path |
 
-Acceptance: the minimal graph in Phase 3a can run using the same tensor
+Acceptance: the minimal graph checkpoint can run using the same tensor
 descriptors and layout rules that the full 96x96 graph will use.
 
 Current implementation status:
@@ -284,58 +284,58 @@ Current implementation status:
   `.text` is still written through AXI I-TCM; firmware then pulls runtime
   descriptor blobs from L2 into scratch.
 
-### Phase 3: Incremental Graph Integration
+### Milestone 3: Incremental Graph Integration
 
 Objective: grow the graph one operator at a time, with a byte-exact checkpoint
 after each addition.
 
 | Step | Graph Added | Expected Output |
 |---|---|---|
-| 3a | Minimal graph: `32x32x3 -> Conv3x3 -> Requant/Clamp -> Conv1x1 -> Requant/Clamp` | `32x32x32` INT8 |
-| 3b | Conv_Stem only for 96x96 input | L1 `48x48x32` INT8 |
-| 3c | Conv_Stem + SiLU | L3 `48x48x32` INT8 |
-| 3d | Add C2f_Conv | L5 `48x48x32` INT8 |
-| 3e | Add residual Add | L6 `48x48x32` INT8 |
-| 3f | Add Conv_Down | L7 `24x24x32` INT8 |
-| 3g | Add SPPF MaxPool | L8 `24x24x32` INT8 |
-| 3h | Add Upsample | L9 `48x48x32` INT8 |
-| 3i | Add Concat to C64 C32-blocked layout | Bypassed; no materialized tensor |
-| 3j | Add Head_Conv IC64 OC32 | Raw head `48x48x32` INT8 |
+| A | Minimal graph: `32x32x3 -> Conv3x3 -> Requant/Clamp -> Conv1x1 -> Requant/Clamp` | `32x32x32` INT8 |
+| B | Conv_Stem only for 96x96 input | L1 `48x48x32` INT8 |
+| C | Conv_Stem + SiLU | L3 `48x48x32` INT8 |
+| D | Add C2f_Conv | L5 `48x48x32` INT8 |
+| E | Add residual Add | L6 `48x48x32` INT8 |
+| F | Add Conv_Down | L7 `24x24x32` INT8 |
+| G | Add SPPF MaxPool | L8 `24x24x32` INT8 |
+| H | Add Upsample | L9 `48x48x32` INT8 |
+| I | Add Concat to C64 C32-blocked layout | Bypassed; no materialized tensor |
+| J | Add Head_Conv IC64 OC32 | Raw head `48x48x32` INT8 |
 
 Acceptance: every step writes its checkpoint tensor to L2 and compares against
-the Python golden before the next operator is enabled. Step 3a also creates the
+the Python golden before the next operator is enabled. The bootstrap step also creates the
 `sw/test/micro_yolo/` firmware, Makefile, linker/start files, and makes the
 existing `test_micro_yolo_e2e.py` style test pass.
 
 Current implementation status:
 
-- The active firmware entrypoint is Phase 3j raw-head E2E. Older Phase 3
+- The active firmware entrypoint is the raw-head E2E checkpoint. Older
   checkpoints are documented as integration history and should not be treated
   as separate current firmware modes.
-- Phase 3h is committed as `6d61c4b Add micro yolo phase 3h upsample`.
-- Phase 3j is committed as `abc827b Add micro yolo phase 3j head conv bypass concat`.
+- The upsample checkpoint is committed as `6d61c4b`.
+- The head-conv checkpoint is committed as `abc827b`.
 - `sw/test/micro_yolo/` now runs the raw-head path through `Head_Conv` and
   writes the `48x48x32` INT8 raw head tensor to L2.
 - `test_micro_yolo_e2e.py` generates deterministic input/weights/golden in
   Python and compares the L2 raw-head output byte-exactly.
 - Latest cluster RTL result: PASS.
 
-Phase 3 checkpoint matrix:
+Milestone 3 checkpoint matrix:
 
 | Step | Status | Runtime path | Checkpoint / output | Notes |
 |---|---|---|---|---|
-| 3a | Historical bootstrap | Minimal graph firmware skeleton | `32x32x32` INT8 | Brought up `sw/test/micro_yolo`, linker/start files, graph descriptors, and byte-exact cocotb harness. Not the active entrypoint now. |
-| 3b | Folded into 3j | `Conv_Stem` 3x3/s2/p1 C3->C32 through systolic linebuffer + requant | L1 `48x48x32` INT8 | Uses direct linebuffer path, not scalar im2col. Input is HWC RGB; output is C32-blocked. |
-| 3c | Folded into 3j | AFU Logistic LUT + AFU `Mul_Q7` for SiLU | L3 `48x48x32` INT8 | L3 is the skip branch later consumed by logical Concat. Current firmware saves it to L2 because the present TCDM lifetime map cannot keep it resident through downsample/pool/upsample. |
-| 3d | Folded into 3j | `C2f_Conv` 3x3/s1/p1 C32->C32 through systolic linebuffer/KGEN + requant | L5 `48x48x32` INT8 | Confirms the C32 steady-state conv path used by later YOLO blocks. |
-| 3e | Folded into 3j | AFU residual Add | L6 `48x48x32` INT8 | Adds C2f output with the preserved SiLU activation before the downsample branch. |
-| 3f | Folded into 3j | `Conv_Down` 3x3/s2/p1 C32->C32 through systolic linebuffer/KGEN + requant | L7 `24x24x32` INT8 | Exercises stride-2 spatial reduction with the same C32 conv scheduler. |
-| 3g | Folded into 3j | MaxPool 5x5/s1/p2 C32 through systolic linebuffer pool mode | L8 `24x24x32` INT8 | Replaced slower Spatz/scalar pooling paths. Reference PMU after this phase was about 18.5k cycles for MaxPool. |
-| 3h | Committed | Upsample nearest 2x C32 through Spatz specialized kernel | L9 `48x48x32` INT8 | Uses one vector load and four vector stores per C32 element group. Phase 3h E2E reference was about 237.7k cycles total. |
-| 3i | Deliberately bypassed | No materialized Concat tensor | No standalone tensor | Logical Concat is only represented in the consuming Head_Conv. This avoids allocating/copying `48x48x64` = 147,456 bytes. |
-| 3j | Active | Fused logical Concat + `Head_Conv` C64->C32 | Raw head `48x48x32` INT8 in L2 | Runs two C32 conv chunks. Chunk 0 writes INT32 psum; chunk 1 accumulates, requants, and writes the final INT8 tile. |
+| Bootstrap | Historical bootstrap | Minimal graph firmware skeleton | `32x32x32` INT8 | Brought up `sw/test/micro_yolo`, linker/start files, graph descriptors, and byte-exact cocotb harness. Not the active entrypoint now. |
+| Stem | Folded into raw-head | `Conv_Stem` 3x3/s2/p1 C3->C32 through systolic linebuffer + requant | L1 `48x48x32` INT8 | Uses direct linebuffer path, not scalar im2col. Input is HWC RGB; output is C32-blocked. |
+| SiLU | Folded into raw-head | AFU Logistic LUT + AFU `Mul_Q7` for SiLU | L3 `48x48x32` INT8 | L3 is the skip branch later consumed by logical Concat. Current firmware saves it to L2 because the present TCDM lifetime map cannot keep it resident through downsample/pool/upsample. |
+| C2f | Folded into raw-head | `C2f_Conv` 3x3/s1/p1 C32->C32 through systolic linebuffer/KGEN + requant | L5 `48x48x32` INT8 | Confirms the C32 steady-state conv path used by later YOLO blocks. |
+| Residual | Folded into raw-head | AFU residual Add | L6 `48x48x32` INT8 | Adds C2f output with the preserved SiLU activation before the downsample branch. |
+| Downsample | Folded into raw-head | `Conv_Down` 3x3/s2/p1 C32->C32 through systolic linebuffer/KGEN + requant | L7 `24x24x32` INT8 | Exercises stride-2 spatial reduction with the same C32 conv scheduler. |
+| Pool | Folded into raw-head | MaxPool 5x5/s1/p2 C32 through systolic linebuffer pool mode | L8 `24x24x32` INT8 | Replaced slower Spatz/scalar pooling paths. Reference PMU after this checkpoint was about 18.5k cycles for MaxPool. |
+| Upsample | Committed | Upsample nearest 2x C32 through Spatz specialized kernel | L9 `48x48x32` INT8 | Uses one vector load and four vector stores per C32 element group. The E2E reference after this checkpoint was about 237.7k cycles total. |
+| Concat | Deliberately bypassed | No materialized Concat tensor | No standalone tensor | Logical Concat is only represented in the consuming Head_Conv. This avoids allocating/copying `48x48x64` = 147,456 bytes. |
+| Head | Active | Fused logical Concat + `Head_Conv` C64->C32 | Raw head `48x48x32` INT8 in L2 | Runs two C32 conv chunks. Chunk 0 writes INT32 psum; chunk 1 accumulates, requants, and writes the final INT8 tile. |
 
-Active Phase 3j graph:
+Active raw-head graph:
 
 ```
 DMA_IN input
@@ -368,29 +368,29 @@ Requantization is only applied after the second chunk has accumulated into the
 INT32 psum. This preserves the logical Concat+Conv result while avoiding the
 147,456-byte `48x48x64` concat copy.
 
-Graph/runtime entries used by the active Phase 3 path:
+Graph/runtime entries used by the active raw-head path:
 
 | Item | Used by | Purpose |
 |---|---|---|
-| `npu_tensor_t` / `npu_layer_t` | 3a+ | Shared graph tensor/layer ABI for firmware-side scheduling. |
-| `npu_layer_t.src2` | 3j | Second input tensor for fused logical Concat consumers. |
+| `npu_tensor_t` / `npu_layer_t` | Bootstrap and later | Shared graph tensor/layer ABI for firmware-side scheduling. |
+| `npu_layer_t.src2` | Head checkpoint | Second input tensor for fused logical Concat consumers. |
 | `CONV2D_C32_LINEBUF_REQUANT` | 3d | C32 conv + final requant path for C2f. |
 | `CONV2D_C32_DOWNSAMPLE_LINEBUF_REQUANT` | 3f | C32 stride-2 conv + final requant path for downsample. |
 | `MAXPOOL2D_I8` | 3g | SPPF-style 5x5 pool through the linebuffer pool datapath. |
-| `UPSAMPLE_NEAREST_I8` | 3h | nearest-neighbor 2x graph op. |
-| `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2` | 3j | fused logical Concat + Head_Conv. |
-| `spatz_upsample_nearest2x_c32_i8()` | 3h | C32 fast path: one vector load, four vector stores. |
-| `systolic_gemm32_linebuf_ktiles_accumulate_requant_strided()` | 3j | final chunk accumulates external psum and requants in the systolic controller. |
-| `npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant()` | 3j | per-spatial-tile final Head_Conv chunk helper. |
+| `UPSAMPLE_NEAREST_I8` | Upsample checkpoint | nearest-neighbor 2x graph op. |
+| `CONV2D_DUAL_SOURCE_C32_LINEBUF_REQUANT_L2` | Head checkpoint | fused logical Concat + Head_Conv. |
+| `spatz_upsample_nearest2x_c32_i8()` | Upsample checkpoint | C32 fast path: one vector load, four vector stores. |
+| `systolic_gemm32_linebuf_ktiles_accumulate_requant_strided()` | Head checkpoint | final chunk accumulates external psum and requants in the systolic controller. |
+| `npu_conv2d_packed_run_oc32_linebuf_tile_accumulate_requant()` | Head checkpoint | per-spatial-tile final Head_Conv chunk helper. |
 
 The head path uses the existing `systolic_controller.sv` psum-buffer/requant
-datapath. No new RTL state was required for 3j: software now exposes the mode
+datapath. No new RTL state was required for this checkpoint: software now exposes the mode
 by setting `accum_en`, `RQ_CTRL`, `psum_addr`, output stride, and psum stride
 for the final C32 chunk.
 
-### Phase 3j PMU Snapshot
+### Raw-Head PMU Snapshot
 
-Latest `test_micro_yolo_e2e.py` result after 3j:
+Latest `test_micro_yolo_e2e.py` raw-head result:
 
 | Layer | Op | Cycles | Key notes |
 |---:|---|---:|---|
@@ -438,32 +438,33 @@ Current head scheduler geometry:
 - Logical C64 is split into two C32 chunks.
 - Scheduler/linebuffer starts: `9 * 2 = 18`.
 - Each C32 chunk has `3*3*32/32 = 9` KGEN tiles.
-- Total KGEN phases in Head_Conv: `18 * 9 = 162`.
+- Total KGEN stages in Head_Conv: `18 * 9 = 162`.
 
-Next optimization target: reduce the 3j head overhead above pure compute by
+Next optimization target: reduce head overhead above pure compute by
 reducing per-tile setup, reusing linebuffer/window state across adjacent tiles,
 and avoiding L2 skip save/reload when a lifetime-aware TCDM allocator can keep
 the skip branch resident.
 
-### Phase 3k: Full 96x96 Raw-Head E2E
+### Full 96x96 Raw-Head E2E
 
 Objective: run the complete raw-head topology through `Raw_Head_Out`.
 DFL/Softmax/decode table entries may exist in metadata but must remain disabled.
 
 | Step | Task |
 |---|---|
-| 3k-a | Generate deterministic Python golden for the full raw-head topology |
-| 3k-b | Export input and weights as fixed `.bin` fixtures or generate them in cocotb |
-| 3k-c | Run firmware scheduler over L2-centric tiled tensors |
-| 3k-d | Compare raw head INT8 output byte-exactly |
-| 3k-e | Collect PMU counters per layer for performance triage |
+| A | Generate deterministic Python golden for the full raw-head topology |
+| B | Export input and weights as fixed `.bin` fixtures or generate them in cocotb |
+| C | Run firmware scheduler over L2-centric tiled tensors |
+| D | Compare raw head INT8 output byte-exactly |
+| E | Collect PMU counters per layer for performance triage |
 
 Acceptance: raw head `1x32x48x48` INT8 matches golden with 0 byte mismatch.
 
-Current status: **implemented and passing** through the Phase 3j raw-head
+Current status: **implemented and passing** through the raw-head
 checkpoint. The test remains in `test_micro_yolo_e2e.py` rather than a separate
-Phase 4 test file, but it now covers the full raw-head tensor. This closes the
-old Phase 4 scope, so postprocess preparation now starts at the new Phase 4.
+postprocess test file, but it now covers the full raw-head tensor. This closes
+the old raw-head scope, so postprocess preparation now starts as the next
+milestone.
 
 Current fixture policy:
 
@@ -491,24 +492,24 @@ Current L2 map:
 | `L2_DFL_OUTPUT` | `0x80060000` | DFL Q8.8 output |
 | `L2_CLASS_OUTPUT` | `0x80065000` | class sigmoid INT8 output |
 
-### Phase 4: Postprocess Preparation
+### Milestone 4: Postprocess Preparation
 
 Objective: extend beyond raw-head output after the Conv/activation path is stable.
 
 | Step | Task |
 |---|---|
-| 4a | Head split into Box/Class branches |
+| A | Head split into Box/Class branches |
 | 4b | Transpose/reshape to flattened head layout |
-| 4c | DFL Softmax implementation and unit test |
-| 4d | Class sigmoid |
-| 4e | Decode/NMS roadmap |
+| C | DFL Softmax implementation and unit test |
+| D | Class sigmoid |
+| E | Decode/NMS roadmap |
 
-#### Phase 4a: Head split into Box/Class branches
+#### Head split into Box/Class branches
 
 Current status: **implemented and passing**.
 
 The current micro-YOLO raw head remains a compact `48x48x32` INT8 ROW32 tensor
-written to `L2_OUTPUT`. Phase 4a defines the first postprocess ABI on top of
+written to `L2_OUTPUT`. This milestone defines the first postprocess ABI on top of
 that raw tensor:
 
 | Branch | Channel range | Shape | Bytes |
@@ -527,7 +528,7 @@ The full raw head is still compared byte-exactly. The postprocess operators now
 consume the two branch views directly from the ROW32 tensor, avoiding an extra
 full-head materialized split/copy.
 
-#### Phase 4c: DFL Softmax implementation and unit test
+#### DFL Softmax implementation and unit test
 
 Current status: **implemented and passing**.
 
@@ -555,7 +556,7 @@ Coverage:
 - `afu_ops_dfl_fused.bin` covers the C wrapper and cluster path.
 - `test_micro_yolo_e2e.py` runs the graph layer and checks `L2_DFL_OUTPUT`.
 
-#### Phase 4d: Class sigmoid
+#### Class sigmoid
 
 Current status: **implemented and passing**.
 
@@ -582,7 +583,7 @@ Coverage:
 - `test_micro_yolo_e2e.py` compares the materialized class sigmoid output
   byte-exactly against the Python golden.
 
-#### Phase 4e: Decode/NMS roadmap
+#### Decode/NMS roadmap
 
 Current status: **not started**.
 
@@ -627,5 +628,5 @@ Relevant passing commits:
 
 | Commit | Scope |
 |---|---|
-| `6d61c4b` | Phase 3h C32-specialized Upsample |
-| `abc827b` | Phase 3j Head_Conv bypass Concat |
+| `6d61c4b` | C32-specialized Upsample checkpoint |
+| `abc827b` | Head_Conv bypass Concat checkpoint |

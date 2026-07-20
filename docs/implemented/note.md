@@ -1,41 +1,45 @@
 # Neural-AI YOLO NPU - Project Summary
 
 **Date**: 2026-06-19
-**Current Version**: Phase 3B (Matrix Engine Integration)
+**Current Version**: Matrix Engine Integration Baseline
 
-## 1. Mục tiêu dự án (Project Goals)
-Xây dựng một kiến trúc NPU (Neural Processing Unit) xử lý hỗn hợp để đạt hiệu năng **10 TOPS**. Dự án được tối ưu hóa sâu cho họ mô hình **YOLO**, đặc biệt là hỗ trợ quá trình suy luận (inference) với dữ liệu lượng tử hóa INT8.
+## 1. Project Goals
 
-Kiến trúc bao gồm 5 **NPU Clusters** chạy song song. Mỗi cluster có:
-- **Control Core (Snitch)**: RISC-V RV32IMAC điều khiển luồng và điều phối các đơn vị tính toán.
-- **Matrix Engine**: Systolic Array (32x32) chuyên cho Dense MatMul / Conv2D (INT8).
-- **Vector Engine**: Spatz RVV co-processor xử lý Depthwise Conv, Activations (SiLU, Softmax).
-- **Shared Data TCDM**: Bộ nhớ L1 (SRAM chia sẻ 256-bit) cho phép truy cập đồng thời từ DMA, Snitch, Systolic Array và Vector Engine.
-- **DMA Engine**: Di chuyển dữ liệu giữa L2 (DRAM/AXI) và L1 (TCDM) một cách tự động, không cần sự can thiệp liên tục của CPU.
+Build a heterogeneous NPU architecture targeting **10 TOPS**. The project is deeply optimized for the **YOLO** model family, especially INT8 quantized inference.
 
-## 2. Tiến độ công việc (Progress)
+The architecture contains 5 parallel **NPU Clusters**. Each cluster includes:
 
-### Các Phase đã hoàn thành (✅ Done):
-- **Phase 1**: DMA Engine + giao tiếp AXI.
-- **Phase 2**: Data TCDM Interconnect (Crossbar đa bank).
-- **Phase 2.5**: AXI-to-OBI bridge, test truyền dữ liệu DMA-to-TCM.
-- **Phase 3A**: Tích hợp Snitch Core (cô lập I-TCM, D-TCM, Boot firmware thành công qua AXI).
-- **Phase 3B - Phần 1 (Matrix Engine)**: 
-  - Đã tích hợp thành công `systolic_controller` và `npu_systolic_array` vào `npu_cluster`.
-  - Nâng cấp TCDM Interconnect lên 8 Master để hỗ trợ 4 cổng ghi và 1 cổng đọc từ Systolic Array.
-  - Sửa các lỗi kiến trúc nghiêm trọng: Bug địa chỉ TCDM, Lỗi Mux/Demux, Backpressure cho OFM (Output Feature Map), DMA L1→L1, thứ tự nạp weight cho systolic array, và thiết lập lại các hằng số không nhất quán giữa RTL và Firmware.
-  - Scoreboard của `test_systolic.py` đã assert thật trên số lượng kết quả và số mismatch; standalone Systolic Array pass 32/32 kết quả.
-  - `test_snitch_boot.py` pass với firmware signature `0xDEADBEEF`, xác nhận boot path và DMA L1→L1 không phá luồng firmware.
-  - `test_matmul.py` pass 10 vòng lặp ngẫu nhiên end-to-end trong cluster: Snitch firmware → DMA → Systolic Array → OFM writeback.
+- **Control Core (Snitch)**: RISC-V RV32IMAC control core that orchestrates flow and dispatches compute units.
+- **Matrix Engine**: 32x32 Systolic Array for dense MatMul / Conv2D (INT8).
+- **Vector Engine**: Spatz RVV coprocessor for Depthwise Conv and activation/post-processing work.
+- **Shared Data TCDM**: 256-bit shared L1 SRAM that supports concurrent access from DMA, Snitch, Systolic Array, and Vector Engine.
+- **DMA Engine**: Moves data between L2 (DRAM/AXI) and L1 (TCDM) autonomously without continuous CPU intervention.
 
-## 3. Công việc còn lại (Remaining Work / Next Steps)
+## 2. Progress
 
-- **Phase 3B - Phần 2 (Vector Engine)**: Tích hợp Spatz Vector Engine vào hệ thống để xử lý các phép toán phi tuyến (non-linear) và element-wise.
-- **Phase 4**: Tích hợp Top-Level (5 Cluster). Đưa 5 cluster kết nối với một Manager Snitch để phân phối tải (tiling & scheduling).
-- **Phase 5**: Chạy mô phỏng toàn bộ một layer YOLO (End-to-End Simulation) từ External Memory -> DMA -> TCDM -> Compute -> Writeback. Đánh giá hiệu năng (TOPS thực tế so với mục tiêu).
+Completed work:
 
-## 4. Các quy tắc quan trọng đã thống nhất (Design Decisions)
-1. **Snitch làm Master**: Chỉ đạo và điều phối mọi block khác qua firmware.
-2. **Loại bỏ APB**: Không dùng APB, mọi giao tiếp Memory-Mapped I/O được định tuyến qua OBI.
-3. **Repository Management**: Không commit các file binary, hex hoặc object sinh ra trong quá trình biên dịch (dùng `.gitignore`).
-4. Sử dụng biến `$(REPO_ROOT)` cho đường dẫn include trong các file cấu hình.
+- **DMA and AXI:** DMA Engine + AXI interface.
+- **Shared memory fabric:** Data TCDM Interconnect with a multi-bank crossbar.
+- **AXI-to-OBI bridge:** DMA-to-TCM data-transfer test.
+- **Snitch integration:** I-TCM and D-TCM isolation, plus successful firmware boot through AXI.
+- **Matrix Engine integration:**
+  - Successfully integrated `systolic_controller` and `npu_systolic_array` into `npu_cluster`.
+  - Upgraded the TCDM interconnect to 8 masters to support 4 write ports and 1 read port from the Systolic Array.
+  - Fixed critical architectural issues: TCDM address bug, mux/demux issue, OFM backpressure, DMA L1-to-L1 path, systolic weight-load ordering, and inconsistent constants between RTL and firmware.
+  - `test_systolic.py` scoreboard now asserts real result counts and mismatch counts; standalone Systolic Array passes 32/32 outputs.
+  - `test_snitch_boot.py` passes with firmware signature `0xDEADBEEF`, confirming that the boot path works and DMA L1-to-L1 does not break firmware flow.
+  - `test_matmul.py` passes 10 randomized end-to-end cluster iterations: Snitch firmware -> DMA -> Systolic Array -> OFM writeback.
+
+## 3. Remaining Work / Next Steps
+
+- **Vector Engine integration:** Integrate Spatz Vector Engine into the system for nonlinear and element-wise operations.
+- **Top-level integration:** Connect 5 clusters to a Manager Snitch for tiling and scheduling.
+- **Full YOLO layer simulation:** Run an end-to-end simulation from External Memory -> DMA -> TCDM -> Compute -> Writeback, then evaluate actual TOPS against the target.
+
+## 4. Agreed Design Decisions
+
+1. **Snitch is the master:** Snitch directs and orchestrates all other blocks through firmware.
+2. **APB is removed:** Do not use APB; route all memory-mapped I/O through OBI.
+3. **Repository management:** Do not commit generated binary, hex, or object files; keep them covered by `.gitignore`.
+4. Use `$(REPO_ROOT)` for include paths in configuration files.

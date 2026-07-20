@@ -604,7 +604,7 @@ Stride policy:
 - `stride=2`: this must not be implemented by scanning stride-1 outputs and
   discarding half of them. It needs a wider prefetch segment or x-banking so
   the next columns are already available before emit.
-- `stride>=3`: not a native performance target in this phase. The compiler must
+- `stride>=3`: not a native performance target in this implementation. The compiler must
   decompose/rewrite the operation or use the packed prepare backup.
 
 ## 9. Verification for the Stream Linebuffer

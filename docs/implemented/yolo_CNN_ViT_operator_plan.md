@@ -1,227 +1,237 @@
-# NPU Cluster — Operator Gap Analysis for YOLO / CNN / Vision Transformer
+# NPU Cluster Operator Gap Analysis for YOLO / CNN / Vision Transformer
 
-**Date:** 2026-06-20  
-**Target Models:** YOLOv5/v8/v11, General CNN (ResNet, MobileNet), Vision Transformer (ViT, DeiT)  
-**Current Hardware:** Snitch (RV32IMAC) + Spatz (RVV INT-only, 2 IPU) + Systolic Array (32×32 INT8) + DMA
-
----
-
-## 1. Hardware hiện tại có thể xử lý
-
-| Operator | Model sử dụng | Hardware xử lý | Ghi chú |
-|----------|---------------|----------------|---------|
-| Dense Conv2D | YOLO, CNN, ViT | **Systolic Array** (im2col + GEMM) | ✅ Core workload, INT8 |
-| Fully Connected / Linear | All | **Systolic Array** (là MatMul) | ✅ |
-| MatMul (Q×K^T, Attn×V) | ViT | **Systolic Array** | ✅ |
-| Element-wise Add | YOLO (skip), ViT (residual) | **Spatz** (`vadd.vv`) | ✅ |
-| Element-wise Mul | Requant, BN fused | **Spatz** (`vmul.vv`) | ✅ |
-| MaxPool | YOLO, CNN | **Spatz** (`vmax.vv` + slide) | ✅ Chậm hơn dedicated |
-| Concat | YOLO (C2f, neck) | **DMA** (data copy) | ✅ Chỉ là di chuyển data |
-| Shift/Clamp (Requantization) | All (INT8 pipeline) | **Spatz** (`vsra` + `vmax/vmin`) | ✅ |
-| ReLU / Clip | CNN | **Spatz** (`vmax.vx` with x=0) | ✅ Trivial |
-| BatchNorm (fused into Conv) | CNN, YOLO | **Spatz** (mul + add per-channel) | ✅ Typically fused at compile |
-| Depthwise Conv | YOLO (C2f), MobileNet | **Spatz** (element-wise loop) | ⚠️ Functional nhưng chậm, không tận dụng systolic |
-| Upsample (Nearest Neighbor) | YOLO (FPN/PAN neck) | **Spatz** hoặc **DMA** | ✅ Duplicate pixels |
-| Transpose / Reshape | ViT (multi-head reshape) | **DMA** + **Spatz** | ✅ Data movement |
+**Date:** 2026-06-20
+**Target Models:** YOLOv5/v8/v11, general CNNs (ResNet, MobileNet), Vision Transformer (ViT, DeiT)
+**Current Hardware:** Snitch (RV32IMAC) + Spatz (RVV INT-only, 2 IPU) + Systolic Array (32x32 INT8) + DMA
 
 ---
 
-## 2. Hardware THIẾU — Operators chưa có cách xử lý hiệu quả
+## 1. Hardware That Can Already Handle Key Operators
 
-### 2.1. 🔴 Activation Function Unit (AFU) — QUAN TRỌNG NHẤT
-
-**Vấn đề:** Spatz (INT-only, không có FPU) **không thể tính** các hàm phi tuyến: `exp()`, `tanh()`, `1/x`, `sqrt()`.
-
-| Function | Công thức | Model sử dụng | Mức độ cần thiết |
-|----------|-----------|---------------|-------------------|
-| **SiLU / Swish** | x × σ(x) = x × 1/(1+exp(-x)) | YOLOv5/v8/v11 (mọi Conv block) | 🔴 Critical |
-| **Sigmoid** | 1 / (1 + exp(-x)) | YOLO (detection head output) | 🔴 Critical |
-| **Softmax** | exp(xᵢ) / Σexp(xⱼ) | ViT (mọi Attention layer) | 🔴 Critical cho ViT |
-| **GELU** | 0.5x(1 + tanh(√(2/π)(x + 0.044715x³))) | ViT (MLP block) | 🔴 Critical cho ViT |
-| **LayerNorm** | (x - μ) / √(σ² + ε) | ViT (mọi layer) | 🟠 Cần sqrt + div |
-| **Tanh** | (exp(x) - exp(-x)) / (exp(x) + exp(-x)) | Một số CNN | 🟡 Ít phổ biến |
-
-**Đây là gap lớn nhất.** Không có AFU thì YOLO và ViT đều không chạy được trên hardware.
-
-#### Giải pháp phổ biến trong NPU industry:
-
-| Approach | Mô tả | Ưu điểm | Nhược điểm |
-|----------|-------|---------|------------|
-| **LUT-based** | Bảng tra cứu trong SRAM, nội suy tuyến tính giữa 2 điểm | Đơn giản nhất, deterministic, area rất nhỏ | Precision giới hạn bởi table size (256-1024 entries thường đủ cho INT8) |
-| **Piecewise Linear (PWL)** | Chia input range thành N segment, mỗi segment là y = ax + b | Chính xác hơn LUT, vẫn nhỏ gọn | Cần multiplier + adder + segment lookup |
-| **Polynomial Approximation** | Dùng Taylor/Chebyshev polynomial bậc 2-3 | Rất chính xác | Cần multiple multipliers, latency cao hơn |
-| **CORDIC** | Iterative algorithm cho sin/cos/exp/sqrt | General purpose, high precision | Area lớn, nhiều cycle, overkill cho INT8 |
-| **Firmware trên Snitch** | Scalar C code tính từng element | Không cần HW mới | Cực chậm, hoàn toàn không scalable |
-
-#### Recommendation cho NPU này:
-
-Dùng **LUT + Linear Interpolation** vì:
-- Target là INT8 inference → input/output chỉ cần 8-bit precision
-- LUT 256 entries × 8-bit = 256 bytes/function → fit trong registers
-- Throughput: 1 element/cycle dễ đạt, có thể pipeline nhiều lanes
-- Hỗ trợ mọi function chỉ bằng cách thay LUT content
-
-#### AFU Architecture gợi ý:
-
-```
-                    ┌──────────────────────────┐
-  TCDM ────────────►│   Activation Function    │────────────► TCDM
-  (input buffer)    │        Unit (AFU)        │   (output buffer)
-                    │                          │
-                    │  ┌─────┐   ┌──────────┐  │
-                    │  │ LUT │──►│ Interp.  │  │
-                    │  │256×8│   │ a×x + b  │  │
-                    │  └─────┘   └──────────┘  │
-                    │                          │
-                    │  Config: func_select,    │
-                    │          src_ptr,         │
-                    │          dst_ptr,         │
-                    │          length           │
-                    └──────────────────────────┘
-```
-
-- Firmware (Snitch) cấu hình: function type, source pointer, dest pointer, length
-- AFU tự đọc data từ TCDM, tra LUT, ghi kết quả lại TCDM
-- Cần thêm 1 Master trên TCDM interconnect (Master 9 hoặc multiplex)
+| Operator | Models | Hardware path | Notes |
+|----------|--------|---------------|-------|
+| Dense Conv2D | YOLO, CNN, ViT | **Systolic Array** (im2col + GEMM) | Core INT8 workload |
+| Fully Connected / Linear | All | **Systolic Array** (MatMul) | Supported |
+| MatMul (Q x K^T, Attn x V) | ViT | **Systolic Array** | Supported |
+| Element-wise Add | YOLO (skip), ViT (residual) | **Spatz** (`vadd.vv`) | Supported |
+| Element-wise Mul | Requant, fused BN | **Spatz** (`vmul.vv`) | Supported |
+| MaxPool | YOLO, CNN | **Spatz** (`vmax.vv` + slide) | Supported, slower than a dedicated engine |
+| Concat | YOLO (C2f, neck) | **DMA** (data copy) | Pure data movement |
+| Shift/Clamp (Requantization) | All INT8 pipelines | **Spatz** (`vsra` + `vmax/vmin`) | Supported |
+| ReLU / Clip | CNN | **Spatz** (`vmax.vx` with x=0) | Trivial |
+| BatchNorm (fused into Conv) | CNN, YOLO | **Spatz** (mul + add per-channel) | Typically fused at compile time |
+| Depthwise Conv | YOLO (C2f), MobileNet | **Spatz** (element-wise loop) | Functional but slow; does not exploit systolic compute |
+| Upsample (Nearest Neighbor) | YOLO (FPN/PAN neck) | **Spatz** or **DMA** | Duplicate pixels |
+| Transpose / Reshape | ViT (multi-head reshape) | **DMA** + **Spatz** | Data movement |
 
 ---
 
-### 2.2. 🟠 Requantization Pipeline (Fuse vào Systolic Output)
+## 2. Missing or Inefficient Hardware Paths
 
-**Vấn đề:** Sau mỗi layer Conv/FC (INT8 × INT8 = INT32 accumulator), cần rescale về INT8 cho layer tiếp theo:
+### 2.1. Activation Function Unit (AFU): Highest Priority
 
+**Problem:** Spatz is integer-only and has no FPU, so it cannot efficiently compute nonlinear functions such as `exp()`, `tanh()`, `1/x`, or `sqrt()`.
+
+| Function | Formula | Models | Importance |
+|----------|---------|--------|------------|
+| **SiLU / Swish** | x x sigma(x) = x x 1/(1+exp(-x)) | YOLOv5/v8/v11 Conv blocks | Critical |
+| **Sigmoid** | 1 / (1 + exp(-x)) | YOLO detection head output | Critical |
+| **Softmax** | exp(x_i) / sum(exp(x_j)) | ViT attention layers | Critical for ViT |
+| **GELU** | 0.5x(1 + tanh(sqrt(2/pi)(x + 0.044715x^3))) | ViT MLP blocks | Critical for ViT |
+| **LayerNorm** | (x - mean) / sqrt(var + eps) | ViT layers | Needs sqrt + div |
+| **Tanh** | (exp(x) - exp(-x)) / (exp(x) + exp(-x)) | Some CNNs | Less common |
+
+This is the largest operator gap. Without AFU support, YOLO and ViT cannot run efficiently on the hardware.
+
+#### Common NPU Approaches
+
+| Approach | Description | Advantages | Disadvantages |
+|----------|-------------|------------|---------------|
+| **LUT-based** | SRAM lookup table with linear interpolation between points | Simplest, deterministic, very small area | Precision limited by table size; 256-1024 entries is usually enough for INT8 |
+| **Piecewise Linear (PWL)** | Split input range into N segments, each modeled as y = ax + b | More accurate than LUT and still compact | Needs multiplier, adder, and segment lookup |
+| **Polynomial Approximation** | Taylor/Chebyshev polynomial of degree 2-3 | Very accurate | Needs multiple multipliers and higher latency |
+| **CORDIC** | Iterative algorithm for sin/cos/exp/sqrt | General purpose and high precision | Large area, many cycles, overkill for INT8 |
+| **Snitch firmware** | Scalar C code computes each element | No new hardware | Extremely slow and not scalable |
+
+#### Recommendation for This NPU
+
+Use **LUT + linear interpolation** because:
+
+- The target is INT8 inference, so input/output only need 8-bit precision.
+- LUT 256 entries x 8-bit = 256 bytes per function, which fits in a small local table.
+- Throughput of 1 element/cycle is realistic, with multiple lanes possible through pipelining.
+- Any function can be supported by changing LUT contents.
+
+#### Suggested AFU Architecture
+
+```text
+                    +--------------------------+
+  TCDM ------------>|   Activation Function    |------------> TCDM
+  (input buffer)    |        Unit (AFU)        |   (output buffer)
+                    |                          |
+                    |  +-----+   +----------+  |
+                    |  | LUT |-->| Interp.  |  |
+                    |  |256x8|   | a*x + b  |  |
+                    |  +-----+   +----------+  |
+                    |                          |
+                    |  Config: func_select,    |
+                    |          src_ptr,         |
+                    |          dst_ptr,         |
+                    |          length           |
+                    +--------------------------+
 ```
-output_int8 = clamp((acc_int32 × scale) >> shift + zero_point, 0, 255)
+
+- Firmware (Snitch) configures function type, source pointer, destination pointer, and length.
+- AFU autonomously reads data from TCDM, performs LUT lookup, and writes results back to TCDM.
+- Add one TCDM-interconnect master, or multiplex with an existing compatible master.
+
+---
+
+### 2.2. Requantization Pipeline Fused into Systolic Output
+
+**Problem:** After each Conv/FC layer (`INT8 x INT8 = INT32 accumulator`), the output must be rescaled to INT8 for the next layer:
+
+```text
+output_int8 = clamp((acc_int32 x scale) >> shift + zero_point, 0, 255)
 ```
 
-Hiện tại `systolic_controller` ghi INT32 raw accumulator ra TCDM, rồi Spatz phải đọc lại, requant, ghi lại. Điều này:
-- Tốn 2× bandwidth TCDM (đọc INT32 + ghi INT8)
-- Tốn latency (firmware dispatch + Spatz processing)
-- Tốn 4× storage (INT32 vs INT8)
+The older path writes raw INT32 accumulators to TCDM, then Spatz reads them back, requantizes, and writes the INT8 result. This:
 
-**Giải pháp:** Thêm **post-processing pipeline** vào `systolic_controller.sv`:
+- Uses 2x TCDM bandwidth (read INT32 + write INT8).
+- Adds latency from firmware dispatch and Spatz processing.
+- Uses 4x storage compared with INT8.
 
-```
+**Solution:** Add a post-processing pipeline to `systolic_controller.sv`:
+
+```text
 Systolic Array INT32 output
-         │
-         ▼
-    ┌──────────┐
-    │ × scale  │  (per-channel scale, loaded from TCDM)
-    │ >> shift  │  (per-channel shift)
-    │ + zp     │  (per-channel zero point)
-    │ clamp    │  (saturate to [0, 255])
-    └──────────┘
-         │
-         ▼
-    INT8 output → ghi TCDM (1/4 bandwidth so với INT32)
+         |
+         v
+    +---------+
+    | x scale |  (per-channel scale, loaded from TCDM)
+    | >> shift|  (per-channel shift)
+    | + zp    |  (per-channel zero point)
+    | clamp   |  (saturate to [0, 255])
+    +---------+
+         |
+         v
+    INT8 output -> write TCDM (1/4 bandwidth versus INT32)
 ```
 
-**Impact:** Giảm 4× TCDM write bandwidth, tăng throughput đáng kể.
+**Impact:** Reduces TCDM write bandwidth by 4x and significantly improves throughput.
 
-**Priority:** 🟠 Nên có nhưng có thể dùng Spatz làm workaround tạm.
+**Priority:** Important, but Spatz can serve as a temporary fallback.
 
 ---
 
-### 2.3. 🟡 Dedicated Pooling Engine (Optional)
+### 2.3. Dedicated Pooling Engine (Optional)
 
-MaxPool 2×2 / 3×3 phổ biến trong YOLO/CNN cũ. Spatz *có thể* làm nhưng throughput thấp vì phải:
-1. Load multiple rows từ TCDM
-2. Vector compare + select
-3. Stride output
+MaxPool 2x2 / 3x3 is common in older YOLO/CNN models. Spatz can implement it, but throughput is low because it must:
 
-Dedicated pooling engine sẽ nhanh hơn, nhưng:
-- Trend gần đây (YOLOv8+) thay MaxPool bằng stride-2 Conv
-- MobileNetV2+ dùng stride-2 Depthwise Conv thay pooling
-- ViT không dùng pooling (chỉ có Global Average Pool cuối)
+1. Load multiple rows from TCDM.
+2. Vector compare and select.
+3. Store strided output.
 
-**Priority:** 🟡 Nice-to-have. Spatz có thể xử lý, không block inference.
+A dedicated pooling engine would be faster, but:
+
+- Recent YOLO variants replace MaxPool with stride-2 Conv.
+- MobileNetV2+ uses stride-2 Depthwise Conv instead of pooling.
+- ViT does not use pooling except the final Global Average Pool in some variants.
+
+**Priority:** Nice-to-have. Spatz can handle it functionally, so it does not block inference.
 
 ---
 
-## 3. Operator Coverage Map (Tổng hợp)
+## 3. Operator Coverage Map
 
-```
-                          Systolic   Spatz    DMA    ❌ Missing
+```text
+                          Systolic   Spatz    DMA    Missing
                           (MatMul)   (RVV)   (Xfer)  (Need HW)
-─────────────────────────────────────────────────────────────────
-Conv2D (dense)              ██████                    
-Depthwise Conv                       ████             
-Fully Connected             ██████                    
-MatMul (Q×K^T, A×V)        ██████                    
-─────────────────────────────────────────────────────────────────
-SiLU / Swish                                          ██████ AFU
-Sigmoid                                               ██████ AFU
-GELU                                                  ██████ AFU
-Softmax                                               ██████ AFU
-LayerNorm                            ██               ████ AFU
-─────────────────────────────────────────────────────────────────
-BatchNorm (fused)                    ████              
-ReLU / Clip                          ██████            
-MaxPool                              ████              
-AvgPool / GAP                        ████              
-Add (residual)                       ██████            
-─────────────────────────────────────────────────────────────────
-Requantization                       ████              ██ (fuse)
-Concat                                        ██████   
-Upsample (nearest)                   ████     ██       
-Transpose/Reshape                    ██       ████     
-─────────────────────────────────────────────────────────────────
+-----------------------------------------------------------------
+Conv2D (dense)              ######
+Depthwise Conv                       ####
+Fully Connected             ######
+MatMul (QxK^T, AxV)         ######
+-----------------------------------------------------------------
+SiLU / Swish                                          ###### AFU
+Sigmoid                                               ###### AFU
+GELU                                                  ###### AFU
+Softmax                                               ###### AFU
+LayerNorm                            ##               #### AFU
+-----------------------------------------------------------------
+BatchNorm (fused)                    ####
+ReLU / Clip                          ######
+MaxPool                              ####
+AvgPool / GAP                        ####
+Add (residual)                       ######
+-----------------------------------------------------------------
+Requantization                       ####              ## (fuse)
+Concat                                        ######
+Upsample (nearest)                   ####     ##
+Transpose/Reshape                    ##       ####
+-----------------------------------------------------------------
 
-██████ = Primary handler     ████ = Can handle     ██ = Partial
+###### = Primary handler     #### = Can handle     ## = Partial
 ```
 
 ---
 
 ## 4. Priority Recommendation
 
-Để chạy được cả 3 target (YOLO, CNN, ViT), implement theo thứ tự:
+To run all three target families (YOLO, CNN, ViT), implement in this order:
 
-| Priority | Hardware Block | Lý do | Impact |
-|----------|---------------|-------|--------|
-| 🔴 **1** | **Activation Function Unit (AFU)** | Không có thì SiLU/Sigmoid/Softmax/GELU đều không chạy được | Blocks YOLO + ViT hoàn toàn |
-| 🟠 **2** | **Requantization Pipeline** (fuse vào systolic output) | Giảm 4× TCDM write bandwidth, tăng throughput lớn | Performance critical |
-| 🟡 **3** | **Pooling Engine** (dedicated) | MaxPool nhanh hơn Spatz, nhưng Spatz có thể workaround | Nice-to-have |
+| Priority | Hardware Block | Rationale | Impact |
+|----------|----------------|-----------|--------|
+| **1** | **Activation Function Unit (AFU)** | Without it, SiLU/Sigmoid/Softmax/GELU cannot run efficiently | Blocks YOLO + ViT efficiency |
+| **2** | **Requantization Pipeline** (fused into systolic output) | Reduces TCDM write bandwidth by 4x and improves throughput | Performance critical |
+| **3** | **Pooling Engine** (dedicated) | Faster MaxPool than Spatz, but Spatz is a functional fallback | Nice-to-have |
 
 ---
 
-## 5. Model-specific Operator Breakdown
+## 5. Model-Specific Operator Breakdown
 
-### YOLOv8 (Detection)
-```
-Input → [Conv2d + BN + SiLU] × N → C2f blocks → 
-  SPPF (MaxPool 5×5) → FPN/PAN (Concat + Upsample) →
+### YOLOv8 Detection
+
+```text
+Input -> [Conv2d + BN + SiLU] x N -> C2f blocks ->
+  SPPF (MaxPool 5x5) -> FPN/PAN (Concat + Upsample) ->
   Detection Head (Conv + Sigmoid)
 ```
-- **Critical missing:** SiLU, Sigmoid → cần AFU
-- Systolic handles: tất cả Conv2D
-- Spatz handles: BN (fused), Add, MaxPool (chậm)
-- DMA handles: Concat, data movement
+
+- **Critical missing operators:** SiLU and Sigmoid need AFU.
+- Systolic handles all Conv2D.
+- Spatz handles BN (fused), Add, and MaxPool, though MaxPool is slower.
+- DMA handles Concat and data movement.
 
 ### Vision Transformer (ViT)
+
+```text
+Input -> Patch Embed (Conv2d) ->
+  [LayerNorm -> MHSA(QxK^T -> Softmax -> xV) -> Add ->
+   LayerNorm -> MLP(Linear -> GELU -> Linear) -> Add] x L ->
+  LayerNorm -> Classification Head
 ```
-Input → Patch Embed (Conv2d) → 
-  [LayerNorm → MHSA(Q×K^T → Softmax → ×V) → Add → 
-   LayerNorm → MLP(Linear → GELU → Linear) → Add] × L →
-  LayerNorm → Classification Head
-```
-- **Critical missing:** Softmax, GELU, LayerNorm (sqrt+div) → cần AFU
-- Systolic handles: tất cả Linear/MatMul (Q, K, V projections, attention, MLP)
-- Spatz handles: Add (residual), partial LayerNorm (mean, variance)
+
+- **Critical missing operators:** Softmax, GELU, and LayerNorm (sqrt+div) need AFU.
+- Systolic handles all Linear/MatMul work (Q, K, V projections, attention, MLP).
+- Spatz handles Add (residual) and part of LayerNorm (mean, variance).
 
 ### ResNet / MobileNet (CNN)
+
+```text
+Input -> [Conv2d + BN + ReLU] x N -> MaxPool ->
+  Residual blocks -> Global AvgPool -> FC -> Softmax
 ```
-Input → [Conv2d + BN + ReLU] × N → MaxPool → 
-  Residual blocks → Global AvgPool → FC → Softmax
-```
-- ReLU = `max(x, 0)` → Spatz handles ✅
-- Softmax chỉ ở layer cuối → firmware Snitch có thể xử lý (1 lần, nhỏ)
-- **Gần như chạy được** trên HW hiện tại nếu dùng ReLU thay SiLU
-- MaxPool → Spatz (chậm nhưng functional)
+
+- ReLU = `max(x, 0)` and maps cleanly to Spatz.
+- Softmax appears only at the final layer, so Snitch firmware can handle it once for small tensors.
+- These models can mostly run on the current hardware if ReLU is used instead of SiLU.
+- MaxPool can run on Spatz, slower but functional.
 
 ---
 
-## 6. Kết luận
+## 6. Conclusion
 
-**Chỉ cần thêm 1 hardware block chính: Activation Function Unit (AFU)** — hỗ trợ SiLU, Sigmoid, GELU, Softmax thông qua LUT + linear interpolation. Đây là gap duy nhất thực sự ngăn cả 3 target model chạy trên NPU.
+The main required hardware block is the **Activation Function Unit (AFU)**, supporting SiLU, Sigmoid, GELU, and Softmax through LUT + linear interpolation. It is the single largest gap blocking efficient execution of all three target model families.
 
-Requantization pipeline là optimization quan trọng thứ hai, nhưng có thể workaround bằng Spatz trước.
+The requantization pipeline is the second most important optimization, but it can initially fall back to Spatz.

@@ -9,5 +9,5 @@ under `docs/`.
 | File | Implemented scope |
 |------|-------------------|
 | `idma_integration_plan.md` | iDMA MMIO/runtime integration replacing the legacy DMA path |
-| `implementation_plan_3B-B.md` | Spatz vector processor integration into `npu_cluster` |
+| `spatz_vector_integration_plan.md` | Spatz vector processor integration into `npu_cluster` |
 | `tcdm_interconnect_upgrade.md` | Grouped TCDM interconnect with common-cells round-robin arbitration |

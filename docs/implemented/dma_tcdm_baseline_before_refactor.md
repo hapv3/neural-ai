@@ -49,7 +49,7 @@ fail_test  = 0
 fail_index = 0
 got        = 0
 expected   = 0
-phase      = 4
+progress_step = 4
 op         = 3
 ```
 
@@ -170,7 +170,7 @@ fail_test  = 0
 fail_index = 0
 got        = 0
 expected   = 0
-phase      = 8
+progress_step = 8
 op         = 7
 ```
 
@@ -215,7 +215,7 @@ fail_test  = 0
 fail_index = 0
 got        = 0
 expected   = 0
-phase      = 4
+progress_step = 4
 op         = 1024
 ```
 
@@ -244,7 +244,7 @@ Baseline closure:
 - Legacy matmul and independent systolic coverage through `M=1024` are green.
 - OFM FIFO high-water tracking is available as an optional diagnostic test, not
   as part of the baseline correctness gate.
-- This is the closed baseline for the next development phase after the TCDM
+- This is the closed baseline for the next development milestone after the TCDM
   `rr_arb_tree` migration.
 
 ## Refactor Gate Recommendation

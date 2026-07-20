@@ -95,7 +95,7 @@ TCDM Side:                        OBI Side:
 ```
 
 > [!NOTE]
-> The OBI protocol has a 2-phase handshake (req/gnt for address phase, rvalid for response phase). TCDM is simpler (1-phase: valid/ready). The bridge must track outstanding requests: after `obi_req && obi_gnt`, wait for `obi_rvalid` before allowing the next request. This is a simple 2-state FSM (IDLE → WAIT_RESP).
+> The OBI protocol has a two-step handshake (req/gnt for address transfer, rvalid for response transfer). TCDM is simpler (single-step: valid/ready). The bridge must track outstanding requests: after `obi_req && obi_gnt`, wait for `obi_rvalid` before allowing the next request. This is a simple 2-state FSM (IDLE → WAIT_RESP).
 
 ---
 

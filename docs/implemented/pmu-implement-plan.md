@@ -1,65 +1,79 @@
 # Performance Management Unit (PMU) Design Plan
 
-Mục tiêu: Xây dựng một khối PMU (Performance Management Unit) phần cứng giúp thu thập các số liệu hiệu năng (Hardware Performance Counters - HPC) của từng thành phần trong NPU Cluster theo thời gian thực. Từ đó, firmware hoặc host CPU có thể profile, tìm ra nút thắt cổ chai (bottleneck) và tính toán các chỉ số như TOPS, Memory Bandwidth, Hardware Utilization.
+Goal: build a hardware PMU that collects real-time hardware performance counters (HPCs) for each major NPU cluster component. Firmware or the host CPU can then profile the system, identify bottlenecks, and compute metrics such as TOPS, memory bandwidth, and hardware utilization.
 
-## 1. Cơ Chế Hoạt Động Của PMU
+## 1. PMU Operating Model
 
-- **Kiến trúc:** PMU là một tập hợp các thanh ghi bộ đếm (Counters) 32-bit hoặc 64-bit.
-- **Giao tiếp:** Được map vào một dải địa chỉ MMIO riêng trên AXI4-Lite host slave port. Implementation P0 dùng `0x2000_4000` vì `0x2000_2000` đã thuộc interrupt controller. Python/cocotb host có thể ghi để Xóa (Reset), Bật/Tắt (Start/Stop), Snapshot và Đọc (Read) các counter này sau mỗi test.
-- **Routing:** Mọi thành phần (DMA, Systolic, TCDM) sẽ xuất ra các cờ tín hiệu (Event Wires) như `is_active`, `is_stalled`, `conflict_pulse`. Các tín hiệu này được nối trực tiếp vào ngõ vào của khối PMU để kích hoạt tăng (increment) counter tương ứng trong mỗi chu kỳ xung nhịp (clock cycle).
+- **Architecture:** The PMU is a set of 32-bit or 64-bit counter registers.
+- **Interface:** The counters are mapped into a dedicated MMIO range on the AXI4-Lite host slave port. The P0 implementation uses `0x2000_4000` because `0x2000_2000` belongs to the interrupt controller. Python/cocotb host code can write this block to clear counters, start/stop counting, snapshot counters, and read results after each test.
+- **Routing:** Each component (DMA, Systolic, TCDM) emits event wires such as `is_active`, `is_stalled`, or `conflict_pulse`. These wires connect directly to PMU inputs and increment the corresponding counter on each clock cycle.
 
 ---
 
-## 2. Các Thông Số Cần Đo Lường Theo Từng Thành Phần
+## 2. Metrics by Component
 
 > [!TIP]
-> **Quy tắc vàng trong Profiling:** Để biết NPU đang bị bottleneck ở đâu, ta cần đo 3 trạng thái cơ bản của mọi module: **Active** (đang làm việc), **Idle** (đang nghỉ chờ việc), và **Stalled** (muốn làm nhưng bị nghẽn I/O).
+> **Profiling rule of thumb:** To identify where the NPU bottlenecks, measure three basic states for every module: **Active** (doing useful work), **Idle** (waiting for work), and **Stalled** (ready to work but blocked by I/O or arbitration).
 
 ### 2.1. Systolic Array (Matrix Engine)
-Đặc tính: Là cỗ máy ngốn dữ liệu, cần tính toán số lượng phép nhân cộng (MAC) và tỷ lệ đói dữ liệu (Data Starvation).
+
+Characteristic: a data-hungry compute engine. The PMU should measure MAC activity and data-starvation rate.
 
 > [!NOTE]
-> **Lưu ý về ảnh hưởng hiệu năng phần cứng:** Việc thiết kế và tích hợp bộ PMU để đếm sự kiện cho Systolic Array **hoàn toàn không làm giảm hiệu năng** (throughput) hay tăng critical path delay của khối này. Mạch PMU chỉ đóng vai trò "nghe lén" (snoop) các dây tín hiệu điều khiển có sẵn (như `valid`, `ready`, trạng thái FSM) và đếm bằng các bộ accumulator độc lập bên ngoài datapath. Do đó, timing của Systolic Array được bảo toàn 100%.
+> **Hardware performance impact:** Adding PMU counters for the Systolic Array does not reduce throughput or increase the array critical path. The PMU only snoops existing control wires such as `valid`, `ready`, and FSM states, then counts through independent accumulators outside the datapath.
 
-- **`SYS_ACTIVE_CYCLES`**: Số chu kỳ Systolic Array đang thực sự thực hiện phép tính MAC.
-- **`SYS_STALL_CYCLES`**: Số chu kỳ Systolic Array đang tính nhưng phải dừng lại do TCDM Interconnect bị nghẽn (không nạp kịp Weight/IFM hoặc không ghi kịp OFM ra).
-- **`SYS_IDLE_CYCLES`**: Số chu kỳ mảng rảnh rỗi (chờ Snitch cấu hình layer mới).
-- **`SYS_TOTAL_MACS`**: (Tùy chọn) Tính tổng số phép toán MAC thực tế đã làm (hoặc có thể tự suy ra từ cấu hình M, N, K).
-*=> Phân tích: Hiệu suất (Utilization) = `SYS_ACTIVE_CYCLES` / Tổng số chu kỳ. Nếu `SYS_STALL_CYCLES` quá cao, I/O TCDM đang là nút thắt cổ chai.*
+- **`SYS_ACTIVE_CYCLES`**: Number of cycles in which the Systolic Array is actively performing MAC work.
+- **`SYS_STALL_CYCLES`**: Number of cycles in which the Systolic Array wants to compute but stalls because the TCDM interconnect cannot feed Weight/IFM or drain OFM fast enough.
+- **`SYS_IDLE_CYCLES`**: Number of cycles in which the array is idle and waiting for Snitch to configure the next layer.
+- **`SYS_TOTAL_MACS`**: Optional total number of MAC operations performed, or derived from M/N/K configuration.
+
+Analysis: utilization = `SYS_ACTIVE_CYCLES` / total cycles. A high `SYS_STALL_CYCLES` value indicates that TCDM I/O is the bottleneck.
 
 ### 2.2. iDMA (Data Movement Engine)
-Đặc tính: Bộ di chuyển dữ liệu bất đồng bộ.
-> **P0 thực tế:** wrapper iDMA hiện tại chưa expose đầy đủ event struct native ra cluster top. PMU P0 đếm từ tín hiệu có sẵn: `busy`, `start`, `done`, TCDM master request/stall. Khi wrapper expose event bus native sau này, có thể map thêm byte counter và stall chi tiết theo AXI/L1.
 
-Các counter sẽ map trực tiếp từ cờ của iDMA:
-- **`DMA_ACTIVE_CYCLES`**: Nối từ cờ `dma_busy`. Đếm số chu kỳ iDMA đang có transfer in-flight.
-- **`DMA_L2_STALL_CYCLES`**: Nối từ cờ `ar_stall` và `aw_stall`. Đếm số chu kỳ bị nghẽn do L2/AXI Interconnect chậm (AXI `ar_ready` hoặc `aw_ready` bị low).
-- **`DMA_L1_STALL_CYCLES`**: Nối từ cờ `w_stall` và `r_stall`. Đếm số chu kỳ bị nghẽn do L1/TCDM Interconnect chậm.
-- **`DMA_BYTES_TRANSFERRED`**: Cộng dồn từ tín hiệu `num_bytes_written` và `r_bw` của iDMA.
-*=> Phân tích: Bandwidth thực tế (GB/s) = `DMA_BYTES_TRANSFERRED` / (`DMA_ACTIVE_CYCLES` * 1/Freq).*
+Characteristic: an asynchronous data mover.
+
+> **P0 reality:** The current iDMA wrapper does not yet expose the full native event struct at cluster top. PMU P0 counts existing signals: `busy`, `start`, `done`, and TCDM master request/stall. Once the wrapper exposes the native event bus, byte counters and detailed AXI/L1 stall counters can be added.
+
+Counters map directly from iDMA flags:
+
+- **`DMA_ACTIVE_CYCLES`**: Connected to `dma_busy`; counts cycles with an in-flight iDMA transfer.
+- **`DMA_L2_STALL_CYCLES`**: Connected to `ar_stall` and `aw_stall`; counts cycles blocked by slow L2/AXI interconnect readiness.
+- **`DMA_L1_STALL_CYCLES`**: Connected to `w_stall` and `r_stall`; counts cycles blocked by L1/TCDM interconnect readiness.
+- **`DMA_BYTES_TRANSFERRED`**: Accumulated from iDMA byte-count signals such as `num_bytes_written` and `r_bw`.
+
+Analysis: actual bandwidth (GB/s) = `DMA_BYTES_TRANSFERRED` / (`DMA_ACTIVE_CYCLES` * 1/Freq).
 
 ### 2.3. Snitch Core (Control Core)
-Đặc tính: Quản lý luồng (Control flow). Đa số thời gian nên ở trạng thái ngủ tiết kiệm điện (WFI - Wait For Interrupt) chờ DMA và Systolic xong việc.
-> **Tích hợp Native:** Snitch **có sẵn** bộ Performance Monitor rất mạnh. Khi bật macro `SNITCH_ENABLE_PERF`, Snitch tự động đếm `mcycle` và `minstret` (truy cập qua lệnh CSR). Đồng thời, core còn xuất ra một struct `core_events_t` chứa sẵn các xung sự kiện như `retired_instr`, `retired_load`, `retired_acc`.
 
-Các counter sẽ map trực tiếp:
-- **`CORE_ACTIVE_CYCLES`**: Có thể đọc trực tiếp từ thanh ghi CSR `mcycle`.
-- **`CORE_INSTR_RETIRED`**: Có thể đọc trực tiếp từ thanh ghi CSR `minstret`.
-- **`CORE_WFI_CYCLES`**: Có thể suy ra từ sự chênh lệch giữa mcycle và số lệnh thực thi, hoặc đếm dựa trên xung tín hiệu nội bộ khi core đang sleep.
-*=> Phân tích: NPU thiết kế tốt thì CPU phải dành > 90% thời gian cho `CORE_WFI_CYCLES`.*
+Characteristic: control-flow management. Most time should be spent in low-power sleep (`WFI`) while DMA and Systolic execute work.
+
+> **Native integration:** Snitch already provides a strong performance monitor. When `SNITCH_ENABLE_PERF` is enabled, Snitch automatically counts `mcycle` and `minstret` through CSRs. The core also emits a `core_events_t` struct with pulses such as `retired_instr`, `retired_load`, and `retired_acc`.
+
+Counter mapping:
+
+- **`CORE_ACTIVE_CYCLES`**: Can be read directly from CSR `mcycle`.
+- **`CORE_INSTR_RETIRED`**: Can be read directly from CSR `minstret`.
+- **`CORE_WFI_CYCLES`**: Can be derived from the difference between `mcycle` and executed instructions, or counted from an internal sleep signal.
+
+Analysis: a well-designed NPU should spend more than 90% of CPU time in `CORE_WFI_CYCLES`.
 
 ### 2.4. TCDM Interconnect (Memory Subsystem)
-Đặc tính: Crossbar điều hướng dữ liệu trọng yếu nhất trong NPU. Nơi dễ xảy ra nút thắt I/O do va chạm (Bank Conflict).
-> **Tích hợp Native:** Tương tự thư viện của PULP/Spatz, ở mỗi cổng gắn vào SRAM Bank, ta sẽ sử dụng mạch `popcount` để lấy 2 thông số: số request chạm đến bank (accessed) và số request bị từ chối do xung đột (congested).
 
-Các counter sẽ map:
-- **`TCDM_BANK_CONFLICTS`**: Đếm tổng số lần các Master muốn truy cập nhưng bị từ chối (stall) do vướng priority.
-- **`TCDM_TOTAL_REQ`**: Tổng số request thành công được đẩy xuống các bank SRAM.
-*=> Phân tích: Tỷ lệ Conflict = `TCDM_BANK_CONFLICTS` / `TCDM_TOTAL_REQ`. Nếu > 5-10%, firmware cần tối ưu hóa lại địa chỉ lưu trữ (memory layout) để tản đều ma trận ra các bank, tránh việc nhiều port cùng dồn vào đọc/ghi 1 bank gây bottleneck.*
+Characteristic: the main data-routing crossbar in the NPU and the most likely source of I/O bottlenecks from bank conflicts.
+
+> **Native integration:** Similar to PULP/Spatz library patterns, each SRAM-bank port can use `popcount` logic to collect two metrics: requests touching the bank (`accessed`) and requests rejected due to conflict (`congested`).
+
+Counter mapping:
+
+- **`TCDM_BANK_CONFLICTS`**: Counts total master requests rejected or stalled because of priority/bank conflicts.
+- **`TCDM_TOTAL_REQ`**: Counts total successful requests sent to SRAM banks.
+
+Analysis: conflict rate = `TCDM_BANK_CONFLICTS` / `TCDM_TOTAL_REQ`. If this exceeds roughly 5-10%, firmware should optimize memory layout to distribute matrices across banks and avoid multiple ports concentrating on one bank.
 
 ---
 
-## 3. Kiến Trúc Hardware PMU
+## 3. Hardware PMU Architecture
 
 ```text
                                               +-----------------------------------+
@@ -70,20 +84,20 @@ Các counter sẽ map:
                                               |                                   |
                                               |  - Counter 0: SYS_ACTIVE (32b)    |
    MMIO Bus (0x2000_4000)                     |  - Counter 1: SYS_STALL  (32b)    |
-   (Đọc kết quả / Reset Counters)  ---------> |  - Counter N: ...                 |
+   (Read results / reset counters) ---------> |  - Counter N: ...                 |
                                               +-----------------------------------+
 ```
 
-## 4. Implementation P0 Status
+## 4. P0 Implementation Status
 
-P0 đã được instance trong `npu_cluster` với 32 fixed 64-bit counters và 32-bit host AXI4-Lite MMIO:
+P0 is instantiated in `npu_cluster` with 32 fixed 64-bit counters and 32-bit host AXI4-Lite MMIO:
 
 - `0x2000_4000` `CTRL`: bit0 enable, bit1 clear, bit2 snapshot.
 - `0x2000_4004` `STATUS`: overflow sticky bits.
-- `0x2000_4008` `NUM_COUNTERS`: số fixed counters.
+- `0x2000_4008` `NUM_COUNTERS`: number of fixed counters.
 - `0x2000_4100 + id*8`: counter low/high 32-bit.
 
-Counter map P0:
+P0 counter map:
 
 | ID | Counter |
 | --- | --- |
@@ -96,14 +110,14 @@ Counter map P0:
 | 19-25 | Systolic compute/weight/ofm/IFM/OFM request/stall |
 | 26-31 | Aggregate TCDM request/grant/stall/bank/read/write request |
 
-Access model P0:
+P0 access model:
 
 - Host AXI4-Lite slave port decodes `0x1000_0000` I-TCM for firmware boot and `0x2000_4000` PMU for profiling.
 - Snitch D-bus `0x2000_4000` is intentionally not connected to PMU; that window returns a sink response to avoid firmware hangs.
 - Cocotb starts PMU before `fetch_enable_i`, snapshots/stops it after `irq_o`, then prints a performance report.
 
-Validation P0:
+P0 validation:
 
 - `make -C sw/test/pmu`
 - `make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot`
-- `test_pmu_basic` firmware smoke generates Snitch/TCDM traffic; Python host verifies PMU MMIO, snapshot and non-zero TCDM counters. If building a dedicated simulator for this module is too heavy, it can reuse any up-to-date `tb_npu_cluster` Verilator binary because cocotb test module is selected at runtime.
+- `test_pmu_basic` firmware smoke generates Snitch/TCDM traffic; Python host verifies PMU MMIO, snapshot, and non-zero TCDM counters. If building a dedicated simulator for this module is too heavy, it can reuse any up-to-date `tb_npu_cluster` Verilator binary because the cocotb test module is selected at runtime.
