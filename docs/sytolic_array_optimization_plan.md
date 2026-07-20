@@ -11,7 +11,7 @@ Current implemented flow:
 - The active Conv2D performance path is `conv_linebuf_stream_packer` inside
   `systolic_controller`, not the legacy `conv_channel_linebuf_packer`.
 - Micro-YOLO no longer asks Snitch firmware to build each linebuffer tile in
-  the hot path. `tools/npu_linebuf_precompute.py` generates a runtime L2
+  the hot path. `hw/rtl/cluster/tb/npu_linebuf_precompute.py` generates a runtime L2
   descriptor manifest plus blobs containing `npu_conv2d_linebuf_job_desc_t`
   arrays; firmware DMA-copies those blobs into scratch/TCDM and
   `npu_conv2d_packed_run_linebuf_job_descs()` dispatches them.

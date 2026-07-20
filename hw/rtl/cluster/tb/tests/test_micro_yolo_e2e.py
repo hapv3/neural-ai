@@ -20,10 +20,9 @@ from npu_test_utils import (
     write_l2_bytes,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
-TOOLS_DIR = REPO_ROOT / "tools"
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
+TB_DIR = Path(__file__).resolve().parents[1]
+if str(TB_DIR) not in sys.path:
+    sys.path.insert(0, str(TB_DIR))
 
 from npu_linebuf_precompute import (
     MICRO_YOLO_DESC_L2_BASE,

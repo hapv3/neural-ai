@@ -27,7 +27,7 @@ The implementation has moved the Micro-YOLO performance path to
 Important points:
 
 - **Host/Python owns the Conv2D linebuffer schedule.**
-  `tools/npu_linebuf_precompute.py` generates a runtime descriptor manifest plus
+  `hw/rtl/cluster/tb/npu_linebuf_precompute.py` generates a runtime descriptor manifest plus
   binary descriptor blobs containing full `npu_conv2d_linebuf_job_desc_t` job
   arrays for each Conv tile. The host writes the manifest and blobs to L2;
   firmware copies them into scratch/TCDM and dispatches received pointer/count

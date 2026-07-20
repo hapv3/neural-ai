@@ -324,7 +324,7 @@ path. `merge_beats` remains implemented for RGB stem, sub-C32/tail,
 
 To reduce Snitch workload, Micro-YOLO now uses host-generated
 `npu_conv2d_linebuf_job_desc_t` arrays delivered through a runtime L2 descriptor
-manifest plus descriptor blobs. `tools/npu_linebuf_precompute.py` emits each
+manifest plus descriptor blobs. `hw/rtl/cluster/tb/npu_linebuf_precompute.py` emits each
 descriptor with the full `systolic_linebuf_cfg_t`, `systolic_gemm32_req_t`, row
 count, and K-tile count. The host writes the manifest and blobs to L2, firmware
 DMA-copies them into scratch/TCDM, stores descriptor pointer/count in

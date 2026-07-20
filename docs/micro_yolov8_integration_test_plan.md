@@ -236,7 +236,7 @@ Required decisions:
   `block_valid_bytes`, `channel_addr_offset`, and `coalesce_k_bytes =
   kernel_h * kernel_w * block_valid_bytes`. Firmware should treat these fields
   as part of the descriptor, not re-plan the schedule on Snitch.
-- The Python host helper in `tools/npu_linebuf_precompute.py` now emits full
+- The Python host helper in `hw/rtl/cluster/tb/npu_linebuf_precompute.py` now emits full
   Micro-YOLO linebuffer/GEMM job arrays as runtime L2 descriptor blobs.
   Firmware DMA-copies those blobs into scratch/TCDM, stores pointers to the
   copied arrays in `npu_layer_t`, and calls the descriptor runner in
@@ -268,7 +268,7 @@ Current implementation status:
 - Requant qparams are carried through graph-layer attributes. The current
   micro-yolo firmware uses uniform qparams per layer; per-channel qparams remain
   compatible with the systolic requant configuration API.
-- `tools/npu_linebuf_precompute.py` owns the current host-side C32 linebuffer
+- `hw/rtl/cluster/tb/npu_linebuf_precompute.py` owns the current host-side C32 linebuffer
   job descriptor planning for the Micro-YOLO graph. The active flow is runtime
   descriptor delivery: Python/host emits a small descriptor manifest plus binary
   descriptor blobs, writes the manifest to L2 at `0x80052000`, writes each blob
