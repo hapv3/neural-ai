@@ -1,0 +1,45 @@
+design -reset
+
+read_liberty -lib tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+read_slang --std 1800-2017 --single-unit -Wno-index-oob --unroll-limit 200000 \
+    --no-proc \
+    --ignore-timing --ignore-initial --ignore-assertions \
+    --top conv_linebuf_stream_packer \
+    -G ADDR_WIDTH=32 \
+    -G DATA_WIDTH=256 \
+    -G ARRAY_DIM=32 \
+    -G INPUT_ELEM_WIDTH=8 \
+    -G MAX_INPUT_W=640 \
+    hw/rtl/cluster/synth/sram_blackboxes.sv \
+    hw/rtl/systolic/conv_linebuf_stream_packer.sv
+
+hierarchy -check -top conv_linebuf_stream_packer
+
+proc_clean
+proc_rmdead
+proc_init
+proc_arst
+proc_rom
+proc_mux
+proc_dlatch
+proc_dff
+proc_memwr
+proc_clean
+opt_expr -keepdc
+opt_clean -purge
+
+memory_collect
+memory_map
+
+techmap
+opt_clean -purge
+dfflibmap -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+techmap -map hw/rtl/cluster/synth/sky130_fd_sc_hd_yosys_gates.v
+
+rename conv_linebuf_stream_packer conv_linebuf_stream_packer_mapped
+clean -purge
+check
+stat -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+write_rtlil build/synth/conv_linebuf_stream_packer_sky130_tt.il
+write_verilog -noattr -noexpr -nodec build/synth/conv_linebuf_stream_packer_sky130_tt.v

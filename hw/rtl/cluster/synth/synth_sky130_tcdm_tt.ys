@@ -1,0 +1,39 @@
+design -reset
+
+read_liberty -lib tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+read_slang --std 1800-2017 --single-unit -Wno-index-oob --unroll-limit 200000 \
+    --no-proc \
+    --ignore-timing --ignore-initial --ignore-assertions \
+    +define+COMMON_CELLS_ASSERTS_OFF \
+    +incdir+hw/common_cells/include \
+    --top tcdm_interconnect \
+    -G NUM_MASTERS=13 \
+    -G NUM_BANKS=16 \
+    -G ADDR_WIDTH=32 \
+    -G DATA_WIDTH=256 \
+    -G HWPE_MASTER_MASK=7674 \
+    -G DMA_MASTER_MASK=516 \
+    -G CORE_MASTER_MASK=1 \
+    hw/common_cells/src/cf_math_pkg.sv \
+    hw/common_cells/src/lzc.sv \
+    hw/common_cells/src/rr_arb_tree.sv \
+    hw/rtl/interconnect/tcdm_interconnect.sv
+
+hierarchy -check -top tcdm_interconnect
+
+proc
+opt_expr -keepdc
+opt_clean -purge
+
+memory_collect
+memory_map
+
+techmap
+dfflibmap -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+techmap -map hw/rtl/cluster/synth/sky130_fd_sc_hd_yosys_gates.v
+
+clean -purge
+check
+stat -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+write_verilog -noattr -noexpr -nodec build/synth/tcdm_interconnect_sky130_tt.v

@@ -1,0 +1,17 @@
+design -reset
+
+read_liberty -lib tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+read_verilog -sv hw/rtl/cluster/npu_pmu.sv
+
+hierarchy -check -top npu_pmu
+check
+
+synth -top npu_pmu -noabc
+dfflibmap -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+abc -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+clean
+check
+stat -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+write_verilog -noattr -noexpr -nodec build/synth/npu_pmu_sky130_tt.v

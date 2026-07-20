@@ -33,6 +33,7 @@ module tcdm_interconnect #(
 
     localparam int unsigned BANK_SEL_BITS = $clog2(NUM_BANKS);
     localparam int unsigned BYTE_SEL_BITS = $clog2(DATA_WIDTH / 8);
+    localparam bit NUM_BANKS_POWER_OF_TWO = (NUM_BANKS & (NUM_BANKS - 1)) == 0;
     localparam logic GROUP_MASKS_CONFIGURED = |(HWPE_MASTER_MASK | DMA_MASTER_MASK | CORE_MASTER_MASK);
     localparam logic [NUM_MASTERS-1:0] HWPE_MASK =
         GROUP_MASKS_CONFIGURED ? HWPE_MASTER_MASK : '0;
@@ -63,7 +64,11 @@ module tcdm_interconnect #(
     // 1. Address decoding (Word-interleaved banking)
     for (genvar m = 0; m < NUM_MASTERS; m++) begin : gen_addr_decode
         logic [BANK_SEL_BITS-1:0] target_bank;
-        assign target_bank = (master_addr_i[m] >> BYTE_SEL_BITS) % NUM_BANKS;
+        if (NUM_BANKS_POWER_OF_TWO) begin : gen_pow2_decode
+            assign target_bank = master_addr_i[m][BYTE_SEL_BITS +: BANK_SEL_BITS];
+        end else begin : gen_generic_decode
+            assign target_bank = (master_addr_i[m] >> BYTE_SEL_BITS) % NUM_BANKS;
+        end
         
         for (genvar b = 0; b < NUM_BANKS; b++) begin : gen_req_matrix
             assign bank_req_matrix[b][m] = master_req_i[m] & (target_bank == b);
@@ -168,7 +173,11 @@ module tcdm_interconnect #(
             bank_wdata_o[b] = '0;
             for (int m = 0; m < NUM_MASTERS; m++) begin
                 if (grant_oh[m]) begin
-                    bank_addr_o[b]  = ((master_addr_i[m] >> BYTE_SEL_BITS) / NUM_BANKS) << BYTE_SEL_BITS;
+                    if (NUM_BANKS_POWER_OF_TWO) begin
+                        bank_addr_o[b] = (master_addr_i[m] >> (BYTE_SEL_BITS + BANK_SEL_BITS)) << BYTE_SEL_BITS;
+                    end else begin
+                        bank_addr_o[b] = ((master_addr_i[m] >> BYTE_SEL_BITS) / NUM_BANKS) << BYTE_SEL_BITS;
+                    end
                     bank_we_o[b]    = master_we_i[m];
                     bank_be_o[b]    = master_be_i[m];
                     bank_wdata_o[b] = master_wdata_i[m];
@@ -192,7 +201,11 @@ module tcdm_interconnect #(
             for (int m = 0; m < NUM_MASTERS; m++) begin
                 if (master_gnt_o[m]) begin
                     master_req_q[m]      <= 1'b1;
-                    master_bank_sel_q[m] <= (master_addr_i[m] >> BYTE_SEL_BITS) % NUM_BANKS;
+                    if (NUM_BANKS_POWER_OF_TWO) begin
+                        master_bank_sel_q[m] <= master_addr_i[m][BYTE_SEL_BITS +: BANK_SEL_BITS];
+                    end else begin
+                        master_bank_sel_q[m] <= (master_addr_i[m] >> BYTE_SEL_BITS) % NUM_BANKS;
+                    end
                     master_we_q[m]       <= master_we_i[m];
                 end else begin
                     master_req_q[m]      <= 1'b0;

@@ -2,7 +2,7 @@
 
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
-VERILATOR_JOBS ?= 4
+VERILATOR_JOBS ?= 8
 
 PWD=$(shell pwd)
 REPO_ROOT=$(PWD)/../../..
