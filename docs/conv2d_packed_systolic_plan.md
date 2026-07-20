@@ -193,7 +193,7 @@ driver.
 
 Current implemented Micro-YOLO path:
 
-- `tools/npu_linebuf_precompute.py` generates a runtime descriptor manifest plus
+- `hw/rtl/cluster/tb/npu_linebuf_precompute.py` generates a runtime descriptor manifest plus
   binary descriptor blobs in the host/Python flow.
 - The host writes the manifest and blobs to L2, and firmware DMA-copies them
   into scratch/TCDM before graph setup.

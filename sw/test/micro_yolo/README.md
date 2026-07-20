@@ -106,7 +106,7 @@ make -C sw/test/micro_yolo
 
 The firmware no longer compiles the linebuffer/GEMM job descriptors into
 `.data`. The host side generates a small runtime descriptor manifest plus binary
-descriptor blobs with `tools/npu_linebuf_precompute.py`, writes the manifest to
+descriptor blobs with `hw/rtl/cluster/tb/npu_linebuf_precompute.py`, writes the manifest to
 L2 at `0x80052000`, and writes each blob at the L2 address listed by that
 manifest. Firmware copies the manifest, then copies each blob into scratch/TCDM
 before graph setup and only dispatches the received pointer/count pairs.
@@ -116,7 +116,7 @@ loads the descriptor blobs into L2 before releasing firmware fetch. For an
 external host flow, use:
 
 ```sh
-tools/npu_linebuf_precompute.py micro-yolo-blob --output-dir /tmp/micro_yolo_desc
+hw/rtl/cluster/tb/npu_linebuf_precompute.py micro-yolo-blob --output-dir /tmp/micro_yolo_desc
 ```
 
 The generated `micro_yolo_linebuf_manifest.bin` is the runtime ABI consumed by
