@@ -146,11 +146,11 @@ def assert_micro_yolo_linebuf_layout_contract():
 
 def pmu_direct_snapshot(dut):
     pmu = dut.u_npu_cluster.u_pmu
-    raw_value = pmu.counter_q.value
-    raw = raw_value.to_unsigned() if raw_value.is_resolvable else 0
     counters = {}
     for idx, name in enumerate(PMU_COUNTER_NAMES):
-        counters[name] = (raw >> (idx * 64)) & ((1 << 64) - 1)
+        counter = getattr(getattr(pmu, f"gen_counters[{idx}]"), "u_counter")
+        raw_value = counter.counter_q.value
+        counters[name] = raw_value.to_unsigned() if raw_value.is_resolvable else 0
     return counters
 
 

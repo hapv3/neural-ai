@@ -63,6 +63,9 @@ Install or provide these tools in `PATH`:
 | `cocotb` | Cocotb |
 | `hw/spatz/install/llvm` | RV32 + Spatz/RVV firmware tests |
 | `hw/spatz/install/riscv-gcc` | Riscv toolchain for Snitch/Spatz/RVV tests |
+| `yosys` with `read_slang` | Open-source RTL synthesis checks |
+| `sta` / OpenSTA | Open-source static timing checks |
+| SkyWater SKY130 PDK | Proxy Liberty library for local synthesis/STA |
 
 The Spatz toolchains are expected at the default paths above. Most Spatz-related
 Makefiles also accept `SPATZ_INSTALL=/path/to/spatz/install` if the toolchain is
@@ -119,6 +122,42 @@ export CCACHE_DIR=/tmp/ccache
 export CCACHE_TEMPDIR=/tmp/ccache-tmp
 export VERILATOR_JOBS=8
 ```
+
+### Synthesis Tool Setup
+
+The repository includes Yosys/OpenSTA synthesis scripts for early RTL quality
+checks.  They are SKY130 proxy flows, not TSMC 5 nm signoff flows, but they are
+useful for catching synthesis parser issues, inferred long arithmetic paths,
+large mux fanout, and block-level timing regressions before handing the RTL to a
+commercial backend flow.
+
+Default tool and PDK locations:
+
+```sh
+tools/yosys-install/bin/yosys
+tools/opensta-install/bin/sta
+tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+```
+
+If your tools are installed elsewhere:
+
+```sh
+export YOSYS_BIN=/path/to/yosys
+export STA_BIN=/path/to/sta
+```
+
+Quick checks:
+
+```sh
+tools/yosys-install/bin/yosys -V
+tools/opensta-install/bin/sta -version
+test -f tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+```
+
+Block-level synthesis documentation lives in:
+
+- [hw/rtl/systolic/synth/README.md](hw/rtl/systolic/synth/README.md)
+- [hw/rtl/cluster/synth/README.md](hw/rtl/cluster/synth/README.md)
 
 ### Smoke Commands
 

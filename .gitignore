@@ -33,3 +33,15 @@ sw/test/micro_yolo/micro_yolo_linebuf_precompute.h
 .superpowers/brainstorm/2319838-1783320015/state/server.pid
 .agents/AGENTS.md
 hw/rtl/systolic/tb/coverage
+coverage/
+yosys-build/
+yosys-src/
+yosys-install/
+cudd-install/
+cudd-src/
+fmt-src/
+opensta-src/
+opensta-build/
+opensta-install/
+build/
+tools/skywater-pdk/

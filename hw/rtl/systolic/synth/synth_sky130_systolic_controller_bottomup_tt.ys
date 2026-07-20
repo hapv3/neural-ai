@@ -1,0 +1,65 @@
+design -reset
+
+read_liberty -lib tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+# Use the already mapped systolic array as real implementation, not a blackbox.
+read_verilog build/synth/npu_systolic_array_sky130_tt.v
+rename npu_systolic_array npu_systolic_array_mapped
+read_rtlil build/synth/requant_pipeline_sky130_generic.il
+
+read_slang --std 1800-2017 --single-unit -Wno-index-oob --unroll-limit 200000 \
+    --no-proc \
+    --ignore-timing --ignore-initial --ignore-assertions \
+    +define+SYNTHESIS_SRAM_BLACKBOX \
+    +incdir+hw/common_cells/include \
+    --top systolic_controller \
+    -G ADDR_WIDTH=32 \
+    -G DATA_WIDTH=256 \
+    -G CFG_DATA_WIDTH=32 \
+    -G ARRAY_DIM=32 \
+    -G INPUT_ELEM_WIDTH=8 \
+    -G OFM_ELEM_WIDTH=32 \
+    -G INPUT_FIFO_DEPTH=4 \
+    -G OFM_FIFO_DEPTH=8 \
+    hw/rtl/cluster/synth/sram_blackboxes.sv \
+    hw/common_cells/src/cf_math_pkg.sv \
+    hw/common_cells/src/lzc.sv \
+    hw/common_cells/src/fifo_v3.sv \
+    hw/common_cells/src/stream_fifo.sv \
+    hw/common_cells/src/stream_fifo_optimal_wrap.sv \
+    hw/common_cells/src/delta_counter.sv \
+    hw/common_cells/src/counter.sv \
+    hw/tech_cells/src/rtl/tc_clk.sv \
+    hw/rtl/systolic/systolic_ctrl_regs.sv \
+    hw/rtl/systolic/conv_linebuf_stream_packer.sv \
+    hw/rtl/systolic/synth/requant_pipeline_sky130_wrapper.sv \
+    hw/rtl/systolic/synth/npu_systolic_array_sky130_wrapper.sv \
+    hw/rtl/systolic/systolic_controller.sv
+
+hierarchy -check -top systolic_controller
+
+proc_clean
+proc_rmdead
+proc_init
+proc_arst
+proc_rom
+proc_mux
+proc_dlatch
+proc_dff
+proc_memwr
+proc_clean
+opt_expr -keepdc
+opt_clean -purge
+
+memory_collect
+memory_map
+
+techmap
+opt_clean -purge
+dfflibmap -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+techmap -map hw/rtl/cluster/synth/sky130_fd_sc_hd_yosys_gates.v
+
+clean -purge
+check
+stat -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+write_verilog -noattr -noexpr -nodec build/synth/systolic_controller_sky130_tt.v

@@ -1,0 +1,17 @@
+design -reset
+
+read_liberty -lib tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+read_verilog -sv hw/rtl/systolic/npu_systolic_array.sv
+
+hierarchy -check -top npu_systolic_array
+check
+
+synth -top npu_systolic_array -noabc
+dfflibmap -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+abc -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+clean
+check
+stat -liberty tools/skywater-pdk/libraries/sky130_fd_sc_hd/latest/timing/sky130_fd_sc_hd__tt_025C_1v80.lib
+
+write_verilog -noattr -noexpr -nodec build/synth/npu_systolic_array_sky130_tt.v
