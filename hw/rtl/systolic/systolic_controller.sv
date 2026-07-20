@@ -500,26 +500,10 @@ module systolic_controller #(
         end
     endfunction
 
-    function automatic logic [31:0] mul_u16_u32_shiftadd(
-        input logic [15:0] lhs,
-        input logic [31:0] rhs
-    );
-        logic [47:0] acc;
-        begin
-            acc = '0;
-            for (int unsigned bit_idx = 0; bit_idx < 16; bit_idx++) begin
-                if (lhs[bit_idx]) begin
-                    acc = acc + ({16'd0, rhs} << bit_idx);
-                end
-            end
-            mul_u16_u32_shiftadd = acc[31:0];
-        end
-    endfunction
-
     assign pool_kernel_vectors = kernel_tap_count(cfg_linebuf_kernel_h_i, cfg_linebuf_kernel_w_i);
     assign dw_weight_rsp_idx = DW_TAP_COUNT_W'(pool_kernel_vectors - rsp_cnt_q);
     assign dw_group_count = ({16'd0, cfg_linebuf_input_c_i} + 32'd31) >> 5;
-    assign dw_group_span_bytes = mul_u16_u32_shiftadd(cfg_linebuf_input_h_i, cfg_linebuf_row_stride_bytes_i);
+    assign dw_group_span_bytes = {16'd0, cfg_linebuf_input_h_i} * cfg_linebuf_row_stride_bytes_i;
     assign dw_group_output_bytes = linebuf_spatial_m << 5;
     assign dw_weight_group_bytes = pool_kernel_vectors << 5;
     assign dw_last_group = (dw_group_idx_q + 32'd1) >= dw_group_count;
@@ -1164,9 +1148,7 @@ module systolic_controller #(
         .DATA_WIDTH       (DATA_WIDTH),
         .ARRAY_DIM        (ARRAY_DIM),
         .INPUT_ELEM_WIDTH (INPUT_ELEM_WIDTH),
-        .K_MAX            (5),
-        .MAX_INPUT_W      (640),
-        .STRIDE_MAX       (2)
+        .MAX_INPUT_W      (640)
     ) i_conv_channel_linebuf_packer (
         .clk_i                   (clk_i),
         .rst_ni                  (rst_ni),
