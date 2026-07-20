@@ -5,9 +5,7 @@ module conv_linebuf_stream_packer #(
     parameter int unsigned DATA_WIDTH = 256,
     parameter int unsigned ARRAY_DIM = 32,
     parameter int unsigned INPUT_ELEM_WIDTH = 8,
-    parameter int unsigned K_MAX = 5,
-    parameter int unsigned MAX_INPUT_W = 640,
-    parameter int unsigned STRIDE_MAX = 2
+    parameter int unsigned MAX_INPUT_W = 640
 )(
     input  logic clk_i,
     input  logic rst_ni,
@@ -67,6 +65,8 @@ module conv_linebuf_stream_packer #(
 
     localparam int unsigned BEAT_BYTES = DATA_WIDTH / 8;
     localparam int unsigned BYTE_SEL_BITS = $clog2(BEAT_BYTES);
+    localparam int unsigned K_MAX = 5;
+    localparam int unsigned STRIDE_MAX = 2;
     localparam int unsigned ROW_SLOTS = K_MAX + STRIDE_MAX;
     localparam int unsigned BANKS = ROW_SLOTS * STRIDE_MAX;
     localparam int unsigned BANK_DEPTH = (MAX_INPUT_W + STRIDE_MAX - 1) / STRIDE_MAX;
@@ -253,6 +253,7 @@ module conv_linebuf_stream_packer #(
     logic signed [31:0] slide_from_iw;
     logic slide_req_active;
     logic [DATA_WIDTH-1:0] pad_vector;
+    logic [31:0] pad_row_offset;
     
     typedef struct packed {
         logic       valid;
@@ -387,9 +388,9 @@ module conv_linebuf_stream_packer #(
                 byte_sel = {1'b0, addr_lsb} + (BYTE_SEL_BITS+1)'(lane);
                 if (lane < valid_bytes) begin
                     if (byte_sel < (BYTE_SEL_BITS+1)'(BEAT_BYTES)) begin
-                        merged[lane * 8 +: 8] = beat0[byte_sel[BYTE_SEL_BITS-1:0] * 8 +: 8];
+                        merged[(lane << 3) +: 8] = beat0[{byte_sel[BYTE_SEL_BITS-1:0], 3'b000} +: 8];
                     end else begin
-                        merged[lane * 8 +: 8] = beat1[byte_sel[BYTE_SEL_BITS-1:0] * 8 +: 8];
+                        merged[(lane << 3) +: 8] = beat1[{byte_sel[BYTE_SEL_BITS-1:0], 3'b000} +: 8];
                     end
                 end
             end
@@ -409,7 +410,7 @@ module conv_linebuf_stream_packer #(
             for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
                 dst_lane = {1'b0, lane_base} + 7'(lane);
                 if ((lane < valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
-                    row[dst_lane[4:0]] = data[lane * 8 +: 8];
+                    row[dst_lane[4:0]] = data[(lane << 3) +: 8];
                 end
             end
             unpack_row = row;
@@ -420,15 +421,58 @@ module conv_linebuf_stream_packer #(
         input logic [15:0] row_slot,
         input logic [15:0] x
     );
-        bank_index = ($clog2(BANKS))'((32'(row_slot) * STRIDE_MAX) + (32'(x) % STRIDE_MAX));
+        bank_index = ($clog2(BANKS))'(({16'd0, row_slot} << 1) + {31'd0, x[0]});
     endfunction
 
     function automatic logic [BANK_ADDR_WIDTH-1:0] bank_word_addr(input logic [15:0] x);
-        bank_word_addr = BANK_ADDR_WIDTH'(32'(x) / STRIDE_MAX);
+        bank_word_addr = BANK_ADDR_WIDTH'(x >> 1);
+    endfunction
+
+    function automatic logic [2:0] mod7_u16(input logic [15:0] value);
+        logic [5:0] sum0;
+        logic [5:0] rem0;
+        logic [5:0] rem1;
+        logic [5:0] rem2;
+        begin
+            // ROW_SLOTS is fixed at 7. Since 8 mod 7 == 1, n mod 7 is the
+            // modulo-7 sum of its 3-bit chunks. This keeps the slot mapper
+            // shallow and avoids a synthesized divider/subtractor chain.
+            sum0 = {3'd0, value[2:0]} +
+                   {3'd0, value[5:3]} +
+                   {3'd0, value[8:6]} +
+                   {3'd0, value[11:9]} +
+                   {3'd0, value[14:12]} +
+                   {5'd0, value[15]};
+            rem0 = (sum0 >= 6'd28) ? (sum0 - 6'd28) : sum0;
+            rem1 = (rem0 >= 6'd14) ? (rem0 - 6'd14) : rem0;
+            rem2 = (rem1 >= 6'd7)  ? (rem1 - 6'd7)  : rem1;
+            mod7_u16 = rem2[2:0];
+        end
     endfunction
 
     function automatic logic [15:0] cache_row_slot(input logic [15:0] ih);
-        cache_row_slot = 16'(32'(ih) % ROW_SLOTS);
+        cache_row_slot = {13'd0, mod7_u16(ih)};
+    endfunction
+
+    function automatic logic [31:0] scale_u32_by_0_to_5(
+        input logic [31:0] value,
+        input logic [15:0] factor
+    );
+        logic [31:0] value_x2;
+        logic [31:0] value_x4;
+        begin
+            value_x2 = value << 1;
+            value_x4 = value << 2;
+            unique case (factor[2:0])
+                3'd0: scale_u32_by_0_to_5 = 32'd0;
+                3'd1: scale_u32_by_0_to_5 = value;
+                3'd2: scale_u32_by_0_to_5 = value_x2;
+                3'd3: scale_u32_by_0_to_5 = value_x2 + value;
+                3'd4: scale_u32_by_0_to_5 = value_x4;
+                3'd5: scale_u32_by_0_to_5 = value_x4 + value;
+                default: scale_u32_by_0_to_5 = 32'd0;
+            endcase
+        end
     endfunction
 
     function automatic logic [31:0] row_stride_offset(input logic [15:0] kh);
@@ -443,7 +487,6 @@ module conv_linebuf_stream_packer #(
                 3'd2: row_stride_offset = stride_x2;
                 3'd3: row_stride_offset = stride_x2 + cfg_row_stride_bytes_i;
                 3'd4: row_stride_offset = stride_x4;
-                3'd5: row_stride_offset = stride_x4 + cfg_row_stride_bytes_i;
                 default: row_stride_offset = 32'd0;
             endcase
         end
@@ -456,27 +499,6 @@ module conv_linebuf_stream_packer #(
         row_tap_addr = row_base + row_stride_offset(kh) + channel_addr_offset;
     endfunction
 
-    function automatic logic [31:0] scale_by_kernel_dim(
-        input logic [31:0] value,
-        input logic [15:0] dim
-    );
-        logic [31:0] value_x2;
-        logic [31:0] value_x4;
-        begin
-            value_x2 = value << 1;
-            value_x4 = value << 2;
-            unique case (dim[2:0])
-                3'd0: scale_by_kernel_dim = 32'd0;
-                3'd1: scale_by_kernel_dim = value;
-                3'd2: scale_by_kernel_dim = value_x2;
-                3'd3: scale_by_kernel_dim = value_x2 + value;
-                3'd4: scale_by_kernel_dim = value_x4;
-                3'd5: scale_by_kernel_dim = value_x4 + value;
-                default: scale_by_kernel_dim = 32'd0;
-            endcase
-        end
-    endfunction
-
     function automatic logic [31:0] coalesce_kernel_bytes(
         input logic [15:0] kernel_h,
         input logic [15:0] kernel_w,
@@ -484,8 +506,8 @@ module conv_linebuf_stream_packer #(
     );
         logic [31:0] row_bytes;
         begin
-            row_bytes = scale_by_kernel_dim({26'd0, valid_bytes}, kernel_w);
-            coalesce_kernel_bytes = scale_by_kernel_dim(row_bytes, kernel_h);
+            row_bytes = scale_u32_by_0_to_5({26'd0, valid_bytes}, kernel_w);
+            coalesce_kernel_bytes = scale_u32_by_0_to_5(row_bytes, kernel_h);
         end
     endfunction
 
@@ -549,7 +571,7 @@ module conv_linebuf_stream_packer #(
             row = '0;
             if (c32_kgen_fast) begin
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][lane * 8 +: 8];
+                    row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][(lane << 3) +: 8];
                 end
             end else if (cfg_coalesce_i && cfg_kgen_i) begin
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
@@ -559,7 +581,7 @@ module conv_linebuf_stream_packer #(
                         (l_ic[lane] < (cfg_c_base_i + 16'(ARRAY_DIM))) &&
                         (l_ic[lane] < cfg_input_c_i)) begin
                         src_lane = l_ic[lane] - cfg_c_base_i;
-                        row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][src_lane[4:0] * 8 +: 8];
+                        row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][{src_lane[4:0], 3'b000} +: 8];
                     end
                 end
             end else if (cfg_coalesce_i) begin
@@ -571,7 +593,7 @@ module conv_linebuf_stream_packer #(
                                 (kw < cfg_kernel_w_i) &&
                                 (lane < block_valid_bytes) &&
                                 (dst_count < 16'(ARRAY_DIM))) begin
-                                row[dst_count[4:0]] = win[kh][kw][lane * 8 +: 8];
+                                row[dst_count[4:0]] = win[kh][kw][(lane << 3) +: 8];
                                 dst_count = dst_count + 16'd1;
                             end
                         end
@@ -581,7 +603,7 @@ module conv_linebuf_stream_packer #(
                 for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
                     dst_lane = {1'b0, cfg_lane_base_i} + 7'(lane);
                     if ((lane < block_valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
-                        row[dst_lane[4:0]] = win[tap_kh[2:0]][tap_kw[2:0]][lane * 8 +: 8];
+                        row[dst_lane[4:0]] = win[tap_kh[2:0]][tap_kw[2:0]][(lane << 3) +: 8];
                     end
                 end
             end
@@ -691,7 +713,7 @@ module conv_linebuf_stream_packer #(
             row_o = '0;
             for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
                 if (desc_i[lane].valid) begin
-                    row_o[lane] = tap_vec_i[lane][desc_i[lane].src_lane * 8 +: 8];
+                    row_o[lane] = tap_vec_i[lane][{desc_i[lane].src_lane, 3'b000} +: 8];
                 end
             end
         end
@@ -967,11 +989,37 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
+    task automatic request_slide_column(
+        input logic signed [31:0] base_iw,
+        input logic [15:0]        target_kw
+    );
+        logic signed [31:0] cell_ih;
+        logic signed [31:0] slide_iw;
+        logic [$clog2(BANKS)-1:0] idx;
+        begin
+            for (int unsigned kh = 0; kh < K_MAX; kh++) begin
+                if (kh < cfg_kernel_h_i) begin
+                    cell_ih = output_base_ih_q + $signed(32'(kh));
+                    slide_iw = base_iw + $signed({16'd0, cfg_stride_w_i}) +
+                               $signed({16'd0, target_kw});
+                    if ((cell_ih >= 32'sd0) &&
+                        (slide_iw >= 32'sd0) &&
+                        (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
+                        (slide_iw < $signed({16'd0, cfg_input_w_i}))) begin
+                        idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
+                                         (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
+                                         slide_iw[15:0]);
+                        bank_r_req[idx] = 1'b1;
+                        bank_r_addr[idx] = bank_word_addr(slide_iw[15:0]);
+                    end
+                end
+            end
+        end
+    endtask
+
     task automatic drive_window_read_requests;
         logic signed [31:0] cell_ih;
         logic signed [31:0] cell_iw;
-        logic signed [31:0] slide_iw;
-        logic [15:0] slide_new_cols;
         logic [15:0] slide_target_kw;
         logic [$clog2(BANKS)-1:0] idx;
         begin
@@ -998,28 +1046,18 @@ module conv_linebuf_stream_packer #(
                     end
                 end
             end else if (slide_req_active) begin
-                slide_new_cols = (cfg_stride_w_i >= cfg_kernel_w_i) ? cfg_kernel_w_i : cfg_stride_w_i;
-                for (int unsigned kh = 0; kh < K_MAX; kh++) begin
-                    for (int unsigned col = 0; col < STRIDE_MAX; col++) begin
-                        if ((kh < cfg_kernel_h_i) && (col < slide_new_cols)) begin
-                            slide_target_kw = (cfg_stride_w_i >= cfg_kernel_w_i) ?
-                                              16'(col) :
-                                              (cfg_kernel_w_i - cfg_stride_w_i + 16'(col));
-                            cell_ih = output_base_ih_q + $signed(32'(kh));
-                            slide_iw = slide_from_iw + $signed({16'd0, cfg_stride_w_i}) +
-                                       $signed({16'd0, slide_target_kw});
-                            if ((cell_ih >= 32'sd0) &&
-                                (slide_iw >= 32'sd0) &&
-                                (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
-                                (slide_iw < $signed({16'd0, cfg_input_w_i}))) begin
-                                idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
-                                                 (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
-                                                 slide_iw[15:0]);
-                                bank_r_req[idx] = 1'b1;
-                                bank_r_addr[idx] = bank_word_addr(slide_iw[15:0]);
-                            end
-                        end
-                    end
+                if (cfg_stride_w_i == 16'd1) begin
+                    slide_target_kw = (cfg_kernel_w_i == 16'd1) ? 16'd0 : (cfg_kernel_w_i - 16'd1);
+                    request_slide_column(slide_from_iw, slide_target_kw);
+                end else if (cfg_kernel_w_i == 16'd1) begin
+                    request_slide_column(slide_from_iw, 16'd0);
+                end else begin
+                    slide_target_kw = (cfg_stride_w_i >= cfg_kernel_w_i) ? 16'd0 :
+                                      (cfg_kernel_w_i - 16'd2);
+                    request_slide_column(slide_from_iw, slide_target_kw);
+                    slide_target_kw = (cfg_stride_w_i >= cfg_kernel_w_i) ? 16'd1 :
+                                      (cfg_kernel_w_i - 16'd1);
+                    request_slide_column(slide_from_iw, slide_target_kw);
                 end
             end
         end
@@ -1043,52 +1081,75 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    task automatic build_slide_window_next;
+    task automatic capture_slide_column(
+        input logic [15:0] target_kw
+    );
         logic signed [31:0] cell_ih;
         logic signed [31:0] slide_iw;
-        logic [15:0] slide_new_cols;
-        logic [15:0] slide_target_kw;
         logic [$clog2(BANKS)-1:0] idx;
         begin
-            slide_window = window_q;
+            for (int unsigned kh = 0; kh < K_MAX; kh++) begin
+                if (kh < cfg_kernel_h_i) begin
+                    cell_ih = output_base_ih_q + $signed(32'(kh));
+                    slide_iw = output_base_iw_q + $signed({16'd0, cfg_stride_w_i}) +
+                               $signed({16'd0, target_kw});
+                    if ((cell_ih >= 32'sd0) &&
+                        (slide_iw >= 32'sd0) &&
+                        (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
+                        (slide_iw < $signed({16'd0, cfg_input_w_i}))) begin
+                        idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
+                                         (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
+                                         slide_iw[15:0]);
+                        slide_window[kh][target_kw[2:0]] = bank_rdata[idx];
+                    end else begin
+                        slide_window[kh][target_kw[2:0]] = pad_vector;
+                    end
+                end
+            end
+        end
+    endtask
+
+    task automatic build_slide_window_next;
+        logic [15:0] slide_target_kw;
+        begin
             if (cfg_stride_w_i >= cfg_kernel_w_i) begin
                 slide_window = '0;
-            end else begin
+            end else if (cfg_stride_w_i == 16'd1) begin
+                slide_window = '0;
                 for (int unsigned kh = 0; kh < K_MAX; kh++) begin
-                    for (int unsigned kw = 0; kw < K_MAX; kw++) begin
-                        if ((kh < cfg_kernel_h_i) &&
-                            ((32'(kw) + 32'(cfg_stride_w_i)) < 32'(cfg_kernel_w_i))) begin
-                            slide_window[kh][kw] = window_q[kh][kw + 32'(cfg_stride_w_i)];
-                        end else begin
-                            slide_window[kh][kw] = pad_vector;
-                        end
+                    if (kh < cfg_kernel_h_i) begin
+                        slide_window[kh][0] = (cfg_kernel_w_i > 16'd1) ? window_q[kh][1] : pad_vector;
+                        slide_window[kh][1] = (cfg_kernel_w_i > 16'd2) ? window_q[kh][2] : pad_vector;
+                        slide_window[kh][2] = (cfg_kernel_w_i > 16'd3) ? window_q[kh][3] : pad_vector;
+                        slide_window[kh][3] = (cfg_kernel_w_i > 16'd4) ? window_q[kh][4] : pad_vector;
+                        slide_window[kh][4] = pad_vector;
+                    end
+                end
+            end else begin
+                slide_window = '0;
+                for (int unsigned kh = 0; kh < K_MAX; kh++) begin
+                    if (kh < cfg_kernel_h_i) begin
+                        slide_window[kh][0] = (cfg_kernel_w_i > 16'd2) ? window_q[kh][2] : pad_vector;
+                        slide_window[kh][1] = (cfg_kernel_w_i > 16'd3) ? window_q[kh][3] : pad_vector;
+                        slide_window[kh][2] = (cfg_kernel_w_i > 16'd4) ? window_q[kh][4] : pad_vector;
+                        slide_window[kh][3] = pad_vector;
+                        slide_window[kh][4] = pad_vector;
                     end
                 end
             end
 
-            slide_new_cols = (cfg_stride_w_i >= cfg_kernel_w_i) ? cfg_kernel_w_i : cfg_stride_w_i;
-            for (int unsigned kh = 0; kh < K_MAX; kh++) begin
-                for (int unsigned col = 0; col < STRIDE_MAX; col++) begin
-                    if ((kh < cfg_kernel_h_i) && (col < slide_new_cols)) begin
-                        slide_target_kw = (cfg_stride_w_i >= cfg_kernel_w_i) ?
-                                          16'(col) :
-                                          (cfg_kernel_w_i - cfg_stride_w_i + 16'(col));
-                        cell_ih = output_base_ih_q + $signed(32'(kh));
-                        slide_iw = output_base_iw_q + $signed({16'd0, cfg_stride_w_i}) +
-                                   $signed({16'd0, slide_target_kw});
-                        if ((cell_ih >= 32'sd0) &&
-                            (slide_iw >= 32'sd0) &&
-                            (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
-                            (slide_iw < $signed({16'd0, cfg_input_w_i}))) begin
-                            idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
-                                             (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
-                                             slide_iw[15:0]);
-                            slide_window[kh][slide_target_kw[2:0]] = bank_rdata[idx];
-                        end else begin
-                            slide_window[kh][slide_target_kw[2:0]] = pad_vector;
-                        end
-                    end
-                end
+            if (cfg_stride_w_i == 16'd1) begin
+                slide_target_kw = (cfg_kernel_w_i == 16'd1) ? 16'd0 : (cfg_kernel_w_i - 16'd1);
+                capture_slide_column(slide_target_kw);
+            end else if (cfg_kernel_w_i == 16'd1) begin
+                capture_slide_column(16'd0);
+            end else begin
+                slide_target_kw = (cfg_stride_w_i >= cfg_kernel_w_i) ? 16'd0 :
+                                  (cfg_kernel_w_i - 16'd2);
+                capture_slide_column(slide_target_kw);
+                slide_target_kw = (cfg_stride_w_i >= cfg_kernel_w_i) ? 16'd1 :
+                                  (cfg_kernel_w_i - 16'd1);
+                capture_slide_column(slide_target_kw);
             end
         end
     endtask
@@ -1106,6 +1167,8 @@ module conv_linebuf_stream_packer #(
         drive_obi_request_mux();
         build_slide_window_next();
     end
+
+    assign pad_row_offset = scale_u32_by_0_to_5(cfg_row_stride_bytes_i, cfg_pad_h_i);
 
     task automatic reset_sequential_state;
         begin
@@ -1144,6 +1207,7 @@ module conv_linebuf_stream_packer #(
             bg_pending_beat_addr_q <= '0;
             bg_valid_bytes_q <= '0;
             bg_started_for_row_q <= 1'b0;
+            beat_fifo_q <= '0;
             bf_wptr_q <= '0;
             bf_rptr_q <= '0;
             bf_count_q <= '0;
@@ -1163,6 +1227,8 @@ module conv_linebuf_stream_packer #(
             stg1_lane_kh_q <= '0;
             stg1_lane_kw_q <= '0;
             stg1_lane_ic_q <= '0;
+            stg1_tap_kh_q <= '0;
+            stg1_tap_kw_q <= '0;
             fmt_s1_window_q <= '0;
             fmt_s1_lane_kh_q <= '0;
             fmt_s1_lane_kw_q <= '0;
@@ -1325,6 +1391,7 @@ module conv_linebuf_stream_packer #(
                     (cfg_kernel_w_i == 16'd0) ||
                     (cfg_kernel_h_i > K_MAX[15:0]) ||
                     (cfg_kernel_w_i > K_MAX[15:0]) ||
+                    (cfg_pad_h_i > K_MAX[15:0]) ||
                     (cfg_input_w_i > MAX_INPUT_W[15:0]) ||
                     (cfg_stride_h_i == 16'd0) ||
                     (cfg_stride_w_i == 16'd0) ||
@@ -1443,16 +1510,12 @@ module conv_linebuf_stream_packer #(
                         fill_x_q <= '0;
                         fill_valid_bytes_q <= block_valid_bytes;
                         fill_addr_q <= row_cache_full_q ?
-                                       row_tap_addr(cfg_origin_base_i +
-                                                    (32'({16'd0, cfg_pad_h_i}) *
-                                                     cfg_row_stride_bytes_i),
+                                       row_tap_addr(cfg_origin_base_i + pad_row_offset,
                                                     fill_kh_q) :
                                        row_tap_addr(output_row_base_addr_q, fill_kh_q);
                         pending_beat_addr_q <= beat_base(
                             row_cache_full_q ?
-                            row_tap_addr(cfg_origin_base_i +
-                                         (32'({16'd0, cfg_pad_h_i}) *
-                                          cfg_row_stride_bytes_i),
+                            row_tap_addr(cfg_origin_base_i + pad_row_offset,
                                          fill_kh_q) :
                             row_tap_addr(output_row_base_addr_q, fill_kh_q)
                         );
