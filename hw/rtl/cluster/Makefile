@@ -51,10 +51,17 @@ BUILD_ARGS += -j$(VERILATOR_JOBS)
 # $(SNITCH_F_STAMP), which is also a compile dependency for Vtop.mk.
 EXTRA_ARGS += -f $(SNITCH_F_EXPANDED)
 
-# Enable VCD dumping if DEBUG=1
+# Enable waveform dumping if DEBUG=1. Use TRACE_FORMAT=fst for smaller traces.
 DEBUG ?= 0
+TRACE_FORMAT ?= vcd
 ifeq ($(DEBUG), 1)
-    EXTRA_ARGS += --trace
+    ifeq ($(TRACE_FORMAT), fst)
+        COMPILE_ARGS += --trace-fst
+        SIM_ARGS += --trace --trace-file dump.fst
+    else
+        COMPILE_ARGS += --trace
+        SIM_ARGS += --trace --trace-file dump.vcd
+    endif
     export WAVES = 1
 endif
 
@@ -88,4 +95,4 @@ sim: gen_f
 
 # Clean output dir
 clean::
-	@rm -rf tb/sim __pycache__ tb/__pycache__ results.xml dump.vcd
+	@rm -rf tb/sim __pycache__ tb/__pycache__ results.xml dump.vcd dump.fst
