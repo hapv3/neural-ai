@@ -5,6 +5,23 @@ The RTL lives under `hw/rtl/afu`, the cluster integration is in
 `hw/rtl/cluster/npu_cluster.sv`, and the firmware wrappers are in
 `sw/lib/hal_afu.h` and `sw/lib/spatz_ops.c`.
 
+Last checked against RTL/firmware: 2026-07-21.
+
+## Current Design Snapshot
+
+| Area | Current implementation | Practical limit / contract |
+|---|---|---|
+| Control path | 32-bit OBI target at `NPU_AFU_BASE = 0x2000_3000` | Config writes update shadow CSRs. A `STATUS/START` bit0 write commits shadow to active only when AFU is not busy. |
+| Data path | 256-bit TCDM beats, 32 bytes per beat | Production graph buffers should remain 32-byte aligned even though byte-enable tails are supported. |
+| TCDM masters | Primary read/write master plus RHS read-only master | RHS port is used only by `MUL_Q7` and `ADD_I8`. Other modes use the primary port only. |
+| Input FIFOs | RFIFO depth 2, RHS_RFIFO depth 2 | Only one primary read and one RHS read can be outstanding; this is a low-area streaming engine, not a many-request DMA. |
+| Output FIFO | WFIFO depth 2, 256-bit data + 32 byte enables | `done_o` waits for WFIFO drain and backend idle, so completion is architecturally after writes reach TCDM. |
+| LUT storage | `LUT_LANES=4`, two 256x32 banks per lane | Normal modes ping-pong active/stage banks. DFL uses fixed bank0/bank1 interpretation. |
+| Generic LUT modes | E8/E16/E32, 4 input bytes per core step | Good for activation/clamp/table staging; not a general vector ISA. |
+| Binary modes | ADD_I8 and MUL_Q7, 32 byte lanes per paired beat | `MUL_Q7` is fixed to `(lhs * rhs) >> 7` with i8 saturation; arbitrary multiplier/shift still uses software fallback. |
+| YOLO fused modes | DFL `reg_max=4` ROW32 low16 and class sigmoid ROW32 high16 | Fixed raw-head layout: box logits in lanes `0..15`, class logits in lanes `16..31`. |
+| GlobalAvgPool | C32-blocked spatial reduction | `SRC2_PTR` carries `spatial_count`; firmware loads reciprocal Q31 into normal LUT entry 0 before start. |
+
 ## 1. Role
 
 The AFU is a small streaming accelerator for post-processing and element-wise
@@ -83,6 +100,10 @@ core_done && wfifo_all_empty && backend_idle
 This prevents the firmware from observing completion before the final write beat
 has drained into TCDM.
 
+The AFU does not own an iDMA channel internally. Current graph firmware may use
+iDMA before or after AFU jobs to move tensors or LUT blobs between L2 and TCDM,
+but AFU execution itself is driven by its OBI masters and MMIO CSRs.
+
 ## 3. RTL Blocks
 
 ### 3.1. `afu.sv`
@@ -110,10 +131,17 @@ Important behavior:
   not busy.
 - On start, shadow registers are atomically copied into active registers and a
   one-cycle `cfg_start_o` pulse is emitted.
-- Reads from config CSRs return shadow values, not active values.
+- Reads from config CSRs return shadow values, not active values. `STATUS` is
+  the exception and returns `{error,busy,done}`.
 - Normal LUT writes are staged into the inactive ping-pong LUT bank.
 - Starting a non-DFL mode with pending LUT writes swaps the active/stage banks.
 - DFL fixed LUT writes target dedicated banks and are blocked while AFU is busy.
+
+Writes to DFL fixed LUT windows are ignored while busy because
+`lut_we_o = req && we && lut_sel && !(lut_dfl_sel && afu_busy_i)`. Normal
+ping-pong LUT writes are not blocked by busy, but runtime software should only
+modify the inactive staging bank and must respect the next-start bank-swap
+semantics.
 
 The shadow-register behavior is important for non-blocking firmware: software
 can preload the next AFU job while a previous job is still running, then launch
@@ -139,6 +167,12 @@ RHS port:
 - Reads `SRC2_PTR` through a separate read-only TCDM master.
 - Feeds RHS_RFIFO so binary modes can consume LHS/RHS beats together.
 
+The backend uses at most one outstanding primary read and one outstanding RHS
+read. It does not coalesce beyond naturally aligned 32-byte beats, and it does
+not reorder writes around reads except for the local primary-port arbitration
+rule: WFIFO write traffic has priority over issuing a new primary read. This is
+intentional to keep completion precise and avoid a deep write backlog.
+
 The backend stops issuing further reads when `core_done` is observed, then waits
 until outstanding requests, pending requests, and WFIFO writes are drained before
 reporting idle.
@@ -163,11 +197,26 @@ Binary modes bypass the LUT SRAM:
 RFIFO beat + RHS_RFIFO beat -> 32 byte-wise ALU lanes -> WFIFO
 ```
 
+`ADD_I8` packs directly from the stage-1 lane bundle. `MUL_Q7` has an explicit
+three-stage registered path:
+
+```text
+S1: latch LHS/RHS beat, lane count, output address
+S2: 32 signed 8x8 products
+S3: arithmetic shift by 7, i8 saturation, byte-enable pack
+```
+
+This keeps the multiply path synthesizable at a high target frequency while
+preserving one 32-lane beat per cycle once the short pipeline is full and the
+TCDM/WFIFO interfaces do not stall.
+
 Special fused modes have dedicated FSM states:
 
-- `ST_DFL_EXP_REQ`, `ST_DFL_EXP_WAIT`, `ST_DFL_RECIP_WAIT`, `ST_DFL_PUSH`
+- `ST_DFL_EXP_REQ`, `ST_DFL_EXP_WAIT`, `ST_DFL_RECIP_WAIT`,
+  `ST_DFL_MUL_WRITE`, `ST_DFL_WRITE`, `ST_DFL_PUSH`
 - `ST_CLASS_LUT_REQ`, `ST_CLASS_LUT_WAIT`, `ST_CLASS_PUSH`
-- `ST_GAP_ACCUM`, `ST_GAP_PUSH`
+- `ST_GAP_ACCUM`, `ST_GAP_RECIP_REQ`, `ST_GAP_RECIP_WAIT`,
+  `ST_GAP_MUL_WRITE`, `ST_GAP_WRITE`, `ST_GAP_PUSH`
 
 These modes use the same backend and WFIFO infrastructure but have custom
 packing and loop semantics.
@@ -190,6 +239,13 @@ DFL fused mode:
 - Bank swapping is disabled for DFL mode.
 - Writes to the fixed DFL LUT windows are blocked while AFU is busy.
 
+GlobalAvgPool does not have a dedicated reciprocal SRAM. It reuses normal LUT
+entry 0 from whichever normal bank is active at start. The current wrapper
+therefore writes `recip_q31 = floor(2^31 / spatial_count)` into
+`NPU_AFU_LUT_BASE + 0` before launching `NPU_AFU_MODE_GLOBAL_AVGPOOL_C32`.
+If future firmware starts caching normal activation LUTs aggressively, it must
+treat GAP reciprocal entry 0 as a separate LUT identity.
+
 ## 4. Programming Model
 
 ### 4.1. Register Map
@@ -207,6 +263,10 @@ All offsets are relative to `NPU_AFU_BASE = 0x2000_3000`.
 | `0x414` | `SRC2_PTR` | R/W shadow | RHS pointer or mode-specific metadata |
 | `0x800..0xbff` | DFL exp LUT | W | 256 32-bit fixed exp entries |
 | `0xc00..0xfff` | DFL reciprocal LUT | W | 256 32-bit fixed reciprocal entries |
+
+CSR address decoding uses offset bits `[5:0]` for the five CSRs, so software
+should use the symbolic addresses in `sw/lib/npu_memory_map.h` and avoid relying
+on mirrored aliases inside the AFU aperture.
 
 Status bits:
 
@@ -232,6 +292,16 @@ wrappers and tests.
 | `NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16` | 6 | `npu_class_sigmoid_row32_high16_i8` | ROW32 high 16 logits | compact 16 INT8 scores/location |
 | `NPU_AFU_MODE_GLOBAL_AVGPOOL_C32` | 7 | `npu_global_avgpool_c32_i8` | C32-blocked tensor | one C32 output group per channel group |
 
+`LENGTH` meaning is mode-specific:
+
+| Mode group | `LENGTH` unit | Notes |
+|---|---|---|
+| E8/E16/E32 | input elements, one byte per input element | Output bytes are `LENGTH`, `2*LENGTH`, or `4*LENGTH`. |
+| MUL_Q7/ADD_I8 | input/output elements, one byte per lane | LHS and RHS must cover the same logical byte count. |
+| DFL4_ROW32_Q8 | input bytes | Must be `locations * 32`. Output bytes are `locations * 8`. |
+| CLASS_SIGMOID_ROW32_HIGH16 | input bytes | Must be `locations * 32`. Output bytes are `locations * 16`. |
+| GLOBAL_AVGPOOL_C32 | input bytes | Must be `spatial_count * ceil(channels/32) * 32`; `SRC2_PTR` is `spatial_count`. |
+
 ### 4.3. Alignment Contract
 
 The backend internally aligns TCDM read/write beats down to 32-byte boundaries
@@ -243,6 +313,11 @@ contract is still conservative:
 - Tails are represented with byte enables on the final write beat.
 - Arbitrary unaligned E16/E32 destination layouts are supported by the RTL test
   bench but are not yet a scheduler contract for production graph generation.
+
+For binary modes, both `SRC_PTR` and `SRC2_PTR` are aligned down independently.
+The core tracks source byte offsets, so unaligned block-level cases work, but
+production graph generation should keep both streams aligned to preserve the
+32-lane throughput model.
 
 ## 5. Mode Semantics
 
@@ -313,6 +388,24 @@ Output is four little-endian Q8.8 `uint16_t` values per location. The current
 micro-YOLO path uses host/Python-generated LUT contents and checks the output
 byte-exactly against the same fixed-point model.
 
+Implementation details:
+
+- Exp values are 16-bit values stored in 32-bit LUT words.
+- The reciprocal index is generated from an 18-bit sum by normalizing the sum
+  into a Q8 range; the RTL clamps the table index to `0..255`.
+- The reciprocal LUT output is consumed through fixed bank1 lane 0.
+- `weighted << 8` is multiplied by the reciprocal LUT entry and rounded in a
+  registered stage before being packed into the 32-byte output beat.
+
+Limitations:
+
+- `reg_max` is fixed at 4.
+- Exactly four box sides are computed.
+- Input must be ROW32; low lanes `0..15` carry the logits. High lanes `16..31`
+  are ignored by this mode.
+- This is not a general softmax engine. Attention softmax or arbitrary class
+  softmax needs a new row-reduction mode.
+
 ### 5.5. Fused Class Sigmoid
 
 Mode `NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16` consumes one 32-byte raw-head row
@@ -326,6 +419,15 @@ dst[location][0..15] = sigmoid_lut(src_row32[location][16..31])
 
 This removes the need to materialize or scan the low DFL logits when only class
 scores are being produced.
+
+The class mode still uses the normal ping-pong LUT path. A pending normal LUT
+update swaps active/stage banks on start, unlike DFL fixed LUT windows.
+
+Limitations:
+
+- It is fixed to 16 class logits per ROW32 location.
+- It only reads lanes `16..31`.
+- It writes compact class bytes, not ROW32-padded class rows.
 
 ### 5.6. C32 Global Average Pool
 
@@ -344,12 +446,23 @@ length        = spatial_count * groups * 32
 ```
 
 For each C32 group, the core accumulates 32 signed lanes across
-`spatial_count` rows, divides each lane by `spatial_count` with truncation toward
-zero, and writes one 32-byte C32 output group.
+`spatial_count` rows, multiplies the absolute sum by the Q31 reciprocal stored in
+normal LUT entry 0, applies one correction step, restores the sign, saturates to
+INT8, and writes one 32-byte C32 output group.
 
 Tail channels in the final C32 group are physically present because the format is
 C32-padded. The software/golden model is responsible for ignoring inactive tail
 lanes where the logical channel count is not a multiple of 32.
+
+Limitations:
+
+- Input order is spatial-major C32 groups:
+  `input[spatial][c32_group][lane0..31]`.
+- The mode assumes every C32 group has exactly `spatial_count` consecutive rows.
+- `spatial_count == 0` is rejected by the firmware wrapper and maps to `ST_DONE`
+  in RTL.
+- The divide behavior is deterministic reciprocal-multiply with correction, not
+  a hardware divider. Python golden tests should match this integer model.
 
 ## 6. Firmware and Host Flow
 
@@ -372,7 +485,8 @@ The preferred runtime pattern is:
 
 ```text
 1. Host/Python places tensors and, where possible, LUT blobs in L2.
-2. Firmware/DMA moves data/LUTs to 32-byte aligned TCDM scratch windows.
+2. Firmware/DMA moves data/LUTs to 32-byte aligned TCDM scratch windows where
+   the current graph ABI requires TCDM execution.
 3. Firmware preloads AFU shadow registers for the next job.
 4. Firmware starts the AFU with one write to STATUS/START.
 5. Firmware polls or waits for AFU done.
@@ -387,6 +501,12 @@ Binary Add/Mul and GlobalAvgPool also use explicit preload followed by
 `afu_start_preloaded()`. This removes late config writes from the immediate
 start path and makes the wrappers compatible with future graph-level
 non-blocking dispatch.
+
+Important caveat: LUT writes are still MMIO writes performed by firmware in the
+current wrappers. Host/Python already owns LUT value generation in the tests and
+can place LUT blobs in L2, but there is no AFU-side DMA ingestion of the LUT
+windows yet. A future graph scheduler may use iDMA or a small firmware loop to
+copy L2 LUT blobs into AFU MMIO windows before the start pulse.
 
 Standalone AFU operator tests follow the same rule as the rest of the cleaned
 test suite: firmware configures and dispatches only; Python/cocotb owns input
@@ -436,8 +556,14 @@ Fused DFL and class sigmoid are intentionally ROW32-specialized:
 - Class sigmoid writes 16 bytes per location, packed into 32-byte write beats.
 
 DFL is not one output location per cycle. It performs four side computations per
-location, including fixed exp and reciprocal LUT accesses. It is still much
-faster and cleaner than CPU delta/reduce loops plus separate AFU E16 staging.
+location. Each side issues an exp LUT read, waits for the exp data, issues a
+reciprocal LUT read, registers the reciprocal multiply, rounds/packs the result,
+and then advances to the next side. It is still much faster and cleaner than CPU
+delta/reduce loops plus separate AFU E16 staging.
+
+Class sigmoid is lighter: it processes four high-half class bytes per LUT step,
+so one ROW32 location requires four LUT groups and produces 16 compact output
+bytes.
 
 ### 7.4. Global Average Pool
 
@@ -449,9 +575,23 @@ read_beats  = spatial_count * c32_groups
 write_beats = c32_groups
 ```
 
-The current divider/average logic is simple and deterministic. If global average
-pool becomes a major full-model bottleneck, the next improvement should be a more
-pipelined reduction tree or reciprocal-multiply average path.
+The current average path already uses reciprocal-multiply rather than a
+sequential divider:
+
+```text
+recip_q31    = floor(2^31 / spatial_count) loaded into normal LUT entry 0
+quotient     = (abs(sum) * recip_q31) >> 31
+correction   = ((quotient * spatial_count) + spatial_count) <= abs(sum)
+avg_abs      = quotient + correction
+avg_signed   = sign_restore(avg_abs)
+dst_i8       = saturate_i8(avg_signed)
+```
+
+The datapath contains 32 parallel 32x32-style products for GAP finalization.
+This is high throughput for C32 output groups, but it is not free for synthesis.
+If GAP becomes timing-critical, preserve the mode semantics and add pipeline
+registers around the reciprocal multiply/correction path rather than replacing
+it with scalar division.
 
 ## 8. PMU Observability
 
@@ -483,6 +623,8 @@ Current tests:
   - Covers E8/E16/E32 aligned and unaligned cases.
   - Covers fused DFL and class sigmoid block behavior.
   - Checks normal LUT ping-pong behavior after DFL fixed-bank use.
+  - The current block-level harness ties the RHS OBI port inactive, so binary
+    ADD/MUL coverage is currently stronger at cluster/operator-wrapper level.
 - `sw/test/afu_ops`
   - Standalone C-callable AFU wrapper binaries:
     - `afu_ops_add_full.bin`
@@ -518,12 +660,23 @@ That number is a cluster test PMU result, not a pure RTL core latency number.
   preload one job before start; graph-level overlap of a future AFU job with a
   current non-AFU layer still needs scheduler support and careful LUT/weight
   lifetime handling.
+- AFU LUT programming is still a firmware/MMIO loop. Host-precomputed LUT blobs
+  are supported at the graph-data level, but there is not yet a native DMA-to-AFU
+  LUT loader ABI.
 - The production scheduler should keep using 32-byte aligned TCDM buffers until
   unaligned E16/E32 destinations are explicitly supported at the graph level.
 - `ERROR` status is not yet driven by real hardware error conditions.
 - `spatz_add_i8()` only uses AFU for full-range saturation. Narrow clamp add
   still uses scalar fallback.
+- `spatz_mul_i8()` still uses scalar software for arbitrary
+  multiply/requant/clamp. The native AFU path only covers Q7 multiply through
+  `npu_mul_q7_i8()`.
 - Legacy assisted DFL (`npu_dfl_softmax4_i8_q8`) still exists as a software/API
   fallback, but the optimized YOLO path should use fused ROW32 DFL.
+- DFL fused mode is fixed to YOLO `reg_max=4` and cannot be reused as a general
+  softmax for LLM attention.
+- Class sigmoid fused mode is fixed to ROW32 high16 and compact 16-byte output.
+- GlobalAvgPool assumes C32-blocked spatial-major input and uses normal LUT entry
+  0 as reciprocal storage.
 - More detailed AFU PMU events are needed before optimizing FIFO depth, OBI
   outstanding policy, or reduction datapaths further.
