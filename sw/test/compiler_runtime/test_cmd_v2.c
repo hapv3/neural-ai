@@ -11,6 +11,8 @@ typedef struct {
     uint32_t qparam_address;
     uint32_t qparam_count;
     uint32_t qparam_block;
+    uint32_t partial_sums;
+    uint32_t ofm;
 } mock_state_t;
 
 typedef struct {
@@ -50,6 +52,20 @@ static uint32_t mock_rq_load(void *context, uint32_t qparam_address,
     state->qparam_address = qparam_address;
     state->qparam_count = qparam_count;
     state->qparam_block = qparam_block;
+    return 0u;
+}
+
+static uint32_t mock_gemm32(void *context, const nai_cmd_gemm32_v2_t *command,
+                            uint32_t weights, uint32_t ifm,
+                            uint32_t partial_sums, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    (void)command;
+    (void)weights;
+    (void)ifm;
+    state->calls++;
+    state->partial_sums = partial_sums;
+    state->ofm = ofm;
     return 0u;
 }
 
@@ -134,6 +150,16 @@ int main(void)
     nai_runtime_ops_v2_t rq_ops = {0};
     nai_cmd_rq_load_v2_t *rq_command = (nai_cmd_rq_load_v2_t *)rq_model;
     nai_cmd_control_v2_t *rq_end = (nai_cmd_control_v2_t *)(rq_model + 32);
+    uint8_t gemm_model[1152] = {0};
+    nai_model_header_v1_t gemm_header = {0};
+    nai_section_v1_t gemm_commands = {NAI_SECTION_COMMANDS, 0, 0, 128, 32, 2, 0, 0};
+    nai_section_v1_t gemm_constants = {NAI_SECTION_CONSTANTS, 0, 128, 1024, 32, 1, 0, 0};
+    nai_model_view_v1_t gemm_view = {0};
+    nai_resolver_v1_t gemm_resolver = {0x80020000u, sizeof(gemm_model), 0, 0,
+        0x10100000u, 0x7f000u, 0, 0};
+    nai_runtime_ops_v2_t gemm_ops = {0};
+    nai_cmd_gemm32_v2_t *gemm_command = (nai_cmd_gemm32_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *gemm_end = (nai_cmd_control_v2_t *)(gemm_model + 96);
 
     ops.context = &state;
     ops.dma_1d = mock_dma_1d;
@@ -190,6 +216,44 @@ int main(void)
     assert(state.qparam_count == 32u && state.qparam_block == 9u);
     rq_command->qparam_count = 31;
     assert(nai_cmd_dispatch_v2(&rq_view, &rq_resolver, &rq_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_header.total_bytes = sizeof(gemm_model);
+    gemm_command->header.type = NAI_CMD_GEMM32_REQUANT;
+    gemm_command->header.size_bytes = sizeof(*gemm_command);
+    gemm_command->weights.region = NAI_REGION_MODEL_CONSTANTS;
+    gemm_command->ifm.region = NAI_REGION_TCDM_SCRATCH;
+    gemm_command->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    gemm_command->ofm.offset = 0x1000u;
+    gemm_command->dim_m = 2;
+    gemm_command->ofm_row_stride = 64;
+    gemm_command->partial_sum_row_stride = 128;
+    gemm_end->header.type = NAI_CMD_END;
+    gemm_end->header.size_bytes = sizeof(*gemm_end);
+    gemm_view.model = gemm_model;
+    gemm_view.model_bytes = sizeof(gemm_model);
+    gemm_view.header = &gemm_header;
+    gemm_view.commands = &gemm_commands;
+    gemm_view.constants = &gemm_constants;
+    gemm_ops.context = &state;
+    gemm_ops.gemm32 = mock_gemm32;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(state.calls == 1u && state.partial_sums == 0u);
+    assert(state.ofm == 0x10101000u);
+
+    gemm_command->partial_sums.region = NAI_REGION_TCDM_SCRATCH;
+    gemm_command->partial_sums.offset = 0x2000u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(state.partial_sums == 0x10102000u);
+
+    gemm_command->partial_sums.region = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;
 }
