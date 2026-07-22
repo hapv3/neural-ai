@@ -40,6 +40,18 @@ uint32_t nai_crc32(const void *data, uint32_t bytes)
     return ~crc;
 }
 
+static uint32_t crc32_update(uint32_t crc, const uint8_t *data, uint32_t bytes)
+{
+    for (uint32_t index = 0; index < bytes; index++) {
+        crc ^= data[index];
+        for (uint32_t bit = 0; bit < 8u; bit++) {
+            uint32_t mask = 0u - (crc & 1u);
+            crc = (crc >> 1) ^ (0xedb88320u & mask);
+        }
+    }
+    return crc;
+}
+
 static nai_loader_status_t set_section(const nai_section_v1_t *section,
                                        nai_model_view_v1_t *view)
 {
@@ -140,6 +152,7 @@ nai_loader_status_t nai_model_open_v1(const void *model, uint32_t available_byte
         !is_aligned(header->entry_command_off, NAI_ALIGNMENT_BYTES)) {
         return NAI_LOADER_BAD_SECTION;
     }
+    view->public_bindings = (const nai_binding_v1_t *)(view->model + view->bindings->offset);
     return nai_model_validate_bindings_v1(view);
 }
 
@@ -168,8 +181,8 @@ nai_loader_status_t nai_model_validate_bindings_v1(const nai_model_view_v1_t *vi
         return NAI_LOADER_BAD_BINDING;
     }
 
-    const nai_binding_v1_t *bindings =
-        (const nai_binding_v1_t *)(view->model + view->bindings->offset);
+    const nai_binding_v1_t *bindings = view->public_bindings;
+    if (bindings == 0) return NAI_LOADER_BAD_ARGUMENT;
     for (uint32_t index = 0; index < expected_count; index++) {
         const nai_binding_v1_t *binding = &bindings[index];
         uint32_t elements = 1u;
@@ -201,6 +214,92 @@ nai_loader_status_t nai_model_validate_bindings_v1(const nai_model_view_v1_t *vi
         }
     }
     return NAI_LOADER_OK;
+}
+
+static nai_loader_status_t stream_crc(const nai_model_reader_v1_t *reader,
+                                      const nai_section_v1_t *section,
+                                      uint8_t *scratch, uint32_t scratch_bytes)
+{
+    uint32_t crc = 0xffffffffu;
+    uint32_t offset = 0u;
+    while (offset < section->size) {
+        uint32_t chunk = section->size - offset;
+        if (chunk > scratch_bytes) chunk = scratch_bytes;
+        if (reader->read(reader->context, section->offset + offset, scratch, chunk) != 0u)
+            return NAI_LOADER_BAD_SIZE;
+        crc = crc32_update(crc, scratch, chunk);
+        offset += chunk;
+    }
+    return ~crc == section->crc32 ? NAI_LOADER_OK : NAI_LOADER_BAD_CRC;
+}
+
+nai_loader_status_t nai_model_open_stream_v1(const nai_model_reader_v1_t *reader,
+                                             uint32_t available_bytes, uint32_t expected_target,
+                                             void *scratch_pointer, uint32_t scratch_bytes,
+                                             nai_model_stream_storage_v1_t *storage,
+                                             nai_model_view_v1_t *view)
+{
+    uint8_t *scratch = (uint8_t *)scratch_pointer;
+    uint32_t section_bytes;
+
+    if (reader == 0 || reader->read == 0 || scratch == 0 || scratch_bytes == 0u ||
+        storage == 0 || view == 0 || available_bytes < sizeof(nai_model_header_v1_t))
+        return NAI_LOADER_BAD_ARGUMENT;
+    *storage = (nai_model_stream_storage_v1_t){0};
+    *view = (nai_model_view_v1_t){0};
+    if (reader->read(reader->context, 0u, &storage->header, sizeof(storage->header)) != 0u)
+        return NAI_LOADER_BAD_SIZE;
+
+    const nai_model_header_v1_t *header = &storage->header;
+    if (header->magic != NAI_MODEL_MAGIC) return NAI_LOADER_BAD_MAGIC;
+    if (header->abi_major != NAI_ABI_MAJOR || header->abi_minor > NAI_ABI_MINOR)
+        return NAI_LOADER_BAD_VERSION;
+    if (header->target_id != expected_target) return NAI_LOADER_BAD_TARGET;
+    if (!all_zero(header->reserved, 3u)) return NAI_LOADER_BAD_RESERVED;
+    if (header->total_bytes < sizeof(*header) || header->total_bytes > available_bytes ||
+        !is_aligned(header->total_bytes, NAI_ALIGNMENT_BYTES)) return NAI_LOADER_BAD_SIZE;
+    if (header->required_tcdm_align != NAI_ALIGNMENT_BYTES ||
+        header->required_tcdm_bytes > 0x0007f000u) return NAI_LOADER_BAD_ALIGNMENT;
+    if (header->section_count == 0u || header->section_count > NAI_MAX_SECTIONS_V1)
+        return NAI_LOADER_BAD_SECTION;
+    section_bytes = header->section_count * sizeof(nai_section_v1_t);
+    if (!is_aligned(header->section_table_off, NAI_ALIGNMENT_BYTES) ||
+        !valid_range(header->section_table_off, section_bytes, header->total_bytes))
+        return NAI_LOADER_BAD_SECTION;
+    if (reader->read(reader->context, header->section_table_off, storage->sections, section_bytes) != 0u)
+        return NAI_LOADER_BAD_SIZE;
+
+    view->model_bytes = header->total_bytes;
+    view->header = header;
+    view->sections = storage->sections;
+    for (uint32_t index = 0; index < header->section_count; index++) {
+        const nai_section_v1_t *section = &storage->sections[index];
+        nai_loader_status_t status;
+        if (section->reserved != 0u) return NAI_LOADER_BAD_RESERVED;
+        if (section->alignment < NAI_ALIGNMENT_BYTES || !is_power_of_two(section->alignment) ||
+            !is_aligned(section->offset, section->alignment) ||
+            !is_aligned(section->size, NAI_ALIGNMENT_BYTES)) return NAI_LOADER_BAD_ALIGNMENT;
+        if (!valid_range(section->offset, section->size, header->total_bytes)) return NAI_LOADER_BAD_SECTION;
+        status = stream_crc(reader, section, scratch, scratch_bytes);
+        if (status != NAI_LOADER_OK) return status;
+        status = set_section(section, view);
+        if (status != NAI_LOADER_OK) return status;
+    }
+    if (view->commands == 0 || view->constants == 0 || view->tensors == 0 ||
+        view->bindings == 0 || view->qparams == 0) return NAI_LOADER_MISSING_SECTION;
+    if (header->entry_command_off < view->commands->offset ||
+        header->entry_command_off >= view->commands->offset + view->commands->size ||
+        !is_aligned(header->entry_command_off, NAI_ALIGNMENT_BYTES)) return NAI_LOADER_BAD_SECTION;
+
+    uint32_t binding_count = header->input_count + header->output_count;
+    uint32_t binding_bytes;
+    if (binding_count < header->input_count || binding_count > NAI_MAX_PUBLIC_BINDINGS_V1 ||
+        !multiply_checked(binding_count, sizeof(nai_binding_v1_t), &binding_bytes) ||
+        binding_bytes > view->bindings->size) return NAI_LOADER_BAD_BINDING;
+    if (binding_bytes != 0u && reader->read(reader->context, view->bindings->offset,
+        storage->bindings, binding_bytes) != 0u) return NAI_LOADER_BAD_SIZE;
+    view->public_bindings = storage->bindings;
+    return nai_model_validate_bindings_v1(view);
 }
 
 static nai_loader_status_t resolve_binding(const nai_resolver_v1_t *resolver,

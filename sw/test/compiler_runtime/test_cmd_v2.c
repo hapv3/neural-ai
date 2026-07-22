@@ -10,6 +10,23 @@ typedef struct {
     uint32_t length;
 } mock_state_t;
 
+typedef struct {
+    const uint8_t *data;
+    uint32_t bytes;
+    uint32_t largest_read;
+    uint32_t reads;
+} memory_reader_t;
+
+static uint32_t memory_read(void *context, uint32_t offset, void *destination, uint32_t bytes)
+{
+    memory_reader_t *reader = (memory_reader_t *)context;
+    if (offset > reader->bytes || bytes > reader->bytes - offset) return 1u;
+    memcpy(destination, reader->data + offset, bytes);
+    if (bytes > reader->largest_read) reader->largest_read = bytes;
+    reader->reads++;
+    return 0u;
+}
+
 static uint32_t mock_dma_1d(void *context, uint32_t source, uint32_t destination,
                             uint32_t length, uint32_t direction)
 {
@@ -81,12 +98,18 @@ int main(void)
 {
     uint8_t model[1408];
     nai_model_view_v1_t view;
+    nai_model_view_v1_t stream_view;
+    nai_model_stream_storage_v1_t stream_storage;
     nai_binding_address_v1_t address = {NAI_BINDING_OUTPUT, 0, 0x80001000u, 32, 0};
     nai_resolver_v1_t resolver = {0x80000000u, 1408, &address, 1, 0x10100000u, 0x7f000u, 0, 0};
     mock_state_t state = {0};
     nai_runtime_ops_v2_t ops = {0};
     uint32_t completed;
     uint32_t failure;
+    uint8_t scratch[64];
+    uint8_t command_buffer[96];
+    memory_reader_t memory = {model, sizeof(model), 0, 0};
+    nai_model_reader_v1_t reader = {&memory, memory_read};
 
     ops.context = &state;
     ops.dma_1d = mock_dma_1d;
@@ -98,6 +121,17 @@ int main(void)
     assert(state.source == 0x80000140u);
     assert(state.destination == 0x80001000u);
     assert(state.length == 32u);
+
+    state = (mock_state_t){0};
+    assert(nai_model_open_stream_v1(&reader, sizeof(model), NAI_TARGET_ID,
+        scratch, sizeof(scratch), &stream_storage, &stream_view) == NAI_LOADER_OK);
+    assert(nai_cmd_dispatch_stream_v2(&stream_view, &resolver, &ops, &reader,
+        command_buffer, sizeof(command_buffer), &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u);
+    assert(state.calls == 1u);
+    assert(state.source == 0x80000140u);
+    assert(memory.reads > 20u);
+    assert(memory.largest_read == 160u);
 
     ((nai_cmd_header_v2_t *)(model + 224))->type = 0xffffu;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops, &completed, &failure) == NAI_DISPATCH_UNSUPPORTED);
