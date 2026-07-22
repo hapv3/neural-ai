@@ -498,6 +498,67 @@ void systolic_gemm32_accumulate_requant(uint32_t weight_addr,
                                      SYSTOLIC_GEMM32_ACCUM_TILE_M);
 }
 
+static void systolic_gemm32_command_strided(uint32_t weight_addr,
+                                             uint32_t ifm_addr,
+                                             uint32_t psum_addr,
+                                             uint32_t ofm_addr,
+                                             uint32_t dim_m,
+                                             uint32_t accum_en,
+                                             uint32_t requant_en,
+                                             uint32_t ofm_row_stride_bytes,
+                                             uint32_t psum_row_stride_bytes) {
+    if (requant_en) {
+        REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
+    } else {
+        systolic_requant_disable();
+    }
+    systolic_linebuf_disable();
+    systolic_gemm32_tile_ex(weight_addr, ifm_addr, psum_addr, ofm_addr, dim_m,
+                            accum_en, ofm_row_stride_bytes,
+                            ofm_row_stride_bytes != 0u ? 1u : 0u,
+                            psum_row_stride_bytes);
+}
+
+void systolic_gemm32_strided(uint32_t weight_addr,
+                             uint32_t ifm_addr,
+                             uint32_t ofm_addr,
+                             uint32_t dim_m,
+                             uint32_t ofm_row_stride_bytes) {
+    systolic_gemm32_command_strided(weight_addr, ifm_addr, 0u, ofm_addr, dim_m,
+                                    0u, 0u, ofm_row_stride_bytes, 0u);
+}
+
+void systolic_gemm32_requant_strided(uint32_t weight_addr,
+                                     uint32_t ifm_addr,
+                                     uint32_t ofm_addr,
+                                     uint32_t dim_m,
+                                     uint32_t ofm_row_stride_bytes) {
+    systolic_gemm32_command_strided(weight_addr, ifm_addr, 0u, ofm_addr, dim_m,
+                                    0u, 1u, ofm_row_stride_bytes, 0u);
+}
+
+void systolic_gemm32_accumulate_strided(uint32_t weight_addr,
+                                        uint32_t ifm_addr,
+                                        uint32_t psum_addr,
+                                        uint32_t ofm_addr,
+                                        uint32_t dim_m,
+                                        uint32_t ofm_row_stride_bytes,
+                                        uint32_t psum_row_stride_bytes) {
+    systolic_gemm32_command_strided(weight_addr, ifm_addr, psum_addr, ofm_addr, dim_m,
+                                    1u, 0u, ofm_row_stride_bytes, psum_row_stride_bytes);
+}
+
+void systolic_gemm32_accumulate_requant_strided(uint32_t weight_addr,
+                                                uint32_t ifm_addr,
+                                                uint32_t psum_addr,
+                                                uint32_t ofm_addr,
+                                                uint32_t dim_m,
+                                                uint32_t ofm_row_stride_bytes,
+                                                uint32_t psum_row_stride_bytes) {
+    systolic_gemm32_command_strided(weight_addr, ifm_addr, psum_addr, ofm_addr, dim_m,
+                                    1u, 1u, ofm_row_stride_bytes, psum_row_stride_bytes);
+}
+
 void systolic_gemm32_requant(uint32_t weight_addr, uint32_t ifm_addr, uint32_t ofm_addr, uint32_t dim_m) {
     systolic_gemm32_run_shadow_tiled(weight_addr,
                                      ifm_addr,

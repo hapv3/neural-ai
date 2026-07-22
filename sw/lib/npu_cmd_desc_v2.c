@@ -148,15 +148,28 @@ static nai_dispatch_status_v2_t run_gemm(const nai_cmd_gemm32_v2_t *command,
     uint32_t ifm_bytes;
     uint32_t ofm_bytes;
     uint32_t partial_bytes;
-    uint32_t needs_partial = command->header.type != NAI_CMD_GEMM32;
     uint32_t requant = command->header.type == NAI_CMD_GEMM32_REQUANT;
+    uint32_t direct_requant = requant && command->partial_sums.region == 0u;
+    uint32_t needs_partial = command->header.type == NAI_CMD_GEMM32_ACCUM ||
+        (requant && !direct_requant);
+    uint32_t ofm_row_bytes = requant ? 32u : 128u;
+    uint32_t ofm_stride = command->ofm_row_stride != 0u ? command->ofm_row_stride : ofm_row_bytes;
+    uint32_t partial_stride = command->partial_sum_row_stride != 0u ?
+        command->partial_sum_row_stride : 128u;
 
     if (command->dim_m == 0u || command->dim_m > 256u || !all_zero(command->reserved, 8u) ||
-        ops->gemm32 == 0 || !multiply(command->dim_m, 32u, &ifm_bytes) ||
-        !multiply(command->dim_m, requant ? 32u : 128u, &ofm_bytes) ||
-        !multiply(command->dim_m, 128u, &partial_bytes)) {
+        ops->gemm32 == 0 || ofm_stride < ofm_row_bytes || (ofm_stride & 31u) != 0u ||
+        partial_stride < 128u || (partial_stride & 31u) != 0u ||
+        (direct_requant && (command->partial_sums.index != 0u || command->partial_sums.offset != 0u)) ||
+        !multiply(command->dim_m, 32u, &ifm_bytes) ||
+        !multiply(command->dim_m - 1u, ofm_stride, &ofm_bytes) ||
+        ofm_bytes > 0xffffffffu - ofm_row_bytes ||
+        !multiply(command->dim_m - 1u, partial_stride, &partial_bytes) ||
+        partial_bytes > 0xffffffffu - 128u) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
+    ofm_bytes += ofm_row_bytes;
+    partial_bytes += 128u;
     if (resolve(view, resolver, &command->weights, 1024u, NAI_ALIGNMENT_BYTES, &weights) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->ifm, ifm_bytes, NAI_ALIGNMENT_BYTES, &ifm) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->ofm, ofm_bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {

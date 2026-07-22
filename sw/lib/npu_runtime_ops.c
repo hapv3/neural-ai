@@ -89,11 +89,22 @@ static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command
     if (command->header.type == NAI_CMD_GEMM32_REQUANT &&
         !nai_quant_buffer_is_loaded_v1(command->qparam_block)) return 1u;
     if (command->header.type == NAI_CMD_GEMM32) {
-        systolic_gemm32(weights, ifm, ofm, command->dim_m);
+        systolic_gemm32_strided(weights, ifm, ofm, command->dim_m,
+                                command->ofm_row_stride);
     } else if (command->header.type == NAI_CMD_GEMM32_ACCUM) {
-        systolic_gemm32_accumulate(weights, ifm, partial_sums, ofm, command->dim_m);
+        systolic_gemm32_accumulate_strided(weights, ifm, partial_sums, ofm, command->dim_m,
+                                           command->ofm_row_stride,
+                                           command->partial_sum_row_stride);
     } else if (command->header.type == NAI_CMD_GEMM32_REQUANT) {
-        systolic_gemm32_accumulate_requant(weights, ifm, partial_sums, ofm, command->dim_m);
+        if (command->partial_sums.region == 0u) {
+            systolic_gemm32_requant_strided(weights, ifm, ofm, command->dim_m,
+                                            command->ofm_row_stride);
+        } else {
+            systolic_gemm32_accumulate_requant_strided(weights, ifm, partial_sums, ofm,
+                                                       command->dim_m,
+                                                       command->ofm_row_stride,
+                                                       command->partial_sum_row_stride);
+        }
     } else {
         return 1u;
     }
