@@ -7,9 +7,9 @@
 #define NPU_ITCM_BASE   0x10000000
 #define NPU_ITCM_SIZE   0x00008000
 
-// 2. D-TCM (8 KB) - Snitch Local Data
+// 2. D-TCM (32 KB) - Snitch Local Data
 #define NPU_DTCM_BASE   0x10008000
-#define NPU_DTCM_SIZE   0x00002000
+#define NPU_DTCM_SIZE   0x00008000
 
 // 3. Shared Data TCDM (512 KB) - Compute Data
 #define NPU_TCDM_BASE   0x10100000
