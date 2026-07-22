@@ -3,6 +3,7 @@
 #include "hal_systolic.h"
 #include "idma_mm_utils.h"
 #include "npu_layout_ops.h"
+#include "npu_quant_buffer.h"
 
 static uint32_t wait_transfer(uint32_t direction, int transfer_id)
 {
@@ -85,6 +86,8 @@ static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command
                                uint32_t partial_sums, uint32_t ofm)
 {
     (void)context;
+    if (command->header.type == NAI_CMD_GEMM32_REQUANT &&
+        !nai_quant_buffer_is_loaded_v1(command->qparam_block)) return 1u;
     if (command->header.type == NAI_CMD_GEMM32) {
         systolic_gemm32(weights, ifm, ofm, command->dim_m);
     } else if (command->header.type == NAI_CMD_GEMM32_ACCUM) {
@@ -112,6 +115,13 @@ static uint32_t runtime_barrier(void *context)
     return 0u;
 }
 
+static uint32_t runtime_rq_load(void *context, uint32_t qparam_address,
+                                uint32_t qparam_count, uint32_t qparam_block)
+{
+    (void)context;
+    return (uint32_t)nai_quant_buffer_load_l2_v1(qparam_address, qparam_count, qparam_block);
+}
+
 const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
 {
     static const nai_runtime_ops_v2_t ops = {
@@ -121,7 +131,8 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_dma_3d,
         runtime_gemm32,
         runtime_copy_layout,
-        runtime_barrier
+        runtime_barrier,
+        runtime_rq_load
     };
     return &ops;
 }
