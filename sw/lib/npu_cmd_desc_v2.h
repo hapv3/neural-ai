@@ -1,7 +1,7 @@
 #ifndef NPU_CMD_DESC_V2_H
 #define NPU_CMD_DESC_V2_H
 
-#include "npu_model_abi.h"
+#include "npu_model_loader.h"
 
 #define NAI_CMD_FLAG_OPTIONAL  (1u << 0)
 #define NAI_CMD_FLAG_SKIPPABLE (1u << 1)
@@ -44,6 +44,11 @@ typedef struct {
     uint32_t layer_id;
     uint32_t tile_id;
 } nai_cmd_header_v2_t;
+
+typedef struct {
+    nai_cmd_header_v2_t header;
+    uint32_t reserved[4];
+} nai_cmd_control_v2_t;
 
 typedef struct {
     nai_cmd_header_v2_t header;
@@ -116,6 +121,7 @@ typedef struct {
 } nai_cmd_copy_layout_v2_t;
 
 _Static_assert(sizeof(nai_cmd_header_v2_t) == 16, "nai_cmd_header_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_control_v2_t) == 32, "nai_cmd_control_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_1d_v2_t) == 64, "nai_cmd_dma_1d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_2d_v2_t) == 64, "nai_cmd_dma_2d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_3d_v2_t) == 64, "nai_cmd_dma_3d_v2_t ABI size");
@@ -123,5 +129,39 @@ _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size"
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");
+
+typedef enum {
+    NAI_DISPATCH_OK = 0,
+    NAI_DISPATCH_BAD_STREAM = 1,
+    NAI_DISPATCH_BAD_COMMAND = 2,
+    NAI_DISPATCH_UNSUPPORTED = 3,
+    NAI_DISPATCH_BAD_REFERENCE = 4,
+    NAI_DISPATCH_OPERATION_FAILED = 5
+} nai_dispatch_status_v2_t;
+
+typedef struct {
+    void *context;
+    uint32_t (*dma_1d)(void *context, uint32_t source, uint32_t destination,
+                       uint32_t length, uint32_t direction);
+    uint32_t (*dma_2d)(void *context, uint32_t source, uint32_t destination,
+                       uint32_t length, uint32_t source_stride, uint32_t destination_stride,
+                       uint32_t repetitions, uint32_t direction);
+    uint32_t (*dma_3d)(void *context, uint32_t source, uint32_t destination,
+                       uint32_t length, uint32_t source_stride_2, uint32_t destination_stride_2,
+                       uint32_t repetitions_2, uint32_t source_stride_3,
+                       uint32_t destination_stride_3, uint32_t repetitions_3,
+                       uint32_t direction);
+    uint32_t (*gemm32)(void *context, const nai_cmd_gemm32_v2_t *command,
+                       uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
+    uint32_t (*copy_layout)(void *context, const nai_cmd_copy_layout_v2_t *command,
+                           uint32_t source, uint32_t destination);
+    uint32_t (*barrier)(void *context);
+} nai_runtime_ops_v2_t;
+
+nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
+                                             const nai_resolver_v1_t *resolver,
+                                             const nai_runtime_ops_v2_t *ops,
+                                             uint32_t *completed_commands,
+                                             uint32_t *failure_command_offset);
 
 #endif
