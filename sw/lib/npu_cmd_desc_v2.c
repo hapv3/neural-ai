@@ -249,3 +249,89 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
     }
     return NAI_DISPATCH_BAD_STREAM;
 }
+
+nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *view,
+                                                    const nai_resolver_v1_t *resolver,
+                                                    const nai_runtime_ops_v2_t *ops,
+                                                    const nai_model_reader_v1_t *reader,
+                                                    void *command_buffer,
+                                                    uint32_t command_buffer_bytes,
+                                                    uint32_t *completed_commands,
+                                                    uint32_t *failure_command_offset)
+{
+    uint32_t offset;
+    uint32_t completed = 0u;
+
+    if (completed_commands != 0) *completed_commands = 0u;
+    if (failure_command_offset != 0) *failure_command_offset = 0u;
+    if (view == 0 || view->header == 0 || view->commands == 0 || resolver == 0 || ops == 0 ||
+        reader == 0 || reader->read == 0 || command_buffer == 0 ||
+        command_buffer_bytes < sizeof(nai_cmd_gemm32_v2_t) ||
+        view->header->entry_command_off < view->commands->offset) return NAI_DISPATCH_BAD_STREAM;
+    offset = view->header->entry_command_off - view->commands->offset;
+
+    while (offset < view->commands->size && completed <= view->header->command_count) {
+        nai_cmd_header_v2_t header;
+        nai_dispatch_status_v2_t status = NAI_DISPATCH_OK;
+        uint32_t model_offset = view->commands->offset + offset;
+        if (!valid_range(offset, sizeof(header), view->commands->size) ||
+            reader->read(reader->context, model_offset, &header, sizeof(header)) != 0u)
+            return NAI_DISPATCH_BAD_STREAM;
+        if (header.size_bytes < 32u || (header.size_bytes & 31u) != 0u ||
+            !valid_range(offset, header.size_bytes, view->commands->size) ||
+            (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u) {
+            status = NAI_DISPATCH_BAD_COMMAND;
+        } else if (header.type == NAI_CMD_END || header.type == NAI_CMD_BARRIER ||
+                   header.type == NAI_CMD_DMA_1D || header.type == NAI_CMD_DMA_2D ||
+                   header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_GEMM32 ||
+                   header.type == NAI_CMD_GEMM32_ACCUM || header.type == NAI_CMD_GEMM32_REQUANT ||
+                   header.type == NAI_CMD_COPY_LAYOUT) {
+            if (header.size_bytes > command_buffer_bytes ||
+                reader->read(reader->context, model_offset, command_buffer, header.size_bytes) != 0u)
+                status = NAI_DISPATCH_BAD_STREAM;
+            else {
+                if (header.type == NAI_CMD_END) {
+                    if (header.size_bytes != sizeof(nai_cmd_control_v2_t) ||
+                        !all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) ||
+                        completed != view->header->command_count) status = NAI_DISPATCH_BAD_STREAM;
+                    else {
+                        if (completed_commands != 0) *completed_commands = completed;
+                        return NAI_DISPATCH_OK;
+                    }
+                } else if (header.type == NAI_CMD_BARRIER && header.size_bytes == sizeof(nai_cmd_control_v2_t)) {
+                    status = all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) &&
+                        ops->barrier != 0 && ops->barrier(ops->context) == 0u ?
+                        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+                } else if (header.type == NAI_CMD_DMA_1D && header.size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
+                    status = run_dma_1d((const nai_cmd_dma_1d_v2_t *)command_buffer, view, resolver, ops);
+                } else if (header.type == NAI_CMD_DMA_2D && header.size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {
+                    status = run_dma_2d((const nai_cmd_dma_2d_v2_t *)command_buffer, view, resolver, ops);
+                } else if (header.type == NAI_CMD_DMA_3D && header.size_bytes == sizeof(nai_cmd_dma_3d_v2_t)) {
+                    status = run_dma_3d((const nai_cmd_dma_3d_v2_t *)command_buffer, view, resolver, ops);
+                } else if ((header.type == NAI_CMD_GEMM32 || header.type == NAI_CMD_GEMM32_ACCUM ||
+                            header.type == NAI_CMD_GEMM32_REQUANT) &&
+                           header.size_bytes == sizeof(nai_cmd_gemm32_v2_t)) {
+                    status = run_gemm((const nai_cmd_gemm32_v2_t *)command_buffer, view, resolver, ops);
+                } else if (header.type == NAI_CMD_COPY_LAYOUT &&
+                           header.size_bytes == sizeof(nai_cmd_copy_layout_v2_t)) {
+                    status = run_copy((const nai_cmd_copy_layout_v2_t *)command_buffer, view, resolver, ops);
+                } else {
+                    status = NAI_DISPATCH_BAD_COMMAND;
+                }
+            }
+        } else if ((header.flags & (NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) ==
+                   (NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) {
+            status = NAI_DISPATCH_OK;
+        } else {
+            status = NAI_DISPATCH_UNSUPPORTED;
+        }
+        if (status != NAI_DISPATCH_OK) {
+            if (completed_commands != 0) *completed_commands = completed;
+            if (failure_command_offset != 0) *failure_command_offset = model_offset;
+            return status;
+        }
+        completed++;
+        offset += header.size_bytes;
+    }
+    return NAI_DISPATCH_BAD_STREAM;
+}
