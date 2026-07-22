@@ -15,6 +15,7 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
 SRCS = start.S main.c \
        ../../lib/npu_cmd_desc.c ../../lib/npu_cmd_desc_v2.c \
        ../../lib/npu_model_loader.c ../../lib/npu_model_runtime.c \
+       ../../lib/npu_quant_buffer.c \
        ../../lib/npu_layout_ops.c ../../lib/npu_runtime_ops.c \
        ../../lib/npu_runtime_memory.c \
        ../../lib/hal_systolic.c
@@ -22,6 +23,7 @@ SRCS = start.S main.c \
 HDRS = ../../lib/npu_cmd_desc.h ../../lib/npu_cmd_desc_v2.h \
        ../../lib/npu_model_abi.h ../../lib/npu_model_loader.h \
        ../../lib/npu_model_runtime.h ../../lib/npu_layout_ops.h \
+       ../../lib/npu_quant_buffer.h \
        ../../lib/npu_runtime_ops.h ../../lib/npu_memory_map.h \
        ../../lib/npu_types.h ../../lib/idma_mm_utils.h ../../lib/hal_systolic.h
 

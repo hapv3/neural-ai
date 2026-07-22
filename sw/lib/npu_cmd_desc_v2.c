@@ -45,6 +45,33 @@ static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
+static nai_dispatch_status_v2_t run_rq_load(const nai_cmd_rq_load_v2_t *command,
+                                             const nai_model_view_v1_t *view,
+                                             const nai_resolver_v1_t *resolver,
+                                             const nai_runtime_ops_v2_t *ops)
+{
+    uint32_t qparam_offset;
+    uint32_t qparam_bytes;
+    uint32_t address;
+    if (command->qparam_count != 32u || command->reserved != 0u || ops->rq_load == 0 ||
+        view->qparams == 0 || command->qparam_index > view->qparams->element_count ||
+        command->qparam_count > view->qparams->element_count - command->qparam_index ||
+        !multiply(command->qparam_index, sizeof(nai_qparam_v1_t), &qparam_offset) ||
+        !multiply(command->qparam_count, sizeof(nai_qparam_v1_t), &qparam_bytes) ||
+        !valid_range(qparam_offset, qparam_bytes, view->qparams->size)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    if (resolver->model_bytes < view->model_bytes ||
+        resolver->model_base > 0xffffffffu - view->qparams->offset ||
+        resolver->model_base + view->qparams->offset > 0xffffffffu - qparam_offset) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    address = resolver->model_base + view->qparams->offset + qparam_offset;
+    if ((address & (NAI_ALIGNMENT_BYTES - 1u)) != 0u) return NAI_DISPATCH_BAD_REFERENCE;
+    return ops->rq_load(ops->context, address, command->qparam_count,
+        command->qparam_block) == 0u ? NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
 static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
                                            const nai_model_view_v1_t *view,
                                            const nai_resolver_v1_t *resolver,
@@ -222,6 +249,8 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
             status = all_zero(((const nai_cmd_control_v2_t *)header)->reserved, 4u) &&
                 ops->barrier != 0 && ops->barrier(ops->context) == 0u ?
                 NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+        } else if (header->type == NAI_CMD_RQ_LOAD && header->size_bytes == sizeof(nai_cmd_rq_load_v2_t)) {
+            status = run_rq_load((const nai_cmd_rq_load_v2_t *)header, view, resolver, ops);
         } else if (header->type == NAI_CMD_DMA_1D && header->size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
             status = run_dma_1d((const nai_cmd_dma_1d_v2_t *)header, view, resolver, ops);
         } else if (header->type == NAI_CMD_DMA_2D && header->size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {
@@ -282,6 +311,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
             (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u) {
             status = NAI_DISPATCH_BAD_COMMAND;
         } else if (header.type == NAI_CMD_END || header.type == NAI_CMD_BARRIER ||
+                   header.type == NAI_CMD_RQ_LOAD ||
                    header.type == NAI_CMD_DMA_1D || header.type == NAI_CMD_DMA_2D ||
                    header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_GEMM32 ||
                    header.type == NAI_CMD_GEMM32_ACCUM || header.type == NAI_CMD_GEMM32_REQUANT ||
@@ -302,6 +332,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                     status = all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) &&
                         ops->barrier != 0 && ops->barrier(ops->context) == 0u ?
                         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+                } else if (header.type == NAI_CMD_RQ_LOAD &&
+                           header.size_bytes == sizeof(nai_cmd_rq_load_v2_t)) {
+                    status = run_rq_load((const nai_cmd_rq_load_v2_t *)command_buffer,
+                        view, resolver, ops);
                 } else if (header.type == NAI_CMD_DMA_1D && header.size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
                     status = run_dma_1d((const nai_cmd_dma_1d_v2_t *)command_buffer, view, resolver, ops);
                 } else if (header.type == NAI_CMD_DMA_2D && header.size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {

@@ -5,6 +5,7 @@
 #include "npu_cmd_desc_v2.h"
 #include "npu_memory_map.h"
 #include "npu_model_loader.h"
+#include "npu_quant_buffer.h"
 #include "npu_runtime_ops.h"
 
 typedef struct {
@@ -141,6 +142,7 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
     resolver = (nai_resolver_v1_t){invocation.model_base, invocation.model_bytes,
         g_binding_addresses, invocation.binding_count, NPU_TCDM_BASE,
         view.header->required_tcdm_bytes, 0u, 0u};
+    nai_quant_buffer_reset_v1();
     REG_WRITE(NPU_CMD_STATUS, NPU_CMD_STATUS_RUNNING);
     nai_dispatch_status_v2_t status = nai_cmd_dispatch_stream_v2(&view, &resolver,
         nai_default_runtime_ops_v2(), &model_reader, g_command_buffer, sizeof(g_command_buffer),

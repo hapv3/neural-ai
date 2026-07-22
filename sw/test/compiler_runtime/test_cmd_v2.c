@@ -8,6 +8,9 @@ typedef struct {
     uint32_t source;
     uint32_t destination;
     uint32_t length;
+    uint32_t qparam_address;
+    uint32_t qparam_count;
+    uint32_t qparam_block;
 } mock_state_t;
 
 typedef struct {
@@ -36,6 +39,17 @@ static uint32_t mock_dma_1d(void *context, uint32_t source, uint32_t destination
     state->source = source;
     state->destination = destination;
     state->length = length;
+    return 0u;
+}
+
+static uint32_t mock_rq_load(void *context, uint32_t qparam_address,
+                             uint32_t qparam_count, uint32_t qparam_block)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->qparam_address = qparam_address;
+    state->qparam_count = qparam_count;
+    state->qparam_block = qparam_block;
     return 0u;
 }
 
@@ -110,6 +124,16 @@ int main(void)
     uint8_t command_buffer[96];
     memory_reader_t memory = {model, sizeof(model), 0, 0};
     nai_model_reader_v1_t reader = {&memory, memory_read};
+    uint8_t rq_model[1088] = {0};
+    nai_model_header_v1_t rq_header = {0};
+    nai_section_v1_t rq_commands = {NAI_SECTION_COMMANDS, 0, 0, 64, 32, 2, 0, 0};
+    nai_section_v1_t rq_qparams = {NAI_SECTION_QPARAMS, 0, 64, 1024, 32, 32, 0, 0};
+    nai_model_view_v1_t rq_view = {0};
+    nai_resolver_v1_t rq_resolver = {0x80010000u, sizeof(rq_model), 0, 0,
+        0x10100000u, 0x7f000u, 0, 0};
+    nai_runtime_ops_v2_t rq_ops = {0};
+    nai_cmd_rq_load_v2_t *rq_command = (nai_cmd_rq_load_v2_t *)rq_model;
+    nai_cmd_control_v2_t *rq_end = (nai_cmd_control_v2_t *)(rq_model + 32);
 
     ops.context = &state;
     ops.dma_1d = mock_dma_1d;
@@ -141,5 +165,31 @@ int main(void)
     ((nai_cmd_header_v2_t *)(model + 224))->flags = NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops, &completed, &failure) == NAI_DISPATCH_OK);
     assert(completed == 1u);
+
+    rq_header.command_count = 1;
+    rq_header.entry_command_off = 0;
+    rq_header.total_bytes = sizeof(rq_model);
+    rq_command->header.type = NAI_CMD_RQ_LOAD;
+    rq_command->header.size_bytes = sizeof(*rq_command);
+    rq_command->qparam_count = 32;
+    rq_command->qparam_block = 9;
+    rq_end->header.type = NAI_CMD_END;
+    rq_end->header.size_bytes = sizeof(*rq_end);
+    rq_view.model = rq_model;
+    rq_view.model_bytes = sizeof(rq_model);
+    rq_view.header = &rq_header;
+    rq_view.commands = &rq_commands;
+    rq_view.qparams = &rq_qparams;
+    rq_ops.context = &state;
+    rq_ops.rq_load = mock_rq_load;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&rq_view, &rq_resolver, &rq_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.qparam_address == 0x80010040u);
+    assert(state.qparam_count == 32u && state.qparam_block == 9u);
+    rq_command->qparam_count = 31;
+    assert(nai_cmd_dispatch_v2(&rq_view, &rq_resolver, &rq_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;
 }
