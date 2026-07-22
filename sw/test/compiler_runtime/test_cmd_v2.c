@@ -1,0 +1,111 @@
+#include "npu_cmd_desc_v2.h"
+
+#include <assert.h>
+#include <string.h>
+
+typedef struct {
+    uint32_t calls;
+    uint32_t source;
+    uint32_t destination;
+    uint32_t length;
+} mock_state_t;
+
+static uint32_t mock_dma_1d(void *context, uint32_t source, uint32_t destination,
+                            uint32_t length, uint32_t direction)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    (void)direction;
+    state->calls++;
+    state->source = source;
+    state->destination = destination;
+    state->length = length;
+    return 0u;
+}
+
+static void make_dma_model(uint8_t model[1408])
+{
+    nai_model_header_v1_t *header;
+    nai_section_v1_t *sections;
+    nai_cmd_dma_1d_v2_t *dma;
+    nai_cmd_header_v2_t *end;
+    nai_binding_v1_t *binding;
+
+    memset(model, 0, 1408);
+    header = (nai_model_header_v1_t *)model;
+    sections = (nai_section_v1_t *)(model + 64);
+    dma = (nai_cmd_dma_1d_v2_t *)(model + 224);
+    end = (nai_cmd_header_v2_t *)(model + 288);
+    binding = (nai_binding_v1_t *)(model + 1344);
+
+    header->magic = NAI_MODEL_MAGIC;
+    header->abi_major = NAI_ABI_MAJOR;
+    header->target_id = NAI_TARGET_ID;
+    header->total_bytes = 1408;
+    header->section_count = 5;
+    header->section_table_off = 64;
+    header->entry_command_off = 224;
+    header->command_count = 1;
+    header->required_tcdm_align = 32;
+    header->output_count = 1;
+
+    sections[0] = (nai_section_v1_t){NAI_SECTION_COMMANDS, 0, 224, 96, 32, 2, 0, 0};
+    sections[1] = (nai_section_v1_t){NAI_SECTION_CONSTANTS, 0, 320, 1024, 32, 1, 0, 0};
+    sections[2] = (nai_section_v1_t){NAI_SECTION_TENSORS, 0, 1344, 0, 32, 0, 0, 0};
+    sections[3] = (nai_section_v1_t){NAI_SECTION_BINDINGS, 0, 1344, 64, 32, 1, 0, 0};
+    sections[4] = (nai_section_v1_t){NAI_SECTION_QPARAMS, 0, 1408, 0, 32, 0, 0, 0};
+
+    dma->header.type = NAI_CMD_DMA_1D;
+    dma->header.size_bytes = sizeof(*dma);
+    dma->source.region = NAI_REGION_MODEL_CONSTANTS;
+    dma->destination.region = NAI_REGION_OUTPUT_BINDING;
+    dma->length = 32;
+    end->type = NAI_CMD_END;
+    end->size_bytes = 32;
+
+    binding->direction = NAI_BINDING_OUTPUT;
+    binding->data_type = NAI_DTYPE_I8;
+    binding->layout = NAI_LAYOUT_NHWC;
+    binding->rank = 4;
+    binding->dimensions[0] = 1;
+    binding->dimensions[1] = 1;
+    binding->dimensions[2] = 1;
+    binding->dimensions[3] = 32;
+    binding->byte_size = 32;
+
+    for (uint32_t index = 0; index < 5u; index++) {
+        sections[index].crc32 = nai_crc32(model + sections[index].offset, sections[index].size);
+    }
+}
+
+int main(void)
+{
+    uint8_t model[1408];
+    nai_model_view_v1_t view;
+    nai_binding_address_v1_t address = {NAI_BINDING_OUTPUT, 0, 0x80001000u, 32, 0};
+    nai_resolver_v1_t resolver = {0x80000000u, 1408, &address, 1, 0x10100000u, 0x7f000u, 0, 0};
+    mock_state_t state = {0};
+    nai_runtime_ops_v2_t ops = {0};
+    uint32_t completed;
+    uint32_t failure;
+
+    ops.context = &state;
+    ops.dma_1d = mock_dma_1d;
+    make_dma_model(model);
+    assert(nai_model_open_v1(model, sizeof(model), NAI_TARGET_ID, &view) == NAI_LOADER_OK);
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops, &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u);
+    assert(state.calls == 1u);
+    assert(state.source == 0x80000140u);
+    assert(state.destination == 0x80001000u);
+    assert(state.length == 32u);
+
+    ((nai_cmd_header_v2_t *)(model + 224))->type = 0xffffu;
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops, &completed, &failure) == NAI_DISPATCH_UNSUPPORTED);
+    assert(completed == 0u);
+    assert(failure == 224u);
+
+    ((nai_cmd_header_v2_t *)(model + 224))->flags = NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE;
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops, &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u);
+    return 0;
+}
