@@ -2,6 +2,13 @@
 #include "hal_systolic.h"
 #include "idma_mm_utils.h"
 #include "npu_memory_map.h"
+#include "npu_model_abi.h"
+#include "npu_model_runtime.h"
+
+extern uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
+                                               uint32_t invocation_bytes,
+                                               uint32_t staging_base,
+                                               uint32_t staging_bytes) __attribute__((weak));
 
 static uint32_t g_cmd_done_count;
 
@@ -562,5 +569,14 @@ uint32_t npu_cmd_dispatch_from_ctrl(void) {
         return cmd_fail(NPU_CMD_FAIL_BAD_ALIGN, cmd_tcdm_base);
     }
 
+    if (!idma_memcpy_blocking(cmd_l2_base, cmd_tcdm_base, NPU_CMD_ALIGN_BYTES)) {
+        return cmd_fail(NPU_CMD_FAIL_COPY, cmd_l2_base);
+    }
+    if (*(volatile uint32_t *)(unsigned long)cmd_tcdm_base == NAI_INVOCATION_MAGIC) {
+        if (nai_runtime_dispatch_from_ctrl == 0) {
+            return cmd_fail(NPU_CMD_FAIL_UNSUPPORTED, cmd_l2_base);
+        }
+        return nai_runtime_dispatch_from_ctrl(cmd_l2_base, cmd_total_bytes, cmd_tcdm_base, cmd_tcdm_bytes);
+    }
     return npu_cmd_dispatch_stream(cmd_l2_base, cmd_total_bytes, cmd_tcdm_base, cmd_tcdm_bytes);
 }
