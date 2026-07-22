@@ -11,6 +11,7 @@ from npu_test_utils import (
     NPU_CMD_FAIL_CODE,
     NPU_CMD_FAIL_PTR,
     NPU_CMD_STATUS,
+    NPU_CMD_STATUS_FAIL,
     NPU_CMD_STATUS_PASS,
     _axi_read32,
     load_firmware_elf_axi,
@@ -35,6 +36,8 @@ OFM_SCRATCH_OFFSET = 0x00030000
 
 NAI_MODEL_MAGIC = 0x4D49414E
 NAI_INVOCATION_MAGIC = 0x5649414E
+NPU_CMD_FAIL_BAD_MODEL = 0xBADCD00B
+NPU_CMD_FAIL_BAD_BINDING = 0xBADCD00C
 
 
 def _ref(region, index=0, offset=0):
@@ -353,3 +356,56 @@ async def test_compiler_runtime_gemm_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 16
     for base, expected in zip(output_bases, expected_outputs):
         assert bytes(await read_l2_bytes(dut, base, len(expected))) == expected
+
+
+@cocotb.test()
+async def test_compiler_runtime_rejects_invalid_bindings(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    model = build_model()
+    invocation, original_addresses = build_invocation(model)
+    invalid_records = []
+    misaligned = bytearray(original_addresses)
+    struct.pack_into("<I", misaligned, 20, OUTPUT_BASE + 4)
+    invalid_records.append(misaligned)
+    undersized = bytearray(original_addresses)
+    struct.pack_into("<I", undersized, 24, 16)
+    invalid_records.append(undersized)
+
+    for binding_addresses in invalid_records:
+        await reset_dut(dut)
+        await write_l2_bytes(dut, MODEL_BASE, model)
+        await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+        await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+        await _load_and_run(dut, axi_master, invocation)
+        assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
+        assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == NPU_CMD_FAIL_BAD_BINDING
+        assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 0
+
+
+@cocotb.test()
+async def test_compiler_runtime_rejects_bad_model_crc(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+    model = bytearray(build_model())
+    model[240] ^= 0x01
+    invocation, binding_addresses = build_invocation(model)
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == NPU_CMD_FAIL_BAD_MODEL
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 0
