@@ -1,7 +1,9 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
+NEURAL_COMPILER_ROOT ?= $(abspath ../../../..)/neural-compiler
+SIM_BUILD ?= /tmp/neural-ai-compiled-model
 
-.PHONY: all check clean
+.PHONY: all check firmware sim clean
 
 all: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer
 
@@ -13,6 +15,16 @@ check: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer
 	./test_cmd_v2
 	./test_copy_layout
 	./test_quant_buffer
+
+firmware:
+	$(MAKE) -C ../../runtime/neural_ai all
+
+sim: firmware
+	PYTHONPATH="$(CURDIR)" NEURAL_COMPILER_ROOT="$(NEURAL_COMPILER_ROOT)" \
+	$(MAKE) -C ../../../hw/rtl/cluster sim \
+		COCOTB_TEST_MODULES=test_compiled_model \
+		CLUSTER_SIM_NAME=compiled_model \
+		SIM_BUILD="$(SIM_BUILD)"
 
 test_cmd_v2: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
 	$(CC) $(CFLAGS) -I../../lib test_cmd_v2.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@

@@ -1,4 +1,9 @@
+import base64
+import os
 import struct
+import subprocess
+import sys
+import tempfile
 import zlib
 from pathlib import Path
 
@@ -28,7 +33,7 @@ INPUT_BASE = 0x80000000
 OUTPUT_BASE = 0x80001000
 INVOCATION_BASE = 0x80040000
 MODEL_BASE = 0x80041000
-BINDING_TABLE_BASE = 0x80042000
+BINDING_TABLE_BASE = 0x80044000
 TCDM_SCRATCH_BASE = 0x10100000
 WEIGHT_SCRATCH_OFFSET = 0x00010000
 IFM_SCRATCH_OFFSET = 0x00020000
@@ -261,6 +266,52 @@ def _signed_input(dim_m, seed):
     return bytes(value & 0xFF for value in values), values
 
 
+def _compile_fully_connected_model():
+    default_root = Path(__file__).resolve().parents[4] / "neural-compiler"
+    compiler_root = Path(os.environ.get("NEURAL_COMPILER_ROOT", default_root)).resolve()
+    extension_modules = list((compiler_root / "ethosu").glob("regor*.so"))
+    if not extension_modules:
+        raise RuntimeError(
+            f"Neural compiler Python extension is not built under {compiler_root}/ethosu"
+        )
+
+    fixture = Path(__file__).with_name("fully_connected_k33_n34.tflite.b64")
+    model_data = base64.b64decode(fixture.read_text(encoding="ascii"))
+    with tempfile.TemporaryDirectory(prefix="neural-ai-compiled-model-") as temporary_dir:
+        temporary_path = Path(temporary_dir)
+        input_path = temporary_path / "fully_connected_k33_n34.tflite"
+        output_path = temporary_path / "output"
+        input_path.write_bytes(model_data)
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; from ethosu.vela.vela import main; raise SystemExit(main(sys.argv[1:]))",
+            "--accelerator-config=neural-ai",
+            "--output-format=nai",
+            f"--output-dir={output_path}",
+            str(input_path),
+        ]
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(compiler_root), environment.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        result = subprocess.run(
+            command,
+            cwd=compiler_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Neural compiler failed ({result.returncode}):\n{result.stdout}\n{result.stderr}"
+            )
+        package = (output_path / "fully_connected_k33_n34.nai").read_bytes()
+    assert package[:4] == b"NAIM"
+    return package
+
+
 async def _load_and_run(dut, axi_master, invocation):
     await load_firmware_elf_axi(
         dut,
@@ -356,6 +407,40 @@ async def test_compiler_runtime_gemm_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 16
     for base, expected in zip(output_bases, expected_outputs):
         assert bytes(await read_l2_bytes(dut, base, len(expected))) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_fully_connected_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model = _compile_fully_connected_model()
+    input_values = [(index % 5) - 2 for index in range(33)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytes([sum(input_values) & 0xFF] * 34)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await _load_and_run(dut, axi_master, invocation)
+
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
 
 
 @cocotb.test()
