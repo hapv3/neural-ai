@@ -245,6 +245,15 @@ int main(void)
     assert(state.calls == 1u && state.partial_sums == 0u);
     assert(state.ofm == 0x10101000u);
 
+    for (uint32_t invalid_dim_m = 257u; invalid_dim_m <= 511u; invalid_dim_m += 254u) {
+        gemm_command->dim_m = invalid_dim_m;
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+            &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+        assert(completed == 0u && state.calls == 0u);
+    }
+    gemm_command->dim_m = 2u;
+
     gemm_command->partial_sums.region = NAI_REGION_TCDM_SCRATCH;
     gemm_command->partial_sums.offset = 0x2000u;
     state = (mock_state_t){0};
