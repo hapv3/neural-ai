@@ -100,7 +100,12 @@ def _gemm(weights, ifm, ofm, dim_m, tile):
 def _copy_layout(source, destination, mode, dimensions, tile):
     command = _command_header(18, 96, tile=tile)
     command += source + destination
-    source_layout, destination_layout = (1, 2) if mode == 1 else (2, 1)
+    source_layout, destination_layout = {
+        1: (1, 2),
+        2: (2, 1),
+        3: (1, 3),
+        4: (3, 1),
+    }[mode]
     channels = dimensions[3]
     compact_stride = channels
     native_stride = ((channels + 31) // 32) * 32
@@ -189,6 +194,19 @@ def build_layout_model():
         [
             _copy_layout(_ref(3), _ref(6), 1, dimensions, 0),
             _copy_layout(_ref(6), _ref(4), 2, dimensions, 1),
+            _command_header(0, 32, tile=2).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
+    return _package(commands, b"", bindings, 2, 256, 1, 1)
+
+
+def build_c32_layout_model():
+    dimensions = (1, 2, 2, 33)
+    commands = b"".join(
+        [
+            _copy_layout(_ref(3), _ref(6), 3, dimensions, 0),
+            _copy_layout(_ref(6), _ref(4), 4, dimensions, 1),
             _command_header(0, 32, tile=2).ljust(32, b"\x00"),
         ]
     )
@@ -420,6 +438,36 @@ async def test_compiler_runtime_layout_round_trip(dut):
 
     input_data = bytes((index * 11 + 5) & 0xFF for index in range(132))
     model = build_layout_model()
+    invocation, binding_addresses = build_invocation(model)
+    binding_addresses = bytearray(binding_addresses)
+    struct.pack_into("<I", binding_addresses, 8, len(input_data))
+    struct.pack_into("<I", binding_addresses, 24, len(input_data))
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(input_data)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_c32_layout_round_trip(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    input_data = bytes((index * 13 + 7) & 0xFF for index in range(132))
+    model = build_c32_layout_model()
     invocation, binding_addresses = build_invocation(model)
     binding_addresses = bytearray(binding_addresses)
     struct.pack_into("<I", binding_addresses, 8, len(input_data))
