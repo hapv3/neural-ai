@@ -106,6 +106,28 @@ def _pointwise_c32(weights, ifm, partial, ofm, rows, input_groups, output_groups
     return command
 
 
+def _depthwise_c32(weights, ifm, ofm, input_h, input_w, output_h, output_w,
+                   channels, stride_h, stride_w, pad_h, pad_w, qparam_block, tile):
+    command = _command_header(11, 96, tile=tile)
+    command += weights + ifm + ofm
+    command += struct.pack(
+        "<10I4I",
+        input_h,
+        input_w,
+        output_h,
+        output_w,
+        channels,
+        stride_h,
+        stride_w,
+        pad_h,
+        pad_w,
+        qparam_block,
+        *([0] * 4),
+    )
+    assert len(command) == 96
+    return command
+
+
 def _copy_layout(source, destination, mode, dimensions, tile):
     command = _command_header(18, 96, tile=tile)
     command += source + destination
@@ -245,6 +267,34 @@ def build_pointwise_c32_model(height=2, width=2, channels=64):
     )
     bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
     return _package(commands, weights, bindings, 4, 0x2200, 1, 1, qparams)
+
+
+def build_depthwise_c32_model(height=3, width=3, channels=32):
+    groups = (channels + 31) // 32
+    weights = bytearray(groups * 3 * 3 * 32)
+    for group in range(groups):
+        for lane in range(32):
+            channel = group * 32 + lane
+            if channel < channels:
+                weights[((group * 9 + 4) * 32) + lane] = 1
+    qparams = b"".join(
+        struct.pack("<iiIiiiII", 0, 1 << 30, 30, 0, -128, 127, 0, 0)
+        for _ in range(32)
+    )
+    dimensions = (1, height, width, channels)
+    commands = b"".join(
+        [
+            _copy_layout(_ref(3), _ref(6), 3, dimensions, 0),
+            _command_header(5, 32, tile=1) + struct.pack("<4I", 0, 32, 0, 0),
+            _depthwise_c32(_ref(1), _ref(6), _ref(6, offset=0x1000),
+                           height, width, height, width, channels,
+                           1, 1, 1, 1, 0, 2),
+            _copy_layout(_ref(6, offset=0x1000), _ref(4), 4, dimensions, 3),
+            _command_header(0, 32, tile=4).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
+    return _package(commands, bytes(weights), bindings, 4, 0x2200, 1, 1, qparams)
 
 
 def build_gemm_model(dimensions):
@@ -602,6 +652,42 @@ async def test_compiler_runtime_pointwise_c32_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_runtime_depthwise_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 3, 3, 32
+    input_values = [((pixel + channel * 3) % 9) - 4
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    model = build_depthwise_c32_model(height, width, channels)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(input_data)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(input_data)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
 
 
 @cocotb.test()

@@ -243,6 +243,67 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
+static nai_dispatch_status_v2_t run_depthwise_c32(
+    const nai_cmd_depthwise_c32_v2_t *command,
+    const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver,
+    const nai_runtime_ops_v2_t *ops)
+{
+    uint32_t weights;
+    uint32_t ifm;
+    uint32_t ofm;
+    uint32_t groups;
+    uint32_t input_pixels;
+    uint32_t output_pixels;
+    uint32_t input_bytes;
+    uint32_t output_bytes;
+    uint32_t weight_bytes;
+    uint32_t expected_output_h;
+    uint32_t expected_output_w;
+    uint32_t padded_input_h;
+    uint32_t padded_input_w;
+
+    if (command->input_h == 0u || command->input_w == 0u ||
+        command->output_h == 0u || command->output_w == 0u ||
+        command->channels == 0u || ops->depthwise_c32 == 0 ||
+        !all_zero(command->reserved, 4u) ||
+        command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        (command->stride_h != 1u && command->stride_h != 2u) ||
+        (command->stride_w != 1u && command->stride_w != 2u) ||
+        command->pad_h != 1u || command->pad_w != 1u ||
+        command->input_h > 0xffffu || command->input_w > 0xffffu ||
+        command->output_h > 0xffffu || command->output_w > 0xffffu ||
+        command->channels > 0xffffu ||
+        command->input_h > 0xffffffffu - 2u * command->pad_h ||
+        command->input_w > 0xffffffffu - 2u * command->pad_w) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    padded_input_h = command->input_h + 2u * command->pad_h;
+    padded_input_w = command->input_w + 2u * command->pad_w;
+    if (padded_input_h < 3u || padded_input_w < 3u) return NAI_DISPATCH_BAD_COMMAND;
+    expected_output_h = ((padded_input_h - 3u) / command->stride_h) + 1u;
+    expected_output_w = ((padded_input_w - 3u) / command->stride_w) + 1u;
+    groups = (command->channels + 31u) / 32u;
+    if (command->output_h != expected_output_h || command->output_w != expected_output_w ||
+        !multiply(command->input_h, command->input_w, &input_pixels) ||
+        !multiply(command->output_h, command->output_w, &output_pixels) ||
+        !multiply(input_pixels, groups, &input_bytes) ||
+        !multiply(input_bytes, 32u, &input_bytes) ||
+        !multiply(output_pixels, groups, &output_bytes) ||
+        !multiply(output_bytes, 32u, &output_bytes) ||
+        !multiply(groups, 3u * 3u * 32u, &weight_bytes)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    if (resolve(view, resolver, &command->weights, weight_bytes, NAI_ALIGNMENT_BYTES, &weights) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->ifm, input_bytes, NAI_ALIGNMENT_BYTES, &ifm) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->ofm, output_bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    return ops->depthwise_c32(ops->context, command, weights, ifm, ofm) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
 static nai_dispatch_status_v2_t run_copy(const nai_cmd_copy_layout_v2_t *command,
                                          const nai_model_view_v1_t *view,
                                          const nai_resolver_v1_t *resolver,
@@ -337,6 +398,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                    header->size_bytes == sizeof(nai_cmd_pointwise_c32_v2_t)) {
             status = run_pointwise_c32((const nai_cmd_pointwise_c32_v2_t *)header,
                 view, resolver, ops);
+        } else if (header->type == NAI_CMD_DEPTHWISE_C32 &&
+                   header->size_bytes == sizeof(nai_cmd_depthwise_c32_v2_t)) {
+            status = run_depthwise_c32((const nai_cmd_depthwise_c32_v2_t *)header,
+                view, resolver, ops);
         } else if (header->type == NAI_CMD_COPY_LAYOUT && header->size_bytes == sizeof(nai_cmd_copy_layout_v2_t)) {
             status = run_copy((const nai_cmd_copy_layout_v2_t *)header, view, resolver, ops);
         } else if ((header->flags & (NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) ==
@@ -392,7 +457,8 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_DMA_1D || header.type == NAI_CMD_DMA_2D ||
                    header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_GEMM32 ||
                    header.type == NAI_CMD_GEMM32_ACCUM || header.type == NAI_CMD_GEMM32_REQUANT ||
-                   header.type == NAI_CMD_POINTWISE_C32 || header.type == NAI_CMD_COPY_LAYOUT) {
+                   header.type == NAI_CMD_POINTWISE_C32 || header.type == NAI_CMD_DEPTHWISE_C32 ||
+                   header.type == NAI_CMD_COPY_LAYOUT) {
             if (header.size_bytes > command_buffer_bytes ||
                 reader->read(reader->context, model_offset, command_buffer, header.size_bytes) != 0u)
                 status = NAI_DISPATCH_BAD_STREAM;
@@ -426,6 +492,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                 } else if (header.type == NAI_CMD_POINTWISE_C32 &&
                            header.size_bytes == sizeof(nai_cmd_pointwise_c32_v2_t)) {
                     status = run_pointwise_c32((const nai_cmd_pointwise_c32_v2_t *)command_buffer,
+                        view, resolver, ops);
+                } else if (header.type == NAI_CMD_DEPTHWISE_C32 &&
+                           header.size_bytes == sizeof(nai_cmd_depthwise_c32_v2_t)) {
+                    status = run_depthwise_c32((const nai_cmd_depthwise_c32_v2_t *)command_buffer,
                         view, resolver, ops);
                 } else if (header.type == NAI_CMD_COPY_LAYOUT &&
                            header.size_bytes == sizeof(nai_cmd_copy_layout_v2_t)) {
