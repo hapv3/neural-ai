@@ -158,6 +158,26 @@ static uint32_t runtime_pointwise_c32(void *context,
     return 0u;
 }
 
+static uint32_t runtime_depthwise_c32(void *context,
+                                      const nai_cmd_depthwise_c32_v2_t *command,
+                                      uint32_t weights, uint32_t ifm,
+                                      uint32_t ofm)
+{
+    const uint32_t groups = (command->channels + 31u) / 32u;
+    const uint32_t weight_bytes = groups * 3u * 3u * 32u;
+    (void)context;
+    if (!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
+        !idma_memcpy_blocking(weights, NPU_CMD_TCDM_BASE, weight_bytes)) return 1u;
+    systolic_depthwise3x3_c32_requant_channels(ifm, NPU_CMD_TCDM_BASE, ofm,
+                                               command->input_h, command->input_w,
+                                               command->output_h, command->output_w,
+                                               command->channels, command->stride_h,
+                                               command->stride_w, command->pad_h,
+                                               command->pad_w);
+    systolic_requant_disable();
+    return 0u;
+}
+
 static void runtime_zero(uint32_t address, uint32_t bytes)
 {
     volatile uint8_t *destination = (volatile uint8_t *)(unsigned long)address;
@@ -284,6 +304,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_dma_3d,
         runtime_gemm32,
         runtime_pointwise_c32,
+        runtime_depthwise_c32,
         runtime_copy_layout,
         runtime_barrier,
         runtime_rq_load

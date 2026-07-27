@@ -123,6 +123,24 @@ typedef struct {
     uint32_t reserved[6];
 } nai_cmd_pointwise_c32_v2_t;
 
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_ref_v1_t weights;
+    nai_ref_v1_t ifm;
+    nai_ref_v1_t ofm;
+    uint32_t input_h;
+    uint32_t input_w;
+    uint32_t output_h;
+    uint32_t output_w;
+    uint32_t channels;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_h;
+    uint32_t pad_w;
+    uint32_t qparam_block;
+    uint32_t reserved[4];
+} nai_cmd_depthwise_c32_v2_t;
+
 typedef enum {
     NAI_COPY_NHWC_TO_ROW32 = 1,
     NAI_COPY_ROW32_TO_NHWC = 2,
@@ -155,6 +173,7 @@ _Static_assert(sizeof(nai_cmd_dma_2d_v2_t) == 64, "nai_cmd_dma_2d_v2_t ABI size"
 _Static_assert(sizeof(nai_cmd_dma_3d_v2_t) == 64, "nai_cmd_dma_3d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 96, "nai_cmd_pointwise_c32_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_depthwise_c32_v2_t) == 96, "nai_cmd_depthwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");
@@ -184,6 +203,8 @@ typedef struct {
                        uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
     uint32_t (*pointwise_c32)(void *context, const nai_cmd_pointwise_c32_v2_t *command,
                               uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
+    uint32_t (*depthwise_c32)(void *context, const nai_cmd_depthwise_c32_v2_t *command,
+                              uint32_t weights, uint32_t ifm, uint32_t ofm);
     uint32_t (*copy_layout)(void *context, const nai_cmd_copy_layout_v2_t *command,
                            uint32_t source, uint32_t destination);
     uint32_t (*barrier)(void *context);

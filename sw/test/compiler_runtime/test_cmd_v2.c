@@ -16,6 +16,15 @@ typedef struct {
     uint32_t rows;
     uint32_t input_groups;
     uint32_t output_groups;
+    uint32_t input_h;
+    uint32_t input_w;
+    uint32_t output_h;
+    uint32_t output_w;
+    uint32_t channels;
+    uint32_t stride_h;
+    uint32_t stride_w;
+    uint32_t pad_h;
+    uint32_t pad_w;
 } mock_state_t;
 
 typedef struct {
@@ -85,6 +94,27 @@ static uint32_t mock_pointwise_c32(void *context, const nai_cmd_pointwise_c32_v2
     state->rows = command->rows;
     state->input_groups = command->input_c32_groups;
     state->output_groups = command->output_c32_groups;
+    return 0u;
+}
+
+static uint32_t mock_depthwise_c32(void *context, const nai_cmd_depthwise_c32_v2_t *command,
+                                   uint32_t weights, uint32_t ifm, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    (void)weights;
+    (void)ifm;
+    state->calls++;
+    state->ofm = ofm;
+    state->input_h = command->input_h;
+    state->input_w = command->input_w;
+    state->output_h = command->output_h;
+    state->output_w = command->output_w;
+    state->channels = command->channels;
+    state->stride_h = command->stride_h;
+    state->stride_w = command->stride_w;
+    state->pad_h = command->pad_h;
+    state->pad_w = command->pad_w;
+    state->qparam_block = command->qparam_block;
     return 0u;
 }
 
@@ -316,6 +346,48 @@ int main(void)
     assert(state.rows == 2u && state.input_groups == 1u && state.output_groups == 1u);
     assert(state.partial_sums == 0u && state.ofm == 0x10101000u);
     pointwise->input_c32_groups = 2u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_header.total_bytes = sizeof(gemm_model);
+    gemm_commands.size = 128;
+    gemm_commands.element_count = 2;
+    nai_cmd_depthwise_c32_v2_t *depthwise = (nai_cmd_depthwise_c32_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *depthwise_end = (nai_cmd_control_v2_t *)(gemm_model + 96);
+    depthwise->header.type = NAI_CMD_DEPTHWISE_C32;
+    depthwise->header.size_bytes = sizeof(*depthwise);
+    depthwise->weights.region = NAI_REGION_MODEL_CONSTANTS;
+    depthwise->ifm.region = NAI_REGION_TCDM_SCRATCH;
+    depthwise->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    depthwise->ofm.offset = 0x1000u;
+    depthwise->input_h = 4u;
+    depthwise->input_w = 4u;
+    depthwise->output_h = 2u;
+    depthwise->output_w = 2u;
+    depthwise->channels = 64u;
+    depthwise->stride_h = 2u;
+    depthwise->stride_w = 2u;
+    depthwise->pad_h = 1u;
+    depthwise->pad_w = 1u;
+    depthwise->qparam_block = 3u;
+    depthwise_end->header.type = NAI_CMD_END;
+    depthwise_end->header.size_bytes = sizeof(*depthwise_end);
+    gemm_ops.depthwise_c32 = mock_depthwise_c32;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.ofm == 0x10101000u);
+    assert(state.input_h == 4u && state.input_w == 4u);
+    assert(state.output_h == 2u && state.output_w == 2u);
+    assert(state.channels == 64u && state.stride_h == 2u && state.stride_w == 2u);
+    assert(state.pad_h == 1u && state.pad_w == 1u && state.qparam_block == 3u);
+    depthwise->output_w = 3u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
