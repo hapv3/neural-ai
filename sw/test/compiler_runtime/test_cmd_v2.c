@@ -291,7 +291,7 @@ int main(void)
     gemm_commands.size = 128;
     gemm_commands.element_count = 2;
     nai_cmd_pointwise_c32_v2_t *pointwise = (nai_cmd_pointwise_c32_v2_t *)gemm_model;
-    nai_cmd_control_v2_t *pointwise_end = (nai_cmd_control_v2_t *)(gemm_model + 64);
+    nai_cmd_control_v2_t *pointwise_end = (nai_cmd_control_v2_t *)(gemm_model + 96);
     pointwise->header.type = NAI_CMD_POINTWISE_C32;
     pointwise->header.size_bytes = sizeof(*pointwise);
     pointwise->weights.region = NAI_REGION_MODEL_CONSTANTS;
@@ -301,6 +301,8 @@ int main(void)
     pointwise->rows = 2u;
     pointwise->input_c32_groups = 1u;
     pointwise->output_c32_groups = 1u;
+    pointwise->input_group_stride_bytes = 64u;
+    pointwise->output_group_stride_bytes = 64u;
     pointwise_end->header.type = NAI_CMD_END;
     pointwise_end->header.size_bytes = sizeof(*pointwise_end);
     gemm_view.header = &gemm_header;

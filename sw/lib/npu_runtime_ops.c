@@ -123,19 +123,20 @@ static uint32_t runtime_pointwise_c32(void *context,
                                       uint32_t partial_sums, uint32_t ofm)
 {
     const uint32_t weight_tile_bytes = 32u * 32u;
-    const uint32_t activation_group_bytes = command->rows * 32u;
+    const uint32_t input_group_stride = command->input_group_stride_bytes;
+    const uint32_t output_group_stride = command->output_group_stride_bytes;
     (void)context;
     if (!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
         command->rows == 0u || command->input_c32_groups == 0u ||
         command->output_c32_groups == 0u) return 1u;
 
     for (uint32_t output_group = 0u; output_group < command->output_c32_groups; output_group++) {
-        const uint32_t output_address = ofm + output_group * activation_group_bytes;
+        const uint32_t output_address = ofm + output_group * output_group_stride;
         const uint32_t output_weight_base = weights +
             output_group * command->input_c32_groups * weight_tile_bytes;
         for (uint32_t input_group = 0u; input_group < command->input_c32_groups; input_group++) {
             const uint32_t weight_address = NPU_CMD_TCDM_BASE;
-            const uint32_t input_address = ifm + input_group * activation_group_bytes;
+            const uint32_t input_address = ifm + input_group * input_group_stride;
             if (!idma_memcpy_blocking(output_weight_base + input_group * weight_tile_bytes,
                                       weight_address, weight_tile_bytes)) return 1u;
             if (command->input_c32_groups == 1u) {
