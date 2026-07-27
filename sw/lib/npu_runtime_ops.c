@@ -111,12 +111,107 @@ static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command
     return 0u;
 }
 
+static void runtime_zero(uint32_t address, uint32_t bytes)
+{
+    volatile uint8_t *destination = (volatile uint8_t *)(unsigned long)address;
+    for (uint32_t byte = 0; byte < bytes; byte++) destination[byte] = 0u;
+}
+
+static uint32_t runtime_layout_dma(uint32_t source, uint32_t destination, uint32_t length,
+                                   uint32_t source_stride, uint32_t destination_stride,
+                                   uint32_t repetitions, uint32_t direction)
+{
+    if (direction == IDMA_DIR_L2_TO_L1)
+        return wait_transfer(direction, idma_L2ToL1_2d(source, destination, length,
+            source_stride, destination_stride, repetitions));
+    if (direction == IDMA_DIR_L1_TO_L2)
+        return wait_transfer(direction, idma_L1ToL2_2d(source, destination, length,
+            source_stride, destination_stride, repetitions));
+    if (direction == 2u) {
+        idma_L1ToL1_2d(source, destination, length, source_stride, destination_stride, repetitions);
+        return 0u;
+    }
+    return 1u;
+}
+
 static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_t *command,
                                     uint32_t source_address, uint32_t destination_address)
 {
+    uint32_t source_l1;
+    uint32_t destination_l1;
+    uint32_t direction;
+    uint32_t element_bytes;
+    uint32_t pixels;
+    uint32_t channels;
+    uint32_t padded_channels;
+    uint32_t native_bytes;
+
     (void)context;
-    return nai_copy_layout_v2(command, (const void *)(unsigned long)source_address,
-                              (void *)(unsigned long)destination_address);
+    if (command == 0 || source_address == 0u || destination_address == 0u) return 1u;
+    source_l1 = idma_mm_is_l1_addr(source_address);
+    destination_l1 = idma_mm_is_l1_addr(destination_address);
+    if (source_l1 && destination_l1)
+        return nai_copy_layout_v2(command, (const void *)(unsigned long)source_address,
+                                  (void *)(unsigned long)destination_address);
+    if (!source_l1 && !destination_l1) return 1u;
+
+    if (command->data_type == NAI_DTYPE_I8) element_bytes = 1u;
+    else if (command->data_type == NAI_DTYPE_I32) element_bytes = 4u;
+    else return 1u;
+    pixels = command->dimensions[0] * command->dimensions[1] * command->dimensions[2];
+    channels = command->valid_channels;
+    padded_channels = (channels + 31u) & ~31u;
+    native_bytes = pixels * padded_channels * element_bytes;
+    direction = dma_direction(source_address, destination_address, 0u);
+
+    if (command->mode == NAI_COPY_NHWC_TO_ROW32 || command->mode == NAI_COPY_ROW32_TO_NHWC) {
+        uint32_t compact_stride = channels * element_bytes;
+        uint32_t native_stride = padded_channels * element_bytes;
+        uint32_t length = compact_stride;
+        if (command->source_row_stride == 0u || command->destination_row_stride == 0u)
+            return 1u;
+        if (command->mode == NAI_COPY_NHWC_TO_ROW32) {
+            if (command->source_row_stride != compact_stride ||
+                command->destination_row_stride != native_stride) return 1u;
+            if (destination_l1) runtime_zero(destination_address, native_bytes);
+        } else {
+            if (command->source_row_stride != native_stride ||
+                command->destination_row_stride != compact_stride) return 1u;
+            length = compact_stride;
+        }
+        return runtime_layout_dma(source_address, destination_address, length,
+                                  command->source_row_stride, command->destination_row_stride,
+                                  pixels, direction);
+    }
+
+    if (command->mode == NAI_COPY_NHWC_TO_C32 || command->mode == NAI_COPY_C32_TO_NHWC) {
+        if (command->mode == NAI_COPY_NHWC_TO_C32 && destination_l1)
+            runtime_zero(destination_address, native_bytes);
+        for (uint32_t group = 0u; group < padded_channels / 32u; group++) {
+            uint32_t group_channels = channels - group * 32u;
+            uint32_t source_stride;
+            uint32_t destination_stride;
+            uint32_t source_offset;
+            uint32_t destination_offset;
+            if (group_channels > 32u) group_channels = 32u;
+            if (command->mode == NAI_COPY_NHWC_TO_C32) {
+                source_stride = channels * element_bytes;
+                destination_stride = 32u * element_bytes;
+                source_offset = group * 32u * element_bytes;
+                destination_offset = group * pixels * 32u * element_bytes;
+            } else {
+                source_stride = 32u * element_bytes;
+                destination_stride = channels * element_bytes;
+                source_offset = group * pixels * 32u * element_bytes;
+                destination_offset = group * 32u * element_bytes;
+            }
+            if (runtime_layout_dma(source_address + source_offset, destination_address + destination_offset,
+                                   group_channels * element_bytes, source_stride, destination_stride,
+                                   pixels, direction) != 0u) return 1u;
+        }
+        return 0u;
+    }
+    return 1u;
 }
 
 static uint32_t runtime_barrier(void *context)
