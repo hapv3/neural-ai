@@ -118,6 +118,9 @@ typedef struct {
     uint32_t input_c32_groups;
     uint32_t output_c32_groups;
     uint32_t qparam_block;
+    uint32_t input_group_stride_bytes;
+    uint32_t output_group_stride_bytes;
+    uint32_t reserved[6];
 } nai_cmd_pointwise_c32_v2_t;
 
 typedef enum {
@@ -151,7 +154,7 @@ _Static_assert(sizeof(nai_cmd_dma_1d_v2_t) == 64, "nai_cmd_dma_1d_v2_t ABI size"
 _Static_assert(sizeof(nai_cmd_dma_2d_v2_t) == 64, "nai_cmd_dma_2d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_3d_v2_t) == 64, "nai_cmd_dma_3d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size");
-_Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 64, "nai_cmd_pointwise_c32_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 96, "nai_cmd_pointwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");

@@ -96,11 +96,13 @@ def _gemm(weights, ifm, ofm, dim_m, tile):
     return command
 
 
-def _pointwise_c32(weights, ifm, partial, ofm, rows, input_groups, output_groups, qparam_block, tile):
-    command = _command_header(10, 64, tile=tile)
+def _pointwise_c32(weights, ifm, partial, ofm, rows, input_groups, output_groups,
+                   qparam_block, input_group_stride, output_group_stride, tile):
+    command = _command_header(10, 96, tile=tile)
     command += weights + ifm + partial + ofm
-    command += struct.pack("<4I", rows, input_groups, output_groups, qparam_block)
-    assert len(command) == 64
+    command += struct.pack("<6I6I", rows, input_groups, output_groups, qparam_block,
+                           input_group_stride, output_group_stride, *([0] * 6))
+    assert len(command) == 96
     return command
 
 
@@ -235,7 +237,8 @@ def build_pointwise_c32_model(height=2, width=2, channels=64):
             _copy_layout(_ref(3), _ref(6), 3, dimensions, 0),
             _command_header(5, 32, tile=1) + struct.pack("<4I", 0, 32, 0, 0),
             _pointwise_c32(_ref(1), _ref(6), _ref(6, offset=0x1000),
-                           _ref(6, offset=0x2000), rows, groups, groups, 0, 2),
+                           _ref(6, offset=0x2000), rows, groups, groups, 0,
+                           rows * 32, rows * 32, 2),
             _copy_layout(_ref(6, offset=0x2000), _ref(4), 4, dimensions, 3),
             _command_header(0, 32, tile=4).ljust(32, b"\x00"),
         ]

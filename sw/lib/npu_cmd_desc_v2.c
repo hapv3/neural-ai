@@ -203,17 +203,26 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
 
     if (command->rows == 0u || command->input_c32_groups == 0u ||
         command->output_c32_groups == 0u || ops->pointwise_c32 == 0 ||
+        !all_zero(command->reserved, 6u) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
         command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
         !multiply(command->input_c32_groups, command->output_c32_groups, &weight_tiles) ||
         !multiply(weight_tiles, 32u * 32u, &weight_bytes) ||
         !multiply(command->rows, 32u, &ifm_groups_bytes) ||
         !multiply(command->rows, 32u, &ofm_groups_bytes) ||
-        !multiply(ifm_groups_bytes, command->input_c32_groups, &ifm_bytes) ||
-        !multiply(ofm_groups_bytes, command->output_c32_groups, &ofm_bytes) ||
+        command->input_group_stride_bytes < ifm_groups_bytes ||
+        command->output_group_stride_bytes < ofm_groups_bytes ||
+        (command->input_group_stride_bytes & (NAI_ALIGNMENT_BYTES - 1u)) != 0u ||
+        (command->output_group_stride_bytes & (NAI_ALIGNMENT_BYTES - 1u)) != 0u ||
+        !multiply(command->input_group_stride_bytes, command->input_c32_groups - 1u, &ifm_bytes) ||
+        ifm_bytes > 0xffffffffu - ifm_groups_bytes ||
+        !multiply(command->output_group_stride_bytes, command->output_c32_groups - 1u, &ofm_bytes) ||
+        ofm_bytes > 0xffffffffu - ofm_groups_bytes ||
         !multiply(command->rows, 32u * 4u, &partial_bytes)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
+    ifm_bytes += ifm_groups_bytes;
+    ofm_bytes += ofm_groups_bytes;
     if (command->input_c32_groups == 1u) {
         if (command->partial_sums.region != 0u || command->partial_sums.index != 0u ||
             command->partial_sums.offset != 0u) return NAI_DISPATCH_BAD_COMMAND;
