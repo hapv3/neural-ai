@@ -106,6 +106,20 @@ typedef struct {
     uint32_t reserved[8];
 } nai_cmd_gemm32_v2_t;
 
+/* Pointwise 1x1 C32 command. Activations are group-major C32 blocked;
+   weights are OCG-major, then ICG-major, with one 32x32 tile per pair. */
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_ref_v1_t weights;
+    nai_ref_v1_t ifm;
+    nai_ref_v1_t partial_sums;
+    nai_ref_v1_t ofm;
+    uint32_t rows;
+    uint32_t input_c32_groups;
+    uint32_t output_c32_groups;
+    uint32_t qparam_block;
+} nai_cmd_pointwise_c32_v2_t;
+
 typedef enum {
     NAI_COPY_NHWC_TO_ROW32 = 1,
     NAI_COPY_ROW32_TO_NHWC = 2,
@@ -137,6 +151,7 @@ _Static_assert(sizeof(nai_cmd_dma_1d_v2_t) == 64, "nai_cmd_dma_1d_v2_t ABI size"
 _Static_assert(sizeof(nai_cmd_dma_2d_v2_t) == 64, "nai_cmd_dma_2d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_3d_v2_t) == 64, "nai_cmd_dma_3d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 64, "nai_cmd_pointwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");
@@ -164,6 +179,8 @@ typedef struct {
                        uint32_t direction);
     uint32_t (*gemm32)(void *context, const nai_cmd_gemm32_v2_t *command,
                        uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
+    uint32_t (*pointwise_c32)(void *context, const nai_cmd_pointwise_c32_v2_t *command,
+                              uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
     uint32_t (*copy_layout)(void *context, const nai_cmd_copy_layout_v2_t *command,
                            uint32_t source, uint32_t destination);
     uint32_t (*barrier)(void *context);

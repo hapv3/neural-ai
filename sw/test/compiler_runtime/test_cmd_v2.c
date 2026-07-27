@@ -13,6 +13,9 @@ typedef struct {
     uint32_t qparam_block;
     uint32_t partial_sums;
     uint32_t ofm;
+    uint32_t rows;
+    uint32_t input_groups;
+    uint32_t output_groups;
 } mock_state_t;
 
 typedef struct {
@@ -66,6 +69,22 @@ static uint32_t mock_gemm32(void *context, const nai_cmd_gemm32_v2_t *command,
     state->calls++;
     state->partial_sums = partial_sums;
     state->ofm = ofm;
+    return 0u;
+}
+
+static uint32_t mock_pointwise_c32(void *context, const nai_cmd_pointwise_c32_v2_t *command,
+                                   uint32_t weights, uint32_t ifm,
+                                   uint32_t partial_sums, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    (void)weights;
+    (void)ifm;
+    state->calls++;
+    state->partial_sums = partial_sums;
+    state->ofm = ofm;
+    state->rows = command->rows;
+    state->input_groups = command->input_c32_groups;
+    state->output_groups = command->output_c32_groups;
     return 0u;
 }
 
@@ -264,5 +283,40 @@ int main(void)
     gemm_command->partial_sums.region = 0u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_header.total_bytes = sizeof(gemm_model);
+    gemm_commands.size = 128;
+    gemm_commands.element_count = 2;
+    nai_cmd_pointwise_c32_v2_t *pointwise = (nai_cmd_pointwise_c32_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *pointwise_end = (nai_cmd_control_v2_t *)(gemm_model + 64);
+    pointwise->header.type = NAI_CMD_POINTWISE_C32;
+    pointwise->header.size_bytes = sizeof(*pointwise);
+    pointwise->weights.region = NAI_REGION_MODEL_CONSTANTS;
+    pointwise->ifm.region = NAI_REGION_TCDM_SCRATCH;
+    pointwise->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    pointwise->ofm.offset = 0x1000u;
+    pointwise->rows = 2u;
+    pointwise->input_c32_groups = 1u;
+    pointwise->output_c32_groups = 1u;
+    pointwise_end->header.type = NAI_CMD_END;
+    pointwise_end->header.size_bytes = sizeof(*pointwise_end);
+    gemm_view.header = &gemm_header;
+    gemm_view.commands = &gemm_commands;
+    gemm_view.constants = &gemm_constants;
+    gemm_ops.pointwise_c32 = mock_pointwise_c32;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.rows == 2u && state.input_groups == 1u && state.output_groups == 1u);
+    assert(state.partial_sums == 0u && state.ofm == 0x10101000u);
+    pointwise->input_c32_groups = 2u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
     return 0;
 }
