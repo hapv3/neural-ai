@@ -117,6 +117,46 @@ static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command
     return 0u;
 }
 
+static uint32_t runtime_pointwise_c32(void *context,
+                                      const nai_cmd_pointwise_c32_v2_t *command,
+                                      uint32_t weights, uint32_t ifm,
+                                      uint32_t partial_sums, uint32_t ofm)
+{
+    const uint32_t weight_tile_bytes = 32u * 32u;
+    const uint32_t activation_group_bytes = command->rows * 32u;
+    (void)context;
+    if (!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
+        command->rows == 0u || command->input_c32_groups == 0u ||
+        command->output_c32_groups == 0u) return 1u;
+
+    for (uint32_t output_group = 0u; output_group < command->output_c32_groups; output_group++) {
+        const uint32_t output_address = ofm + output_group * activation_group_bytes;
+        const uint32_t output_weight_base = weights +
+            output_group * command->input_c32_groups * weight_tile_bytes;
+        for (uint32_t input_group = 0u; input_group < command->input_c32_groups; input_group++) {
+            const uint32_t weight_address = NPU_CMD_TCDM_BASE;
+            const uint32_t input_address = ifm + input_group * activation_group_bytes;
+            if (!idma_memcpy_blocking(output_weight_base + input_group * weight_tile_bytes,
+                                      weight_address, weight_tile_bytes)) return 1u;
+            if (command->input_c32_groups == 1u) {
+                systolic_gemm32_requant(weight_address, input_address, output_address,
+                                        command->rows);
+            } else if (input_group == 0u) {
+                systolic_gemm32(weight_address, input_address, partial_sums, command->rows);
+            } else if (input_group + 1u == command->input_c32_groups) {
+                systolic_gemm32_accumulate_requant(weight_address, input_address,
+                                                   partial_sums, output_address,
+                                                   command->rows);
+            } else {
+                systolic_gemm32_accumulate(weight_address, input_address, partial_sums,
+                                           partial_sums, command->rows);
+            }
+        }
+    }
+    systolic_requant_disable();
+    return 0u;
+}
+
 static void runtime_zero(uint32_t address, uint32_t bytes)
 {
     volatile uint8_t *destination = (volatile uint8_t *)(unsigned long)address;
@@ -242,6 +282,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_dma_2d,
         runtime_dma_3d,
         runtime_gemm32,
+        runtime_pointwise_c32,
         runtime_copy_layout,
         runtime_barrier,
         runtime_rq_load
