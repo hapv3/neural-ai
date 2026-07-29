@@ -6,8 +6,10 @@
 typedef struct {
     uint32_t calls;
     uint32_t source;
+    uint32_t source2;
     uint32_t destination;
     uint32_t length;
+    uint32_t mode;
     uint32_t qparam_address;
     uint32_t qparam_count;
     uint32_t qparam_block;
@@ -117,6 +119,19 @@ static uint32_t mock_depthwise_c32(void *context, const nai_cmd_depthwise_c32_v2
     state->pad_h = command->pad_h;
     state->pad_w = command->pad_w;
     state->qparam_block = command->qparam_block;
+    return 0u;
+}
+
+static uint32_t mock_afu_binary(void *context, const nai_cmd_afu_binary_v2_t *command,
+                                uint32_t lhs, uint32_t rhs, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = lhs;
+    state->source2 = rhs;
+    state->destination = ofm;
+    state->length = command->length;
+    state->mode = command->mode;
     return 0u;
 }
 
@@ -494,5 +509,42 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 0u && state.calls == 0u);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 96;
+    gemm_commands.element_count = 2;
+    nai_cmd_afu_binary_v2_t *afu_binary = (nai_cmd_afu_binary_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *afu_binary_end = (nai_cmd_control_v2_t *)(gemm_model + 64);
+    afu_binary->header.type = NAI_CMD_AFU_BINARY;
+    afu_binary->header.size_bytes = sizeof(*afu_binary);
+    afu_binary->lhs.region = NAI_REGION_TCDM_SCRATCH;
+    afu_binary->rhs.region = NAI_REGION_TCDM_SCRATCH;
+    afu_binary->rhs.offset = 0x100u;
+    afu_binary->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    afu_binary->ofm.offset = 0x200u;
+    afu_binary->length = 64u;
+    afu_binary->mode = NAI_AFU_BINARY_ADD_I8;
+    afu_binary_end->header.type = NAI_CMD_END;
+    afu_binary_end->header.size_bytes = sizeof(*afu_binary_end);
+    gemm_ops.afu_binary = mock_afu_binary;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.source2 == 0x10100100u);
+    assert(state.destination == 0x10100200u && state.length == 64u);
+    assert(state.mode == NAI_AFU_BINARY_ADD_I8);
+
+    afu_binary->ofm.offset = 0x120u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    afu_binary->ofm.offset = 0x200u;
+    afu_binary->mode = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;
 }

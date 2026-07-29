@@ -1,5 +1,6 @@
 #include "npu_runtime_ops.h"
 
+#include "hal_afu.h"
 #include "hal_systolic.h"
 #include "idma_mm_utils.h"
 #include "npu_layout_ops.h"
@@ -176,6 +177,16 @@ static uint32_t runtime_depthwise_c32(void *context,
                                                command->pad_w);
     systolic_requant_disable();
     return 0u;
+}
+
+static uint32_t runtime_afu_binary(void *context,
+                                   const nai_cmd_afu_binary_v2_t *command,
+                                   uint32_t lhs, uint32_t rhs, uint32_t ofm)
+{
+    (void)context;
+    if (command->mode != NAI_AFU_BINARY_ADD_I8) return 1u;
+    afu_start_add_i8(lhs, rhs, ofm, command->length);
+    return afu_wait_done(1000000u) ? 0u : 1u;
 }
 
 static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
@@ -397,6 +408,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_gemm32,
         runtime_pointwise_c32,
         runtime_depthwise_c32,
+        runtime_afu_binary,
         runtime_linebuf_job,
         runtime_copy_layout,
         runtime_barrier,
