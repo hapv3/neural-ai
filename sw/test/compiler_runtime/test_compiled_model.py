@@ -704,9 +704,7 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
 
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
-    debug_fail = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
-    cocotb.log.warning("unaligned debug source marker=0x%08x", debug_fail)
-    assert debug_fail == 0
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == expected
 

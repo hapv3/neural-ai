@@ -318,6 +318,7 @@ static nai_dispatch_status_v2_t run_linebuf_job(
 {
     uint32_t expected_k_tiles;
     uint32_t kernel_elements;
+    uint32_t expected_group_stationary;
     if (command->job.rows == 0u || command->job.rows > 256u ||
         command->job.k_tiles == 0u || command->job.k_tiles > 0xffffu ||
         command->job.linebuf.kernel_h == 0u || command->job.linebuf.kernel_h > 5u ||
@@ -359,6 +360,17 @@ static nai_dispatch_status_v2_t run_linebuf_job(
         (command->job.gemm.accum_en != 0u && command->job.gemm.psum_row_stride_bytes == 0u)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
+    expected_group_stationary =
+        command->job.linebuf.coalesce == 1u &&
+        command->job.linebuf.kgen == 1u &&
+        command->job.linebuf.c32_fast == 1u &&
+        command->job.linebuf.lane_base == 0u &&
+        command->job.linebuf.block_valid_bytes == 32u &&
+        command->job.linebuf.input_c >= 32u &&
+        (command->job.linebuf.input_c & 31u) == 0u &&
+        command->job.k_tiles > 1u;
+    if (command->job.linebuf.c32_group_stationary != expected_group_stationary)
+        return NAI_DISPATCH_BAD_COMMAND;
     return ops->linebuf_job(ops->context, command) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
