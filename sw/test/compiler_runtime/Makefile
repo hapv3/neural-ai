@@ -4,18 +4,21 @@ NEURAL_COMPILER_ROOT ?= $(abspath ../../../..)/neural-compiler
 SIM_BUILD ?= /tmp/neural-ai-compiled-model
 COCOTB_TESTCASE ?=
 
-.PHONY: all check firmware sim clean
+.PHONY: all check check_cross_repo_abi firmware sim clean
 
 all: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer
 
 test_model_abi: test_model_abi.c ../../lib/npu_model_abi.h ../../lib/npu_cmd_desc_v2.h ../../lib/npu_model_loader.h ../../lib/npu_model_loader.c ../../lib/npu_memory_map.h
 	$(CC) $(CFLAGS) -I../../lib test_model_abi.c ../../lib/npu_model_loader.c -o $@
 
-check: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer
+check: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer check_cross_repo_abi
 	./test_model_abi
 	./test_cmd_v2
 	./test_copy_layout
 	./test_quant_buffer
+
+check_cross_repo_abi:
+	NEURAL_COMPILER_ROOT="$(NEURAL_COMPILER_ROOT)" python3 ./check_cross_repo_abi.py
 
 firmware:
 	$(MAKE) -C ../../runtime/neural_ai all
