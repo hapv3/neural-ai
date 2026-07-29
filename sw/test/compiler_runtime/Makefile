@@ -2,6 +2,7 @@ CC ?= cc
 CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
 NEURAL_COMPILER_ROOT ?= $(abspath ../../../..)/neural-compiler
 SIM_BUILD ?= /tmp/neural-ai-compiled-model
+COCOTB_TESTCASE ?=
 
 .PHONY: all check firmware sim clean
 
@@ -23,6 +24,7 @@ sim: firmware
 	PYTHONPATH="$(CURDIR)" NEURAL_COMPILER_ROOT="$(NEURAL_COMPILER_ROOT)" \
 	$(MAKE) -C ../../../hw/rtl/cluster sim \
 		COCOTB_TEST_MODULES=test_compiled_model \
+		COCOTB_TESTCASE="$(COCOTB_TESTCASE)" \
 		CLUSTER_SIM_NAME=compiled_model \
 		SIM_BUILD="$(SIM_BUILD)"
 

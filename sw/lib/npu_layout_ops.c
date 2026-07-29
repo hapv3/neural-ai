@@ -1,5 +1,12 @@
 #include "npu_layout_ops.h"
 
+static uint32_t checked_multiply(uint32_t lhs, uint32_t rhs, uint32_t *result)
+{
+    if (lhs != 0u && rhs > 0xffffffffu / lhs) return 0u;
+    *result = lhs * rhs;
+    return 1u;
+}
+
 static uint32_t c32_offset(uint32_t pixels, uint32_t pixel, uint32_t channel,
                            uint32_t element_bytes)
 {
@@ -26,10 +33,20 @@ uint32_t nai_copy_layout_v2(const nai_cmd_copy_layout_v2_t *command,
     if (command->data_type == NAI_DTYPE_I8) element_bytes = 1u;
     else if (command->data_type == NAI_DTYPE_I32) element_bytes = 4u;
     else return 1u;
-    pixels = command->dimensions[0] * command->dimensions[1] * command->dimensions[2];
+    if (command->valid_channels == 0u ||
+        !checked_multiply(command->dimensions[0], command->dimensions[1], &pixels) ||
+        !checked_multiply(pixels, command->dimensions[2], &pixels)) return 1u;
     channels = command->valid_channels;
+    if (channels > 0xffffffffu - 31u) return 1u;
     padded_channels = (channels + 31u) & ~31u;
-    native_bytes = pixels * padded_channels * element_bytes;
+    if (!checked_multiply(pixels, padded_channels, &native_bytes) ||
+        !checked_multiply(native_bytes, element_bytes, &native_bytes)) return 1u;
+
+    if (command->valid_channels != command->dimensions[3]) return 1u;
+    if (command->mode != NAI_COPY_NHWC_TO_ROW32 &&
+        command->mode != NAI_COPY_ROW32_TO_NHWC &&
+        command->mode != NAI_COPY_NHWC_TO_C32 &&
+        command->mode != NAI_COPY_C32_TO_NHWC) return 1u;
 
     if (command->mode == NAI_COPY_NHWC_TO_ROW32 || command->mode == NAI_COPY_NHWC_TO_C32) {
         for (uint32_t byte = 0; byte < native_bytes; byte++) destination[byte] = 0u;

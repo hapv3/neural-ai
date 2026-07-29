@@ -75,7 +75,21 @@ static uint32_t validate_runtime_bindings(const nai_model_view_v1_t *view,
 
     for (uint32_t index = 0; index < invocation->binding_count; index++) {
         const nai_binding_address_v1_t *address = &g_binding_addresses[index];
-        if (address->flags != 0u || (address->base & 31u) != 0u || address->byte_size == 0u ||
+        uint32_t required_alignment = NAI_ALIGNMENT_BYTES;
+        /* Public NHWC is a compact byte-addressed contract.  Native command
+           references still request 32-byte alignment when they need it; the
+           binding table itself must not reject a valid compact base. */
+        if (address->direction == NAI_BINDING_INPUT || address->direction == NAI_BINDING_OUTPUT) {
+            for (uint32_t public_index = 0u; public_index < public_count; public_index++) {
+                const nai_binding_v1_t *binding = &view->public_bindings[public_index];
+                if (binding->direction == address->direction && binding->index == address->index &&
+                    binding->layout == NAI_LAYOUT_NHWC) {
+                    required_alignment = 1u;
+                    break;
+                }
+            }
+        }
+        if (address->flags != 0u || (address->base % required_alignment) != 0u || address->byte_size == 0u ||
             address->base > 0xffffffffu - address->byte_size) return 0u;
         if (address->direction != NAI_BINDING_INPUT && address->direction != NAI_BINDING_OUTPUT &&
             address->direction != NAI_BINDING_L2_TEMPORARY) return 0u;

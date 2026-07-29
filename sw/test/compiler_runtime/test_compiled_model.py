@@ -128,6 +128,22 @@ def _depthwise_c32(weights, ifm, ofm, input_h, input_w, output_h, output_w,
     return command
 
 
+def _linebuf_job(k_tiles, tile):
+    linebuf = struct.pack(
+        "<I8H4I14H4I",
+        0,
+        3, 3, 32, 2, 1, 1, 1, 1,
+        96, 32, 32, 96,
+        3, 3, 0, 0, 1, 1, 0, 1, 0, 1, 32, 0, 0, 0,
+        k_tiles, 4, 0, 27,
+    )
+    gemm = struct.pack("<9I", 0, 0, 0, 0, 4, 0, 64, 2, 512)
+    command = _command_header(9, 160, tile=tile) + linebuf + gemm
+    command += struct.pack("<2I", 4, k_tiles) + bytes(20)
+    assert len(command) == 160
+    return command
+
+
 def _copy_layout(source, destination, mode, dimensions, tile):
     command = _command_header(18, 96, tile=tile)
     command += source + destination
@@ -224,7 +240,6 @@ def build_layout_model():
     commands = b"".join(
         [
             _copy_layout(_ref(3), _ref(6), 1, dimensions, 0),
-            _copy_layout(_ref(6), _ref(4), 2, dimensions, 1),
             _command_header(0, 32, tile=2).ljust(32, b"\x00"),
         ]
     )
@@ -245,31 +260,64 @@ def build_c32_layout_model():
     return _package(commands, b"", bindings, 2, 256, 1, 1)
 
 
-def build_pointwise_c32_model(height=2, width=2, channels=64):
-    rows = height * width
-    groups = channels // 32
-    weights = bytes([1]) * (groups * groups * 32 * 32)
-    qparams = b"".join(
-        struct.pack("<iiIiiiII", 0, 1 << 30, 30, 0, -128, 127, 0, 0)
-        for _ in range(32)
-    )
-    dimensions = (1, height, width, channels)
+def build_unaligned_row32_layout_model(channels, pixels):
+    dimensions = (1, 1, pixels, channels)
     commands = b"".join(
         [
-            _copy_layout(_ref(3), _ref(6), 3, dimensions, 0),
-            _command_header(5, 32, tile=1) + struct.pack("<4I", 0, 32, 0, 0),
-            _pointwise_c32(_ref(1), _ref(6), _ref(6, offset=0x1000),
-                           _ref(6, offset=0x2000), rows, groups, groups, 0,
-                           rows * 32, rows * 32, 2),
-            _copy_layout(_ref(6, offset=0x2000), _ref(4), 4, dimensions, 3),
-            _command_header(0, 32, tile=4).ljust(32, b"\x00"),
+            _copy_layout(_ref(3), _ref(6), 1, dimensions, 0),
+            _copy_layout(_ref(6), _ref(4), 2, dimensions, 1),
+            _command_header(0, 32, tile=2).ljust(32, b"\x00"),
         ]
     )
+    compact_bytes = pixels * channels
     bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
-    return _package(commands, weights, bindings, 4, 0x2200, 1, 1, qparams)
+    return _package(
+        commands, b"", bindings, 2, ((channels + 31) // 32) * pixels * 32, 1, 1
+    ), compact_bytes
 
 
-def build_depthwise_c32_model(height=3, width=3, channels=32):
+def build_pointwise_c32_model(height=2, width=2, channels=64, output_channels=None,
+                              clamp_min=-128, clamp_max=127, qparam_specs=None):
+    rows = height * width
+    if output_channels is None:
+        output_channels = channels
+    input_groups = (channels + 31) // 32
+    output_groups = (output_channels + 31) // 32
+    weights = bytes([1]) * (output_groups * input_groups * 32 * 32)
+    if qparam_specs is None:
+        qparam_specs = [(0, 1 << 30, 30, 0, clamp_min, clamp_max)] * (output_groups * 32)
+    assert len(qparam_specs) == output_groups * 32
+    qparams = b"".join(
+        struct.pack("<iiIiiiII", *spec, 0, 0) for spec in qparam_specs
+    )
+    input_dimensions = (1, height, width, channels)
+    output_dimensions = (1, height, width, output_channels)
+    commands = [_copy_layout(_ref(3), _ref(6), 3, input_dimensions, 0)]
+    for output_group in range(output_groups):
+        commands.append(
+            _command_header(5, 32, tile=output_group * 2 + 1) +
+            struct.pack("<4I", output_group * 32, 32, output_group, 0)
+        )
+        commands.append(
+            _pointwise_c32(
+                _ref(1, offset=output_group * input_groups * 32 * 32),
+                _ref(6),
+                _ref(6, offset=0x1000) if input_groups > 1 else _ref(0),
+                _ref(6, offset=0x2000 + output_group * rows * 32),
+                rows, input_groups, 1, output_group,
+                rows * 32, rows * 32, output_group * 2 + 2
+            )
+        )
+    commands.extend([
+        _copy_layout(_ref(6, offset=0x2000), _ref(4), 4, output_dimensions, 3),
+        _command_header(0, 32, tile=len(commands)).ljust(32, b"\x00"),
+    ])
+    commands = b"".join(commands)
+    bindings = _binding(1, 0, dimensions=input_dimensions) + _binding(2, 0, dimensions=output_dimensions)
+    return _package(commands, weights, bindings, 2 + output_groups * 2, 0x2200, 1, 1, qparams)
+
+
+def build_depthwise_c32_model(height=3, width=3, channels=32, stride=1):
     groups = (channels + 31) // 32
     weights = bytearray(groups * 3 * 3 * 32)
     for group in range(groups):
@@ -279,22 +327,74 @@ def build_depthwise_c32_model(height=3, width=3, channels=32):
                 weights[((group * 9 + 4) * 32) + lane] = 1
     qparams = b"".join(
         struct.pack("<iiIiiiII", 0, 1 << 30, 30, 0, -128, 127, 0, 0)
-        for _ in range(32)
+        for _ in range(groups * 32)
     )
-    dimensions = (1, height, width, channels)
-    commands = b"".join(
-        [
-            _copy_layout(_ref(3), _ref(6), 3, dimensions, 0),
-            _command_header(5, 32, tile=1) + struct.pack("<4I", 0, 32, 0, 0),
-            _depthwise_c32(_ref(1), _ref(6), _ref(6, offset=0x1000),
-                           height, width, height, width, channels,
-                           1, 1, 1, 1, 0, 2),
-            _copy_layout(_ref(6, offset=0x1000), _ref(4), 4, dimensions, 3),
-            _command_header(0, 32, tile=4).ljust(32, b"\x00"),
-        ]
+    output_height = ((height - 1) // stride) + 1
+    output_width = ((width - 1) // stride) + 1
+    input_dimensions = (1, height, width, channels)
+    output_dimensions = (1, output_height, output_width, channels)
+    input_pixels = height * width
+    output_pixels = output_height * output_width
+    commands = [_copy_layout(_ref(3), _ref(6), 3, input_dimensions, 0)]
+    for group in range(groups):
+        valid_channels = min(32, channels - group * 32)
+        commands.append(
+            _command_header(5, 32, tile=group * 2 + 1) +
+            struct.pack("<4I", group * 32, 32, group, 0)
+        )
+        commands.append(
+            _depthwise_c32(
+                _ref(1, offset=group * 9 * 32),
+                _ref(6, offset=group * input_pixels * 32),
+                _ref(6, offset=0x1000 + group * output_pixels * 32),
+                height, width, output_height, output_width, valid_channels,
+                stride, stride, 1, 1, group, group * 2 + 2,
+            )
+        )
+    commands.extend([
+        _copy_layout(_ref(6, offset=0x1000), _ref(4), 4, output_dimensions,
+                     len(commands)),
+        _command_header(0, 32, tile=len(commands)).ljust(32, b"\x00"),
+    ])
+    commands = b"".join(commands)
+    bindings = _binding(1, 0, dimensions=input_dimensions) + _binding(2, 0, dimensions=output_dimensions)
+    command_count = 2 + groups * 2
+    return _package(commands, bytes(weights), bindings, command_count, 0x2200, 1, 1, qparams)
+
+
+def build_pointwise_depthwise_chain_model(height=2, width=2):
+    channels = 32
+    rows = height * width
+    input_dimensions = (1, height, width, channels)
+    output_dimensions = input_dimensions
+    pointwise_weights = bytes([1]) * (32 * 32)
+    depthwise_weights = bytearray(9 * 32)
+    depthwise_weights[4 * 32:5 * 32] = bytes([1]) * 32
+    constants = pointwise_weights + bytes(depthwise_weights)
+    qparam = struct.pack("<iiIiiiII", 0, 1 << 30, 30, 0, -128, 127, 0, 0)
+    qparams = qparam * 64
+    commands = [
+        _copy_layout(_ref(3), _ref(6), 3, input_dimensions, 0),
+        _command_header(5, 32, tile=1) + struct.pack("<4I", 0, 32, 0, 0),
+        _pointwise_c32(
+            _ref(1), _ref(6), _ref(0), _ref(6, offset=0x2000),
+            rows, 1, 1, 0, rows * 32, rows * 32, 2,
+        ),
+        _command_header(5, 32, tile=3) + struct.pack("<4I", 32, 32, 1, 0),
+        _depthwise_c32(
+            _ref(1, offset=len(pointwise_weights)), _ref(6, offset=0x2000),
+            _ref(6, offset=0x3000), height, width, height, width,
+            channels, 1, 1, 1, 1, 1, 4,
+        ),
+        _copy_layout(_ref(6, offset=0x3000), _ref(4), 4, output_dimensions, 5),
+        _command_header(0, 32, tile=6).ljust(32, b"\x00"),
+    ]
+    bindings = _binding(1, 0, dimensions=input_dimensions) + _binding(
+        2, 0, dimensions=output_dimensions
     )
-    bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
-    return _package(commands, bytes(weights), bindings, 4, 0x2200, 1, 1, qparams)
+    return _package(
+        b"".join(commands), constants, bindings, 6, 0x3100, 1, 1, qparams
+    )
 
 
 def build_gemm_model(dimensions):
@@ -495,7 +595,139 @@ def _compile_pointwise_conv_model():
     return package
 
 
-async def _load_and_run(dut, axi_master, invocation):
+def _compile_tflite_fixture_model(fixture_stem, temporary_prefix):
+    default_root = Path(__file__).resolve().parents[4] / "neural-compiler"
+    compiler_root = Path(os.environ.get("NEURAL_COMPILER_ROOT", default_root)).resolve()
+    extension_modules = list((compiler_root / "ethosu").glob("regor*.so"))
+    if not extension_modules:
+        raise RuntimeError(
+            f"Neural compiler Python extension is not built under {compiler_root}/ethosu"
+        )
+
+    fixture = Path(__file__).with_name(f"{fixture_stem}.tflite.b64")
+    model_data = base64.b64decode(fixture.read_text(encoding="ascii"))
+    with tempfile.TemporaryDirectory(prefix=temporary_prefix) as temporary_dir:
+        temporary_path = Path(temporary_dir)
+        input_path = temporary_path / f"{fixture_stem}.tflite"
+        output_path = temporary_path / "output"
+        input_path.write_bytes(model_data)
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; from ethosu.vela.vela import main; raise SystemExit(main(sys.argv[1:]))",
+            "--accelerator-config=neural-ai",
+            "--output-format=nai",
+            f"--output-dir={output_path}",
+            str(input_path),
+        ]
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(compiler_root), environment.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        result = subprocess.run(
+            command,
+            cwd=compiler_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Neural compiler failed ({result.returncode}):\n{result.stdout}\n{result.stderr}"
+            )
+        package = (output_path / f"{fixture_stem}.nai").read_bytes()
+    assert package[:4] == b"NAIM"
+    return package
+
+
+def _compile_generic_k3_conv_model():
+    return _compile_tflite_fixture_model(
+        "generic_k3_conv_h8w8_k64_n64", "neural-ai-compiled-k3-"
+    )
+
+
+def _compile_rgb_k3_conv_model():
+    return _compile_tflite_fixture_model(
+        "rgb_k3_conv_h7w7_k3_n32", "neural-ai-compiled-rgb-"
+    )
+
+
+def _compile_depthwise_k3_conv_model():
+    return _compile_tflite_fixture_model(
+        "depthwise_k3_conv_h7w7_c33_s2", "neural-ai-compiled-depthwise-"
+    )
+
+
+def _compile_pointwise_depthwise_chain_model():
+    return _compile_tflite_fixture_model(
+        "pointwise_depthwise_chain", "neural-ai-compiled-chain-"
+    )
+
+
+def _load_compiler_striped_pointwise_package(width):
+    fixture = Path(__file__).with_name(f"pointwise_m{width}.nai.b64")
+    package = base64.b64decode(fixture.read_text(encoding="ascii"))
+    assert package[:4] == b"NAIM"
+    return package
+
+
+def _pointwise_striped_expected(input_values, width):
+    expected = bytearray()
+    for pixel in range(width):
+        channels = input_values[pixel * 32:(pixel + 1) * 32]
+        value = sum(channel - 256 if channel >= 128 else channel for channel in channels)
+        value = max(-128, min(127, value)) & 0xFF
+        expected.extend([value] * 32)
+    return bytes(expected)
+
+
+async def _run_compiler_striped_pointwise(dut, axi_master, width):
+    model = _load_compiler_striped_pointwise_package(width)
+    input_values = [(index * 7 + 3) & 0xFF for index in range(width * 32)]
+    input_data = bytes(input_values)
+    expected = _pointwise_striped_expected(input_values, width)
+    input_base = 0x80000000
+    output_base = 0x80004000
+    runtime_bindings = [
+        (1, 0, input_base, len(input_data)),
+        (2, 0, output_base, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=500000)
+
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    debug_fail = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+    cocotb.log.warning("unaligned debug source marker=0x%08x", debug_fail)
+    assert debug_fail == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == expected
+
+    # The compiler must lower oversized M into legal pointwise stripes.
+    section_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_offset + 8)[0]
+    offset = command_offset
+    pointwise_rows = []
+    while offset < len(model):
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 10:
+            pointwise_rows.append(struct.unpack_from("<I", model, offset + 48)[0])
+        if command_type == 0:
+            break
+        offset += command_size
+    assert pointwise_rows and sum(pointwise_rows) == width
+    assert max(pointwise_rows) <= 256
+
+
+
+async def _load_and_run(dut, axi_master, invocation, timeout_cycles=600000):
     await load_firmware_elf_axi(
         dut,
         axi_master,
@@ -506,7 +738,7 @@ async def _load_and_run(dut, axi_master, invocation):
     try:
         await wait_for_host_irq(
             dut,
-            timeout_cycles=600000,
+            timeout_cycles=timeout_cycles,
             axi_master=axi_master,
             report_name="test_compiler_runtime",
         )
@@ -550,7 +782,7 @@ async def test_compiler_runtime_dma_package(dut):
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 1
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, 32)) == input_data
 
 
@@ -580,7 +812,7 @@ async def test_compiler_runtime_layout_round_trip(dut):
     await _load_and_run(dut, axi_master, invocation)
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 1
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
 
 
@@ -614,6 +846,50 @@ async def test_compiler_runtime_c32_layout_round_trip(dut):
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
 
 
+async def _run_unaligned_row32_case(dut, axi_master, channels, pixels,
+                                    input_base, output_base):
+    model, compact_bytes = build_unaligned_row32_layout_model(channels, pixels)
+    input_data = bytes((index * 17 + channels) & 0xFF for index in range(compact_bytes))
+    runtime_bindings = [
+        (1, 0, input_base, compact_bytes),
+        (2, 0, output_base, compact_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await reset_dut(dut)
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(compact_bytes))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await _load_and_run(dut, axi_master, invocation)
+    status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+    if status != NPU_CMD_STATUS_PASS:
+        fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+        done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+        raise AssertionError(
+            f"unaligned layout dispatch failed: status={status} "
+            f"fail=0x{fail_code:08x} done={done_count}"
+        )
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert bytes(await read_l2_bytes(dut, output_base, compact_bytes)) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_unaligned_row32_c3_c31(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await _run_unaligned_row32_case(dut, axi_master, 3, 11,
+                                     0x80002003, 0x80003007)
+    await _run_unaligned_row32_case(dut, axi_master, 31, 5,
+                                     0x80002005, 0x8000300b)
+
+
 @cocotb.test()
 async def test_compiler_runtime_pointwise_c32_package(dut):
     cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
@@ -625,7 +901,7 @@ async def test_compiler_runtime_pointwise_c32_package(dut):
     )
     await reset_dut(dut)
 
-    height, width, channels = 2, 2, 64
+    height, width, channels, output_channels = 1, 1, 64, 32
     input_values = [((pixel + channel) % 5) - 2
                     for pixel in range(height * width)
                     for channel in range(channels)]
@@ -633,8 +909,90 @@ async def test_compiler_runtime_pointwise_c32_package(dut):
     expected = bytearray()
     for pixel in range(height * width):
         value = sum(input_values[pixel * channels:(pixel + 1) * channels]) & 0xFF
-        expected.extend([value] * channels)
-    model = build_pointwise_c32_model(height, width, channels)
+        expected.extend([value] * output_channels)
+    model = build_pointwise_c32_model(height, width, channels, output_channels)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=200000)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_runtime_pointwise_c32_relu6_clamp(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    input_values = [-1] * 4 + [2] * 28
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected_value = min(max(sum(input_values), 0), 6)
+    expected = bytes([expected_value] * 32)
+    model = build_pointwise_c32_model(1, 1, 32, 32, clamp_min=0, clamp_max=6)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=200000)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
+
+
+@cocotb.test()
+async def test_compiler_runtime_pointwise_per_channel_requant(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    qparam_specs = []
+    expected_values = []
+    for channel in range(32):
+        bias = channel * 5 - 75
+        multiplier = 1 << (30 if channel % 2 == 0 else 29)
+        shift = 30
+        zero_point = -(channel // 2)
+        qparam_specs.append((bias, multiplier, shift, zero_point, -128, 127))
+        accumulator = 32 + bias
+        product = accumulator * multiplier
+        magnitude = abs(product)
+        rounded = (magnitude + (1 << (shift - 1))) >> shift
+        scaled = rounded if product >= 0 else -rounded
+        expected_values.append(max(-128, min(127, scaled + zero_point)) & 0xFF)
+
+    model = build_pointwise_c32_model(1, 1, 32, 32, qparam_specs=qparam_specs)
+    input_data = bytes([1] * 32)
+    expected = bytes(expected_values)
     runtime_bindings = [
         (1, 0, INPUT_BASE, len(input_data)),
         (2, 0, OUTPUT_BASE, len(expected)),
@@ -650,8 +1008,7 @@ async def test_compiler_runtime_pointwise_c32_package(dut):
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
-    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
 
 
 @cocotb.test()
@@ -688,6 +1045,183 @@ async def test_compiler_runtime_depthwise_c32_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_depthwise_c65_stride2_tail(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels, stride = 3, 3, 65, 2
+    output_height = ((height - 1) // stride) + 1
+    output_width = ((width - 1) // stride) + 1
+    input_values = [((pixel * 7 + channel * 3) % 19) - 9
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for output_y in range(output_height):
+        for output_x in range(output_width):
+            input_pixel = (output_y * stride) * width + output_x * stride
+            expected.extend(
+                value & 0xFF
+                for value in input_values[input_pixel * channels:(input_pixel + 1) * channels]
+            )
+
+    model = build_depthwise_c32_model(height, width, channels, stride)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=400000)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 8
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_runtime_depthwise_c96_stride2_groups(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels, stride = 3, 3, 96, 2
+    output_height = ((height - 1) // stride) + 1
+    output_width = ((width - 1) // stride) + 1
+    input_values = [((pixel * 11 + channel * 5) % 23) - 11
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for output_y in range(output_height):
+        for output_x in range(output_width):
+            input_pixel = (output_y * stride) * width + output_x * stride
+            expected.extend(
+                value & 0xFF
+                for value in input_values[input_pixel * channels:(input_pixel + 1) * channels]
+            )
+
+    model = build_depthwise_c32_model(height, width, channels, stride)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=400000)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 8
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_runtime_pointwise_depthwise_chain(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 2, 2, 32
+    input_values = [((pixel * 3 + channel) % 5) - 2
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for pixel in range(height * width):
+        value = sum(input_values[pixel * channels:(pixel + 1) * channels])
+        expected.extend([max(-128, min(127, value)) & 0xFF] * channels)
+
+    model = build_pointwise_depthwise_chain_model(height, width)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=300000)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 6
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_pointwise_depthwise_chain(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 2, 2, 32
+    input_values = [((pixel * 5 + channel * 2) % 7) - 3
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for pixel in range(height * width):
+        value = sum(input_values[pixel * channels:(pixel + 1) * channels])
+        expected.extend([max(-128, min(127, value)) & 0xFF] * channels)
+
+    model = _compile_pointwise_depthwise_chain_model()
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=300000)
+
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
 
 
 @cocotb.test()
@@ -763,6 +1297,32 @@ async def test_compiler_generated_fully_connected_package(dut):
 
 
 @cocotb.test()
+async def test_compiler_generated_pointwise_m257_stripes(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+    await _run_compiler_striped_pointwise(dut, axi_master, 257)
+
+
+@cocotb.test()
+async def test_compiler_generated_pointwise_m511_stripes(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+    await _run_compiler_striped_pointwise(dut, axi_master, 511)
+
+
+@cocotb.test()
 async def test_compiler_generated_pointwise_conv_c32_package(dut):
     cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
     axi_master = AxiLiteMaster(
@@ -783,6 +1343,159 @@ async def test_compiler_generated_pointwise_conv_c32_package(dut):
         value = sum(input_values[pixel * channels:(pixel + 1) * channels]) & 0xFF
         expected.extend([value] * output_channels)
     model = _compile_pointwise_conv_model()
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_generic_k3_conv_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels, output_channels = 8, 8, 64, 64
+    input_values = [((pixel * 3 + channel) % 9) - 4
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for output_y in range(height):
+        for output_x in range(width):
+            value = 0
+            for kernel_y in range(3):
+                input_y = output_y + kernel_y - 1
+                for kernel_x in range(3):
+                    input_x = output_x + kernel_x - 1
+                    if 0 <= input_y < height and 0 <= input_x < width:
+                        pixel = input_y * width + input_x
+                        value += sum(input_values[pixel * channels:(pixel + 1) * channels])
+            value = max(-128, min(127, value)) & 0xFF
+            expected.extend([value] * output_channels)
+
+    model = _compile_generic_k3_conv_model()
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_rgb_k3_conv_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels, output_height, output_width = 7, 7, 3, 4, 4
+    input_values = [((pixel * 5 + channel) % 11) - 5
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for output_y in range(output_height):
+        for output_x in range(output_width):
+            value = 0
+            for kernel_y in range(3):
+                input_y = output_y * 2 + kernel_y - 1
+                for kernel_x in range(3):
+                    input_x = output_x * 2 + kernel_x - 1
+                    if 0 <= input_y < height and 0 <= input_x < width:
+                        pixel = input_y * width + input_x
+                        value += sum(input_values[pixel * channels:(pixel + 1) * channels])
+            value = max(-128, min(127, value)) & 0xFF
+            expected.extend([value] * 32)
+
+    model = _compile_rgb_k3_conv_model()
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_depthwise_k3_conv_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels, output_height, output_width = 7, 7, 33, 4, 4
+    input_values = [((pixel * 5 + channel * 3) % 13) - 6
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytearray()
+    for output_y in range(output_height):
+        for output_x in range(output_width):
+            channel_values = [0] * channels
+            for kernel_y in range(3):
+                input_y = output_y * 2 + kernel_y - 1
+                for kernel_x in range(3):
+                    input_x = output_x * 2 + kernel_x - 1
+                    if 0 <= input_y < height and 0 <= input_x < width:
+                        pixel = input_y * width + input_x
+                        for channel in range(channels):
+                            channel_values[channel] += input_values[pixel * channels + channel]
+            expected.extend(max(-128, min(127, value)) & 0xFF for value in channel_values)
+
+    model = _compile_depthwise_k3_conv_model()
     runtime_bindings = [
         (1, 0, INPUT_BASE, len(input_data)),
         (2, 0, OUTPUT_BASE, len(expected)),
@@ -831,6 +1544,40 @@ async def test_compiler_runtime_rejects_invalid_bindings(dut):
         assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
         assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == NPU_CMD_FAIL_BAD_BINDING
         assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 0
+
+
+@cocotb.test()
+async def test_compiler_runtime_rejects_malformed_linebuf_job(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    qparams = b"".join(
+        struct.pack("<iiIiiiII", 0, 1 << 30, 30, 0, -128, 127, 0, 0)
+        for _ in range(32)
+    )
+    commands = b"".join(
+        [
+            _command_header(5, 32, tile=0) + struct.pack("<4I", 0, 32, 0, 0),
+            _linebuf_job(8, 1),  # K3*C32 requires nine K tiles.
+            _command_header(0, 32, tile=2).ljust(32, b"\x00"),
+        ]
+    )
+    model = _package(commands, b"", b"", 2, 0x1000, 0, 0, qparams)
+    invocation, binding_addresses = build_invocation_with_bindings(model, [])
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 1
 
 
 @cocotb.test()
