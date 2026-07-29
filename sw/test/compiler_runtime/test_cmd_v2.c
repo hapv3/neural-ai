@@ -304,23 +304,27 @@ int main(void)
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
 
     dma->source.region = NAI_REGION_TCDM_SCRATCH;
+    dma->source.offset = 3u;
     dma->destination.region = NAI_REGION_OUTPUT_BINDING;
+    dma->destination.offset = 1u;
+    dma->length = 31u;
     dma->direction = NAI_DMA_LOCAL_TO_EXTERNAL;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_OK);
-    assert(state.source == 0x10100000u && state.destination == 0x80001000u);
+    assert(state.source == 0x10100003u && state.destination == 0x80001001u);
+    assert(state.length == 31u);
     assert(state.direction == NAI_DMA_LOCAL_TO_EXTERNAL);
 
     dma->source.region = NAI_REGION_TCDM_SCRATCH;
-    dma->source.offset = 0u;
+    dma->source.offset = 3u;
     dma->destination.region = NAI_REGION_TCDM_SCRATCH;
-    dma->destination.offset = 32u;
+    dma->destination.offset = 37u;
     dma->direction = NAI_DMA_LOCAL_TO_LOCAL;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_OK);
-    assert(state.source == 0x10100000u && state.destination == 0x10100020u);
+    assert(state.source == 0x10100003u && state.destination == 0x10100025u);
     assert(state.direction == NAI_DMA_LOCAL_TO_LOCAL);
 
     nai_cmd_dma_2d_v2_t *dma_2d = (nai_cmd_dma_2d_v2_t *)(model + 224);
@@ -328,17 +332,21 @@ int main(void)
     dma_2d->header.type = NAI_CMD_DMA_2D;
     dma_2d->header.size_bytes = sizeof(*dma_2d);
     dma_2d->source.region = NAI_REGION_MODEL_CONSTANTS;
+    dma_2d->source.offset = 3u;
     dma_2d->destination.region = NAI_REGION_TCDM_SCRATCH;
-    dma_2d->length = 32u;
-    dma_2d->source_stride_2 = 32u;
+    dma_2d->destination.offset = 0u;
+    dma_2d->length = 3u;
+    dma_2d->source_stride_2 = 3u;
     dma_2d->destination_stride_2 = 32u;
-    dma_2d->repetitions_2 = 2u;
+    dma_2d->repetitions_2 = 11u;
     dma_2d->direction = NAI_DMA_EXTERNAL_TO_LOCAL;
     ops.dma_2d = mock_dma_2d;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_OK);
     assert(state.calls == 1u && state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
+    assert(state.source == 0x80000143u && state.destination == 0x10100000u);
+    assert(state.length == 3u);
     dma_2d->direction = NAI_DMA_LOCAL_TO_EXTERNAL;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
@@ -348,13 +356,15 @@ int main(void)
     dma_3d->header.type = NAI_CMD_DMA_3D;
     dma_3d->header.size_bytes = sizeof(*dma_3d);
     dma_3d->source.region = NAI_REGION_MODEL_CONSTANTS;
+    dma_3d->source.offset = 3u;
     dma_3d->destination.region = NAI_REGION_TCDM_SCRATCH;
-    dma_3d->length = 32u;
-    dma_3d->source_stride_2 = 32u;
+    dma_3d->destination.offset = 0u;
+    dma_3d->length = 31u;
+    dma_3d->source_stride_2 = 31u;
     dma_3d->destination_stride_2 = 32u;
     dma_3d->repetitions_2 = 2u;
-    dma_3d->source_stride_3 = 64u;
-    dma_3d->destination_stride_3 = 64u;
+    dma_3d->source_stride_3 = 67u;
+    dma_3d->destination_stride_3 = 96u;
     dma_3d->repetitions_3 = 2u;
     dma_3d->direction = NAI_DMA_EXTERNAL_TO_LOCAL;
     ops.dma_3d = mock_dma_3d;
@@ -362,6 +372,8 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_OK);
     assert(state.calls == 1u && state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
+    assert(state.source == 0x80000143u && state.destination == 0x10100000u);
+    assert(state.length == 31u);
     dma_3d->destination.region = NAI_REGION_OUTPUT_BINDING;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
