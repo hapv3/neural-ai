@@ -43,6 +43,7 @@ NAI_MODEL_MAGIC = 0x4D49414E
 NAI_INVOCATION_MAGIC = 0x5649414E
 NPU_CMD_FAIL_BAD_MODEL = 0xBADCD00B
 NPU_CMD_FAIL_BAD_BINDING = 0xBADCD00C
+NPU_CMD_FAIL_V2_OPERATION = 0xBADCD012
 
 
 def _ref(region, index=0, offset=0):
@@ -392,7 +393,8 @@ def build_unaligned_row32_layout_model(channels, pixels):
 
 
 def build_pointwise_c32_model(height=2, width=2, channels=64, output_channels=None,
-                              clamp_min=-128, clamp_max=127, qparam_specs=None):
+                              clamp_min=-128, clamp_max=127, qparam_specs=None,
+                              qparam_block_delta=0):
     rows = height * width
     if output_channels is None:
         output_channels = channels
@@ -419,7 +421,7 @@ def build_pointwise_c32_model(height=2, width=2, channels=64, output_channels=No
                 _ref(6),
                 _ref(6, offset=0x1000) if input_groups > 1 else _ref(0),
                 _ref(6, offset=0x2000 + output_group * rows * 32),
-                rows, input_groups, 1, output_group,
+                rows, input_groups, 1, output_group + qparam_block_delta,
                 rows * 32, rows * 32, output_group * 2 + 2
             )
         )
@@ -1230,6 +1232,44 @@ async def test_compiler_runtime_pointwise_per_channel_requant(dut):
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
+
+
+@cocotb.test()
+async def test_compiler_runtime_rejects_mismatched_qparam_block(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model = build_pointwise_c32_model(
+        1, 1, 32, 32, qparam_block_delta=1
+    )
+    input_data = bytes([1] * 32)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, 32),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(32))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
+    assert await _axi_read32(
+        axi_master, NPU_CMD_FAIL_CODE
+    ) == NPU_CMD_FAIL_V2_OPERATION
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, 32)) == bytes(32)
 
 
 @cocotb.test()
