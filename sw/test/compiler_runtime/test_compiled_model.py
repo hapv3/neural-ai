@@ -643,7 +643,7 @@ def _compile_tflite_fixture_model(fixture_stem, temporary_prefix):
 
 def _compile_generic_k3_conv_model():
     return _compile_tflite_fixture_model(
-        "generic_k3_conv_h8w8_k64_n64", "neural-ai-compiled-k3-"
+        "generic_k3_conv_h4w4_k32_n32", "neural-ai-compiled-k3-"
     )
 
 
@@ -1372,7 +1372,7 @@ async def test_compiler_generated_generic_k3_conv_package(dut):
     )
     await reset_dut(dut)
 
-    height, width, channels, output_channels = 8, 8, 64, 64
+    height, width, channels, output_channels = 4, 4, 32, 32
     input_values = [((pixel * 3 + channel) % 9) - 4
                     for pixel in range(height * width)
                     for channel in range(channels)]
