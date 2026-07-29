@@ -64,5 +64,17 @@ int main(void)
     qparams[20].clamp_max = 99;
     assert(nai_quant_buffer_decode_v1(qparams, 32, 0,
         &buffer) == NAI_QUANT_BUFFER_BAD_PARAMETER);
+    make_qparams(qparams);
+    qparams[0].clamp_min = -129;
+    assert(nai_quant_buffer_decode_v1(qparams, 32, 0,
+        &buffer) == NAI_QUANT_BUFFER_BAD_PARAMETER);
+    qparams[0].clamp_min = -100;
+    qparams[0].clamp_max = 128;
+    assert(nai_quant_buffer_decode_v1(qparams, 32, 0,
+        &buffer) == NAI_QUANT_BUFFER_BAD_PARAMETER);
+    qparams[0].clamp_min = 101;
+    qparams[0].clamp_max = 100;
+    assert(nai_quant_buffer_decode_v1(qparams, 32, 0,
+        &buffer) == NAI_QUANT_BUFFER_BAD_PARAMETER);
     return 0;
 }
