@@ -22,8 +22,11 @@ L2_SRC_2D = 0x80002000
 L2_DST_2D = 0x80003000
 L2_SRC_3D = 0x80004000
 L2_DST_3D = 0x80005000
+L2_ALIAS_SRC = 0x80006000
+L2_ALIAS_DST = 0x80007000
 TCDM_BANK_LOW = 0x10102000
 TCDM_BANK_HIGH = 0x1017E000
+TCDM_ALIAS_CANONICAL = 0x10100100
 DMA_BYTES = 512
 
 DMA_2D_LEN = 8
@@ -126,6 +129,8 @@ async def test_independent_memory(dut):
     await write_l2_bytes(dut, L2_SRC_3D, [l2_3d_pattern(i) for i in range(l2_3d_fixture_len)])
     await write_l2_bytes(dut, L2_DST_2D, [0x5A] * len(make_expected_2d_output()))
     await write_l2_bytes(dut, L2_DST_3D, [0x6B] * len(make_expected_3d_output()))
+    await write_l2_bytes(dut, L2_ALIAS_SRC, (0xA53CC35A).to_bytes(4, "little"))
+    await write_l2_bytes(dut, L2_ALIAS_DST, bytes(4))
     await release_fetch(dut, axi_master=axi_master)
 
     await wait_for_host_irq(
@@ -146,6 +151,10 @@ async def test_independent_memory(dut):
         high = read_tcdm_word32(dut, TCDM_BANK_HIGH + bank * 32)
         assert low == (0x11000000 | bank), f"TCDM low bank {bank} got=0x{low:08x}"
         assert high == (0x22000000 | bank), f"TCDM high bank {bank} got=0x{high:08x}"
+    alias_value = read_tcdm_word32(dut, TCDM_ALIAS_CANONICAL)
+    assert alias_value == 0xA53CC35A, f"TCDM alias probe got=0x{alias_value:08x}"
+    alias_dma = int.from_bytes(await read_l2_bytes(dut, L2_ALIAS_DST, 4), "little")
+    assert alias_dma == 0x2468ACE0, f"TCDM engine alias got=0x{alias_dma:08x}"
 
     got_2d = await read_l2_bytes(dut, L2_DST_2D, len(make_expected_2d_output()))
     for idx, (got_byte, exp_byte) in enumerate(zip(got_2d, make_expected_2d_output())):
