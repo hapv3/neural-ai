@@ -59,6 +59,12 @@ typedef struct {
     uint32_t reserved;
 } nai_cmd_rq_load_v2_t;
 
+typedef enum {
+    NAI_DMA_EXTERNAL_TO_LOCAL = 0,
+    NAI_DMA_LOCAL_TO_EXTERNAL = 1,
+    NAI_DMA_LOCAL_TO_LOCAL = 2
+} nai_dma_direction_v2_t;
+
 typedef struct {
     nai_cmd_header_v2_t header;
     nai_ref_v1_t source;

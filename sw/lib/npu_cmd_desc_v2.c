@@ -42,6 +42,42 @@ static uint32_t ranges_overlap(uint32_t lhs, uint32_t rhs, uint32_t bytes)
     return lhs < rhs ? bytes > rhs - lhs : bytes > lhs - rhs;
 }
 
+static uint32_t dma_region_is_local(uint16_t region, uint32_t *is_local)
+{
+    switch (region) {
+        case NAI_REGION_MODEL_CONSTANTS:
+        case NAI_REGION_MODEL_COMMANDS:
+        case NAI_REGION_INPUT_BINDING:
+        case NAI_REGION_OUTPUT_BINDING:
+        case NAI_REGION_L2_TEMP_BINDING:
+            *is_local = 0u;
+            return 1u;
+        case NAI_REGION_TCDM_SCRATCH:
+        case NAI_REGION_DTCM_RUNTIME:
+            *is_local = 1u;
+            return 1u;
+        default:
+            return 0u;
+    }
+}
+
+static nai_dispatch_status_v2_t validate_dma_direction(
+    const nai_ref_v1_t *source, const nai_ref_v1_t *destination, uint32_t direction)
+{
+    uint32_t source_local;
+    uint32_t destination_local;
+    uint32_t expected;
+    if (!dma_region_is_local(source->region, &source_local) ||
+        !dma_region_is_local(destination->region, &destination_local) ||
+        (!source_local && !destination_local)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    expected = source_local ?
+        (destination_local ? NAI_DMA_LOCAL_TO_LOCAL : NAI_DMA_LOCAL_TO_EXTERNAL) :
+        NAI_DMA_EXTERNAL_TO_LOCAL;
+    return direction == expected ? NAI_DISPATCH_OK : NAI_DISPATCH_BAD_COMMAND;
+}
+
 static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
                                            const nai_model_view_v1_t *view,
                                            const nai_resolver_v1_t *resolver,
@@ -49,8 +85,12 @@ static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
 {
     uint32_t source;
     uint32_t destination;
-    if (command->length == 0u || !all_zero(command->reserved, 6u) || ops->dma_1d == 0 ||
-        resolve(view, resolver, &command->source, command->length, NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||
+    if (command->length == 0u || !all_zero(command->reserved, 6u) || ops->dma_1d == 0)
+        return NAI_DISPATCH_BAD_COMMAND;
+    if (validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK)
+        return NAI_DISPATCH_BAD_COMMAND;
+    if (resolve(view, resolver, &command->source, command->length, NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, command->length, NAI_ALIGNMENT_BYTES, &destination) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
@@ -104,6 +144,9 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
     }
     source_bytes += command->length;
     destination_bytes += command->length;
+    if (validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK)
+        return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes, NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, NAI_ALIGNMENT_BYTES, &destination) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
@@ -139,6 +182,9 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
     }
     source_bytes += command->length;
     destination_bytes += command->length;
+    if (validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK)
+        return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes, NAI_ALIGNMENT_BYTES, &source_2) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, NAI_ALIGNMENT_BYTES, &destination_2) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
