@@ -31,6 +31,7 @@ from npu_test_utils import (
 
 INPUT_BASE = 0x80000000
 OUTPUT_BASE = 0x80001000
+INPUT2_BASE = 0x80002000
 INVOCATION_BASE = 0x80040000
 MODEL_BASE = 0x80041000
 BINDING_TABLE_BASE = 0x80044000
@@ -125,6 +126,14 @@ def _depthwise_c32(weights, ifm, ofm, input_h, input_w, output_h, output_w,
         *([0] * 4),
     )
     assert len(command) == 96
+    return command
+
+
+def _afu_binary(lhs, rhs, ofm, length, mode, tile):
+    command = _command_header(13, 64, tile=tile)
+    command += lhs + rhs + ofm
+    command += struct.pack("<2I4I", length, mode, 0, 0, 0, 0)
+    assert len(command) == 64
     return command
 
 
@@ -258,6 +267,29 @@ def build_c32_layout_model():
     )
     bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
     return _package(commands, b"", bindings, 2, 256, 1, 1)
+
+
+def build_afu_add_model():
+    dimensions = (1, 2, 2, 32)
+    tensor_bytes = 2 * 2 * 32
+    commands = b"".join(
+        [
+            _copy_layout(_ref(3, 0), _ref(6), 3, dimensions, 0),
+            _copy_layout(_ref(3, 1), _ref(6, offset=0x200), 3, dimensions, 1),
+            _afu_binary(
+                _ref(6), _ref(6, offset=0x200), _ref(6, offset=0x400),
+                tensor_bytes, 1, 2,
+            ),
+            _copy_layout(_ref(6, offset=0x400), _ref(4), 4, dimensions, 3),
+            _command_header(0, 32, tile=4).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=dimensions)
+        + _binding(1, 1, dimensions=dimensions)
+        + _binding(2, 0, dimensions=dimensions)
+    )
+    return _package(commands, b"", bindings, 4, 0x480, 2, 1)
 
 
 def build_unaligned_row32_layout_model(channels, pixels):
@@ -842,6 +874,48 @@ async def test_compiler_runtime_c32_layout_round_trip(dut):
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_afu_add_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 2 * 2 * 32
+    lhs_values = [120 if index % 7 == 0 else ((index * 3) % 41) - 20
+                  for index in range(count)]
+    rhs_values = [20 if index % 7 == 0 else ((index * 5) % 31) - 15
+                  for index in range(count)]
+    expected = bytes(
+        max(-128, min(127, lhs + rhs)) & 0xFF
+        for lhs, rhs in zip(lhs_values, rhs_values)
+    )
+    model = build_afu_add_model()
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (1, 1, INPUT2_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, bytes(value & 0xFF for value in lhs_values))
+    await write_l2_bytes(dut, INPUT2_BASE, bytes(value & 0xFF for value in rhs_values))
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
 
 
 async def _run_unaligned_row32_case(dut, axi_master, channels, pixels,
