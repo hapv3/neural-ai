@@ -104,12 +104,12 @@ static uint32_t mock_gemm32(void *context, const nai_cmd_gemm32_v2_t *command,
                             uint32_t partial_sums, uint32_t ofm)
 {
     mock_state_t *state = (mock_state_t *)context;
-    (void)command;
     (void)weights;
     (void)ifm;
     state->calls++;
     state->partial_sums = partial_sums;
     state->ofm = ofm;
+    state->rows = command->dim_m;
     return 0u;
 }
 
@@ -434,11 +434,18 @@ int main(void)
     gemm_view.constants = &gemm_constants;
     gemm_ops.context = &state;
     gemm_ops.gemm32 = mock_gemm32;
-    state = (mock_state_t){0};
-    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
-        &completed, &failure) == NAI_DISPATCH_OK);
-    assert(state.calls == 1u && state.partial_sums == 0u);
-    assert(state.ofm == 0x10101000u);
+    const uint32_t valid_dim_m_values[] = {1u, 31u, 32u, 33u, 255u, 256u};
+    for (uint32_t index = 0u;
+         index < sizeof(valid_dim_m_values) / sizeof(valid_dim_m_values[0]);
+         index++) {
+        gemm_command->dim_m = valid_dim_m_values[index];
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+            &completed, &failure) == NAI_DISPATCH_OK);
+        assert(state.calls == 1u && state.partial_sums == 0u);
+        assert(state.ofm == 0x10101000u);
+        assert(state.rows == valid_dim_m_values[index]);
+    }
 
     for (uint32_t invalid_dim_m = 257u; invalid_dim_m <= 511u; invalid_dim_m += 254u) {
         gemm_command->dim_m = invalid_dim_m;
