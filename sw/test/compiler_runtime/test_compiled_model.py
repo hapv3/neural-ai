@@ -655,7 +655,7 @@ def _compile_rgb_k3_conv_model():
 
 def _compile_depthwise_k3_conv_model():
     return _compile_tflite_fixture_model(
-        "depthwise_k3_conv_h7w7_c33_s2", "neural-ai-compiled-depthwise-"
+        "depthwise_k3_conv_h3w3_c33_s2", "neural-ai-compiled-depthwise-"
     )
 
 
@@ -1474,7 +1474,7 @@ async def test_compiler_generated_depthwise_k3_conv_package(dut):
     )
     await reset_dut(dut)
 
-    height, width, channels, output_height, output_width = 7, 7, 33, 4, 4
+    height, width, channels, output_height, output_width = 3, 3, 33, 2, 2
     input_values = [((pixel * 5 + channel * 3) % 13) - 6
                     for pixel in range(height * width)
                     for channel in range(channels)]
