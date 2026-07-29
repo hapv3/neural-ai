@@ -61,6 +61,45 @@ def _dma_1d(source, destination, length, direction, tile):
     return command
 
 
+def _dma_2d(source, destination, length, source_stride, destination_stride,
+            repetitions, direction, tile):
+    command = _command_header(3, 64, tile=tile)
+    command += source + destination
+    command += struct.pack(
+        "<5I3I",
+        length,
+        source_stride,
+        destination_stride,
+        repetitions,
+        direction,
+        0,
+        0,
+        0,
+    )
+    assert len(command) == 64
+    return command
+
+
+def _dma_3d(source, destination, length, source_stride_2,
+            destination_stride_2, repetitions_2, source_stride_3,
+            destination_stride_3, repetitions_3, direction, tile):
+    command = _command_header(4, 64, tile=tile)
+    command += source + destination
+    command += struct.pack(
+        "<8I",
+        length,
+        source_stride_2,
+        destination_stride_2,
+        repetitions_2,
+        source_stride_3,
+        destination_stride_3,
+        repetitions_3,
+        direction,
+    )
+    assert len(command) == 64
+    return command
+
+
 def _binding(direction, index, data_type=1, dimensions=(1, 1, 1, 32)):
     element_bytes = 1 if data_type == 1 else 4
     byte_size = element_bytes
@@ -242,6 +281,50 @@ def build_model():
     )
     bindings = _binding(1, 0) + _binding(2, 0)
     return _package(commands, b"", bindings, 2, 32, 1, 1)
+
+
+def build_unaligned_dma_model(dimension):
+    binding_bytes = 192
+    if dimension == 1:
+        commands = [
+            _dma_1d(_ref(3, offset=3), _ref(6, offset=5), 37, 0, 0),
+            _dma_1d(_ref(6, offset=5), _ref(4, offset=7), 37, 1, 1),
+        ]
+        copies = [(3, 7, 37)]
+    elif dimension == 2:
+        commands = [
+            _dma_2d(_ref(3, offset=3), _ref(6),
+                    3, 3, 32, 11, 0, 0),
+            _dma_2d(_ref(6), _ref(4, offset=5),
+                    3, 32, 3, 11, 1, 1),
+        ]
+        copies = [(3 + row * 3, 5 + row * 3, 3) for row in range(11)]
+    elif dimension == 3:
+        commands = [
+            _dma_3d(_ref(3, offset=3), _ref(6),
+                    31, 31, 32, 2, 67, 96, 2, 0, 0),
+            _dma_3d(_ref(6), _ref(4, offset=7),
+                    31, 32, 31, 2, 96, 67, 2, 1, 1),
+        ]
+        copies = [
+            (3 + plane * 67 + row * 31,
+             7 + plane * 67 + row * 31,
+             31)
+            for plane in range(2)
+            for row in range(2)
+        ]
+    else:
+        raise ValueError(f"unsupported DMA dimension {dimension}")
+    commands.append(_command_header(0, 32, tile=2).ljust(32, b"\x00"))
+    bindings = (
+        _binding(1, 0, dimensions=(1, 1, 1, binding_bytes))
+        + _binding(2, 0, dimensions=(1, 1, 1, binding_bytes))
+    )
+    return (
+        _package(b"".join(commands), b"", bindings, 2, 384, 1, 1),
+        copies,
+        binding_bytes,
+    )
 
 
 def build_layout_model():
@@ -826,6 +909,60 @@ async def test_compiler_runtime_dma_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 1
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, 32)) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_unaligned_raw_dma_1d_2d_3d(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+
+    for dimension in (1, 2, 3):
+        model, copies, binding_bytes = build_unaligned_dma_model(dimension)
+        input_data = bytes(
+            (index * 17 + dimension * 11) & 0xFF
+            for index in range(binding_bytes)
+        )
+        expected = bytearray(binding_bytes)
+        for source, destination, length in copies:
+            expected[destination:destination + length] = (
+                input_data[source:source + length]
+            )
+        runtime_bindings = [
+            (1, 0, INPUT_BASE, binding_bytes),
+            (2, 0, OUTPUT_BASE, binding_bytes),
+        ]
+        invocation, binding_addresses = build_invocation_with_bindings(
+            model, runtime_bindings
+        )
+
+        await reset_dut(dut)
+        await write_l2_bytes(dut, INPUT_BASE, input_data)
+        await write_l2_bytes(dut, OUTPUT_BASE, bytes(binding_bytes))
+        await write_l2_bytes(dut, MODEL_BASE, model)
+        await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+        await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+        await _load_and_run(dut, axi_master, invocation)
+
+        status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+        if status != NPU_CMD_STATUS_PASS:
+            fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+            fail_pointer = await _axi_read32(axi_master, NPU_CMD_FAIL_PTR)
+            done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+            raise AssertionError(
+                f"unaligned DMA{dimension}D failed: status={status} "
+                f"fail=0x{fail_code:08x} pointer=0x{fail_pointer:08x} "
+                f"done={done_count}"
+            )
+        assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+        assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
+        assert bytes(await read_l2_bytes(
+            dut, OUTPUT_BASE, binding_bytes
+        )) == bytes(expected)
 
 
 @cocotb.test()

@@ -90,8 +90,8 @@ static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
     if (validate_dma_direction(&command->source, &command->destination,
             command->direction) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_COMMAND;
-    if (resolve(view, resolver, &command->source, command->length, NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||
-        resolve(view, resolver, &command->destination, command->length, NAI_ALIGNMENT_BYTES, &destination) != NAI_DISPATCH_OK) {
+    if (resolve(view, resolver, &command->source, command->length, 1u, &source) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->destination, command->length, 1u, &destination) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
     return ops->dma_1d(ops->context, source, destination, command->length, command->direction) == 0u ?
@@ -147,8 +147,8 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
     if (validate_dma_direction(&command->source, &command->destination,
             command->direction) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_COMMAND;
-    if (resolve(view, resolver, &command->source, source_bytes, NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||
-        resolve(view, resolver, &command->destination, destination_bytes, NAI_ALIGNMENT_BYTES, &destination) != NAI_DISPATCH_OK) {
+    if (resolve(view, resolver, &command->source, source_bytes, 1u, &source) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
     return ops->dma_2d(ops->context, source, destination, command->length,
@@ -185,8 +185,8 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
     if (validate_dma_direction(&command->source, &command->destination,
             command->direction) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_COMMAND;
-    if (resolve(view, resolver, &command->source, source_bytes, NAI_ALIGNMENT_BYTES, &source_2) != NAI_DISPATCH_OK ||
-        resolve(view, resolver, &command->destination, destination_bytes, NAI_ALIGNMENT_BYTES, &destination_2) != NAI_DISPATCH_OK) {
+    if (resolve(view, resolver, &command->source, source_bytes, 1u, &source_2) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination_2) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
     return ops->dma_3d(ops->context, source_2, destination_2, command->length,
