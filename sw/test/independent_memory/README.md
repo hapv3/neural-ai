@@ -11,7 +11,9 @@ Spatz compute blocks. This is the baseline suite for DMA/TCDM refactors.
 2. Cocotb loads firmware into I-TCM and releases `fetch_enable_i`.
 3. `L2 -> TCDM` 1D transfer is verified inside firmware.
 4. `TCDM -> L2` 1D transfer is verified by cocotb in external memory.
-5. Firmware probes low/high representatives for all 16 TCDM banks.
+5. Firmware probes low/high representatives for all 16 TCDM banks, verifies the
+   Snitch-visible `0x1010...`/`0x1018...` alias, and verifies the engine-only
+   `0x1020...` alias through iDMA round trips.
 6. `L2 -> TCDM` 2D and 3D transfers are verified inside firmware.
 7. `TCDM -> L2` 2D and 3D transfers are verified by cocotb.
 

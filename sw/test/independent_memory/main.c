@@ -12,6 +12,8 @@
 #define L2_DST_2D      0x80003000u
 #define L2_SRC_3D      0x80004000u
 #define L2_DST_3D      0x80005000u
+#define L2_ALIAS_SRC   0x80006000u
+#define L2_ALIAS_DST   0x80007000u
 #define TCDM_SRC       0x10100000u
 #define TCDM_DST       0x10100400u
 #define TCDM_DST_2D    0x10103000u
@@ -20,6 +22,9 @@
 #define TCDM_SRC_3D    0x10106000u
 #define TCDM_BANK_LOW  0x10102000u
 #define TCDM_BANK_HIGH 0x1017E000u
+#define TCDM_ALIAS_CANONICAL 0x10100100u
+#define TCDM_ALIAS_512K      0x10180100u
+#define TCDM_ALIAS_1M        0x10200100u
 #define DMA_BYTES      512u
 
 #define DMA_2D_LEN        8u
@@ -215,6 +220,32 @@ static void verify_bank_addresses(void) {
     }
 }
 
+static void verify_tcdm_aliases(void) {
+    volatile uint32_t *canonical = (volatile uint32_t *)TCDM_ALIAS_CANONICAL;
+    volatile uint32_t *alias_512k = (volatile uint32_t *)TCDM_ALIAS_512K;
+
+    *canonical = 0x13579BDFu;
+    if (*alias_512k != 0x13579BDFu) {
+        spatz_rt_fail_at(12, 0, (int32_t)*alias_512k, 0x13579BDFu);
+    }
+    *alias_512k = 0x2468ACE0u;
+    if (*canonical != 0x2468ACE0u) {
+        spatz_rt_fail_at(12, 1, (int32_t)*canonical, 0x2468ACE0u);
+    }
+
+    int tx = idma_L1ToL2(TCDM_ALIAS_1M, L2_ALIAS_DST, sizeof(uint32_t));
+    if (!idma_mm_wait_for_completion(IDMA_DIR_L1_TO_L2, (uint32_t)tx)) {
+        spatz_rt_fail_at(12, 2, tx, 1);
+    }
+    tx = idma_L2ToL1(L2_ALIAS_SRC, TCDM_ALIAS_1M, sizeof(uint32_t));
+    if (!idma_mm_wait_for_completion(IDMA_DIR_L2_TO_L1, (uint32_t)tx)) {
+        spatz_rt_fail_at(12, 3, tx, 1);
+    }
+    if (*canonical != 0xA53CC35Au) {
+        spatz_rt_fail_at(12, 4, (int32_t)*canonical, (int32_t)0xA53CC35Au);
+    }
+}
+
 int main(void) {
     spatz_rt_init();
     spatz_rt_set_phase(1, 0);
@@ -237,6 +268,7 @@ int main(void) {
     // Phase 4: direct TCDM bank low/high address decode probe.
     spatz_rt_set_phase(4, 3);
     verify_bank_addresses();
+    verify_tcdm_aliases();
     spatz_rt_pass_step();
 
     // Phase 5: L2 -> TCDM 2D copy with non-equal source/destination strides.
