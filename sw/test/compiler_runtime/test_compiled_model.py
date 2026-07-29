@@ -697,6 +697,12 @@ def _compile_afu_add_model():
     )
 
 
+def _compile_public_reshape_model():
+    return _compile_tflite_fixture_model(
+        "reshape_1x4x32_to_1x2x2x32", "neural-ai-compiled-reshape-"
+    )
+
+
 def _compile_pointwise_depthwise_chain_model():
     return _compile_tflite_fixture_model(
         "pointwise_depthwise_chain", "neural-ai-compiled-chain-"
@@ -1492,6 +1498,43 @@ async def test_compiler_generated_afu_add_c32_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_public_reshape_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    tensor_bytes = 4 * 32
+    input_data = bytes((index * 29 + 7) & 0xFF for index in range(tensor_bytes))
+    model = _compile_public_reshape_model()
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, tensor_bytes),
+        (2, 0, OUTPUT_BASE, tensor_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(tensor_bytes))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert command_count == 2
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, tensor_bytes)) == input_data
 
 
 @cocotb.test()
