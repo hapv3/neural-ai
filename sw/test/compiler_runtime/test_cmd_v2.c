@@ -25,6 +25,8 @@ typedef struct {
     uint32_t stride_w;
     uint32_t pad_h;
     uint32_t pad_w;
+    uint32_t linebuf_rows;
+    uint32_t linebuf_k_tiles;
 } mock_state_t;
 
 typedef struct {
@@ -115,6 +117,15 @@ static uint32_t mock_depthwise_c32(void *context, const nai_cmd_depthwise_c32_v2
     state->pad_h = command->pad_h;
     state->pad_w = command->pad_w;
     state->qparam_block = command->qparam_block;
+    return 0u;
+}
+
+static uint32_t mock_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->linebuf_rows = command->job.rows;
+    state->linebuf_k_tiles = command->job.k_tiles;
     return 0u;
 }
 
@@ -345,11 +356,26 @@ int main(void)
     assert(completed == 1u && state.calls == 1u);
     assert(state.rows == 2u && state.input_groups == 1u && state.output_groups == 1u);
     assert(state.partial_sums == 0u && state.ofm == 0x10101000u);
+    for (uint32_t invalid_rows = 257u; invalid_rows <= 511u; invalid_rows += 254u) {
+        pointwise->rows = invalid_rows;
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+            &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+        assert(completed == 0u && state.calls == 0u);
+    }
+    pointwise->rows = 2u;
     pointwise->input_c32_groups = 2u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 0u && state.calls == 0u);
+    pointwise->output_c32_groups = 2u;
+    pointwise->input_c32_groups = 1u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    pointwise->output_c32_groups = 1u;
 
     memset(gemm_model, 0, sizeof(gemm_model));
     gemm_header.command_count = 1;
@@ -369,7 +395,7 @@ int main(void)
     depthwise->input_w = 4u;
     depthwise->output_h = 2u;
     depthwise->output_w = 2u;
-    depthwise->channels = 64u;
+    depthwise->channels = 32u;
     depthwise->stride_h = 2u;
     depthwise->stride_w = 2u;
     depthwise->pad_h = 1u;
@@ -385,9 +411,72 @@ int main(void)
     assert(state.ofm == 0x10101000u);
     assert(state.input_h == 4u && state.input_w == 4u);
     assert(state.output_h == 2u && state.output_w == 2u);
-    assert(state.channels == 64u && state.stride_h == 2u && state.stride_w == 2u);
+    assert(state.channels == 32u && state.stride_h == 2u && state.stride_w == 2u);
     assert(state.pad_h == 1u && state.pad_w == 1u && state.qparam_block == 3u);
+    depthwise->channels = 33u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    depthwise->channels = 32u;
     depthwise->output_w = 3u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 192;
+    gemm_commands.element_count = 2;
+    nai_cmd_linebuf_job_v2_t *linebuf = (nai_cmd_linebuf_job_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *linebuf_end = (nai_cmd_control_v2_t *)(gemm_model + 160);
+    linebuf->header.type = NAI_CMD_LINEBUF_JOB;
+    linebuf->header.size_bytes = sizeof(*linebuf);
+    linebuf->job.rows = 4u;
+    linebuf->job.k_tiles = 9u;
+    linebuf->job.linebuf.input_h = 3u;
+    linebuf->job.linebuf.input_w = 3u;
+    linebuf->job.linebuf.input_c = 32u;
+    linebuf->job.linebuf.output_w = 2u;
+    linebuf->job.linebuf.stride_h = 1u;
+    linebuf->job.linebuf.stride_w = 1u;
+    linebuf->job.linebuf.pad_h = 1u;
+    linebuf->job.linebuf.pad_w = 1u;
+    linebuf->job.linebuf.row_stride_bytes = 96u;
+    linebuf->job.linebuf.pixel_stride_bytes = 32u;
+    linebuf->job.linebuf.ow_step_bytes = 32u;
+    linebuf->job.linebuf.oh_step_bytes = 96u;
+    linebuf->job.linebuf.kernel_h = 3u;
+    linebuf->job.linebuf.kernel_w = 3u;
+    linebuf->job.linebuf.block_valid_bytes = 32u;
+    linebuf->job.linebuf.k_tiles = 9u;
+    linebuf->job.linebuf.spatial_m = 4u;
+    linebuf->job.gemm.dim_m = 4u;
+    linebuf->job.gemm.ofm_row_stride_bytes = 64u;
+    linebuf->job.gemm.ofm_tile_cols = 2u;
+    linebuf_end->header.type = NAI_CMD_END;
+    linebuf_end->header.size_bytes = sizeof(*linebuf_end);
+    gemm_ops.linebuf_job = mock_linebuf_job;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.linebuf_rows == 4u && state.linebuf_k_tiles == 9u);
+    linebuf->reserved[0] = 1u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    linebuf->reserved[0] = 0u;
+    linebuf->job.linebuf.k_tiles = 8u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    linebuf->job.linebuf.k_tiles = 9u;
+    linebuf->job.linebuf.c32_fast = 2u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);

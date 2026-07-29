@@ -45,3 +45,7 @@ opensta-build/
 opensta-install/
 build/
 tools/skywater-pdk/
+sw/test/compiler_runtime/test_quant_buffer
+sw/test/compiler_runtime/test_model_abi
+sw/test/compiler_runtime/test_copy_layout
+sw/test/compiler_runtime/test_cmd_v2

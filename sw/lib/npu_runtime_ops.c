@@ -163,10 +163,10 @@ static uint32_t runtime_depthwise_c32(void *context,
                                       uint32_t weights, uint32_t ifm,
                                       uint32_t ofm)
 {
-    const uint32_t groups = (command->channels + 31u) / 32u;
-    const uint32_t weight_bytes = groups * 3u * 3u * 32u;
+    const uint32_t weight_bytes = 3u * 3u * 32u;
     (void)context;
-    if (!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
+    if (command->channels == 0u || command->channels > 32u ||
+        !nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
         !idma_memcpy_blocking(weights, NPU_CMD_TCDM_BASE, weight_bytes)) return 1u;
     systolic_depthwise3x3_c32_requant_channels(ifm, NPU_CMD_TCDM_BASE, ofm,
                                                command->input_h, command->input_w,
@@ -174,6 +174,66 @@ static uint32_t runtime_depthwise_c32(void *context,
                                                command->channels, command->stride_h,
                                                command->stride_w, command->pad_h,
                                                command->pad_w);
+    systolic_requant_disable();
+    return 0u;
+}
+
+static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
+{
+    systolic_linebuf_cfg_t linebuf = command->job.linebuf;
+    systolic_gemm32_req_t gemm = command->job.gemm;
+    (void)context;
+    /* The fixed 124-byte linebuffer wire record carries compact TCDM offsets,
+       matching RefV1 scratch offsets used by the compiler.  Resolve those
+       offsets to the physical TCDM window immediately before programming HAL;
+       the input address additionally accounts for the HAL's virtual top
+       padding row. */
+    if (linebuf.input_base >= NPU_TCDM_SIZE || gemm.weight_addr >= NPU_TCDM_SIZE ||
+        gemm.ifm_addr >= NPU_TCDM_SIZE || gemm.psum_addr >= NPU_TCDM_SIZE ||
+        gemm.ofm_addr >= NPU_TCDM_SIZE) return 1u;
+    /* The HAL linebuffer contract addresses the virtual top-padding row by
+       subtracting pad_h*row_stride from input_base.  Keep the wire field a
+       compact TCDM offset, then perform that subtraction after relocation so
+       an offset of zero does not wrap the 32-bit ABI arithmetic. */
+    if (linebuf.pad_h != 0u &&
+        linebuf.row_stride_bytes > 0xffffffffu / linebuf.pad_h) return 1u;
+    {
+        uint32_t pad_bytes = (uint32_t)linebuf.pad_h * linebuf.row_stride_bytes;
+        uint32_t physical_input = NPU_TCDM_BASE + linebuf.input_base;
+        if (physical_input < pad_bytes) return 1u;
+        linebuf.input_base = physical_input - pad_bytes;
+    }
+    gemm.weight_addr += NPU_TCDM_BASE;
+    gemm.ifm_addr += NPU_TCDM_BASE;
+    gemm.psum_addr += NPU_TCDM_BASE;
+    gemm.ofm_addr += NPU_TCDM_BASE;
+    systolic_linebuf_config(&linebuf);
+    if (command->job.k_tiles > 1u) {
+        if (gemm.accum_en == 2u) {
+            systolic_gemm32_linebuf_ktiles_accumulate_requant_strided(
+                gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m,
+                gemm.ofm_row_stride_bytes, gemm.ofm_tile_cols,
+                gemm.psum_row_stride_bytes);
+        } else if (gemm.accum_en == 1u) {
+            systolic_gemm32_linebuf_ktiles_accumulate_strided(
+                gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m,
+                gemm.ofm_row_stride_bytes, gemm.ofm_tile_cols,
+                gemm.psum_row_stride_bytes);
+        } else {
+            systolic_gemm32_linebuf_ktiles_requant_strided(
+                gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m,
+                gemm.ofm_row_stride_bytes, gemm.ofm_tile_cols);
+        }
+    } else if (gemm.accum_en == 2u) {
+        systolic_gemm32_linebuf_accumulate_requant(
+            gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m);
+    } else if (gemm.accum_en == 1u) {
+        systolic_gemm32_linebuf_accumulate(
+            gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m);
+    } else {
+        systolic_gemm32_linebuf_requant(gemm.weight_addr, gemm.ofm_addr, gemm.dim_m);
+    }
+    systolic_linebuf_disable();
     systolic_requant_disable();
     return 0u;
 }
@@ -199,6 +259,34 @@ static uint32_t runtime_layout_dma(uint32_t source, uint32_t destination, uint32
         return 0u;
     }
     return 1u;
+}
+
+static uint32_t runtime_layout_dma_chunked(uint32_t source, uint32_t destination,
+                                            uint32_t length, uint32_t source_stride,
+                                            uint32_t destination_stride, uint32_t repetitions,
+                                            uint32_t direction)
+{
+    uint32_t completed = 0u;
+    while (completed < repetitions) {
+        const uint32_t chunk = (repetitions - completed) > 256u ?
+            256u : (repetitions - completed);
+        uint32_t source_offset;
+        uint32_t destination_offset;
+        if (source_stride != 0u && completed > 0xffffffffu / source_stride) return 1u;
+        if (destination_stride != 0u && completed > 0xffffffffu / destination_stride) return 1u;
+        source_offset = completed * source_stride;
+        destination_offset = completed * destination_stride;
+        if (source > 0xffffffffu - source_offset ||
+            destination > 0xffffffffu - destination_offset ||
+            (chunk == 1u ?
+                runtime_dma_1d(0, source + source_offset, destination + destination_offset,
+                               length, direction) :
+                runtime_layout_dma(source + source_offset, destination + destination_offset,
+                                   length, source_stride, destination_stride, chunk, direction)) != 0u)
+            return 1u;
+        completed += chunk;
+    }
+    return 0u;
 }
 
 static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_t *command,
@@ -246,9 +334,9 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
                 command->destination_row_stride != compact_stride) return 1u;
             length = compact_stride;
         }
-        return runtime_layout_dma(source_address, destination_address, length,
-                                  command->source_row_stride, command->destination_row_stride,
-                                  pixels, direction);
+        return runtime_layout_dma_chunked(source_address, destination_address, length,
+                                          command->source_row_stride, command->destination_row_stride,
+                                          pixels, direction);
     }
 
     if (command->mode == NAI_COPY_NHWC_TO_C32 || command->mode == NAI_COPY_C32_TO_NHWC) {
@@ -272,9 +360,13 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
                 source_offset = group * pixels * 32u * element_bytes;
                 destination_offset = group * 32u * element_bytes;
             }
-            if (runtime_layout_dma(source_address + source_offset, destination_address + destination_offset,
-                                   group_channels * element_bytes, source_stride, destination_stride,
-                                   pixels, direction) != 0u) return 1u;
+            if (source_address > 0xffffffffu - source_offset ||
+                destination_address > 0xffffffffu - destination_offset ||
+                runtime_layout_dma_chunked(source_address + source_offset,
+                                            destination_address + destination_offset,
+                                            group_channels * element_bytes, source_stride,
+                                            destination_stride, pixels, direction) != 0u)
+                return 1u;
         }
         return 0u;
     }
@@ -305,6 +397,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_gemm32,
         runtime_pointwise_c32,
         runtime_depthwise_c32,
+        runtime_linebuf_job,
         runtime_copy_layout,
         runtime_barrier,
         runtime_rq_load

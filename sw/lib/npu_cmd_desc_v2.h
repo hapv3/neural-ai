@@ -2,6 +2,7 @@
 #define NPU_CMD_DESC_V2_H
 
 #include "npu_model_loader.h"
+#include "hal_systolic.h"
 
 #define NAI_CMD_FLAG_OPTIONAL  (1u << 0)
 #define NAI_CMD_FLAG_SKIPPABLE (1u << 1)
@@ -106,6 +107,19 @@ typedef struct {
     uint32_t reserved[8];
 } nai_cmd_gemm32_v2_t;
 
+typedef struct {
+    systolic_linebuf_cfg_t linebuf;
+    systolic_gemm32_req_t gemm;
+    uint32_t rows;
+    uint32_t k_tiles;
+} nai_linebuf_job_wire_v1_t;
+
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_linebuf_job_wire_v1_t job;
+    uint8_t reserved[20];
+} nai_cmd_linebuf_job_v2_t;
+
 /* Pointwise 1x1 C32 command. Activations are group-major C32 blocked;
    weights are OCG-major, then ICG-major, with one 32x32 tile per pair. */
 typedef struct {
@@ -172,6 +186,8 @@ _Static_assert(sizeof(nai_cmd_dma_1d_v2_t) == 64, "nai_cmd_dma_1d_v2_t ABI size"
 _Static_assert(sizeof(nai_cmd_dma_2d_v2_t) == 64, "nai_cmd_dma_2d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_3d_v2_t) == 64, "nai_cmd_dma_3d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size");
+_Static_assert(sizeof(nai_linebuf_job_wire_v1_t) == 124, "nai_linebuf_job_wire_v1_t ABI size");
+_Static_assert(sizeof(nai_cmd_linebuf_job_v2_t) == 160, "nai_cmd_linebuf_job_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 96, "nai_cmd_pointwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_depthwise_c32_v2_t) == 96, "nai_cmd_depthwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
@@ -205,6 +221,7 @@ typedef struct {
                               uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
     uint32_t (*depthwise_c32)(void *context, const nai_cmd_depthwise_c32_v2_t *command,
                               uint32_t weights, uint32_t ifm, uint32_t ofm);
+    uint32_t (*linebuf_job)(void *context, const nai_cmd_linebuf_job_v2_t *command);
     uint32_t (*copy_layout)(void *context, const nai_cmd_copy_layout_v2_t *command,
                            uint32_t source, uint32_t destination);
     uint32_t (*barrier)(void *context);
