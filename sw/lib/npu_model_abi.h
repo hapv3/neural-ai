@@ -8,7 +8,7 @@
 #define NAI_MODEL_MAGIC       0x4D49414Eu
 #define NAI_INVOCATION_MAGIC  0x5649414Eu
 #define NAI_ABI_MAJOR         1u
-#define NAI_ABI_MINOR         0u
+#define NAI_ABI_MINOR         1u
 #define NAI_TARGET_ID         1u
 #define NAI_ALIGNMENT_BYTES   32u
 
@@ -73,8 +73,7 @@ typedef struct {
     uint32_t size;
     uint32_t alignment;
     uint32_t element_count;
-    uint32_t crc32;
-    uint32_t reserved;
+    uint32_t reserved[2];
 } nai_section_v1_t;
 
 typedef struct {

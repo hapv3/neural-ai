@@ -14,7 +14,6 @@ typedef enum {
     NAI_LOADER_BAD_RESERVED = 7,
     NAI_LOADER_BAD_SECTION = 8,
     NAI_LOADER_MISSING_SECTION = 9,
-    NAI_LOADER_BAD_CRC = 10,
     NAI_LOADER_BAD_BINDING = 11,
     NAI_LOADER_BAD_REFERENCE = 12
 } nai_loader_status_t;
@@ -58,12 +57,10 @@ typedef struct {
     uint32_t dtcm_runtime_bytes;
 } nai_resolver_v1_t;
 
-uint32_t nai_crc32(const void *data, uint32_t bytes);
 nai_loader_status_t nai_model_open_v1(const void *model, uint32_t available_bytes,
                                       uint32_t expected_target, nai_model_view_v1_t *view);
 nai_loader_status_t nai_model_open_stream_v1(const nai_model_reader_v1_t *reader,
                                              uint32_t available_bytes, uint32_t expected_target,
-                                             void *scratch, uint32_t scratch_bytes,
                                              nai_model_stream_storage_v1_t *storage,
                                              nai_model_view_v1_t *view);
 nai_loader_status_t nai_model_validate_bindings_v1(const nai_model_view_v1_t *view);
