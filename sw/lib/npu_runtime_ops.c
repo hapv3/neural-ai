@@ -189,6 +189,21 @@ static uint32_t runtime_afu_binary(void *context,
     return afu_wait_done(1000000u) ? 0u : 1u;
 }
 
+static uint32_t runtime_afu_global_avgpool(
+    void *context, const nai_cmd_afu_global_avgpool_v2_t *command,
+    uint32_t ifm, uint32_t ofm)
+{
+    const uint32_t spatial_count = command->input_h * command->input_w;
+    const uint32_t groups = (command->channels + 31u) / 32u;
+    const uint32_t input_bytes = spatial_count * groups * 32u;
+    const uint32_t reciprocal_q31 =
+        (uint32_t)((1ull << 31) / (uint64_t)spatial_count);
+    (void)context;
+    afu_load_lut_entry(0u, reciprocal_q31);
+    afu_start_global_avgpool_c32(ifm, ofm, input_bytes, spatial_count);
+    return afu_wait_done(100000u + input_bytes) ? 0u : 1u;
+}
+
 static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
 {
     systolic_linebuf_cfg_t linebuf = command->job.linebuf;
@@ -434,6 +449,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_pointwise_c32,
         runtime_depthwise_c32,
         runtime_afu_binary,
+        runtime_afu_global_avgpool,
         runtime_linebuf_job,
         runtime_copy_layout,
         runtime_barrier,
