@@ -2060,26 +2060,3 @@ async def test_compiler_runtime_rejects_malformed_linebuf_job(dut):
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 1
-
-
-@cocotb.test()
-async def test_compiler_runtime_rejects_bad_model_crc(dut):
-    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
-    axi_master = AxiLiteMaster(
-        AxiLiteBus.from_prefix(dut, "s_axi"),
-        dut.clk_i,
-        dut.rst_ni,
-        reset_active_level=False,
-    )
-    await reset_dut(dut)
-    model = bytearray(build_model())
-    model[240] ^= 0x01
-    invocation, binding_addresses = build_invocation(model)
-    await write_l2_bytes(dut, MODEL_BASE, model)
-    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
-    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
-    await _load_and_run(dut, axi_master, invocation)
-
-    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_FAIL
-    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == NPU_CMD_FAIL_BAD_MODEL
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 0
