@@ -272,10 +272,15 @@ static uint32_t runtime_layout_dma(uint32_t source, uint32_t destination, uint32
     return 1u;
 }
 
-static uint32_t runtime_layout_dma_chunked(uint32_t source, uint32_t destination,
-                                            uint32_t length, uint32_t source_stride,
-                                            uint32_t destination_stride, uint32_t repetitions,
-                                            uint32_t direction)
+/* Wide 2D rows with a compact, non-beat-aligned stride can leave the current
+   RTL iDMA path busy indefinitely. Keep every affine row segment within one
+   32-byte data beat while preserving the logical source/destination strides. */
+#define NAI_LAYOUT_DMA_CHUNK_BYTES 32u
+
+static uint32_t runtime_layout_dma_repetitions_chunked(
+    uint32_t source, uint32_t destination, uint32_t length,
+    uint32_t source_stride, uint32_t destination_stride,
+    uint32_t repetitions, uint32_t direction)
 {
     uint32_t completed = 0u;
     while (completed < repetitions) {
@@ -294,6 +299,26 @@ static uint32_t runtime_layout_dma_chunked(uint32_t source, uint32_t destination
                                length, direction) :
                 runtime_layout_dma(source + source_offset, destination + destination_offset,
                                    length, source_stride, destination_stride, chunk, direction)) != 0u)
+            return 1u;
+        completed += chunk;
+    }
+    return 0u;
+}
+
+static uint32_t runtime_layout_dma_chunked(uint32_t source, uint32_t destination,
+                                           uint32_t length, uint32_t source_stride,
+                                           uint32_t destination_stride, uint32_t repetitions,
+                                           uint32_t direction)
+{
+    uint32_t completed = 0u;
+    while (completed < length) {
+        const uint32_t chunk = (length - completed) > NAI_LAYOUT_DMA_CHUNK_BYTES ?
+            NAI_LAYOUT_DMA_CHUNK_BYTES : (length - completed);
+        if (source > 0xffffffffu - completed ||
+            destination > 0xffffffffu - completed ||
+            runtime_layout_dma_repetitions_chunked(
+                source + completed, destination + completed, chunk,
+                source_stride, destination_stride, repetitions, direction) != 0u)
             return 1u;
         completed += chunk;
     }

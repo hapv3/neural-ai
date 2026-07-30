@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 import struct
 import subprocess
@@ -9,6 +10,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.utils import get_sim_time
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
@@ -376,8 +378,8 @@ def build_afu_add_model():
     return _package(commands, b"", bindings, 4, 0x480, 2, 1)
 
 
-def build_unaligned_row32_layout_model(channels, pixels):
-    dimensions = (1, 1, pixels, channels)
+def build_row32_layout_model(channels, height, width):
+    dimensions = (1, height, width, channels)
     commands = b"".join(
         [
             _copy_layout(_ref(3), _ref(6), 1, dimensions, 0),
@@ -385,10 +387,16 @@ def build_unaligned_row32_layout_model(channels, pixels):
             _command_header(0, 32, tile=2).ljust(32, b"\x00"),
         ]
     )
-    compact_bytes = pixels * channels
+    compact_bytes = height * width * channels
     bindings = _binding(1, 0, dimensions=dimensions) + _binding(2, 0, dimensions=dimensions)
     return _package(
-        commands, b"", bindings, 2, ((channels + 31) // 32) * pixels * 32, 1, 1
+        commands,
+        b"",
+        bindings,
+        2,
+        ((channels + 31) // 32) * height * width * 32,
+        1,
+        1,
     ), compact_bytes
 
 
@@ -1069,9 +1077,9 @@ async def test_compiler_runtime_afu_add_c32_package(dut):
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
 
 
-async def _run_unaligned_row32_case(dut, axi_master, channels, pixels,
-                                    input_base, output_base):
-    model, compact_bytes = build_unaligned_row32_layout_model(channels, pixels)
+async def _run_row32_case(dut, axi_master, channels, height, width,
+                          input_base, output_base):
+    model, compact_bytes = build_row32_layout_model(channels, height, width)
     input_data = bytes((index * 17 + channels) & 0xFF for index in range(compact_bytes))
     runtime_bindings = [
         (1, 0, input_base, compact_bytes),
@@ -1084,18 +1092,22 @@ async def _run_unaligned_row32_case(dut, axi_master, channels, pixels,
     await write_l2_bytes(dut, MODEL_BASE, model)
     await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
     await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    start_ns = get_sim_time("ns")
     await _load_and_run(dut, axi_master, invocation)
+    elapsed_ns = get_sim_time("ns") - start_ns
     status = await _axi_read32(axi_master, NPU_CMD_STATUS)
     if status != NPU_CMD_STATUS_PASS:
         fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
         done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
         raise AssertionError(
-            f"unaligned layout dispatch failed: status={status} "
+            f"ROW32 C={channels} H={height} W={width} dispatch failed: "
+            f"status={status} "
             f"fail=0x{fail_code:08x} done={done_count}"
         )
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 2
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert bytes(await read_l2_bytes(dut, output_base, compact_bytes)) == input_data
+    return elapsed_ns
 
 
 @cocotb.test()
@@ -1107,10 +1119,38 @@ async def test_compiler_runtime_unaligned_row32_c3_c31(dut):
         dut.rst_ni,
         reset_active_level=False,
     )
-    await _run_unaligned_row32_case(dut, axi_master, 3, 11,
-                                     0x80002003, 0x80003007)
-    await _run_unaligned_row32_case(dut, axi_master, 31, 5,
-                                     0x80002005, 0x8000300b)
+    await _run_row32_case(dut, axi_master, 3, 1, 11,
+                          0x80002003, 0x80003007)
+    await _run_row32_case(dut, axi_master, 31, 1, 5,
+                          0x80002005, 0x8000300b)
+
+
+@cocotb.test()
+async def test_compiler_runtime_row32_channel_boundary_matrix(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    logging.getLogger("cocotb.tb_npu_cluster.s_axi").setLevel(logging.WARNING)
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+
+    for channels in (3, 31, 32, 33, 63, 64, 65):
+        elapsed_ns = await _run_row32_case(
+            dut,
+            axi_master,
+            channels,
+            2,
+            3,
+            0x80002000,
+            0x80003000,
+        )
+        dut._log.info(
+            "ROW32 C=%d H=2 W=3 runtime completion: %.3f ns",
+            channels,
+            elapsed_ns,
+        )
 
 
 @cocotb.test()
