@@ -163,6 +163,20 @@ static uint32_t mock_afu_binary(void *context, const nai_cmd_afu_binary_v2_t *co
     return 0u;
 }
 
+static uint32_t mock_afu_global_avgpool(
+    void *context, const nai_cmd_afu_global_avgpool_v2_t *command,
+    uint32_t ifm, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = ifm;
+    state->destination = ofm;
+    state->input_h = command->input_h;
+    state->input_w = command->input_w;
+    state->channels = command->channels;
+    return 0u;
+}
+
 static uint32_t mock_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
 {
     mock_state_t *state = (mock_state_t *)context;
@@ -671,6 +685,48 @@ int main(void)
     assert(completed == 0u && state.calls == 0u);
     afu_binary->ofm.offset = 0x200u;
     afu_binary->mode = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 96;
+    gemm_commands.element_count = 2;
+    nai_cmd_afu_global_avgpool_v2_t *global_avgpool =
+        (nai_cmd_afu_global_avgpool_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *global_avgpool_end =
+        (nai_cmd_control_v2_t *)(gemm_model + 64);
+    global_avgpool->header.type = NAI_CMD_AFU_GLOBAL_AVGPOOL;
+    global_avgpool->header.size_bytes = sizeof(*global_avgpool);
+    global_avgpool->ifm.region = NAI_REGION_TCDM_SCRATCH;
+    global_avgpool->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    global_avgpool->ofm.offset = 0x200u;
+    global_avgpool->input_h = 2u;
+    global_avgpool->input_w = 3u;
+    global_avgpool->channels = 33u;
+    global_avgpool_end->header.type = NAI_CMD_END;
+    global_avgpool_end->header.size_bytes = sizeof(*global_avgpool_end);
+    gemm_ops.afu_global_avgpool = mock_afu_global_avgpool;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.destination == 0x10100200u);
+    assert(state.input_h == 2u && state.input_w == 3u && state.channels == 33u);
+
+    global_avgpool->ofm.offset = 0x20u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    global_avgpool->ofm.offset = 0x100u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    global_avgpool->ofm.offset = 0x200u;
+    global_avgpool->input_h = 0u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;

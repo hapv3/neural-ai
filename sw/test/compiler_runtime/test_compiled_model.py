@@ -790,6 +790,12 @@ def _compile_afu_add_model():
     )
 
 
+def _compile_global_avgpool_model():
+    return _compile_tflite_fixture_model(
+        "global_avgpool_h2w3_c33", "neural-ai-compiled-global-avgpool-"
+    )
+
+
 def _compile_public_reshape_model():
     return _compile_tflite_fixture_model(
         "reshape_1x4x32_to_1x2x2x32", "neural-ai-compiled-reshape-"
@@ -862,7 +868,9 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
 
 
 
-async def _load_and_run(dut, axi_master, invocation, timeout_cycles=600000):
+async def _load_and_run(
+    dut, axi_master, invocation, timeout_cycles=600000, measure_pmu=False
+):
     await load_firmware_elf_axi(
         dut,
         axi_master,
@@ -871,7 +879,7 @@ async def _load_and_run(dut, axi_master, invocation, timeout_cycles=600000):
     await program_command_queue(axi_master, INVOCATION_BASE, len(invocation))
     await release_fetch(dut, axi_master=axi_master)
     try:
-        await wait_for_host_irq(
+        counters = await wait_for_host_irq(
             dut,
             timeout_cycles=timeout_cycles,
             axi_master=axi_master,
@@ -891,6 +899,9 @@ async def _load_and_run(dut, axi_master, invocation, timeout_cycles=600000):
             f"pointer=0x{fail_pointer:08x} done={done_count} "
             f"pc=0x{program_counter:08x}"
         ) from error
+    if measure_pmu:
+        return counters
+    return None
 
 
 @cocotb.test()
@@ -1715,6 +1726,84 @@ async def test_compiler_generated_afu_add_c32_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_global_avgpool_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 2, 3, 33
+    deltas = (-5, -3, -1, 1, 3, 5)
+    input_values = []
+    expected_values = []
+    for pixel in range(height * width):
+        for channel in range(channels):
+            base = (channel % 41) - 20
+            input_values.append(base + deltas[pixel])
+    for channel in range(channels):
+        expected_values.append((channel % 41) - 20)
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected = bytes(value & 0xFF for value in expected_values)
+    model = _compile_global_avgpool_model()
+
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    avgpool_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 14:
+            assert command_size == 64
+            assert struct.unpack_from("<3I", model, offset + 32) == (
+                height,
+                width,
+                channels,
+            )
+            avgpool_commands += 1
+        offset += command_size
+    assert avgpool_commands == 1
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=300000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
+    assert counters["afu_done"] > 0
+    cocotb.log.info(
+        "compiler global AvgPool C33 runtime=%s ns PMU cycles=%d "
+        "AFU done=%d AFU TCDM req=%d",
+        elapsed_ns,
+        counters["cycle"],
+        counters["afu_done"],
+        counters["afu_tcdm_req"],
+    )
 
 
 @cocotb.test()
