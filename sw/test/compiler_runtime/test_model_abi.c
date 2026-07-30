@@ -33,11 +33,11 @@ static void make_valid_model(uint8_t model[320])
     header->required_tcdm_align = NAI_ALIGNMENT_BYTES;
     header->input_count = 1;
 
-    sections[0] = (nai_section_v1_t){NAI_SECTION_COMMANDS, 0, 224, 32, 32, 1, 0, 0};
-    sections[1] = (nai_section_v1_t){NAI_SECTION_CONSTANTS, 0, 256, 0, 32, 0, 0, 0};
-    sections[2] = (nai_section_v1_t){NAI_SECTION_TENSORS, 0, 256, 0, 32, 0, 0, 0};
-    sections[3] = (nai_section_v1_t){NAI_SECTION_BINDINGS, 0, 256, 64, 32, 1, 0, 0};
-    sections[4] = (nai_section_v1_t){NAI_SECTION_QPARAMS, 0, 320, 0, 32, 0, 0, 0};
+    sections[0] = (nai_section_v1_t){NAI_SECTION_COMMANDS, 0, 224, 32, 32, 1, {0, 0}};
+    sections[1] = (nai_section_v1_t){NAI_SECTION_CONSTANTS, 0, 256, 0, 32, 0, {0, 0}};
+    sections[2] = (nai_section_v1_t){NAI_SECTION_TENSORS, 0, 256, 0, 32, 0, {0, 0}};
+    sections[3] = (nai_section_v1_t){NAI_SECTION_BINDINGS, 0, 256, 64, 32, 1, {0, 0}};
+    sections[4] = (nai_section_v1_t){NAI_SECTION_QPARAMS, 0, 320, 0, 32, 0, {0, 0}};
 
     binding->direction = NAI_BINDING_INPUT;
     binding->data_type = NAI_DTYPE_I8;
@@ -49,16 +49,12 @@ static void make_valid_model(uint8_t model[320])
     binding->dimensions[3] = 5;
     binding->byte_size = 30;
 
-    for (uint32_t index = 0; index < 5u; index++) {
-        sections[index].crc32 = nai_crc32(model + sections[index].offset,
-                                          sections[index].size);
-    }
 }
 
 int main(void)
 {
     static const uint8_t expected_header[64] = {
-        0x4e, 0x41, 0x49, 0x4d, 0x01, 0x00, 0x00, 0x00,
+        0x4e, 0x41, 0x49, 0x4d, 0x01, 0x00, 0x01, 0x00,
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x04, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
         0x40, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
@@ -105,7 +101,6 @@ int main(void)
     assert(nai_model_open_v1(model, sizeof(model), NAI_TARGET_ID, &view) == NAI_LOADER_BAD_ALIGNMENT);
     make_valid_model(model);
     ((nai_binding_v1_t *)(model + 256))->layout = NAI_LAYOUT_C32_BLOCKED;
-    ((nai_section_v1_t *)(model + 64))[3].crc32 = nai_crc32(model + 256, 64);
     assert(nai_model_open_v1(model, sizeof(model), NAI_TARGET_ID, &view) == NAI_LOADER_BAD_BINDING);
     return 0;
 }

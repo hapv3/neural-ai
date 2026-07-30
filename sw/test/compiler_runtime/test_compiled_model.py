@@ -243,7 +243,7 @@ def _package(commands, constants, bindings, command_count, required_tcdm_bytes,
                 len(payload),
                 32,
                 element_count,
-                zlib.crc32(payload) & 0xFFFFFFFF,
+                0,
                 0,
             )
         )
@@ -253,7 +253,7 @@ def _package(commands, constants, bindings, command_count, required_tcdm_bytes,
         "<IHH11I3I",
         NAI_MODEL_MAGIC,
         1,
-        0,
+        1,
         1,
         0,
         offset,
@@ -928,7 +928,9 @@ async def test_compiler_runtime_dma_package(dut):
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 1
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == struct.unpack_from(
+        "<I", model, 32
+    )[0]
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, 32)) == input_data
 
 

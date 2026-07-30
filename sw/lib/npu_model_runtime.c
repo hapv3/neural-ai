@@ -141,7 +141,7 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
         staging_base, NPU_CMD_TCDM_SIZE};
     model_reader = (nai_model_reader_v1_t){&model_context, l2_read};
     if (nai_model_open_stream_v1(&model_reader, invocation.model_bytes, NAI_TARGET_ID,
-        (void *)(unsigned long)staging_base, NPU_CMD_TCDM_SIZE, &g_model_storage, &view) != NAI_LOADER_OK)
+        &g_model_storage, &view) != NAI_LOADER_OK)
         return fail(NPU_CMD_FAIL_BAD_MODEL, invocation.model_base, 0u);
 
     if (invocation.binding_count != 0u) {

@@ -212,11 +212,11 @@ static void make_dma_model(uint8_t model[1408])
     header->required_tcdm_align = 32;
     header->output_count = 1;
 
-    sections[0] = (nai_section_v1_t){NAI_SECTION_COMMANDS, 0, 224, 96, 32, 2, 0, 0};
-    sections[1] = (nai_section_v1_t){NAI_SECTION_CONSTANTS, 0, 320, 1024, 32, 1, 0, 0};
-    sections[2] = (nai_section_v1_t){NAI_SECTION_TENSORS, 0, 1344, 0, 32, 0, 0, 0};
-    sections[3] = (nai_section_v1_t){NAI_SECTION_BINDINGS, 0, 1344, 64, 32, 1, 0, 0};
-    sections[4] = (nai_section_v1_t){NAI_SECTION_QPARAMS, 0, 1408, 0, 32, 0, 0, 0};
+    sections[0] = (nai_section_v1_t){NAI_SECTION_COMMANDS, 0, 224, 96, 32, 2, {0, 0}};
+    sections[1] = (nai_section_v1_t){NAI_SECTION_CONSTANTS, 0, 320, 1024, 32, 1, {0, 0}};
+    sections[2] = (nai_section_v1_t){NAI_SECTION_TENSORS, 0, 1344, 0, 32, 0, {0, 0}};
+    sections[3] = (nai_section_v1_t){NAI_SECTION_BINDINGS, 0, 1344, 64, 32, 1, {0, 0}};
+    sections[4] = (nai_section_v1_t){NAI_SECTION_QPARAMS, 0, 1408, 0, 32, 0, {0, 0}};
 
     dma->header.type = NAI_CMD_DMA_1D;
     dma->header.size_bytes = sizeof(*dma);
@@ -237,9 +237,6 @@ static void make_dma_model(uint8_t model[1408])
     binding->dimensions[3] = 32;
     binding->byte_size = 32;
 
-    for (uint32_t index = 0; index < 5u; index++) {
-        sections[index].crc32 = nai_crc32(model + sections[index].offset, sections[index].size);
-    }
 }
 
 int main(void)
@@ -254,14 +251,13 @@ int main(void)
     nai_runtime_ops_v2_t ops = {0};
     uint32_t completed;
     uint32_t failure;
-    uint8_t scratch[64];
     uint8_t command_buffer[96];
     memory_reader_t memory = {model, sizeof(model), 0, 0};
     nai_model_reader_v1_t reader = {&memory, memory_read};
     uint8_t rq_model[1088] = {0};
     nai_model_header_v1_t rq_header = {0};
-    nai_section_v1_t rq_commands = {NAI_SECTION_COMMANDS, 0, 0, 64, 32, 2, 0, 0};
-    nai_section_v1_t rq_qparams = {NAI_SECTION_QPARAMS, 0, 64, 1024, 32, 32, 0, 0};
+    nai_section_v1_t rq_commands = {NAI_SECTION_COMMANDS, 0, 0, 64, 32, 2, {0, 0}};
+    nai_section_v1_t rq_qparams = {NAI_SECTION_QPARAMS, 0, 64, 1024, 32, 32, {0, 0}};
     nai_model_view_v1_t rq_view = {0};
     nai_resolver_v1_t rq_resolver = {0x80010000u, sizeof(rq_model), 0, 0,
         0x10100000u, 0x7f000u, 0, 0};
@@ -270,8 +266,8 @@ int main(void)
     nai_cmd_control_v2_t *rq_end = (nai_cmd_control_v2_t *)(rq_model + 32);
     uint8_t gemm_model[1152] = {0};
     nai_model_header_v1_t gemm_header = {0};
-    nai_section_v1_t gemm_commands = {NAI_SECTION_COMMANDS, 0, 0, 128, 32, 2, 0, 0};
-    nai_section_v1_t gemm_constants = {NAI_SECTION_CONSTANTS, 0, 128, 1024, 32, 1, 0, 0};
+    nai_section_v1_t gemm_commands = {NAI_SECTION_COMMANDS, 0, 0, 128, 32, 2, {0, 0}};
+    nai_section_v1_t gemm_constants = {NAI_SECTION_CONSTANTS, 0, 128, 1024, 32, 1, {0, 0}};
     nai_model_view_v1_t gemm_view = {0};
     nai_resolver_v1_t gemm_resolver = {0x80020000u, sizeof(gemm_model), 0, 0,
         0x10100000u, 0x7f000u, 0, 0};
@@ -293,13 +289,13 @@ int main(void)
 
     state = (mock_state_t){0};
     assert(nai_model_open_stream_v1(&reader, sizeof(model), NAI_TARGET_ID,
-        scratch, sizeof(scratch), &stream_storage, &stream_view) == NAI_LOADER_OK);
+        &stream_storage, &stream_view) == NAI_LOADER_OK);
     assert(nai_cmd_dispatch_stream_v2(&stream_view, &resolver, &ops, &reader,
         command_buffer, sizeof(command_buffer), &completed, &failure) == NAI_DISPATCH_OK);
     assert(completed == 1u);
     assert(state.calls == 1u);
     assert(state.source == 0x80000140u);
-    assert(memory.reads > 20u);
+    assert(memory.reads == 7u);
     assert(memory.largest_read == 160u);
 
     nai_cmd_dma_1d_v2_t *dma = (nai_cmd_dma_1d_v2_t *)(model + 224);
