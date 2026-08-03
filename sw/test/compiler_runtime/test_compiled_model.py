@@ -602,7 +602,12 @@ def build_invocation(model):
     return invocation, binding_addresses
 
 
-def build_invocation_with_bindings(model, bindings):
+def build_invocation_with_bindings(
+    model,
+    bindings,
+    model_base=MODEL_BASE,
+    binding_table_base=BINDING_TABLE_BASE,
+):
     binding_addresses = b"".join(
         struct.pack("<HHIII", direction, index, base, byte_size, 0)
         for direction, index, base, byte_size in bindings
@@ -613,9 +618,9 @@ def build_invocation_with_bindings(model, bindings):
         1,
         0,
         64,
-        MODEL_BASE,
+        model_base,
         len(model),
-        BINDING_TABLE_BASE,
+        binding_table_base,
         len(bindings),
         0,
         *([0] * 8),
@@ -626,6 +631,308 @@ def build_invocation_with_bindings(model, bindings):
 def _signed_input(dim_m, seed):
     values = [((row * 3 + column + seed) % 15) - 7 for row in range(dim_m) for column in range(32)]
     return bytes(value & 0xFF for value in values), values
+
+
+def _mm_clamp(value, lower=-128, upper=127):
+    return max(lower, min(upper, value))
+
+
+def _mm_input_value(row, column, channel):
+    return ((row * 3 + column * 5 + channel * 7 + 1) % 5) - 2
+
+
+def _mm_stem_weight(kh, kw, input_channel, output_channel):
+    return (
+        (
+            kh * 2
+            + kw * 3
+            + input_channel * 5
+            + output_channel * 7
+            + 2
+        )
+        % 3
+    ) - 1
+
+
+def _mm_depthwise_weight(tag, kh, kw, channel):
+    return ((tag * 3 + kh * 5 + kw * 7 + channel * 2 + 1) % 3) - 1
+
+
+def _mm_pointwise_weight(tag, input_channel, output_channel):
+    if tag == 5:
+        return 1 if input_channel == output_channel else 0
+    return (
+        (tag * 5 + input_channel * 3 + output_channel * 7 + 4) % 3
+    ) - 1
+
+
+def _mm_conv_weight(tag, kh, kw, input_channel, output_channel):
+    return (
+        (
+            tag * 11
+            + kh * 3
+            + kw * 5
+            + input_channel * 7
+            + output_channel * 2
+            + 6
+        )
+        % 3
+    ) - 1
+
+
+def _mm_conv2d(
+    source,
+    height,
+    width,
+    input_channels,
+    output_channels,
+    kernel,
+    stride,
+    weight,
+    activation=None,
+):
+    output_height = (height + stride - 1) // stride
+    output_width = (width + stride - 1) // stride
+    total_pad_h = max(
+        0, (output_height - 1) * stride + kernel - height
+    )
+    total_pad_w = max(
+        0, (output_width - 1) * stride + kernel - width
+    )
+    pad_top = total_pad_h // 2
+    pad_left = total_pad_w // 2
+    output = [0] * (output_height * output_width * output_channels)
+    for output_y in range(output_height):
+        for output_x in range(output_width):
+            output_pixel = (
+                output_y * output_width + output_x
+            ) * output_channels
+            for output_channel in range(output_channels):
+                accumulator = 0
+                for kh in range(kernel):
+                    input_y = output_y * stride + kh - pad_top
+                    if input_y < 0 or input_y >= height:
+                        continue
+                    for kw in range(kernel):
+                        input_x = output_x * stride + kw - pad_left
+                        if input_x < 0 or input_x >= width:
+                            continue
+                        input_pixel = (
+                            input_y * width + input_x
+                        ) * input_channels
+                        for input_channel in range(input_channels):
+                            accumulator += (
+                                source[input_pixel + input_channel]
+                                * weight(
+                                    kh,
+                                    kw,
+                                    input_channel,
+                                    output_channel,
+                                )
+                            )
+                if activation is None:
+                    output[output_pixel + output_channel] = _mm_clamp(
+                        accumulator
+                    )
+                else:
+                    output[output_pixel + output_channel] = _mm_clamp(
+                        accumulator, *activation
+                    )
+    return output, output_height, output_width
+
+
+def _mm_depthwise(
+    source,
+    height,
+    width,
+    channels,
+    stride,
+    tag,
+    activation=None,
+):
+    output_height = (height + stride - 1) // stride
+    output_width = (width + stride - 1) // stride
+    total_pad_h = max(0, (output_height - 1) * stride + 3 - height)
+    total_pad_w = max(0, (output_width - 1) * stride + 3 - width)
+    pad_top = total_pad_h // 2
+    pad_left = total_pad_w // 2
+    output = [0] * (output_height * output_width * channels)
+    for output_y in range(output_height):
+        for output_x in range(output_width):
+            output_pixel = (output_y * output_width + output_x) * channels
+            for channel in range(channels):
+                accumulator = 0
+                for kh in range(3):
+                    input_y = output_y * stride + kh - pad_top
+                    if input_y < 0 or input_y >= height:
+                        continue
+                    for kw in range(3):
+                        input_x = output_x * stride + kw - pad_left
+                        if input_x < 0 or input_x >= width:
+                            continue
+                        input_pixel = (input_y * width + input_x) * channels
+                        accumulator += (
+                            source[input_pixel + channel]
+                            * _mm_depthwise_weight(tag, kh, kw, channel)
+                        )
+                if activation is None:
+                    output[output_pixel + channel] = _mm_clamp(accumulator)
+                else:
+                    output[output_pixel + channel] = _mm_clamp(
+                        accumulator, *activation
+                    )
+    return output, output_height, output_width
+
+
+def _mm_add(lhs, rhs):
+    return [_mm_clamp(left + right) for left, right in zip(lhs, rhs)]
+
+
+def _mm_global_avgpool(source, height, width, channels):
+    pixels = height * width
+    output = []
+    for channel in range(channels):
+        total = sum(
+            source[pixel * channels + channel] for pixel in range(pixels)
+        )
+        sign = -1 if total < 0 else 1
+        output.append(sign * (abs(total) // pixels))
+    return output
+
+
+def _micro_mobilenet_input_values():
+    return [
+        _mm_input_value(row, column, channel)
+        for row in range(96)
+        for column in range(96)
+        for channel in range(3)
+    ]
+
+
+def _micro_mobilenet_stage10_values(input_values):
+    stem, _, _ = _mm_conv2d(
+        input_values,
+        96,
+        96,
+        3,
+        32,
+        3,
+        2,
+        _mm_stem_weight,
+        activation=(0, 6),
+    )
+    dw0, _, _ = _mm_depthwise(
+        stem, 48, 48, 32, 1, tag=0, activation=(0, 6)
+    )
+    pw0, _, _ = _mm_conv2d(
+        dw0,
+        48,
+        48,
+        32,
+        32,
+        1,
+        1,
+        lambda _kh, _kw, ic, oc: _mm_pointwise_weight(0, ic, oc),
+    )
+    residual0 = _mm_add(pw0, stem)
+    dw1, _, _ = _mm_depthwise(
+        residual0, 48, 48, 32, 2, tag=1
+    )
+    pw1, _, _ = _mm_conv2d(
+        dw1,
+        24,
+        24,
+        32,
+        64,
+        1,
+        1,
+        lambda _kh, _kw, ic, oc: _mm_pointwise_weight(1, ic, oc),
+        activation=(0, 6),
+    )
+    pw2, _, _ = _mm_conv2d(
+        pw1,
+        24,
+        24,
+        64,
+        128,
+        1,
+        1,
+        lambda _kh, _kw, ic, oc: _mm_pointwise_weight(2, ic, oc),
+    )
+    dw2, _, _ = _mm_depthwise(pw2, 24, 24, 128, 1, tag=2)
+    pw3, _, _ = _mm_conv2d(
+        dw2,
+        24,
+        24,
+        128,
+        64,
+        1,
+        1,
+        lambda _kh, _kw, ic, oc: _mm_pointwise_weight(3, ic, oc),
+    )
+    residual1 = _mm_add(pw3, pw1)
+    return residual1
+
+
+def _micro_mobilenet_input_and_expected():
+    input_values = _micro_mobilenet_input_values()
+    residual1 = _micro_mobilenet_stage10_values(input_values)
+    validate, _, _ = _mm_conv2d(
+        residual1,
+        24,
+        24,
+        64,
+        64,
+        3,
+        1,
+        lambda kh, kw, ic, oc: _mm_conv_weight(
+            4, kh, kw, ic, oc
+        ),
+    )
+    pooled = _mm_global_avgpool(validate, 24, 24, 64)
+    classifier, _, _ = _mm_conv2d(
+        pooled,
+        1,
+        1,
+        64,
+        32,
+        1,
+        1,
+        lambda _kh, _kw, ic, oc: _mm_pointwise_weight(5, ic, oc),
+    )
+    return (
+        bytes(value & 0xFF for value in input_values),
+        bytes(value & 0xFF for value in classifier),
+    )
+
+
+def _micro_mobilenet_stage1_input_and_expected():
+    input_values = _micro_mobilenet_input_values()
+    output, output_height, output_width = _mm_conv2d(
+        input_values,
+        96,
+        96,
+        3,
+        32,
+        3,
+        2,
+        _mm_stem_weight,
+        activation=(0, 6),
+    )
+    assert (output_height, output_width) == (48, 48)
+    return (
+        bytes(value & 0xFF for value in input_values),
+        bytes(value & 0xFF for value in output),
+    )
+
+
+def _micro_mobilenet_stage10_input_and_expected():
+    input_values = _micro_mobilenet_input_values()
+    output = _micro_mobilenet_stage10_values(input_values)
+    return (
+        bytes(value & 0xFF for value in input_values),
+        bytes(value & 0xFF for value in output),
+    )
 
 
 def _compile_fully_connected_model():
@@ -720,7 +1027,9 @@ def _compile_pointwise_conv_model():
     return package
 
 
-def _compile_tflite_fixture_model(fixture_stem, temporary_prefix):
+def _compile_tflite_fixture_model(
+    fixture_stem, temporary_prefix, compressed=False
+):
     default_root = Path(__file__).resolve().parents[4] / "neural-compiler"
     compiler_root = Path(os.environ.get("NEURAL_COMPILER_ROOT", default_root)).resolve()
     extension_modules = list((compiler_root / "ethosu").glob("regor*.so"))
@@ -729,8 +1038,11 @@ def _compile_tflite_fixture_model(fixture_stem, temporary_prefix):
             f"Neural compiler Python extension is not built under {compiler_root}/ethosu"
         )
 
-    fixture = Path(__file__).with_name(f"{fixture_stem}.tflite.b64")
+    suffix = ".tflite.zlib.b64" if compressed else ".tflite.b64"
+    fixture = Path(__file__).with_name(f"{fixture_stem}{suffix}")
     model_data = base64.b64decode(fixture.read_text(encoding="ascii"))
+    if compressed:
+        model_data = zlib.decompress(model_data)
     with tempfile.TemporaryDirectory(prefix=temporary_prefix) as temporary_dir:
         temporary_path = Path(temporary_dir)
         input_path = temporary_path / f"{fixture_stem}.tflite"
@@ -808,6 +1120,30 @@ def _compile_pointwise_depthwise_chain_model():
     )
 
 
+def _compile_micro_mobilenet_full_model():
+    return _compile_tflite_fixture_model(
+        "micro_mobilenet_full",
+        "neural-ai-compiled-micro-mobilenet-",
+        compressed=True,
+    )
+
+
+def _compile_micro_mobilenet_stage1_model():
+    return _compile_tflite_fixture_model(
+        "micro_mobilenet_stage1",
+        "neural-ai-compiled-micro-mobilenet-stage1-",
+        compressed=True,
+    )
+
+
+def _compile_micro_mobilenet_stage10_model():
+    return _compile_tflite_fixture_model(
+        "micro_mobilenet_stage10",
+        "neural-ai-compiled-micro-mobilenet-stage10-",
+        compressed=True,
+    )
+
+
 def _load_compiler_striped_pointwise_package(width):
     fixture = Path(__file__).with_name(f"pointwise_m{width}.nai.b64")
     package = base64.b64decode(fixture.read_text(encoding="ascii"))
@@ -869,14 +1205,19 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
 
 
 async def _load_and_run(
-    dut, axi_master, invocation, timeout_cycles=600000, measure_pmu=False
+    dut,
+    axi_master,
+    invocation,
+    timeout_cycles=600000,
+    measure_pmu=False,
+    invocation_base=INVOCATION_BASE,
 ):
     await load_firmware_elf_axi(
         dut,
         axi_master,
         Path(__file__).resolve().parents[3] / "sw/runtime/neural_ai/neural_ai.elf",
     )
-    await program_command_queue(axi_master, INVOCATION_BASE, len(invocation))
+    await program_command_queue(axi_master, invocation_base, len(invocation))
     await release_fetch(dut, axi_master=axi_master)
     try:
         counters = await wait_for_host_irq(
@@ -1536,6 +1877,227 @@ async def test_compiler_generated_pointwise_depthwise_chain(dut):
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_micro_mobilenet_full_graph(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    input_base = 0x80000000
+    output_base = 0x80008000
+    invocation_base = 0x80010000
+    binding_table_base = 0x80011000
+    model_base = 0x80100000
+    native_mobilenet_cycles = 347_992
+    native_yolo_cycles = 388_146
+
+    input_data, expected = _micro_mobilenet_input_and_expected()
+    model = _compile_micro_mobilenet_full_model()
+    assert len(input_data) == 96 * 96 * 3
+    assert len(expected) == 32
+    assert struct.unpack_from("<I", model, 16)[0] == len(model)
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    required_tcdm = struct.unpack_from("<I", model, 36)[0]
+    assert required_tcdm <= 0x7F000
+    assert struct.unpack_from("<2I", model, 44) == (1, 1)
+
+    section_table = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table + 12)[0]
+    command_types = {}
+    offset = command_offset
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        assert command_size >= 32
+        command_types[command_type] = command_types.get(command_type, 0) + 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert command_types.get(12, 0) == 0
+    assert command_types.get(13, 0) == 2
+    assert command_types.get(14, 0) == 1
+    assert command_types.get(9, 0) > 0
+    assert command_types.get(10, 0) > 0
+    assert command_types.get(11, 0) > 0
+
+    runtime_bindings = [
+        (1, 0, input_base, len(input_data)),
+        (2, 0, output_base, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=3_000_000,
+        measure_pmu=True,
+        invocation_base=invocation_base,
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    actual = bytes(await read_l2_bytes(dut, output_base, len(expected)))
+    assert actual == expected, (
+        f"Micro-MobileNet mismatch: actual={list(actual)} "
+        f"expected={list(expected)}"
+    )
+    assert counters["cycle"] > 0
+    cocotb.log.warning(
+        "compiler Micro-MobileNet full graph package=%d bytes commands=%d "
+        "TCDM=%d runtime=%s ns PMU cycles=%d "
+        "vs native MobileNet=%d (%.3fx) and native YOLO=%d (%.3fx)",
+        len(model),
+        command_count,
+        required_tcdm,
+        elapsed_ns,
+        counters["cycle"],
+        native_mobilenet_cycles,
+        counters["cycle"] / native_mobilenet_cycles,
+        native_yolo_cycles,
+        counters["cycle"] / native_yolo_cycles,
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_micro_mobilenet_stage1(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    input_base = 0x80000000
+    output_base = 0x80010000
+    invocation_base = 0x80030000
+    binding_table_base = 0x80031000
+    model_base = 0x80040000
+    input_data, expected = _micro_mobilenet_stage1_input_and_expected()
+    model = _compile_micro_mobilenet_stage1_model()
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        [
+            (1, 0, input_base, len(input_data)),
+            (2, 0, output_base, len(expected)),
+        ],
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=1_500_000,
+        invocation_base=invocation_base,
+    )
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    actual = bytes(await read_l2_bytes(dut, output_base, len(expected)))
+    if actual != expected:
+        mismatch = next(
+            index
+            for index, (actual_value, expected_value) in enumerate(
+                zip(actual, expected)
+            )
+            if actual_value != expected_value
+        )
+        raise AssertionError(
+            "Micro-MobileNet stage 1 mismatch at byte "
+            f"{mismatch}: actual={actual[mismatch]} "
+            f"expected={expected[mismatch]}"
+        )
+
+
+@cocotb.test()
+async def test_compiler_generated_micro_mobilenet_stage10(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    input_base = 0x80000000
+    output_base = 0x80010000
+    invocation_base = 0x80030000
+    binding_table_base = 0x80031000
+    model_base = 0x80040000
+    input_data, expected = _micro_mobilenet_stage10_input_and_expected()
+    model = _compile_micro_mobilenet_stage10_model()
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        [
+            (1, 0, input_base, len(input_data)),
+            (2, 0, output_base, len(expected)),
+        ],
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=3_000_000,
+        invocation_base=invocation_base,
+    )
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    actual = bytes(await read_l2_bytes(dut, output_base, len(expected)))
+    if actual != expected:
+        mismatch = next(
+            index
+            for index, (actual_value, expected_value) in enumerate(
+                zip(actual, expected)
+            )
+            if actual_value != expected_value
+        )
+        raise AssertionError(
+            "Micro-MobileNet stage 10 mismatch at byte "
+            f"{mismatch}: actual={actual[mismatch]} "
+            f"expected={expected[mismatch]}"
+        )
 
 
 @cocotb.test()
