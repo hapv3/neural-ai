@@ -325,8 +325,8 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
     uint32_t weight_bytes;
     uint32_t expected_output_h;
     uint32_t expected_output_w;
-    uint32_t padded_input_h;
-    uint32_t padded_input_w;
+    uint32_t total_pad_h;
+    uint32_t total_pad_w;
 
     if (command->input_h == 0u || command->input_w == 0u ||
         command->output_h == 0u || command->output_w == 0u ||
@@ -336,21 +336,19 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
         command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
         (command->stride_h != 1u && command->stride_h != 2u) ||
         (command->stride_w != 1u && command->stride_w != 2u) ||
-        command->pad_h != 1u || command->pad_w != 1u ||
+        command->pad_h > 1u || command->pad_w > 1u ||
         command->input_h > 0xffffu || command->input_w > 0xffffu ||
         command->output_h > 0xffffu || command->output_w > 0xffffu ||
-        command->channels > 32u ||
-        command->input_h > 0xffffffffu - 2u * command->pad_h ||
-        command->input_w > 0xffffffffu - 2u * command->pad_w) {
+        command->channels > 32u) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
-    padded_input_h = command->input_h + 2u * command->pad_h;
-    padded_input_w = command->input_w + 2u * command->pad_w;
-    if (padded_input_h < 3u || padded_input_w < 3u) return NAI_DISPATCH_BAD_COMMAND;
-    expected_output_h = ((padded_input_h - 3u) / command->stride_h) + 1u;
-    expected_output_w = ((padded_input_w - 3u) / command->stride_w) + 1u;
+    expected_output_h = (command->input_h + command->stride_h - 1u) / command->stride_h;
+    expected_output_w = (command->input_w + command->stride_w - 1u) / command->stride_w;
+    total_pad_h = (expected_output_h - 1u) * command->stride_h + 3u - command->input_h;
+    total_pad_w = (expected_output_w - 1u) * command->stride_w + 3u - command->input_w;
     groups = 1u;
     if (command->output_h != expected_output_h || command->output_w != expected_output_w ||
+        command->pad_h != total_pad_h / 2u || command->pad_w != total_pad_w / 2u ||
         !multiply(command->input_h, command->input_w, &input_pixels) ||
         !multiply(command->output_h, command->output_w, &output_pixels) ||
         !multiply(input_pixels, groups, &input_bytes) ||
