@@ -234,14 +234,22 @@ static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_
     gemm.psum_addr += NPU_TCDM_BASE;
     gemm.ofm_addr += NPU_TCDM_BASE;
     systolic_linebuf_config(&linebuf);
-    if (command->job.k_tiles > 1u) {
+    if (gemm.accum_en == 1u) {
+        /* Initialize the external partial-sum tile without reading its old
+           contents.  The raw INT32 result is written directly to PSUM. */
+        systolic_gemm32_linebuf_ktiles_strided(
+            gemm.weight_addr, gemm.psum_addr, gemm.psum_addr, gemm.dim_m,
+            gemm.psum_row_stride_bytes, gemm.ofm_tile_cols);
+    } else if (gemm.accum_en == 3u) {
+        /* Intermediate input groups accumulate in place in the external
+           partial-sum tile; only the final group writes the quantized OFM. */
+        systolic_gemm32_linebuf_ktiles_accumulate_strided(
+            gemm.weight_addr, gemm.psum_addr, gemm.psum_addr, gemm.dim_m,
+            gemm.psum_row_stride_bytes, gemm.ofm_tile_cols,
+            gemm.psum_row_stride_bytes);
+    } else if (command->job.k_tiles > 1u) {
         if (gemm.accum_en == 2u) {
             systolic_gemm32_linebuf_ktiles_accumulate_requant_strided(
-                gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m,
-                gemm.ofm_row_stride_bytes, gemm.ofm_tile_cols,
-                gemm.psum_row_stride_bytes);
-        } else if (gemm.accum_en == 1u) {
-            systolic_gemm32_linebuf_ktiles_accumulate_strided(
                 gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m,
                 gemm.ofm_row_stride_bytes, gemm.ofm_tile_cols,
                 gemm.psum_row_stride_bytes);
@@ -252,9 +260,6 @@ static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_
         }
     } else if (gemm.accum_en == 2u) {
         systolic_gemm32_linebuf_accumulate_requant(
-            gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m);
-    } else if (gemm.accum_en == 1u) {
-        systolic_gemm32_linebuf_accumulate(
             gemm.weight_addr, gemm.psum_addr, gemm.ofm_addr, gemm.dim_m);
     } else {
         systolic_gemm32_linebuf_requant(gemm.weight_addr, gemm.ofm_addr, gemm.dim_m);

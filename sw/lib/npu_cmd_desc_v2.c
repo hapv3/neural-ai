@@ -460,7 +460,7 @@ static nai_dispatch_status_v2_t run_linebuf_job(
         command->job.linebuf.input_c == 0u || command->job.linebuf.output_w == 0u ||
         command->job.linebuf.block_valid_bytes == 0u ||
         command->job.linebuf.block_valid_bytes > 32u ||
-        command->job.gemm.accum_en > 2u ||
+        command->job.gemm.accum_en > 3u ||
         command->job.linebuf.coalesce > 1u || command->job.linebuf.kgen > 1u ||
         command->job.linebuf.pool > 1u || command->job.linebuf.c32_fast > 1u ||
         command->job.linebuf.depthwise > 1u || command->job.linebuf.c32_group_stationary > 1u ||
