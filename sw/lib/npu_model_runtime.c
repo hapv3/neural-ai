@@ -31,7 +31,15 @@ static uint32_t l2_read(void *context_pointer, uint32_t offset, void *destinatio
     if (offset > context->bytes || bytes > context->bytes - offset || bytes > context->staging_bytes ||
         context->base > 0xffffffffu - offset) return 1u;
     if (!idma_memcpy_blocking(context->base + offset, context->staging_base, bytes)) return 1u;
-    for (uint32_t index = 0; index < bytes; index++) output[index] = staging[index];
+    if ((((uint32_t)(unsigned long)destination | context->staging_base | bytes) & 3u) == 0u) {
+        uint32_t *output_words = (uint32_t *)destination;
+        volatile const uint32_t *staging_words =
+            (volatile const uint32_t *)(unsigned long)context->staging_base;
+        for (uint32_t index = 0; index < bytes / 4u; index++)
+            output_words[index] = staging_words[index];
+    } else {
+        for (uint32_t index = 0; index < bytes; index++) output[index] = staging[index];
+    }
     return 0u;
 }
 
