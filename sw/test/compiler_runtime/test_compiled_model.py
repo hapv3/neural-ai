@@ -21,6 +21,7 @@ from npu_test_utils import (
     NPU_CMD_STATUS_FAIL,
     NPU_CMD_STATUS_PASS,
     _axi_read32,
+    format_pmu_report,
     load_firmware_elf_axi,
     program_command_queue,
     read_l2_bytes,
@@ -1976,6 +1977,7 @@ async def test_compiler_generated_micro_mobilenet_full_graph(dut):
         native_yolo_cycles,
         counters["cycle"] / native_yolo_cycles,
     )
+    cocotb.log.warning("%s", format_pmu_report(counters))
 
 
 @cocotb.test()
@@ -2012,11 +2014,12 @@ async def test_compiler_generated_micro_mobilenet_stage1(dut):
     await write_l2_bytes(dut, binding_table_base, binding_addresses)
     await write_l2_bytes(dut, invocation_base, invocation)
 
-    await _load_and_run(
+    counters = await _load_and_run(
         dut,
         axi_master,
         invocation,
         timeout_cycles=1_500_000,
+        measure_pmu=True,
         invocation_base=invocation_base,
     )
 
@@ -2037,6 +2040,9 @@ async def test_compiler_generated_micro_mobilenet_stage1(dut):
             f"{mismatch}: actual={actual[mismatch]} "
             f"expected={expected[mismatch]}"
         )
+    cocotb.log.warning(
+        "compiler Micro-MobileNet stage 1\n%s", format_pmu_report(counters)
+    )
 
 
 @cocotb.test()
