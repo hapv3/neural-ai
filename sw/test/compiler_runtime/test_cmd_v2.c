@@ -654,6 +654,19 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_OK);
     assert(completed == 1u && state.calls == 1u);
+    linebuf->job.gemm.accum_en = 3u;
+    linebuf->job.gemm.psum_row_stride_bytes = 256u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    linebuf->job.gemm.accum_en = 4u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    linebuf->job.gemm.accum_en = 0u;
+    linebuf->job.gemm.psum_row_stride_bytes = 0u;
     linebuf->job.linebuf.c32_group_stationary = 0u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
