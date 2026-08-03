@@ -629,6 +629,34 @@ int main(void)
         &completed, &failure) == NAI_DISPATCH_OK);
     assert(completed == 1u && state.calls == 1u);
     assert(state.linebuf_rows == 4u && state.linebuf_k_tiles == 9u);
+    linebuf->job.rows = 1024u;
+    linebuf->job.linebuf.spatial_m = 1024u;
+    linebuf->job.gemm.dim_m = 1024u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u && state.linebuf_rows == 1024u);
+    linebuf->job.rows = 1025u;
+    linebuf->job.linebuf.spatial_m = 1025u;
+    linebuf->job.gemm.dim_m = 1025u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    linebuf->job.rows = 257u;
+    linebuf->job.linebuf.spatial_m = 257u;
+    linebuf->job.gemm.dim_m = 257u;
+    linebuf->job.gemm.accum_en = 3u;
+    linebuf->job.gemm.psum_row_stride_bytes = 256u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    linebuf->job.rows = 4u;
+    linebuf->job.linebuf.spatial_m = 4u;
+    linebuf->job.gemm.dim_m = 4u;
+    linebuf->job.gemm.accum_en = 0u;
+    linebuf->job.gemm.psum_row_stride_bytes = 0u;
     linebuf->reserved[0] = 1u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,

@@ -435,10 +435,11 @@ static nai_dispatch_status_v2_t run_linebuf_job(
     const nai_cmd_linebuf_job_v2_t *command,
     const nai_runtime_ops_v2_t *ops)
 {
+    const uint32_t max_rows = command->job.gemm.accum_en == 0u ? 1024u : 256u;
     uint32_t expected_k_tiles;
     uint32_t kernel_elements;
     uint32_t expected_group_stationary;
-    if (command->job.rows == 0u || command->job.rows > 256u ||
+    if (command->job.rows == 0u || command->job.rows > max_rows ||
         command->job.k_tiles == 0u || command->job.k_tiles > 0xffffu ||
         command->job.linebuf.kernel_h == 0u || command->job.linebuf.kernel_h > 5u ||
         command->job.linebuf.kernel_w == 0u || command->job.linebuf.kernel_w > 5u ||
