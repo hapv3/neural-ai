@@ -2079,11 +2079,12 @@ async def test_compiler_generated_micro_mobilenet_stage10(dut):
     await write_l2_bytes(dut, binding_table_base, binding_addresses)
     await write_l2_bytes(dut, invocation_base, invocation)
 
-    await _load_and_run(
+    counters = await _load_and_run(
         dut,
         axi_master,
         invocation,
         timeout_cycles=3_000_000,
+        measure_pmu=True,
         invocation_base=invocation_base,
     )
 
@@ -2104,6 +2105,10 @@ async def test_compiler_generated_micro_mobilenet_stage10(dut):
             f"{mismatch}: actual={actual[mismatch]} "
             f"expected={expected[mismatch]}"
         )
+    assert counters["cycle"] > 0
+    cocotb.log.warning(
+        "compiler Micro-MobileNet stage 10\n%s", format_pmu_report(counters)
+    )
 
 
 @cocotb.test()
