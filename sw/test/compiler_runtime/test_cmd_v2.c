@@ -550,8 +550,8 @@ int main(void)
     depthwise->channels = 32u;
     depthwise->stride_h = 2u;
     depthwise->stride_w = 2u;
-    depthwise->pad_h = 1u;
-    depthwise->pad_w = 1u;
+    depthwise->pad_h = 0u;
+    depthwise->pad_w = 0u;
     depthwise->qparam_block = 3u;
     depthwise_end->header.type = NAI_CMD_END;
     depthwise_end->header.size_bytes = sizeof(*depthwise_end);
@@ -564,14 +564,27 @@ int main(void)
     assert(state.input_h == 4u && state.input_w == 4u);
     assert(state.output_h == 2u && state.output_w == 2u);
     assert(state.channels == 32u && state.stride_h == 2u && state.stride_w == 2u);
-    assert(state.pad_h == 1u && state.pad_w == 1u && state.qparam_block == 3u);
+    assert(state.pad_h == 0u && state.pad_w == 0u && state.qparam_block == 3u);
+    depthwise->input_h = 5u;
+    depthwise->input_w = 5u;
+    depthwise->output_h = 3u;
+    depthwise->output_w = 3u;
+    depthwise->pad_h = 1u;
+    depthwise->pad_w = 1u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.input_h == 5u && state.input_w == 5u);
+    assert(state.output_h == 3u && state.output_w == 3u);
+    assert(state.pad_h == 1u && state.pad_w == 1u);
     depthwise->channels = 33u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 0u && state.calls == 0u);
     depthwise->channels = 32u;
-    depthwise->output_w = 3u;
+    depthwise->output_w = 4u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
