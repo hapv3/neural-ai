@@ -491,6 +491,37 @@ static nai_dispatch_status_v2_t run_upsample_nearest(
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
+static nai_dispatch_status_v2_t run_maxpool(
+    const nai_cmd_maxpool_v2_t *command,
+    const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver,
+    const nai_runtime_ops_v2_t *ops)
+{
+    uint32_t pixels;
+    uint32_t bytes;
+    uint32_t ifm;
+    uint32_t ofm;
+    if (command->input_h == 0u || command->input_w == 0u ||
+        command->channels != 32u || command->kernel_h != 5u || command->kernel_w != 5u ||
+        command->stride_h != 1u || command->stride_w != 1u ||
+        command->pad_h != 2u || command->pad_w != 2u ||
+        !all_zero(command->reserved, 7u) || ops->maxpool == 0 ||
+        command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        !multiply(command->input_h, command->input_w, &pixels) ||
+        !multiply(pixels, command->channels, &bytes)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    if (resolve(view, resolver, &command->ifm, bytes, NAI_ALIGNMENT_BYTES, &ifm) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->ofm, bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    if (ranges_overlap_sized(ifm, bytes, ofm, bytes))
+        return NAI_DISPATCH_BAD_COMMAND;
+    return ops->maxpool(ops->context, command, ifm, ofm) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
 static nai_dispatch_status_v2_t run_linebuf_job(
     const nai_cmd_linebuf_job_v2_t *command,
     const nai_runtime_ops_v2_t *ops)
@@ -669,6 +700,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                    header->size_bytes == sizeof(nai_cmd_upsample_nearest_v2_t)) {
             status = run_upsample_nearest(
                 (const nai_cmd_upsample_nearest_v2_t *)header, view, resolver, ops);
+        } else if (header->type == NAI_CMD_MAXPOOL &&
+                   header->size_bytes == sizeof(nai_cmd_maxpool_v2_t)) {
+            status = run_maxpool(
+                (const nai_cmd_maxpool_v2_t *)header, view, resolver, ops);
         } else if (header->type == NAI_CMD_LINEBUF_JOB &&
                    header->size_bytes == sizeof(nai_cmd_linebuf_job_v2_t)) {
             status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)header, ops);
@@ -732,6 +767,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_AFU_BINARY ||
                    header.type == NAI_CMD_AFU_GLOBAL_AVGPOOL ||
                    header.type == NAI_CMD_UPSAMPLE_NEAREST ||
+                   header.type == NAI_CMD_MAXPOOL ||
                    header.type == NAI_CMD_LINEBUF_JOB ||
                    header.type == NAI_CMD_COPY_LAYOUT) {
             if (header.size_bytes > command_buffer_bytes ||
@@ -789,6 +825,11 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                            header.size_bytes == sizeof(nai_cmd_upsample_nearest_v2_t)) {
                     status = run_upsample_nearest(
                         (const nai_cmd_upsample_nearest_v2_t *)command_buffer,
+                        view, resolver, ops);
+                } else if (header.type == NAI_CMD_MAXPOOL &&
+                           header.size_bytes == sizeof(nai_cmd_maxpool_v2_t)) {
+                    status = run_maxpool(
+                        (const nai_cmd_maxpool_v2_t *)command_buffer,
                         view, resolver, ops);
                 } else if (header.type == NAI_CMD_LINEBUF_JOB &&
                            header.size_bytes == sizeof(nai_cmd_linebuf_job_v2_t)) {
