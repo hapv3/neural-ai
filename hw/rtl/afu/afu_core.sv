@@ -643,12 +643,12 @@ module afu_core #(
                                     stream_state_n = ST_PROCESS;
                                 end
                             end
-                        end else if (stream_dst_addr_n[4:0] == 0) begin
-                            stream_p1_flush_mid_n = 1'b1;
-                            stream_state_n = (stream_src_addr_n[4:0] == 0) ? ST_READ_IN : ST_PROCESS;
                         end else if (stream_elem_cnt_n == cfg_length_i) begin
                             stream_p1_flush_done_n = 1'b1;
                             stream_state_n = ST_WAIT_FLUSH;
+                        end else if (stream_dst_addr_n[4:0] == 0) begin
+                            stream_p1_flush_mid_n = 1'b1;
+                            stream_state_n = (stream_src_addr_n[4:0] == 0) ? ST_READ_IN : ST_PROCESS;
                         end else if (stream_src_addr_n[4:0] == 0) begin
                             stream_state_n = ST_READ_IN;
                         end
