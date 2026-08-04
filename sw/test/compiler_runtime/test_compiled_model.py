@@ -1,5 +1,6 @@
 import base64
 import logging
+import math
 import os
 import struct
 import subprocess
@@ -1100,6 +1101,12 @@ def _compile_depthwise_k3_conv_model():
 def _compile_afu_add_model():
     return _compile_tflite_fixture_model(
         "add_h2w2_c32", "neural-ai-compiled-add-"
+    )
+
+
+def _compile_sigmoid_model():
+    return _compile_tflite_fixture_model(
+        "sigmoid_h2w3_c33", "neural-ai-compiled-sigmoid-"
     )
 
 
@@ -2301,6 +2308,68 @@ async def test_compiler_generated_afu_add_c32_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_sigmoid_afu_lut_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 2 * 3 * 33
+    input_data = bytes(range(count))
+    expected = bytearray()
+    for raw in input_data:
+        signed = raw if raw < 128 else raw - 256
+        real = max(-8.0, min(8.0, 0.125 * signed))
+        logistic = 1.0 / (1.0 + math.exp(-real))
+        quantized = max(-128, min(127, math.floor(-128.0 + 256.0 * logistic + 0.5)))
+        expected.append(quantized & 0xFF)
+
+    model = _compile_sigmoid_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    lut_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 12:
+            assert command_size == 64
+            assert struct.unpack_from("<H", model, offset + 16)[0] == 6
+            assert struct.unpack_from("<H", model, offset + 24)[0] == 6
+            assert struct.unpack_from("<H", model, offset + 32)[0] == 1
+            assert struct.unpack_from("<I", model, offset + 40)[0] == 384
+            lut_commands += 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert lut_commands == 1
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, timeout_cycles=300000)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == bytes(expected)
 
 
 @cocotb.test()

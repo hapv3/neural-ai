@@ -193,8 +193,13 @@ static uint32_t runtime_afu_lut(void *context,
                                 const nai_cmd_afu_lut_v2_t *command,
                                 uint32_t ifm, uint32_t ofm, uint32_t lut)
 {
-    const uint8_t *lut_bytes = (const uint8_t *)(unsigned long)lut;
+    const uint8_t *lut_bytes;
     (void)context;
+    if (command->lut.region == NAI_REGION_MODEL_CONSTANTS) {
+        if (!idma_memcpy_blocking(lut, NPU_CMD_TCDM_BASE, 256u)) return 1u;
+        lut = NPU_CMD_TCDM_BASE;
+    }
+    lut_bytes = (const uint8_t *)(unsigned long)lut;
     afu_preload(ifm, ofm, command->length, NPU_AFU_MODE_E8);
     for (uint32_t index = 0u; index < 256u; index++) {
         afu_load_lut_entry(index, (uint32_t)lut_bytes[index]);
