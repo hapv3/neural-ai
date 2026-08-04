@@ -1134,6 +1134,12 @@ def _compile_maxpool_model():
     )
 
 
+def _compile_concat_model():
+    return _compile_tflite_fixture_model(
+        "concat_h24w24_c32_c32", "neural-ai-compiled-concat-"
+    )
+
+
 def _compile_public_reshape_model():
     return _compile_tflite_fixture_model(
         "reshape_1x4x32_to_1x2x2x32", "neural-ai-compiled-reshape-"
@@ -2702,6 +2708,90 @@ async def test_compiler_generated_maxpool_c32_package(dut):
     assert bytes(await read_l2_bytes(dut, maxpool_output_base, len(expected))) == expected
     cocotb.log.info(
         "compiler MaxPool K5/S1/P2 C32 runtime=%s ns PMU cycles=%d",
+        elapsed_ns,
+        counters["cycle"],
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_concat_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, input_channels = 24, 24, 32
+    input_bytes = height * width * input_channels
+    output_bytes = input_bytes * 2
+    rhs_base = 0x80010000
+    concat_output_base = 0x80020000
+    lhs = bytes((index * 29 + 7) & 0xFF for index in range(input_bytes))
+    rhs = bytes((index * 43 + 19) & 0xFF for index in range(input_bytes))
+    expected = bytearray()
+    for pixel in range(height * width):
+        offset = pixel * input_channels
+        expected.extend(lhs[offset : offset + input_channels])
+        expected.extend(rhs[offset : offset + input_channels])
+
+    model = _compile_concat_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    layout_commands = 0
+    local_dma_commands = []
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 18:
+            layout_commands += 1
+        if command_type == 2:
+            source_region = struct.unpack_from("<H", model, offset + 16)[0]
+            destination_region = struct.unpack_from("<H", model, offset + 24)[0]
+            destination_offset = struct.unpack_from("<I", model, offset + 28)[0]
+            length, direction = struct.unpack_from("<II", model, offset + 32)
+            if direction == 2:
+                assert source_region == 6
+                assert destination_region == 6
+                assert length == input_bytes
+                local_dma_commands.append(destination_offset)
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert layout_commands == 3
+    assert len(local_dma_commands) == 2
+    assert abs(local_dma_commands[1] - local_dma_commands[0]) == input_bytes
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, input_bytes),
+        (1, 1, rhs_base, input_bytes),
+        (2, 0, concat_output_base, output_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, lhs)
+    await write_l2_bytes(dut, rhs_base, rhs)
+    await write_l2_bytes(dut, concat_output_base, bytes(output_bytes))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=300000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, concat_output_base, output_bytes)) == bytes(expected)
+    cocotb.log.warning(
+        "compiler Concat C32+C32 runtime=%s ns PMU cycles=%d",
         elapsed_ns,
         counters["cycle"],
     )
