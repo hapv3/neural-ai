@@ -235,6 +235,16 @@ static uint32_t runtime_upsample_nearest(
     return 0u;
 }
 
+static uint32_t runtime_maxpool(
+    void *context, const nai_cmd_maxpool_v2_t *command,
+    uint32_t ifm, uint32_t ofm)
+{
+    (void)context;
+    systolic_maxpool5x5s1p2_c32_linebuf(
+        ifm, ofm, command->input_h, command->input_w);
+    return 0u;
+}
+
 static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
 {
     systolic_linebuf_cfg_t linebuf = command->job.linebuf;
@@ -488,6 +498,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_afu_binary,
         runtime_afu_global_avgpool,
         runtime_upsample_nearest,
+        runtime_maxpool,
         runtime_linebuf_job,
         runtime_copy_layout,
         runtime_barrier,

@@ -95,6 +95,7 @@ STRUCTS = {
     "CommandAFUBinaryV2": "nai_cmd_afu_binary_v2_t",
     "CommandAFUGlobalAvgPoolV2": "nai_cmd_afu_global_avgpool_v2_t",
     "CommandUpsampleNearestV2": "nai_cmd_upsample_nearest_v2_t",
+    "CommandMaxPoolV2": "nai_cmd_maxpool_v2_t",
     "LinebufJobWireV1": "nai_linebuf_job_wire_v1_t",
     "CommandLineBufferJobV2": "nai_cmd_linebuf_job_v2_t",
     "CommandCopyLayoutV2": "nai_cmd_copy_layout_v2_t",
