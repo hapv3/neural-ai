@@ -460,6 +460,37 @@ static nai_dispatch_status_v2_t run_afu_global_avgpool(
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
+static nai_dispatch_status_v2_t run_upsample_nearest(
+    const nai_cmd_upsample_nearest_v2_t *command,
+    const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver,
+    const nai_runtime_ops_v2_t *ops)
+{
+    uint32_t input_pixels;
+    uint32_t input_bytes;
+    uint32_t output_bytes;
+    uint32_t ifm;
+    uint32_t ofm;
+    if (command->input_h == 0u || command->input_w == 0u ||
+        command->channels != 32u || command->scale_h != 2u || command->scale_w != 2u ||
+        !all_zero(command->reserved, 3u) || ops->upsample_nearest == 0 ||
+        command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        !multiply(command->input_h, command->input_w, &input_pixels) ||
+        !multiply(input_pixels, command->channels, &input_bytes) ||
+        !multiply(input_bytes, 4u, &output_bytes)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    if (resolve(view, resolver, &command->ifm, input_bytes, NAI_ALIGNMENT_BYTES, &ifm) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->ofm, output_bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    if (ranges_overlap_sized(ifm, input_bytes, ofm, output_bytes))
+        return NAI_DISPATCH_BAD_COMMAND;
+    return ops->upsample_nearest(ops->context, command, ifm, ofm) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
 static nai_dispatch_status_v2_t run_linebuf_job(
     const nai_cmd_linebuf_job_v2_t *command,
     const nai_runtime_ops_v2_t *ops)
@@ -634,6 +665,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                    header->size_bytes == sizeof(nai_cmd_afu_global_avgpool_v2_t)) {
             status = run_afu_global_avgpool(
                 (const nai_cmd_afu_global_avgpool_v2_t *)header, view, resolver, ops);
+        } else if (header->type == NAI_CMD_UPSAMPLE_NEAREST &&
+                   header->size_bytes == sizeof(nai_cmd_upsample_nearest_v2_t)) {
+            status = run_upsample_nearest(
+                (const nai_cmd_upsample_nearest_v2_t *)header, view, resolver, ops);
         } else if (header->type == NAI_CMD_LINEBUF_JOB &&
                    header->size_bytes == sizeof(nai_cmd_linebuf_job_v2_t)) {
             status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)header, ops);
@@ -696,6 +731,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_AFU_LUT ||
                    header.type == NAI_CMD_AFU_BINARY ||
                    header.type == NAI_CMD_AFU_GLOBAL_AVGPOOL ||
+                   header.type == NAI_CMD_UPSAMPLE_NEAREST ||
                    header.type == NAI_CMD_LINEBUF_JOB ||
                    header.type == NAI_CMD_COPY_LAYOUT) {
             if (header.size_bytes > command_buffer_bytes ||
@@ -748,6 +784,11 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                            header.size_bytes == sizeof(nai_cmd_afu_global_avgpool_v2_t)) {
                     status = run_afu_global_avgpool(
                         (const nai_cmd_afu_global_avgpool_v2_t *)command_buffer,
+                        view, resolver, ops);
+                } else if (header.type == NAI_CMD_UPSAMPLE_NEAREST &&
+                           header.size_bytes == sizeof(nai_cmd_upsample_nearest_v2_t)) {
+                    status = run_upsample_nearest(
+                        (const nai_cmd_upsample_nearest_v2_t *)command_buffer,
                         view, resolver, ops);
                 } else if (header.type == NAI_CMD_LINEBUF_JOB &&
                            header.size_bytes == sizeof(nai_cmd_linebuf_job_v2_t)) {

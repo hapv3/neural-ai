@@ -196,6 +196,18 @@ typedef struct {
     uint32_t reserved[5];
 } nai_cmd_afu_global_avgpool_v2_t;
 
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_ref_v1_t ifm;
+    nai_ref_v1_t ofm;
+    uint32_t input_h;
+    uint32_t input_w;
+    uint32_t channels;
+    uint32_t scale_h;
+    uint32_t scale_w;
+    uint32_t reserved[3];
+} nai_cmd_upsample_nearest_v2_t;
+
 typedef enum {
     NAI_COPY_NHWC_TO_ROW32 = 1,
     NAI_COPY_ROW32_TO_NHWC = 2,
@@ -235,6 +247,8 @@ _Static_assert(sizeof(nai_cmd_afu_lut_v2_t) == 64, "nai_cmd_afu_lut_v2_t ABI siz
 _Static_assert(sizeof(nai_cmd_afu_binary_v2_t) == 64, "nai_cmd_afu_binary_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_global_avgpool_v2_t) == 64,
                "nai_cmd_afu_global_avgpool_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_upsample_nearest_v2_t) == 64,
+               "nai_cmd_upsample_nearest_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");
@@ -272,6 +286,9 @@ typedef struct {
                            uint32_t lhs, uint32_t rhs, uint32_t ofm);
     uint32_t (*afu_global_avgpool)(
         void *context, const nai_cmd_afu_global_avgpool_v2_t *command,
+        uint32_t ifm, uint32_t ofm);
+    uint32_t (*upsample_nearest)(
+        void *context, const nai_cmd_upsample_nearest_v2_t *command,
         uint32_t ifm, uint32_t ofm);
     uint32_t (*linebuf_job)(void *context, const nai_cmd_linebuf_job_v2_t *command);
     uint32_t (*copy_layout)(void *context, const nai_cmd_copy_layout_v2_t *command,

@@ -17,6 +17,7 @@ SRCS = start.S main.c \
        ../../lib/npu_model_loader.c ../../lib/npu_model_runtime.c \
        ../../lib/npu_quant_buffer.c \
        ../../lib/npu_layout_ops.c ../../lib/npu_runtime_ops.c \
+       ../../lib/spatz_ops.c ../../lib/spatz_ops.S \
        ../../lib/npu_runtime_memory.c \
        ../../lib/hal_systolic.c
 

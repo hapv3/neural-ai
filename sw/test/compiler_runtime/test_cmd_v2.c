@@ -189,6 +189,22 @@ static uint32_t mock_afu_global_avgpool(
     return 0u;
 }
 
+static uint32_t mock_upsample_nearest(
+    void *context, const nai_cmd_upsample_nearest_v2_t *command,
+    uint32_t ifm, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = ifm;
+    state->destination = ofm;
+    state->input_h = command->input_h;
+    state->input_w = command->input_w;
+    state->channels = command->channels;
+    state->stride_h = command->scale_h;
+    state->stride_w = command->scale_w;
+    return 0u;
+}
+
 static uint32_t mock_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
 {
     mock_state_t *state = (mock_state_t *)context;
@@ -834,6 +850,56 @@ int main(void)
     assert(completed == 0u && state.calls == 0u);
     global_avgpool->ofm.offset = 0x200u;
     global_avgpool->input_h = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 96;
+    gemm_commands.element_count = 2;
+    nai_cmd_upsample_nearest_v2_t *upsample =
+        (nai_cmd_upsample_nearest_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *upsample_end =
+        (nai_cmd_control_v2_t *)(gemm_model + 64);
+    upsample->header.type = NAI_CMD_UPSAMPLE_NEAREST;
+    upsample->header.size_bytes = sizeof(*upsample);
+    upsample->ifm.region = NAI_REGION_TCDM_SCRATCH;
+    upsample->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    upsample->ofm.offset = 0x1000u;
+    upsample->input_h = 2u;
+    upsample->input_w = 3u;
+    upsample->channels = 32u;
+    upsample->scale_h = 2u;
+    upsample->scale_w = 2u;
+    upsample_end->header.type = NAI_CMD_END;
+    upsample_end->header.size_bytes = sizeof(*upsample_end);
+    gemm_ops.upsample_nearest = mock_upsample_nearest;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.destination == 0x10101000u);
+    assert(state.input_h == 2u && state.input_w == 3u && state.channels == 32u);
+    assert(state.stride_h == 2u && state.stride_w == 2u);
+
+    gemm_memory.data = gemm_model;
+    gemm_memory.bytes = sizeof(gemm_model);
+    gemm_memory.largest_read = 0u;
+    gemm_memory.reads = 0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_stream_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &gemm_reader, command_buffer, sizeof(command_buffer), &completed, &failure) ==
+        NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+
+    upsample->ofm.offset = 0x80u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    upsample->ofm.offset = 0x1000u;
+    upsample->scale_w = 3u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;
