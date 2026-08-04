@@ -33,7 +33,8 @@ static uint32_t runtime_dma_1d(void *context, uint32_t source, uint32_t destinat
     if (direction == IDMA_DIR_L1_TO_L2)
         return wait_transfer(direction, idma_L1ToL2(source, destination, length));
     if (direction == 2u) {
-        idma_L1ToL1(source, destination, length);
+        spatz_vec_copy_i8((const int8_t *)(unsigned long)source,
+                          (int8_t *)(unsigned long)destination, length);
         return 0u;
     }
     return 1u;
@@ -312,8 +313,7 @@ static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_
 
 static void runtime_zero(uint32_t address, uint32_t bytes)
 {
-    volatile uint8_t *destination = (volatile uint8_t *)(unsigned long)address;
-    for (uint32_t byte = 0; byte < bytes; byte++) destination[byte] = 0u;
+    spatz_vec_zero_i8((int8_t *)(unsigned long)address, bytes);
 }
 
 static uint32_t runtime_layout_dma(uint32_t source, uint32_t destination, uint32_t length,
@@ -437,7 +437,8 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
     }
 
     if (command->mode == NAI_COPY_NHWC_TO_C32 || command->mode == NAI_COPY_C32_TO_NHWC) {
-        if (command->mode == NAI_COPY_NHWC_TO_C32 && destination_l1)
+        if (command->mode == NAI_COPY_NHWC_TO_C32 && destination_l1 &&
+            padded_channels != channels)
             runtime_zero(destination_address, native_bytes);
         for (uint32_t group = 0u; group < padded_channels / 32u; group++) {
             uint32_t group_channels = channels - group * 32u;
