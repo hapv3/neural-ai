@@ -394,6 +394,35 @@ static nai_dispatch_status_v2_t run_afu_binary(
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
+static nai_dispatch_status_v2_t run_afu_lut(
+    const nai_cmd_afu_lut_v2_t *command,
+    const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver,
+    const nai_runtime_ops_v2_t *ops)
+{
+    uint32_t ifm;
+    uint32_t ofm;
+    uint32_t lut;
+    if (command->length == 0u || !all_zero(command->reserved, 5u) ||
+        ops->afu_lut == 0 ||
+        command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        (command->lut.region != NAI_REGION_MODEL_CONSTANTS &&
+         command->lut.region != NAI_REGION_TCDM_SCRATCH)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
+    if (resolve(view, resolver, &command->ifm, command->length,
+            NAI_ALIGNMENT_BYTES, &ifm) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->ofm, command->length,
+            NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->lut, 256u, 1u, &lut) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    if (ranges_overlap(ifm, ofm, command->length)) return NAI_DISPATCH_BAD_COMMAND;
+    return ops->afu_lut(ops->context, command, ifm, ofm, lut) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
 static nai_dispatch_status_v2_t run_afu_global_avgpool(
     const nai_cmd_afu_global_avgpool_v2_t *command,
     const nai_model_view_v1_t *view,
@@ -593,6 +622,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                    header->size_bytes == sizeof(nai_cmd_depthwise_c32_v2_t)) {
             status = run_depthwise_c32((const nai_cmd_depthwise_c32_v2_t *)header,
                 view, resolver, ops);
+        } else if (header->type == NAI_CMD_AFU_LUT &&
+                   header->size_bytes == sizeof(nai_cmd_afu_lut_v2_t)) {
+            status = run_afu_lut((const nai_cmd_afu_lut_v2_t *)header,
+                view, resolver, ops);
         } else if (header->type == NAI_CMD_AFU_BINARY &&
                    header->size_bytes == sizeof(nai_cmd_afu_binary_v2_t)) {
             status = run_afu_binary((const nai_cmd_afu_binary_v2_t *)header,
@@ -660,6 +693,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_GEMM32 ||
                    header.type == NAI_CMD_GEMM32_ACCUM || header.type == NAI_CMD_GEMM32_REQUANT ||
                    header.type == NAI_CMD_POINTWISE_C32 || header.type == NAI_CMD_DEPTHWISE_C32 ||
+                   header.type == NAI_CMD_AFU_LUT ||
                    header.type == NAI_CMD_AFU_BINARY ||
                    header.type == NAI_CMD_AFU_GLOBAL_AVGPOOL ||
                    header.type == NAI_CMD_LINEBUF_JOB ||
@@ -701,6 +735,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                 } else if (header.type == NAI_CMD_DEPTHWISE_C32 &&
                            header.size_bytes == sizeof(nai_cmd_depthwise_c32_v2_t)) {
                     status = run_depthwise_c32((const nai_cmd_depthwise_c32_v2_t *)command_buffer,
+                        view, resolver, ops);
+                } else if (header.type == NAI_CMD_AFU_LUT &&
+                           header.size_bytes == sizeof(nai_cmd_afu_lut_v2_t)) {
+                    status = run_afu_lut((const nai_cmd_afu_lut_v2_t *)command_buffer,
                         view, resolver, ops);
                 } else if (header.type == NAI_CMD_AFU_BINARY &&
                            header.size_bytes == sizeof(nai_cmd_afu_binary_v2_t)) {

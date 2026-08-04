@@ -161,6 +161,17 @@ typedef struct {
     uint32_t reserved[4];
 } nai_cmd_depthwise_c32_v2_t;
 
+/* Generic INT8 lookup.  The AFU consumes one byte per element and the LUT
+   contains exactly one output byte for every possible input byte. */
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_ref_v1_t ifm;
+    nai_ref_v1_t ofm;
+    nai_ref_v1_t lut;
+    uint32_t length;
+    uint32_t reserved[5];
+} nai_cmd_afu_lut_v2_t;
+
 typedef enum {
     NAI_AFU_BINARY_ADD_I8 = 1
 } nai_afu_binary_mode_v2_t;
@@ -220,6 +231,7 @@ _Static_assert(sizeof(nai_linebuf_job_wire_v1_t) == 124, "nai_linebuf_job_wire_v
 _Static_assert(sizeof(nai_cmd_linebuf_job_v2_t) == 160, "nai_cmd_linebuf_job_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 96, "nai_cmd_pointwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_depthwise_c32_v2_t) == 96, "nai_cmd_depthwise_c32_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_afu_lut_v2_t) == 64, "nai_cmd_afu_lut_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_binary_v2_t) == 64, "nai_cmd_afu_binary_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_global_avgpool_v2_t) == 64,
                "nai_cmd_afu_global_avgpool_v2_t ABI size");
@@ -254,6 +266,8 @@ typedef struct {
                               uint32_t weights, uint32_t ifm, uint32_t partial_sums, uint32_t ofm);
     uint32_t (*depthwise_c32)(void *context, const nai_cmd_depthwise_c32_v2_t *command,
                               uint32_t weights, uint32_t ifm, uint32_t ofm);
+    uint32_t (*afu_lut)(void *context, const nai_cmd_afu_lut_v2_t *command,
+                        uint32_t ifm, uint32_t ofm, uint32_t lut);
     uint32_t (*afu_binary)(void *context, const nai_cmd_afu_binary_v2_t *command,
                            uint32_t lhs, uint32_t rhs, uint32_t ofm);
     uint32_t (*afu_global_avgpool)(

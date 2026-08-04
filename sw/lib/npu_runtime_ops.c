@@ -189,6 +189,20 @@ static uint32_t runtime_afu_binary(void *context,
     return afu_wait_done(1000000u) ? 0u : 1u;
 }
 
+static uint32_t runtime_afu_lut(void *context,
+                                const nai_cmd_afu_lut_v2_t *command,
+                                uint32_t ifm, uint32_t ofm, uint32_t lut)
+{
+    const uint8_t *lut_bytes = (const uint8_t *)(unsigned long)lut;
+    (void)context;
+    afu_preload(ifm, ofm, command->length, NPU_AFU_MODE_E8);
+    for (uint32_t index = 0u; index < 256u; index++) {
+        afu_load_lut_entry(index, (uint32_t)lut_bytes[index]);
+    }
+    afu_start_preloaded();
+    return afu_wait_done(1000000u) ? 0u : 1u;
+}
+
 static uint32_t runtime_afu_global_avgpool(
     void *context, const nai_cmd_afu_global_avgpool_v2_t *command,
     uint32_t ifm, uint32_t ofm)
@@ -453,6 +467,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_gemm32,
         runtime_pointwise_c32,
         runtime_depthwise_c32,
+        runtime_afu_lut,
         runtime_afu_binary,
         runtime_afu_global_avgpool,
         runtime_linebuf_job,
