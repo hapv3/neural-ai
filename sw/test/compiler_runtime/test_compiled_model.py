@@ -1122,6 +1122,12 @@ def _compile_global_avgpool_model():
     )
 
 
+def _compile_resize_nearest_model():
+    return _compile_tflite_fixture_model(
+        "resize_nearest_h2w3_c32_2x", "neural-ai-compiled-resize-nearest-"
+    )
+
+
 def _compile_public_reshape_model():
     return _compile_tflite_fixture_model(
         "reshape_1x4x32_to_1x2x2x32", "neural-ai-compiled-reshape-"
@@ -2515,6 +2521,82 @@ async def test_compiler_generated_global_avgpool_c32_package(dut):
         counters["cycle"],
         counters["afu_done"],
         counters["afu_tcdm_req"],
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_resize_nearest_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 2, 3, 32
+    input_data = bytes((index * 29 + 7) & 0xFF for index in range(height * width * channels))
+    expected = bytearray()
+    for output_y in range(height * 2):
+        input_y = output_y // 2
+        for output_x in range(width * 2):
+            input_x = output_x // 2
+            pixel = (input_y * width + input_x) * channels
+            expected.extend(input_data[pixel : pixel + channels])
+    model = _compile_resize_nearest_model()
+
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    upsample_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 20:
+            assert command_size == 64
+            assert struct.unpack_from("<H", model, offset + 16)[0] == 6
+            assert struct.unpack_from("<H", model, offset + 24)[0] == 6
+            assert struct.unpack_from("<5I", model, offset + 32) == (
+                height,
+                width,
+                channels,
+                2,
+                2,
+            )
+            upsample_commands += 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert upsample_commands == 1
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=300000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+    cocotb.log.info(
+        "compiler nearest 2x C32 runtime=%s ns PMU cycles=%d",
+        elapsed_ns,
+        counters["cycle"],
     )
 
 

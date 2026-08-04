@@ -6,6 +6,7 @@
 #include "npu_layout_ops.h"
 #include "npu_memory_map.h"
 #include "npu_quant_buffer.h"
+#include "spatz_ops.h"
 
 static uint32_t wait_transfer(uint32_t direction, int transfer_id)
 {
@@ -221,6 +222,17 @@ static uint32_t runtime_afu_global_avgpool(
     afu_load_lut_entry(0u, reciprocal_q31);
     afu_start_global_avgpool_c32(ifm, ofm, input_bytes, spatial_count);
     return afu_wait_done(100000u + input_bytes) ? 0u : 1u;
+}
+
+static uint32_t runtime_upsample_nearest(
+    void *context, const nai_cmd_upsample_nearest_v2_t *command,
+    uint32_t ifm, uint32_t ofm)
+{
+    (void)context;
+    spatz_upsample_nearest2x_c32_i8(
+        (const int8_t *)(unsigned long)ifm, (int8_t *)(unsigned long)ofm,
+        command->input_h, command->input_w);
+    return 0u;
 }
 
 static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
@@ -475,6 +487,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_afu_lut,
         runtime_afu_binary,
         runtime_afu_global_avgpool,
+        runtime_upsample_nearest,
         runtime_linebuf_job,
         runtime_copy_layout,
         runtime_barrier,
