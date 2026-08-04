@@ -91,6 +91,7 @@ STRUCTS = {
     "CommandGemm32V2": "nai_cmd_gemm32_v2_t",
     "CommandPointwiseC32V2": "nai_cmd_pointwise_c32_v2_t",
     "CommandDepthwiseC32V2": "nai_cmd_depthwise_c32_v2_t",
+    "CommandAFULutV2": "nai_cmd_afu_lut_v2_t",
     "CommandAFUBinaryV2": "nai_cmd_afu_binary_v2_t",
     "CommandAFUGlobalAvgPoolV2": "nai_cmd_afu_global_avgpool_v2_t",
     "LinebufJobWireV1": "nai_linebuf_job_wire_v1_t",
