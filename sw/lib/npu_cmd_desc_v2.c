@@ -325,8 +325,12 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
     uint32_t weight_bytes;
     uint32_t expected_output_h;
     uint32_t expected_output_w;
+    uint32_t expected_valid_h;
+    uint32_t expected_valid_w;
     uint32_t total_pad_h;
     uint32_t total_pad_w;
+    uint32_t same_shape;
+    uint32_t valid_shape;
 
     if (command->input_h == 0u || command->input_w == 0u ||
         command->output_h == 0u || command->output_w == 0u ||
@@ -344,11 +348,19 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
     }
     expected_output_h = (command->input_h + command->stride_h - 1u) / command->stride_h;
     expected_output_w = (command->input_w + command->stride_w - 1u) / command->stride_w;
+    expected_valid_h = command->input_h >= 3u ?
+        (command->input_h - 3u) / command->stride_h + 1u : 0u;
+    expected_valid_w = command->input_w >= 3u ?
+        (command->input_w - 3u) / command->stride_w + 1u : 0u;
     total_pad_h = (expected_output_h - 1u) * command->stride_h + 3u - command->input_h;
     total_pad_w = (expected_output_w - 1u) * command->stride_w + 3u - command->input_w;
+    same_shape = command->output_h == expected_output_h &&
+        command->output_w == expected_output_w &&
+        command->pad_h == total_pad_h / 2u && command->pad_w == total_pad_w / 2u;
+    valid_shape = command->output_h == expected_valid_h &&
+        command->output_w == expected_valid_w && command->pad_h == 0u && command->pad_w == 0u;
     groups = 1u;
-    if (command->output_h != expected_output_h || command->output_w != expected_output_w ||
-        command->pad_h != total_pad_h / 2u || command->pad_w != total_pad_w / 2u ||
+    if ((!same_shape && !valid_shape) ||
         !multiply(command->input_h, command->input_w, &input_pixels) ||
         !multiply(command->output_h, command->output_w, &output_pixels) ||
         !multiply(input_pixels, groups, &input_bytes) ||

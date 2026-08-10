@@ -682,6 +682,22 @@ int main(void)
     assert(state.input_h == 5u && state.input_w == 5u);
     assert(state.output_h == 3u && state.output_w == 3u);
     assert(state.pad_h == 1u && state.pad_w == 1u);
+    depthwise->input_h = 10u;
+    depthwise->input_w = 10u;
+    depthwise->output_h = 8u;
+    depthwise->output_w = 8u;
+    depthwise->stride_h = 1u;
+    depthwise->stride_w = 1u;
+    depthwise->pad_h = 0u;
+    depthwise->pad_w = 0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.input_h == 10u && state.input_w == 10u);
+    assert(state.output_h == 8u && state.output_w == 8u);
+    assert(state.stride_h == 1u && state.stride_w == 1u);
+    assert(state.pad_h == 0u && state.pad_w == 0u);
     depthwise->channels = 33u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
