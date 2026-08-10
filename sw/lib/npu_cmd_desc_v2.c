@@ -266,7 +266,7 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
     uint32_t ofm_bytes;
     uint32_t partial_bytes;
 
-    if (command->rows == 0u || command->rows > 256u || command->input_c32_groups == 0u ||
+    if (command->rows == 0u || command->input_c32_groups == 0u ||
         command->output_c32_groups != 1u || ops->pointwise_c32 == 0 ||
         !all_zero(command->reserved, 6u) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
@@ -283,7 +283,7 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
         ifm_bytes > 0xffffffffu - ifm_groups_bytes ||
         !multiply(command->output_group_stride_bytes, command->output_c32_groups - 1u, &ofm_bytes) ||
         ofm_bytes > 0xffffffffu - ofm_groups_bytes ||
-        !multiply(command->rows, 32u * 4u, &partial_bytes)) {
+        !multiply(command->rows < 256u ? command->rows : 256u, 32u * 4u, &partial_bytes)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
     ifm_bytes += ifm_groups_bytes;
@@ -299,9 +299,20 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
         resolve(view, resolver, &command->ofm, ofm_bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
+    /* nai_resolve_ref_v1 validates the section-relative range.  Also guard
+       the resolved physical address arithmetic here: a resolver base near
+       UINT32_MAX must not wrap when the runtime walks the complete tensor. */
+    if (weights > 0xffffffffu - weight_bytes ||
+        ifm > 0xffffffffu - ifm_bytes || ofm > 0xffffffffu - ofm_bytes) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
     if (command->input_c32_groups > 1u &&
         resolve(view, resolver, &command->partial_sums, partial_bytes,
                 NAI_ALIGNMENT_BYTES, &partial_sums) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    if (command->input_c32_groups > 1u &&
+        partial_sums > 0xffffffffu - partial_bytes) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
     return ops->pointwise_c32(ops->context, command, weights, ifm, partial_sums, ofm) == 0u ?

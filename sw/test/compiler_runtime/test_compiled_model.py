@@ -1231,7 +1231,8 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == expected
 
-    # The compiler must lower oversized M into legal pointwise stripes.
+    # The compiler must coalesce oversized M into one full-row pointwise
+    # command; the runtime performs the <=256-row decomposition internally.
     section_offset = struct.unpack_from("<I", model, 24)[0]
     command_offset = struct.unpack_from("<I", model, section_offset + 8)[0]
     offset = command_offset
@@ -1244,7 +1245,7 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
             break
         offset += command_size
     assert pointwise_rows and sum(pointwise_rows) == width
-    assert max(pointwise_rows) <= 256
+    assert pointwise_rows == [width]
 
 
 

@@ -126,34 +126,67 @@ static uint32_t runtime_pointwise_c32(void *context,
                                       uint32_t partial_sums, uint32_t ofm)
 {
     const uint32_t weight_tile_bytes = 32u * 32u;
+    const uint32_t stripe_rows = 256u;
+    const uint32_t cached_weight_slots = 3u;
     const uint32_t input_group_stride = command->input_group_stride_bytes;
     const uint32_t output_group_stride = command->output_group_stride_bytes;
+    uint32_t cached_weight_sources[3] = {0u, 0u, 0u};
+    uint32_t cached_weight_valid[3] = {0u, 0u, 0u};
     (void)context;
     if (!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
         command->rows == 0u || command->input_c32_groups == 0u ||
-        command->output_c32_groups == 0u) return 1u;
+        command->output_c32_groups != 1u) return 1u;
 
     for (uint32_t output_group = 0u; output_group < command->output_c32_groups; output_group++) {
         const uint32_t output_address = ofm + output_group * output_group_stride;
         const uint32_t output_weight_base = weights +
             output_group * command->input_c32_groups * weight_tile_bytes;
-        for (uint32_t input_group = 0u; input_group < command->input_c32_groups; input_group++) {
-            const uint32_t weight_address = NPU_CMD_TCDM_BASE;
-            const uint32_t input_address = ifm + input_group * input_group_stride;
-            if (!idma_memcpy_blocking(output_weight_base + input_group * weight_tile_bytes,
-                                      weight_address, weight_tile_bytes)) return 1u;
-            if (command->input_c32_groups == 1u) {
-                systolic_gemm32_requant(weight_address, input_address, output_address,
-                                        command->rows);
-            } else if (input_group == 0u) {
-                systolic_gemm32(weight_address, input_address, partial_sums, command->rows);
-            } else if (input_group + 1u == command->input_c32_groups) {
-                systolic_gemm32_accumulate_requant(weight_address, input_address,
-                                                   partial_sums, output_address,
-                                                   command->rows);
-            } else {
-                systolic_gemm32_accumulate(weight_address, input_address, partial_sums,
-                                           partial_sums, command->rows);
+        /* Keep the row-stripe loop outside the input-group loop.  The partial
+           sum scratch is intentionally only one 256-row stripe, so processing
+           all input groups for a stripe must complete before the next stripe.
+           Three 1 KiB command-TCDM slots retain the first input-group tiles;
+           a fourth group (if present) uses the transient slot and is reloaded
+           for each stripe.  The source keys are per invocation, preventing a
+           stale tile from a previous command from being reused. */
+        for (uint32_t row_base = 0u; row_base < command->rows; row_base += stripe_rows) {
+            const uint32_t rows = command->rows - row_base > stripe_rows ?
+                stripe_rows : command->rows - row_base;
+            for (uint32_t input_group = 0u;
+                 input_group < command->input_c32_groups; input_group++) {
+                uint32_t weight_address;
+                const uint32_t weight_source = output_weight_base +
+                    input_group * weight_tile_bytes;
+                if (input_group < cached_weight_slots) {
+                    weight_address = NPU_CMD_TCDM_BASE +
+                        (input_group + 1u) * weight_tile_bytes;
+                    if (!cached_weight_valid[input_group] ||
+                        cached_weight_sources[input_group] != weight_source) {
+                        if (!idma_memcpy_blocking(weight_source, weight_address,
+                                                  weight_tile_bytes)) return 1u;
+                        cached_weight_sources[input_group] = weight_source;
+                        cached_weight_valid[input_group] = 1u;
+                    }
+                } else {
+                    weight_address = NPU_CMD_TCDM_BASE;
+                    if (!idma_memcpy_blocking(weight_source, weight_address,
+                                              weight_tile_bytes)) return 1u;
+                }
+                const uint32_t input_address = ifm + input_group * input_group_stride +
+                    row_base * 32u;
+                const uint32_t output_row_address = output_address + row_base * 32u;
+                if (command->input_c32_groups == 1u) {
+                    systolic_gemm32_requant(weight_address, input_address,
+                                            output_row_address, rows);
+                } else if (input_group == 0u) {
+                    systolic_gemm32(weight_address, input_address, partial_sums, rows);
+                } else if (input_group + 1u == command->input_c32_groups) {
+                    systolic_gemm32_accumulate_requant(weight_address, input_address,
+                                                       partial_sums, output_row_address,
+                                                       rows);
+                } else {
+                    systolic_gemm32_accumulate(weight_address, input_address, partial_sums,
+                                               partial_sums, rows);
+                }
             }
         }
     }
