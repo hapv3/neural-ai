@@ -1116,6 +1116,12 @@ def _compile_sigmoid_model():
     )
 
 
+def _compile_silu_model():
+    return _compile_tflite_fixture_model(
+        "silu_h2w3_c33", "neural-ai-compiled-silu-"
+    )
+
+
 def _compile_relu6_model():
     return _compile_tflite_fixture_model(
         "relu6_h2w3_c33", "neural-ai-compiled-relu6-"
@@ -2484,6 +2490,96 @@ async def test_compiler_generated_sigmoid_afu_lut_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_silu_afu_lut_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 2 * 3 * 33
+    input_data = bytes((index * 131 + 17) & 0xFF for index in range(count))
+    expected = bytearray()
+    for raw in input_data:
+        signed = raw if raw < 128 else raw - 256
+        real = max(-8.0, min(8.0, 0.125 * signed))
+        logistic = 1.0 / (1.0 + math.exp(-real))
+        quantized_logistic = max(
+            -128, min(127, math.floor(-128.0 + 256.0 * logistic + 0.5))
+        )
+        product = signed * (quantized_logistic + 128)
+        rounded = (
+            (product + 64) // 128
+            if product >= 0
+            else -((-product + 64) // 128)
+        )
+        expected.append(max(-128, min(127, rounded)) & 0xFF)
+
+    model = _compile_silu_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    command_types = []
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        assert command_size >= 32
+        command_types.append(command_type)
+        if command_type == 12:
+            assert command_size == 64
+            assert struct.unpack_from("<H", model, offset + 16)[0] == 6
+            assert struct.unpack_from("<H", model, offset + 24)[0] == 6
+            assert struct.unpack_from("<H", model, offset + 32)[0] == 1
+            assert struct.unpack_from("<I", model, offset + 40)[0] == 384
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert command_types.count(12) == 1
+    assert 13 not in command_types
+    assert 17 not in command_types
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=300000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == bytes(expected)
+    assert counters["cycle"] > 0
+    cocotb.log.warning(
+        "compiler SiLU LUT package=%d bytes commands=%d runtime=%s ns "
+        "PMU cycles=%d; diagnostic ratios vs Micro-MobileNet=%0.3fx "
+        "and Micro-YOLO=%0.3fx",
+        len(model),
+        command_count,
+        elapsed_ns,
+        counters["cycle"],
+        counters["cycle"] / 347_992,
+        counters["cycle"] / 388_146,
+    )
+    cocotb.log.warning("%s", format_pmu_report(counters))
 
 
 @cocotb.test()
