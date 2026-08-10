@@ -163,6 +163,19 @@ static uint32_t mock_afu_binary(void *context, const nai_cmd_afu_binary_v2_t *co
     return 0u;
 }
 
+static uint32_t mock_spatz_add(void *context, const nai_cmd_spatz_add_v2_t *command,
+                               uint32_t lhs, uint32_t rhs, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = lhs;
+    state->source2 = rhs;
+    state->destination = ofm;
+    state->length = command->length;
+    state->mode = command->double_round_shift;
+    return 0u;
+}
+
 static uint32_t mock_afu_lut(void *context, const nai_cmd_afu_lut_v2_t *command,
                              uint32_t ifm, uint32_t ofm, uint32_t lut)
 {
@@ -826,6 +839,71 @@ int main(void)
     assert(completed == 0u && state.calls == 0u);
     afu_binary->ofm.offset = 0x200u;
     afu_binary->mode = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 128;
+    gemm_commands.element_count = 2;
+    nai_cmd_spatz_add_v2_t *spatz_add = (nai_cmd_spatz_add_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *spatz_add_end = (nai_cmd_control_v2_t *)(gemm_model + 96);
+    spatz_add->header.type = NAI_CMD_SPATZ_ADD;
+    spatz_add->header.size_bytes = sizeof(*spatz_add);
+    spatz_add->lhs.region = NAI_REGION_TCDM_SCRATCH;
+    spatz_add->rhs.region = NAI_REGION_TCDM_SCRATCH;
+    spatz_add->rhs.offset = 0x100u;
+    spatz_add->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    spatz_add->ofm.offset = 0x200u;
+    spatz_add->length = 64u;
+    spatz_add->lhs_scale = 0x60000000;
+    spatz_add->lhs_shift = 20u;
+    spatz_add->rhs_scale = 0x40000000;
+    spatz_add->rhs_shift = 20u;
+    spatz_add->output_scale = 0x40000000;
+    spatz_add->output_shift = 41u;
+    spatz_add->lhs_zero_point = -3;
+    spatz_add->rhs_zero_point = 5;
+    spatz_add->output_zero_point = 7;
+    spatz_add->clamp_min = -100;
+    spatz_add->clamp_max = 100;
+    spatz_add->double_round_shift = 20u;
+    spatz_add_end->header.type = NAI_CMD_END;
+    spatz_add_end->header.size_bytes = sizeof(*spatz_add_end);
+    gemm_ops.spatz_add = mock_spatz_add;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.source2 == 0x10100100u);
+    assert(state.destination == 0x10100200u && state.length == 64u);
+    assert(state.mode == 20u);
+
+    gemm_memory.data = gemm_model;
+    gemm_memory.bytes = sizeof(gemm_model);
+    gemm_memory.largest_read = 0u;
+    gemm_memory.reads = 0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_stream_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &gemm_reader, command_buffer, sizeof(command_buffer), &completed, &failure) ==
+        NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.source2 == 0x10100100u);
+    assert(state.destination == 0x10100200u && state.length == 64u);
+    assert(state.mode == 20u);
+
+    spatz_add->ofm.offset = 0x120u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    spatz_add->ofm.offset = 0x200u;
+    spatz_add->lhs_scale = 0;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    spatz_add->lhs_scale = 0x60000000;
+    spatz_add->output_shift = 64u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
 

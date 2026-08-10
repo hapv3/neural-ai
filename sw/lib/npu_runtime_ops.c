@@ -191,6 +191,25 @@ static uint32_t runtime_afu_binary(void *context,
     return afu_wait_done(1000000u) ? 0u : 1u;
 }
 
+static uint32_t runtime_spatz_add(void *context,
+                                  const nai_cmd_spatz_add_v2_t *command,
+                                  uint32_t lhs, uint32_t rhs, uint32_t ofm)
+{
+    const spatz_quantized_add_params_t params = {
+        command->lhs_scale, command->lhs_shift,
+        command->rhs_scale, command->rhs_shift,
+        command->output_scale, command->output_shift,
+        command->lhs_zero_point, command->rhs_zero_point,
+        command->output_zero_point, command->clamp_min,
+        command->clamp_max, command->double_round_shift,
+    };
+    (void)context;
+    spatz_quantized_add_i8((const int8_t *)(unsigned long)lhs,
+        (const int8_t *)(unsigned long)rhs, (int8_t *)(unsigned long)ofm,
+        command->length, &params);
+    return 0u;
+}
+
 static uint32_t runtime_afu_lut(void *context,
                                 const nai_cmd_afu_lut_v2_t *command,
                                 uint32_t ifm, uint32_t ofm, uint32_t lut)
@@ -497,6 +516,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_depthwise_c32,
         runtime_afu_lut,
         runtime_afu_binary,
+        runtime_spatz_add,
         runtime_afu_global_avgpool,
         runtime_upsample_nearest,
         runtime_maxpool,

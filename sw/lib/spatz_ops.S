@@ -176,6 +176,184 @@ spatz_requant_i32_to_i32:
 3:
     ret
 
+    /*
+     * Apply Regor/TFLite's signed fixed-point scale using an e32 vector pair
+     * for the low and high halves of each exact 64-bit product.  Spatz is an
+     * ELEN=32 implementation, so this deliberately avoids e64 operations.
+     * v8 and v16 are scratch groups; source and result are e32,m4 groups.
+     */
+    .macro spatz_scale_i32 source, result, multiplier, shift, double_shift
+    vmul.vx v8, \source, \multiplier
+    vmulh.vx v16, \source, \multiplier
+    beqz \shift, .Lscale_no_shift\@
+
+    vmv.v.i v24, 0
+    vmv.v.i v28, 0
+    li t1, 32
+    bgtu \shift, t1, .Lscale_round_high\@
+    li t2, 1
+    addi t3, \shift, -1
+    sll t2, t2, t3
+    vmv.v.x v24, t2
+    j .Lscale_double_round\@
+.Lscale_round_high\@:
+    li t2, 1
+    addi t3, \shift, -33
+    sll t2, t2, t3
+    vmv.v.x v28, t2
+
+.Lscale_double_round\@:
+    li t2, 31
+    sub t2, t2, \double_shift
+    bleu \shift, t2, .Lscale_add_round\@
+    li t2, 1
+    li t3, 30
+    sub t3, t3, \double_shift
+    sll t2, t2, t3
+    vsra.vi v28, \source, 31
+    li t3, 32
+    bgtu \shift, t3, .Lscale_double_high\@
+    slli t2, t2, 1
+    vmul.vx v28, v28, t2
+    srli t2, t2, 1
+    vadd.vx v28, v28, t2
+    vadd.vv v24, v24, v28
+    vmv.v.i v28, 0
+    j .Lscale_add_round\@
+.Lscale_double_high\@:
+    vadd.vv v28, v28, v28
+    vmul.vx v24, v28, t2
+    vadd.vx v24, v24, t2
+    vsra.vi v28, \source, 31
+    li t3, 1
+    addi t1, \shift, -33
+    sll t3, t3, t1
+    vadd.vx v28, v28, t3
+
+.Lscale_add_round\@:
+    vadd.vv v16, v16, v28
+    vadd.vv \result, v8, v24
+    vor.vv v28, v8, v24
+    vand.vv v8, v8, v24
+    vxor.vi v24, \result, -1
+    vand.vv v28, v28, v24
+    vor.vv v8, v8, v28
+    vsrl.vi v8, v8, 31
+    vadd.vv v16, v16, v8
+
+    li t1, 32
+    beq \shift, t1, .Lscale_shift_32\@
+    bgtu \shift, t1, .Lscale_shift_high\@
+    li t2, 32
+    sub t2, t2, \shift
+    vsrl.vx v8, \result, \shift
+    vsll.vx v24, v16, t2
+    vor.vv \result, v8, v24
+    j .Lscale_done\@
+.Lscale_shift_32\@:
+    vadd.vx \result, v16, zero
+    j .Lscale_done\@
+.Lscale_shift_high\@:
+    addi t2, \shift, -32
+    vsra.vx \result, v16, t2
+    j .Lscale_done\@
+.Lscale_no_shift\@:
+    vadd.vx \result, v8, zero
+.Lscale_done\@:
+    .endm
+
+    .global spatz_quantized_add_i8
+    .type spatz_quantized_add_i8, @function
+spatz_quantized_add_i8:
+    beqz a3, .Lquant_add_done
+    addi sp, sp, -48
+    sw s0, 0(sp)
+    sw s1, 4(sp)
+    sw s2, 8(sp)
+    sw s3, 12(sp)
+    sw s4, 16(sp)
+    sw s5, 20(sp)
+    sw s6, 24(sp)
+    sw s7, 28(sp)
+    sw s8, 32(sp)
+    sw s9, 36(sp)
+    sw s10, 40(sp)
+    sw s11, 44(sp)
+    mv s0, a0
+    mv s1, a1
+    mv s2, a2
+    mv s3, a3
+    mv s4, a4
+    lw s6, 0(s4)
+    lw s7, 4(s4)
+    lw s8, 8(s4)
+    lw s9, 12(s4)
+    lw s10, 16(s4)
+    lw s11, 20(s4)
+
+.Lquant_add_loop:
+    vsetvli s5, s3, e8, m1, ta, mu
+    vle8.v v1, (s0)
+    vle8.v v2, (s1)
+    li t1, 1
+    vwmul.vx v8, v1, t1
+    vwmul.vx v10, v2, t1
+    vsetvli zero, s5, e16, m2, ta, mu
+    vwmul.vx v12, v8, t1
+    vwmul.vx v20, v10, t1
+    vsetvli zero, s5, e32, m4, ta, mu
+    lw t1, 24(s4)
+    lw t2, 28(s4)
+    vsub.vx v12, v12, t1
+    vsub.vx v20, v20, t2
+
+    lw t4, 44(s4)
+    spatz_scale_i32 v12, v12, s6, s7, t4
+    spatz_scale_i32 v20, v20, s8, s9, t4
+    vadd.vv v12, v12, v20
+    li t4, 0
+    spatz_scale_i32 v12, v12, s10, s11, t4
+
+    lw t1, 32(s4)
+    lw t2, 36(s4)
+    lw t3, 40(s4)
+    vadd.vx v12, v12, t1
+    vmax.vx v12, v12, t2
+    vmin.vx v12, v12, t3
+    lui t1, 0x10140
+    vse32.v v12, (t1)
+    mv t2, s2
+    mv t3, s5
+.Lquant_add_pack:
+    lw t4, 0(t1)
+    sb t4, 0(t2)
+    addi t1, t1, 4
+    addi t2, t2, 1
+    addi t3, t3, -1
+    bnez t3, .Lquant_add_pack
+
+    add s0, s0, s5
+    add s1, s1, s5
+    add s2, s2, s5
+    sub s3, s3, s5
+    bnez s3, .Lquant_add_loop
+
+    lw s0, 0(sp)
+    lw s1, 4(sp)
+    lw s2, 8(sp)
+    lw s3, 12(sp)
+    lw s4, 16(sp)
+    lw s5, 20(sp)
+    lw s6, 24(sp)
+    lw s7, 28(sp)
+    lw s8, 32(sp)
+    lw s9, 36(sp)
+    lw s10, 40(sp)
+    lw s11, 44(sp)
+    addi sp, sp, 48
+.Lquant_add_done:
+    ret
+
     .global spatz_mul_i8_q7
     .type spatz_mul_i8_q7, @function
 spatz_mul_i8_q7:

@@ -93,6 +93,7 @@ STRUCTS = {
     "CommandDepthwiseC32V2": "nai_cmd_depthwise_c32_v2_t",
     "CommandAFULutV2": "nai_cmd_afu_lut_v2_t",
     "CommandAFUBinaryV2": "nai_cmd_afu_binary_v2_t",
+    "CommandSpatzAddV2": "nai_cmd_spatz_add_v2_t",
     "CommandAFUGlobalAvgPoolV2": "nai_cmd_afu_global_avgpool_v2_t",
     "CommandUpsampleNearestV2": "nai_cmd_upsample_nearest_v2_t",
     "CommandMaxPoolV2": "nai_cmd_maxpool_v2_t",
