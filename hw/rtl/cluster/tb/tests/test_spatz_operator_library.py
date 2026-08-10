@@ -96,6 +96,19 @@ def as_i8(value):
     return value - 0x100 if value & 0x80 else value
 
 
+def scale_add_value(value, scale, shift, double_round_shift):
+    product = value * scale
+    if shift == 0:
+        return product
+    double_round = (
+        1 << (30 - double_round_shift)
+        if shift > 31 - double_round_shift
+        else 0
+    )
+    product += (1 << (shift - 1)) + (double_round if value >= 0 else -double_round)
+    return product >> shift
+
+
 def safe_signal_int(getter):
     try:
         value = getter().value
@@ -763,6 +776,30 @@ async def test_spatz_op_requant(dut):
 @cocotb.test()
 async def test_spatz_op_add(dut):
     await run_firmware_case(dut, "spatz_ops_add.bin", "test_spatz_op_add", 1, check_add)
+
+
+@cocotb.test()
+async def test_spatz_op_quantized_add(dut):
+    def check_quantized_add(dut):
+        for index in range(VL):
+            lhs = as_i8(index * 17 + 3) - (-3)
+            rhs = as_i8(index * 29 + 11) - 5
+            value = scale_add_value(lhs, 1610612736, 20, 20)
+            value += scale_add_value(rhs, 1073741824, 20, 20)
+            value = scale_add_value(value, 1073741824, 41, 0) + 7
+            expected = min(max(value, -100), 100)
+            got = as_i8(read_tcdm_byte(dut, ADD_DST + index))
+            assert got == expected, (
+                f"quantized add mismatch at {index}: got={got} expected={expected}"
+            )
+
+    await run_firmware_case(
+        dut,
+        "spatz_ops_quant_add.bin",
+        "test_spatz_op_quantized_add",
+        1,
+        check_quantized_add,
+    )
 
 
 @cocotb.test()

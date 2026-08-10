@@ -1104,6 +1104,12 @@ def _compile_afu_add_model():
     )
 
 
+def _compile_quantized_add_model():
+    return _compile_tflite_fixture_model(
+        "add_quant_h2w2_c32", "neural-ai-compiled-quant-add-"
+    )
+
+
 def _compile_sigmoid_model():
     return _compile_tflite_fixture_model(
         "sigmoid_h2w3_c33", "neural-ai-compiled-sigmoid-"
@@ -2332,6 +2338,90 @@ async def test_compiler_generated_afu_add_c32_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_quantized_add_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 2 * 2 * 32
+    lhs_values = [((index * 17 + 3) & 0xFF) - 128 for index in range(count)]
+    rhs_values = [((index * 29 + 11) & 0xFF) - 128 for index in range(count)]
+    model = _compile_quantized_add_model()
+    commands_offset = struct.unpack_from("<I", model, 64 + 8)[0]
+    commands_size = struct.unpack_from("<I", model, 64 + 12)[0]
+    command_types = []
+    offset = commands_offset
+    while offset < commands_offset + commands_size:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        command_types.append(command_type)
+        offset += command_size
+    assert 16 in command_types
+
+    # Read the exact compiler-emitted parameters so this independent reference
+    # also freezes command field interpretation across the two repositories.
+    spatz_offset = next(
+        pos for pos in range(commands_offset, commands_offset + commands_size, 32)
+        if struct.unpack_from("<H", model, pos)[0] == 16
+    )
+    # The command layout contains alternating signed scale / unsigned shift;
+    # unpack explicitly to avoid relying on Python integer wraparound.
+    lhs_scale = struct.unpack_from("<i", model, spatz_offset + 44)[0]
+    lhs_shift = struct.unpack_from("<I", model, spatz_offset + 48)[0]
+    rhs_scale = struct.unpack_from("<i", model, spatz_offset + 52)[0]
+    rhs_shift = struct.unpack_from("<I", model, spatz_offset + 56)[0]
+    output_scale = struct.unpack_from("<i", model, spatz_offset + 60)[0]
+    output_shift = struct.unpack_from("<I", model, spatz_offset + 64)[0]
+    lhs_zp, rhs_zp, output_zp, clamp_min, clamp_max = struct.unpack_from(
+        "<5i", model, spatz_offset + 68
+    )
+    double_round_shift = struct.unpack_from("<I", model, spatz_offset + 88)[0]
+    def scale_value(value, scale, shift, double_shift):
+        if shift == 0:
+            return value * scale
+        correction = 1 << (30 - double_shift) if shift > 31 - double_shift else 0
+        rounded = value * scale + (1 << (shift - 1))
+        rounded += correction if value >= 0 else -correction
+        return rounded >> shift
+
+    expected = bytearray()
+    for lhs, rhs in zip(lhs_values, rhs_values):
+        value = scale_value(lhs - lhs_zp, lhs_scale, lhs_shift, double_round_shift)
+        value += scale_value(rhs - rhs_zp, rhs_scale, rhs_shift, double_round_shift)
+        value = scale_value(value, output_scale, output_shift, 0) + output_zp
+        expected.append(min(max(value, clamp_min), clamp_max) & 0xFF)
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (1, 1, INPUT2_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, bytes(value & 0xFF for value in lhs_values))
+    await write_l2_bytes(dut, INPUT2_BASE, bytes(value & 0xFF for value in rhs_values))
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await _load_and_run(dut, axi_master, invocation)
+
+    status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+    fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+    fail_ptr = await _axi_read32(axi_master, NPU_CMD_FAIL_PTR)
+    done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+    assert status == NPU_CMD_STATUS_PASS, (
+        f"runtime failed: status=0x{status:08x} code=0x{fail_code:08x} "
+        f"ptr=0x{fail_ptr:08x} done={done_count} types={command_types}"
+    )
+    assert fail_code == 0
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == bytes(expected)
 
 
 @cocotb.test()

@@ -6,6 +6,21 @@
 #define SPATZ_OP_SCRATCH_I32_ADDR 0x10140000u
 #define SPATZ_OP_SCRATCH_I8_ADDR  SPATZ_OP_SCRATCH_I32_ADDR
 
+typedef struct {
+    int32_t lhs_scale;
+    uint32_t lhs_shift;
+    int32_t rhs_scale;
+    uint32_t rhs_shift;
+    int32_t output_scale;
+    uint32_t output_shift;
+    int32_t lhs_zero_point;
+    int32_t rhs_zero_point;
+    int32_t output_zero_point;
+    int32_t clamp_min;
+    int32_t clamp_max;
+    uint32_t double_round_shift;
+} spatz_quantized_add_params_t;
+
 void spatz_vec_copy_i8(const int8_t *src, int8_t *dst, uint32_t count);
 void spatz_vec_zero_i8(int8_t *dst, uint32_t count);
 void spatz_vec_zero_i32(uint32_t *dst, uint32_t count);
@@ -28,6 +43,9 @@ void spatz_requant_i32_to_i8(const int32_t *src, int8_t *dst, uint32_t count,
                              int32_t min_val, int32_t max_val);
 void spatz_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                   uint32_t count, int32_t min_val, int32_t max_val);
+void spatz_quantized_add_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
+                            uint32_t count,
+                            const spatz_quantized_add_params_t *params);
 void spatz_mul_i8(const int8_t *lhs, const int8_t *rhs, int8_t *dst,
                   uint32_t count, int32_t multiplier, uint32_t shift,
                   int32_t min_val, int32_t max_val);

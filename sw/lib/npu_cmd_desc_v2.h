@@ -188,6 +188,27 @@ typedef struct {
 
 typedef struct {
     nai_cmd_header_v2_t header;
+    nai_ref_v1_t lhs;
+    nai_ref_v1_t rhs;
+    nai_ref_v1_t ofm;
+    uint32_t length;
+    int32_t lhs_scale;
+    uint32_t lhs_shift;
+    int32_t rhs_scale;
+    uint32_t rhs_shift;
+    int32_t output_scale;
+    uint32_t output_shift;
+    int32_t lhs_zero_point;
+    int32_t rhs_zero_point;
+    int32_t output_zero_point;
+    int32_t clamp_min;
+    int32_t clamp_max;
+    uint32_t double_round_shift;
+    uint32_t reserved;
+} nai_cmd_spatz_add_v2_t;
+
+typedef struct {
+    nai_cmd_header_v2_t header;
     nai_ref_v1_t ifm;
     nai_ref_v1_t ofm;
     uint32_t input_h;
@@ -261,6 +282,7 @@ _Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 96, "nai_cmd_pointwise_c32_
 _Static_assert(sizeof(nai_cmd_depthwise_c32_v2_t) == 96, "nai_cmd_depthwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_lut_v2_t) == 64, "nai_cmd_afu_lut_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_binary_v2_t) == 64, "nai_cmd_afu_binary_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_spatz_add_v2_t) == 96, "nai_cmd_spatz_add_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_global_avgpool_v2_t) == 64,
                "nai_cmd_afu_global_avgpool_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_upsample_nearest_v2_t) == 64,
@@ -302,6 +324,8 @@ typedef struct {
                         uint32_t ifm, uint32_t ofm, uint32_t lut);
     uint32_t (*afu_binary)(void *context, const nai_cmd_afu_binary_v2_t *command,
                            uint32_t lhs, uint32_t rhs, uint32_t ofm);
+    uint32_t (*spatz_add)(void *context, const nai_cmd_spatz_add_v2_t *command,
+                          uint32_t lhs, uint32_t rhs, uint32_t ofm);
     uint32_t (*afu_global_avgpool)(
         void *context, const nai_cmd_afu_global_avgpool_v2_t *command,
         uint32_t ifm, uint32_t ofm);

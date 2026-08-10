@@ -28,6 +28,7 @@
 #define SPATZ_OP_TEST_CLASS_SIGMOID 15u
 #define SPATZ_OP_TEST_GLOBAL_AVGPOOL 16u
 #define SPATZ_OP_TEST_CLAMP_RELU6 17u
+#define SPATZ_OP_TEST_QUANT_ADD 18u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -203,6 +204,31 @@ static void run_add(void) {
     }
     spatz_add_i8((const int8_t *)ADD_LHS, (const int8_t *)ADD_RHS,
                  (int8_t *)ADD_DST, VL, -12, 18);
+    mark_pass();
+}
+
+static void run_quantized_add(void) {
+    spatz_quantized_add_params_t params;
+    params.lhs_scale = 1610612736;
+    params.lhs_shift = 20;
+    params.rhs_scale = 1073741824;
+    params.rhs_shift = 20;
+    params.output_scale = 1073741824;
+    params.output_shift = 41;
+    params.lhs_zero_point = -3;
+    params.rhs_zero_point = 5;
+    params.output_zero_point = 7;
+    params.clamp_min = -100;
+    params.clamp_max = 100;
+    params.double_round_shift = 20;
+    for (uint32_t i = 0; i < VL; i++) {
+        ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
+        ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
+        ADD_DST[i] = 0;
+    }
+    spatz_quantized_add_i8((const int8_t *)ADD_LHS,
+                           (const int8_t *)ADD_RHS,
+                           (int8_t *)ADD_DST, VL, &params);
     mark_pass();
 }
 
@@ -500,6 +526,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_CLAMP_RELU6) {
         run_clamp_relu6();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_QUANT_ADD) {
+        run_quantized_add();
     }
 
     SIG_STATUS = PASS_SIGNATURE;
