@@ -612,13 +612,27 @@ int main(void)
     assert(completed == 1u && state.calls == 1u);
     assert(state.rows == 2u && state.input_groups == 1u && state.output_groups == 1u);
     assert(state.partial_sums == 0u && state.ofm == 0x10101000u);
-    for (uint32_t invalid_rows = 257u; invalid_rows <= 511u; invalid_rows += 254u) {
-        pointwise->rows = invalid_rows;
-        state = (mock_state_t){0};
-        assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
-            &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
-        assert(completed == 0u && state.calls == 0u);
-    }
+    /* M may exceed the 256-row systolic limit; dispatch keeps the complete
+       tensor references while the runtime callback stripes the operation. */
+    pointwise->rows = 511u;
+    pointwise->input_group_stride_bytes = 511u * 32u;
+    pointwise->output_group_stride_bytes = 511u * 32u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u && state.rows == 511u);
+    pointwise->rows = 2u;
+    pointwise->input_group_stride_bytes = 64u;
+    pointwise->output_group_stride_bytes = 64u;
+
+    pointwise->ofm.offset = 0u;
+    gemm_resolver.tcdm_scratch_base = 0xfffffff0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_REFERENCE);
+    assert(completed == 0u && state.calls == 0u);
+    pointwise->ofm.offset = 0x1000u;
+    gemm_resolver.tcdm_scratch_base = 0x10100000u;
     pointwise->rows = 2u;
     pointwise->input_c32_groups = 2u;
     state = (mock_state_t){0};

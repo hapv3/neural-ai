@@ -127,7 +127,9 @@ typedef struct {
 } nai_cmd_linebuf_job_v2_t;
 
 /* Pointwise 1x1 C32 command. Activations are group-major C32 blocked;
-   weights are OCG-major, then ICG-major, with one 32x32 tile per pair. */
+   weights are OCG-major, then ICG-major, with one 32x32 tile per pair.
+   `rows` is the complete output row count.  The runtime executes it as
+   <=256-row systolic stripes while reusing staged weight tiles. */
 typedef struct {
     nai_cmd_header_v2_t header;
     nai_ref_v1_t weights;
