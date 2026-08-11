@@ -557,7 +557,8 @@ static nai_dispatch_status_v2_t run_maxpool(
     uint32_t ifm;
     uint32_t ofm;
     if (command->input_h == 0u || command->input_w == 0u ||
-        command->channels != 32u || command->kernel_h != 5u || command->kernel_w != 5u ||
+        (command->channels != 32u && command->channels != 128u) ||
+        command->kernel_h != 5u || command->kernel_w != 5u ||
         command->stride_h != 1u || command->stride_w != 1u ||
         command->pad_h != 2u || command->pad_w != 2u ||
         !all_zero(command->reserved, 7u) || ops->maxpool == 0 ||

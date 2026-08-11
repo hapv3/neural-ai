@@ -310,9 +310,14 @@ static uint32_t runtime_maxpool(
     void *context, const nai_cmd_maxpool_v2_t *command,
     uint32_t ifm, uint32_t ofm)
 {
+    const uint32_t group_bytes = command->input_h * command->input_w * 32u;
+    uint32_t offset;
     (void)context;
-    systolic_maxpool5x5s1p2_c32_linebuf(
-        ifm, ofm, command->input_h, command->input_w);
+    for (offset = 0u; offset < group_bytes * (command->channels / 32u);
+         offset += group_bytes) {
+        systolic_maxpool5x5s1p2_c32_linebuf(
+            ifm + offset, ofm + offset, command->input_h, command->input_w);
+    }
     return 0u;
 }
 
