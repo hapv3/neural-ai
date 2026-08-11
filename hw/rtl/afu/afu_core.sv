@@ -58,6 +58,7 @@ module afu_core #(
         ST_WAIT_FLUSH,
         ST_DFL_EXP_REQ,
         ST_DFL_EXP_WAIT,
+        ST_DFL_RECIP_REQ,
         ST_DFL_RECIP_WAIT,
         ST_DFL_MUL_WRITE,
         ST_DFL_WRITE,
@@ -157,14 +158,16 @@ module afu_core #(
     logic [7:0]  dfl_exp_idx [LUT_LANES];
     logic [7:0]  dfl_recip_idx;
     logic [7:0]  class_lut_idx [LUT_LANES];
+    // DFL4 uses this as the side index. DFL16 uses it as the four-bin group
+    // index within one 16-bin ROW32 record.
     logic [1:0]  dfl_side_q, dfl_side_n;
     logic [1:0]  class_group_q, class_group_n;
-    logic [17:0] dfl_sum_q, dfl_sum_n;
-    logic [18:0] dfl_weighted_q, dfl_weighted_n;
+    logic [19:0] dfl_sum_q, dfl_sum_n;
+    logic [22:0] dfl_weighted_q, dfl_weighted_n;
     logic [4:0]  dfl_shift_q, dfl_shift_n;
     logic signed [7:0] dfl_s1_max_value;
-    logic [17:0] dfl_s1_sum_value;
-    logic [18:0] dfl_s1_weighted_value;
+    logic [19:0] dfl_s1_sum_value;
+    logic [22:0] dfl_s1_weighted_value;
     logic [31:0] dfl_s1_next_elem_cnt;
     logic [31:0] dfl_s1_next_dst_addr;
     logic        dfl_s1_flush_output;
@@ -197,11 +200,15 @@ module afu_core #(
     logic        gap_mul_negative_n [32];
     logic signed [31:0] gap_avg_q [32];
     logic signed [31:0] gap_avg_n [32];
-    logic [58:0] dfl_mul_product_q, dfl_mul_product_n;
+    logic [62:0] dfl_mul_product_q, dfl_mul_product_n;
 
     localparam int unsigned GAP_RECIP_SHIFT = 31;
 
     assign gap_spatial_count = cfg_src2_ptr_i;
+    // Preserve the deployed DFL4 ABI (SRC2=0). SRC2=16 selects one 16-bin
+    // distribution per ROW32 record while reusing the same AFU mode.
+    logic dfl16_mode;
+    assign dfl16_mode = cfg_mode_i == MODE_DFL4_ROW32_Q8 && cfg_src2_ptr_i == 32'd16;
     assign gap_next_elem_cnt = elem_cnt_q + 32'd32;
     assign gap_group_done = ((gap_row_count_q + 32'd1) >= gap_spatial_count);
     assign gap_final_input = (elem_cnt_q >= cfg_length_i);
@@ -341,6 +348,18 @@ module afu_core #(
         end
     endfunction
 
+    function automatic logic [7:0] select_dfl16_byte(
+        input logic [255:0] data,
+        input logic [1:0] group,
+        input logic [1:0] bin
+    );
+        logic [4:0] byte_idx;
+        begin
+            byte_idx = {group, 2'b00} + {3'd0, bin};
+            select_dfl16_byte = data[{byte_idx, 3'b000} +: 8];
+        end
+    endfunction
+
     function automatic logic signed [7:0] max4_i8(
         input logic [7:0] a,
         input logic [7:0] b,
@@ -357,23 +376,58 @@ module afu_core #(
         end
     endfunction
 
-    function automatic logic [4:0] msb_pos18(input logic [17:0] value);
-        logic [4:0] pos;
+    function automatic logic signed [7:0] max2_i8(
+        input logic [7:0] a,
+        input logic [7:0] b
+    );
         begin
-            pos = 5'd0;
-            for (int i = 0; i < 18; i++) begin
-                if (value[i]) pos = 5'(i);
-            end
-            msb_pos18 = pos;
+            max2_i8 = ($signed(a) > $signed(b)) ? $signed(a) : $signed(b);
         end
     endfunction
 
-    function automatic logic [7:0] recip_index_from_sum(input logic [17:0] sum);
+    function automatic logic signed [7:0] max16_i8(input logic [255:0] data);
+        logic signed [7:0] max01, max23, max45, max67;
+        logic signed [7:0] max89, maxab, maxcd, maxef;
+        logic signed [7:0] max03, max47, max8b, maxcf;
+        logic signed [7:0] max07, max8f;
+        begin
+            // Explicit balanced tree: four comparator levels, independent of
+            // synthesis-loop unrolling heuristics.
+            max01 = max2_i8(data[7:0],     data[15:8]);
+            max23 = max2_i8(data[23:16],   data[31:24]);
+            max45 = max2_i8(data[39:32],   data[47:40]);
+            max67 = max2_i8(data[55:48],   data[63:56]);
+            max89 = max2_i8(data[71:64],   data[79:72]);
+            maxab = max2_i8(data[87:80],   data[95:88]);
+            maxcd = max2_i8(data[103:96],  data[111:104]);
+            maxef = max2_i8(data[119:112], data[127:120]);
+            max03 = max2_i8(max01, max23);
+            max47 = max2_i8(max45, max67);
+            max8b = max2_i8(max89, maxab);
+            maxcf = max2_i8(maxcd, maxef);
+            max07 = max2_i8(max03, max47);
+            max8f = max2_i8(max8b, maxcf);
+            max16_i8 = max2_i8(max07, max8f);
+        end
+    endfunction
+
+    function automatic logic [4:0] msb_pos20(input logic [19:0] value);
+        logic [4:0] pos;
+        begin
+            pos = 5'd0;
+            for (int i = 0; i < 20; i++) begin
+                if (value[i]) pos = 5'(i);
+            end
+            msb_pos20 = pos;
+        end
+    endfunction
+
+    function automatic logic [7:0] recip_index_from_sum(input logic [19:0] sum);
         logic [4:0]  shift;
-        logic [25:0] shifted;
+        logic [27:0] shifted;
         logic [8:0]  norm_q8;
         begin
-            shift = msb_pos18(sum);
+            shift = msb_pos20(sum);
             shifted = {8'd0, sum} << 8;
             norm_q8 = shifted >> shift;
             if (norm_q8 < 9'd256) begin
@@ -387,17 +441,17 @@ module afu_core #(
     endfunction
 
     function automatic logic [15:0] dfl_q8_from_product(
-        input logic [58:0] product,
+        input logic [62:0] product,
         input logic [4:0]  sum_shift
     );
-        logic [58:0] rounded;
+        logic [62:0] rounded;
         logic [5:0]  total_shift;
-        logic [58:0] round_add;
+        logic [62:0] round_add;
         begin
             total_shift = 6'd28 + {1'b0, sum_shift};
-            round_add = 59'd1 << (total_shift - 6'd1);
+            round_add = 63'd1 << (total_shift - 6'd1);
             rounded = (product + round_add) >> total_shift;
-            if (rounded > 59'hFFFF) begin
+            if (rounded > 63'hFFFF) begin
                 dfl_q8_from_product = 16'hFFFF;
             end else begin
                 dfl_q8_from_product = rounded[15:0];
@@ -474,10 +528,10 @@ module afu_core #(
     state_e dfl_state_n;
     logic [31:0] dfl_elem_cnt_n, dfl_dst_addr_n;
     logic [1:0]  dfl_side_next;
-    logic [17:0] dfl_sum_next;
-    logic [18:0] dfl_weighted_next;
+    logic [19:0] dfl_sum_next;
+    logic [22:0] dfl_weighted_next;
     logic [4:0]  dfl_shift_next;
-    logic [58:0] dfl_mul_product_next;
+    logic [62:0] dfl_mul_product_next;
     logic [15:0] dfl_round_value_next;
     logic        dfl_exp_req_next, dfl_recip_req_next;
     logic [7:0]  dfl_recip_idx_next;
@@ -686,13 +740,19 @@ module afu_core #(
         endcase
     end
 
-    // DFL fused-softmax path.
+    // DFL fused-softmax path. DFL4 consumes four 4-bin sides from one ROW32
+    // record. DFL16 consumes one 16-bin distribution from each ROW32 record,
+    // evaluating four bins per LUT cycle and accumulating across four groups.
     always_comb begin
         logic [1:0] dfl_next_side;
         logic signed [7:0] dfl_next_max_value;
+        logic [19:0] dfl_chunk_sum;
+        logic [22:0] dfl_chunk_weighted;
 
         dfl_next_side = dfl_side_q + 2'd1;
         dfl_next_max_value = '0;
+        dfl_chunk_sum = '0;
+        dfl_chunk_weighted = '0;
         dfl_state_n = state_q;
         dfl_elem_cnt_n = elem_cnt_q;
         dfl_dst_addr_n = dst_addr_q;
@@ -718,37 +778,94 @@ module afu_core #(
 
         unique case (state_q)
             ST_DFL_EXP_REQ: begin
-                dfl_s1_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_side_q, 2'd0),
-                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd1),
-                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd2),
-                                           select_dfl_byte(in_buf_q, dfl_side_q, 2'd3));
-                for (int i = 0; i < LUT_LANES; i++) begin
-                    dfl_exp_idx_next[i] = select_dfl_byte(in_buf_q, dfl_side_q, 2'(i)) -
-                                          dfl_s1_max_value[7:0];
+                if (dfl16_mode) begin
+                    dfl_s1_max_value = max16_i8(in_buf_q);
+                    for (int i = 0; i < LUT_LANES; i++) begin
+                        dfl_exp_idx_next[i] = select_dfl16_byte(in_buf_q, dfl_side_q, 2'(i)) -
+                                              dfl_s1_max_value[7:0];
+                    end
+                end else begin
+                    dfl_s1_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_side_q, 2'd0),
+                                               select_dfl_byte(in_buf_q, dfl_side_q, 2'd1),
+                                               select_dfl_byte(in_buf_q, dfl_side_q, 2'd2),
+                                               select_dfl_byte(in_buf_q, dfl_side_q, 2'd3));
+                    for (int i = 0; i < LUT_LANES; i++) begin
+                        dfl_exp_idx_next[i] = select_dfl_byte(in_buf_q, dfl_side_q, 2'(i)) -
+                                              dfl_s1_max_value[7:0];
+                    end
                 end
                 dfl_exp_req_next = 1'b1;
                 dfl_state_n = ST_DFL_EXP_WAIT;
             end
 
             ST_DFL_EXP_WAIT: begin
-                dfl_s1_sum_value = {2'd0, lut_rdata_bank0[0][15:0]} +
-                                   {2'd0, lut_rdata_bank0[1][15:0]} +
-                                   {2'd0, lut_rdata_bank0[2][15:0]} +
-                                   {2'd0, lut_rdata_bank0[3][15:0]};
-                dfl_s1_weighted_value = {3'd0, lut_rdata_bank0[1][15:0]} +
-                                        ({2'd0, lut_rdata_bank0[2][15:0]} << 1) +
-                                        ({2'd0, lut_rdata_bank0[3][15:0]} * 19'd3);
-                dfl_sum_next = dfl_s1_sum_value;
-                dfl_weighted_next = dfl_s1_weighted_value;
-                dfl_shift_next = msb_pos18(dfl_s1_sum_value);
-                dfl_recip_idx_next = recip_index_from_sum(dfl_s1_sum_value);
+                dfl_chunk_sum = {4'd0, lut_rdata_bank0[0][15:0]} +
+                                {4'd0, lut_rdata_bank0[1][15:0]} +
+                                {4'd0, lut_rdata_bank0[2][15:0]} +
+                                {4'd0, lut_rdata_bank0[3][15:0]};
+                if (dfl16_mode) begin
+                    // Local weights 0,1,2,3 plus the group base 0,4,8,12.
+                    // Keep this multiplier-free so the LUT response path is
+                    // add/shift only at the 1 GHz target.
+                    dfl_chunk_weighted =
+                        {7'd0, lut_rdata_bank0[1][15:0]} +
+                        ({7'd0, lut_rdata_bank0[2][15:0]} << 1) +
+                        ({7'd0, lut_rdata_bank0[3][15:0]} << 1) +
+                        {7'd0, lut_rdata_bank0[3][15:0]};
+                    unique case (dfl_side_q)
+                        2'd1: dfl_chunk_weighted = dfl_chunk_weighted +
+                                                          ({3'd0, dfl_chunk_sum} << 2);
+                        2'd2: dfl_chunk_weighted = dfl_chunk_weighted +
+                                                          ({3'd0, dfl_chunk_sum} << 3);
+                        2'd3: dfl_chunk_weighted = dfl_chunk_weighted +
+                                                          ({3'd0, dfl_chunk_sum} << 3) +
+                                                          ({3'd0, dfl_chunk_sum} << 2);
+                        default: ;
+                    endcase
+                    dfl_s1_sum_value = dfl_sum_q + dfl_chunk_sum;
+                    dfl_s1_weighted_value = dfl_weighted_q + dfl_chunk_weighted;
+                    dfl_sum_next = dfl_s1_sum_value;
+                    dfl_weighted_next = dfl_s1_weighted_value;
+
+                    if (dfl_side_q != 2'd3) begin
+                        dfl_next_max_value = max16_i8(in_buf_q);
+                        for (int i = 0; i < LUT_LANES; i++) begin
+                            dfl_exp_idx_next[i] = select_dfl16_byte(in_buf_q, dfl_next_side, 2'(i)) -
+                                                  dfl_next_max_value[7:0];
+                        end
+                        dfl_exp_req_next = 1'b1;
+                        dfl_side_next = dfl_next_side;
+                        dfl_state_n = ST_DFL_EXP_WAIT;
+                    end else begin
+                        // Register the final accumulators before normalization.
+                        // This keeps the four-lane sum/weighted adders out of
+                        // the reciprocal-address path at the 1 GHz target.
+                        dfl_state_n = ST_DFL_RECIP_REQ;
+                    end
+                end else begin
+                    dfl_chunk_weighted = {7'd0, lut_rdata_bank0[1][15:0]} +
+                                         ({7'd0, lut_rdata_bank0[2][15:0]} << 1) +
+                                         ({7'd0, lut_rdata_bank0[3][15:0]} << 1) +
+                                         {7'd0, lut_rdata_bank0[3][15:0]};
+                    dfl_s1_sum_value = dfl_chunk_sum;
+                    dfl_s1_weighted_value = dfl_chunk_weighted;
+                    dfl_sum_next = dfl_s1_sum_value;
+                    dfl_weighted_next = dfl_s1_weighted_value;
+                    dfl_state_n = ST_DFL_RECIP_REQ;
+                end
+            end
+
+            ST_DFL_RECIP_REQ: begin
+                dfl_shift_next = msb_pos20(dfl_sum_q);
+                dfl_recip_idx_next = recip_index_from_sum(dfl_sum_q);
                 dfl_recip_req_next = 1'b1;
                 dfl_state_n = ST_DFL_RECIP_WAIT;
             end
 
             ST_DFL_RECIP_WAIT: begin
-                dfl_mul_product_next = ({32'd0, dfl_weighted_q, 8'd0}) *
-                                       {27'd0, lut_rdata_bank1[0]};
+                // 31x32-bit registered multiply; do not zero-extend operands
+                // to the 63-bit result width before inference.
+                dfl_mul_product_next = {dfl_weighted_q, 8'd0} * lut_rdata_bank1[0];
                 dfl_state_n = ST_DFL_MUL_WRITE;
             end
 
@@ -758,9 +875,11 @@ module afu_core #(
             end
 
             ST_DFL_WRITE: begin
-                dfl_s1_final_location = (dfl_side_q == 2'd3);
+                dfl_s1_final_location = dfl16_mode || (dfl_side_q == 2'd3);
                 dfl_s1_next_elem_cnt = elem_cnt_q + (dfl_s1_final_location ? 32'd32 : 32'd0);
-                dfl_s1_next_dst_addr = dst_addr_q + (dfl_s1_final_location ? 32'd8 : 32'd0);
+                dfl_s1_next_dst_addr = dst_addr_q +
+                                       (dfl16_mode ? 32'd2 :
+                                        (dfl_s1_final_location ? 32'd8 : 32'd0));
                 dfl_s1_flush_output = dfl_s1_final_location &&
                                       ((dfl_s1_next_dst_addr[4:0] == 5'd0) ||
                                        (dfl_s1_next_elem_cnt >= cfg_length_i));
@@ -769,11 +888,15 @@ module afu_core #(
                     dfl_elem_cnt_n = dfl_s1_next_elem_cnt;
                     dfl_dst_addr_n = dfl_s1_next_dst_addr;
                     dfl_side_next = 2'd0;
+                    dfl_sum_next = '0;
+                    dfl_weighted_next = '0;
                     dfl_state_n = ST_DFL_PUSH;
                 end else if (dfl_s1_final_location) begin
                     dfl_elem_cnt_n = dfl_s1_next_elem_cnt;
                     dfl_dst_addr_n = dfl_s1_next_dst_addr;
                     dfl_side_next = 2'd0;
+                    dfl_sum_next = '0;
+                    dfl_weighted_next = '0;
                     dfl_state_n = (dfl_s1_next_elem_cnt >= cfg_length_i) ? ST_DONE : ST_READ_IN;
                 end else begin
                     dfl_next_max_value = max4_i8(select_dfl_byte(in_buf_q, dfl_next_side, 2'd0),
@@ -1070,7 +1193,7 @@ module afu_core #(
                     p1_dst_addr_n = stream_p1_dst_addr_n;
                 end
 
-                ST_DFL_EXP_REQ, ST_DFL_EXP_WAIT, ST_DFL_RECIP_WAIT,
+                ST_DFL_EXP_REQ, ST_DFL_EXP_WAIT, ST_DFL_RECIP_REQ, ST_DFL_RECIP_WAIT,
                 ST_DFL_MUL_WRITE, ST_DFL_WRITE, ST_DFL_PUSH: begin
                     state_n = dfl_state_n;
                     elem_cnt_n = dfl_elem_cnt_n;
@@ -1173,10 +1296,13 @@ module afu_core #(
 
     always_comb begin : p_dfl_writeback_comb
         dfl_s2_out_value = dfl_round_value_q;
-        dfl_s2_out_off = dst_addr_q[4:0] + {2'd0, dfl_side_q, 1'b0};
-        dfl_s2_final_location = (dfl_side_q == 2'd3);
+        dfl_s2_out_off = dfl16_mode ? dst_addr_q[4:0] :
+                         dst_addr_q[4:0] + {2'd0, dfl_side_q, 1'b0};
+        dfl_s2_final_location = dfl16_mode || (dfl_side_q == 2'd3);
         dfl_s2_next_elem_cnt = elem_cnt_q + (dfl_s2_final_location ? 32'd32 : 32'd0);
-        dfl_s2_next_dst_addr = dst_addr_q + (dfl_s2_final_location ? 32'd8 : 32'd0);
+        dfl_s2_next_dst_addr = dst_addr_q +
+                               (dfl16_mode ? 32'd2 :
+                                (dfl_s2_final_location ? 32'd8 : 32'd0));
         dfl_s2_flush_output = dfl_s2_final_location &&
                               ((dfl_s2_next_dst_addr[4:0] == 5'd0) ||
                                (dfl_s2_next_elem_cnt >= cfg_length_i));
