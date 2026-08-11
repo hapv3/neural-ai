@@ -809,9 +809,12 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
         nai_cmd_header_v2_t header;
         nai_dispatch_status_v2_t status = NAI_DISPATCH_OK;
         uint32_t model_offset = view->commands->offset + offset;
+        uint32_t prefetched_bytes = view->commands->size - offset;
+        if (prefetched_bytes > command_buffer_bytes) prefetched_bytes = command_buffer_bytes;
         if (!valid_range(offset, sizeof(header), view->commands->size) ||
-            reader->read(reader->context, model_offset, &header, sizeof(header)) != 0u)
+            reader->read(reader->context, model_offset, command_buffer, prefetched_bytes) != 0u)
             return NAI_DISPATCH_BAD_STREAM;
+        __builtin_memcpy(&header, command_buffer, sizeof(header));
         if (header.size_bytes < 32u || (header.size_bytes & 31u) != 0u ||
             !valid_range(offset, header.size_bytes, view->commands->size) ||
             (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u) {
@@ -830,8 +833,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_MAXPOOL ||
                    header.type == NAI_CMD_LINEBUF_JOB ||
                    header.type == NAI_CMD_COPY_LAYOUT) {
-            if (header.size_bytes > command_buffer_bytes ||
-                reader->read(reader->context, model_offset, command_buffer, header.size_bytes) != 0u)
+            if (header.size_bytes > prefetched_bytes)
                 status = NAI_DISPATCH_BAD_STREAM;
             else {
                 if (header.type == NAI_CMD_END) {

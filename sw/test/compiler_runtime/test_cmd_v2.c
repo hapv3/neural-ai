@@ -356,7 +356,9 @@ int main(void)
     assert(completed == 1u);
     assert(state.calls == 1u);
     assert(state.source == 0x80000140u);
-    assert(memory.reads == 7u);
+    /* Stream dispatch prefetches each command once instead of reading its
+       header and full record through separate model-reader transactions. */
+    assert(memory.reads == 5u);
     assert(memory.largest_read == 160u);
 
     nai_cmd_dma_1d_v2_t *dma = (nai_cmd_dma_1d_v2_t *)(model + 224);
