@@ -673,7 +673,23 @@ static nai_dispatch_status_v2_t run_copy(const nai_cmd_copy_layout_v2_t *command
         !multiply(elements, element_bytes, &compact_bytes) ||
         !multiply(rows, (command->valid_channels + 31u) & ~31u, &native_bytes) ||
         !multiply(native_bytes, element_bytes, &native_bytes)) return NAI_DISPATCH_BAD_COMMAND;
-    if (command->mode == NAI_COPY_NHWC_TO_ROW32 || command->mode == NAI_COPY_NHWC_TO_C32) {
+    if (command->mode == NAI_COPY_C32_TO_CHW) {
+        uint32_t expected_source_stride;
+        if (command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
+            command->dimensions[1] != command->dimensions[2] ||
+            (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
+             command->dimensions[1] != 40u) || command->dimensions[3] != 144u ||
+            command->source_layout != NAI_LAYOUT_C32_BLOCKED ||
+            command->destination_layout != NAI_LAYOUT_NHWC ||
+            command->source.region != NAI_REGION_TCDM_SCRATCH ||
+            command->destination.region != NAI_REGION_TCDM_SCRATCH ||
+            !multiply(rows, 32u, &expected_source_stride) ||
+            command->source_row_stride != expected_source_stride ||
+            command->destination_row_stride != rows)
+            return NAI_DISPATCH_BAD_COMMAND;
+        source_bytes = native_bytes;
+        destination_bytes = compact_bytes;
+    } else if (command->mode == NAI_COPY_NHWC_TO_ROW32 || command->mode == NAI_COPY_NHWC_TO_C32) {
         source_bytes = compact_bytes;
         destination_bytes = native_bytes;
     } else if (command->mode == NAI_COPY_ROW32_TO_NHWC || command->mode == NAI_COPY_C32_TO_NHWC) {
@@ -683,6 +699,9 @@ static nai_dispatch_status_v2_t run_copy(const nai_cmd_copy_layout_v2_t *command
     if (resolve(view, resolver, &command->source, source_bytes, 1u, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_REFERENCE;
+    if (command->mode == NAI_COPY_C32_TO_CHW &&
+        source < destination + destination_bytes && destination < source + source_bytes)
+        return NAI_DISPATCH_BAD_COMMAND;
     return ops->copy_layout(ops->context, command, source, destination) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }

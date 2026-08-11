@@ -251,7 +251,8 @@ typedef enum {
     NAI_COPY_NHWC_TO_ROW32 = 1,
     NAI_COPY_ROW32_TO_NHWC = 2,
     NAI_COPY_NHWC_TO_C32 = 3,
-    NAI_COPY_C32_TO_NHWC = 4
+    NAI_COPY_C32_TO_NHWC = 4,
+    NAI_COPY_C32_TO_CHW = 5
 } nai_copy_layout_mode_v2_t;
 
 typedef struct {

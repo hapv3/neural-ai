@@ -381,3 +381,13 @@ void spatz_concat_c32_i8(const int8_t *src0, uint32_t c0,
         }
     }
 }
+void spatz_c32_to_chw_i8(const int8_t *src, int8_t *dst,
+                         uint32_t pixels, uint32_t channels)
+{
+    for (uint32_t channel = 0u; channel < channels; channel++) {
+        const uint32_t source_offset =
+            (channel >> 5) * pixels * 32u + (channel & 31u);
+        spatz_vec_strided_copy_i8(src + source_offset, dst + channel * pixels,
+                                  pixels, 32, 1);
+    }
+}
