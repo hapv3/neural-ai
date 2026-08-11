@@ -299,10 +299,16 @@ static uint32_t runtime_upsample_nearest(
     void *context, const nai_cmd_upsample_nearest_v2_t *command,
     uint32_t ifm, uint32_t ofm)
 {
+    const uint32_t input_group_bytes = command->input_h * command->input_w * 32u;
+    const uint32_t output_group_bytes = input_group_bytes * 4u;
+    uint32_t group;
     (void)context;
-    spatz_upsample_nearest2x_c32_i8(
-        (const int8_t *)(unsigned long)ifm, (int8_t *)(unsigned long)ofm,
-        command->input_h, command->input_w);
+    for (group = 0u; group < command->channels / 32u; ++group) {
+        spatz_upsample_nearest2x_c32_i8(
+            (const int8_t *)(unsigned long)(ifm + group * input_group_bytes),
+            (int8_t *)(unsigned long)(ofm + group * output_group_bytes),
+            command->input_h, command->input_w);
+    }
     return 0u;
 }
 

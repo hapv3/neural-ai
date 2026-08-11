@@ -1011,6 +1011,23 @@ int main(void)
     assert(state.input_h == 2u && state.input_w == 3u && state.channels == 32u);
     assert(state.stride_h == 2u && state.stride_w == 2u);
 
+    upsample->channels = 128u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u && state.channels == 128u);
+    upsample->channels = 256u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u && state.channels == 256u);
+    upsample->channels = 64u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    upsample->channels = 32u;
+
     gemm_memory.data = gemm_model;
     gemm_memory.bytes = sizeof(gemm_model);
     gemm_memory.largest_read = 0u;

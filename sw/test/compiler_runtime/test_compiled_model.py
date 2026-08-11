@@ -1146,6 +1146,12 @@ def _compile_resize_nearest_model():
     )
 
 
+def _compile_yolov8_resize_c256_model():
+    return _compile_tflite_fixture_model(
+        "yolov8_resize_h10w10_c256_2x", "neural-ai-compiled-yolov8-resize-"
+    )
+
+
 def _compile_maxpool_model():
     return _compile_tflite_fixture_model(
         "maxpool_h24w24_c32_k5s1p2", "neural-ai-compiled-maxpool-"
@@ -2806,6 +2812,83 @@ async def test_compiler_generated_resize_nearest_c32_package(dut):
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
     cocotb.log.info(
         "compiler nearest 2x C32 runtime=%s ns PMU cycles=%d",
+        elapsed_ns,
+        counters["cycle"],
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_yolov8_resize_c256_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    input_h, input_w, channels = 10, 10, 256
+    output_h, output_w = input_h * 2, input_w * 2
+    output_base = 0x80010000
+    input_data = bytes(
+        (index * 37 + 11) & 0xFF
+        for index in range(input_h * input_w * channels)
+    )
+    expected = bytearray()
+    for output_y in range(output_h):
+        for output_x in range(output_w):
+            source = ((output_y // 2) * input_w + output_x // 2) * channels
+            expected.extend(input_data[source : source + channels])
+
+    model = _compile_yolov8_resize_c256_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    upsample_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 20:
+            assert command_size == 64
+            assert struct.unpack_from("<5I", model, offset + 32) == (
+                input_h,
+                input_w,
+                channels,
+                2,
+                2,
+            )
+            upsample_commands += 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert upsample_commands == 1
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, output_base, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=600000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == bytes(expected)
+    cocotb.log.info(
+        "compiler YOLO nearest 2x C256 runtime=%s ns PMU cycles=%d",
         elapsed_ns,
         counters["cycle"],
     )
