@@ -1152,6 +1152,12 @@ def _compile_maxpool_model():
     )
 
 
+def _compile_yolov8_maxpool_c128_model():
+    return _compile_tflite_fixture_model(
+        "yolov8_maxpool_h10w10_c128", "neural-ai-compiled-yolov8-maxpool-"
+    )
+
+
 def _compile_concat_model():
     return _compile_tflite_fixture_model(
         "concat_h24w24_c32_c32", "neural-ai-compiled-concat-"
@@ -2901,6 +2907,100 @@ async def test_compiler_generated_maxpool_c32_package(dut):
     assert bytes(await read_l2_bytes(dut, maxpool_output_base, len(expected))) == expected
     cocotb.log.info(
         "compiler MaxPool K5/S1/P2 C32 runtime=%s ns PMU cycles=%d",
+        elapsed_ns,
+        counters["cycle"],
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_yolov8_maxpool_c128_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 10, 10, 128
+    output_base = 0x80010000
+    input_values = [
+        (index * 37 + 11) & 0xFF for index in range(height * width * channels)
+    ]
+    expected = bytearray()
+    for output_y in range(height):
+        for output_x in range(width):
+            for channel in range(channels):
+                value = -128
+                for kernel_y in range(-2, 3):
+                    input_y = output_y + kernel_y
+                    if input_y < 0 or input_y >= height:
+                        continue
+                    for kernel_x in range(-2, 3):
+                        input_x = output_x + kernel_x
+                        if input_x < 0 or input_x >= width:
+                            continue
+                        raw = input_values[
+                            (input_y * width + input_x) * channels + channel
+                        ]
+                        signed = raw if raw < 128 else raw - 256
+                        value = max(value, signed)
+                expected.append(value & 0xFF)
+
+    model = _compile_yolov8_maxpool_c128_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    maxpool_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 19:
+            assert command_size == 96
+            assert struct.unpack_from("<9I", model, offset + 32) == (
+                height,
+                width,
+                channels,
+                5,
+                5,
+                1,
+                1,
+                2,
+                2,
+            )
+            maxpool_commands += 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert maxpool_commands == 1
+
+    input_data = bytes(input_values)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, output_base, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=300000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == bytes(expected)
+    cocotb.log.info(
+        "compiler YOLO MaxPool K5/S1/P2 C128 runtime=%s ns PMU cycles=%d",
         elapsed_ns,
         counters["cycle"],
     )
