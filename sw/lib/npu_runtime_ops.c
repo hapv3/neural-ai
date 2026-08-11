@@ -54,7 +54,11 @@ static uint32_t runtime_dma_2d(void *context, uint32_t source, uint32_t destinat
         return wait_transfer(direction, idma_L1ToL2_2d(source, destination, length,
             source_stride, destination_stride, repetitions));
     if (direction == 2u) {
-        idma_L1ToL1_2d(source, destination, length, source_stride, destination_stride, repetitions);
+        for (uint32_t rep = 0; rep < repetitions; rep++) {
+            spatz_vec_copy_i8(
+                (const int8_t *)(unsigned long)(source + rep * source_stride),
+                (int8_t *)(unsigned long)(destination + rep * destination_stride), length);
+        }
         return 0u;
     }
     return 1u;
@@ -77,9 +81,15 @@ static uint32_t runtime_dma_3d(void *context, uint32_t source, uint32_t destinat
             source_stride_2, destination_stride_2, repetitions_2,
             source_stride_3, destination_stride_3, repetitions_3));
     if (direction == 2u) {
-        idma_L1ToL1_3d(source, destination, length,
-            source_stride_2, destination_stride_2, repetitions_2,
-            source_stride_3, destination_stride_3, repetitions_3);
+        for (uint32_t rep3 = 0; rep3 < repetitions_3; rep3++) {
+            for (uint32_t rep2 = 0; rep2 < repetitions_2; rep2++) {
+                spatz_vec_copy_i8(
+                    (const int8_t *)(unsigned long)(source + rep3 * source_stride_3 +
+                        rep2 * source_stride_2),
+                    (int8_t *)(unsigned long)(destination + rep3 * destination_stride_3 +
+                        rep2 * destination_stride_2), length);
+            }
+        }
         return 0u;
     }
     return 1u;
