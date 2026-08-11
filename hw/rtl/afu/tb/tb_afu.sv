@@ -211,6 +211,20 @@ module tb_afu;
         write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
         write_obi(AFU_CSR_BASE + 32'h0c, length);
         write_obi(AFU_CSR_BASE + 32'h10, {29'd0, mode});
+        write_obi(AFU_CSR_BASE + 32'h14, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
+    endtask
+
+    task automatic start_dfl16_afu(
+        input logic [31:0] src_ptr,
+        input logic [31:0] dst_ptr,
+        input logic [31:0] length
+    );
+        write_obi(AFU_CSR_BASE + 32'h04, src_ptr);
+        write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
+        write_obi(AFU_CSR_BASE + 32'h0c, length);
+        write_obi(AFU_CSR_BASE + 32'h10, {29'd0, MODE_DFL4_ROW32_Q8});
+        write_obi(AFU_CSR_BASE + 32'h14, 32'd16);
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
 
@@ -254,6 +268,10 @@ module tb_afu;
         dfl_input_value = 8'(((loc * 13 + channel * 7 + 5) % 41) - 20);
     endfunction
 
+    function automatic logic signed [7:0] dfl16_input_value(input int record, input int bin);
+        dfl16_input_value = 8'(((record * 13 + bin * 11 + 7) % 61) - 30);
+    endfunction
+
     function automatic logic [15:0] dfl_exp_lut_value(input int index);
         int neg_delta;
         int shift;
@@ -286,14 +304,14 @@ module tb_afu;
         end
     endfunction
 
-    function automatic int unsigned msb_pos18_tb(input int unsigned value);
+    function automatic int unsigned msb_pos20_tb(input int unsigned value);
         int unsigned pos;
         begin
             pos = 0;
-            for (int i = 0; i < 18; i++) begin
+            for (int i = 0; i < 20; i++) begin
                 if (value[i]) pos = i;
             end
-            msb_pos18_tb = pos;
+            msb_pos20_tb = pos;
         end
     endfunction
 
@@ -301,7 +319,7 @@ module tb_afu;
         int unsigned shift;
         int unsigned norm_q8;
         begin
-            shift = msb_pos18_tb(sum);
+            shift = msb_pos20_tb(sum);
             norm_q8 = (sum << 8) >> shift;
             if (norm_q8 < 256) begin
                 recip_index_from_sum_tb = 8'd0;
@@ -340,7 +358,7 @@ module tb_afu;
             end
             sum = exp_values[0] + exp_values[1] + exp_values[2] + exp_values[3];
             weighted = exp_values[1] + (2 * exp_values[2]) + (3 * exp_values[3]);
-            sum_shift = msb_pos18_tb(sum);
+            sum_shift = msb_pos20_tb(sum);
             recip_index = recip_index_from_sum_tb(sum);
             product = (longint'(weighted) << 8) * longint'(dfl_recip_lut[recip_index]);
             total_shift = 28 + sum_shift;
@@ -350,9 +368,107 @@ module tb_afu;
         end
     endfunction
 
+    function automatic logic [15:0] dfl16_expected_approx(input int record);
+        logic signed [7:0] logits [0:15];
+        logic signed [7:0] max_value;
+        int unsigned exp_values [0:15];
+        int unsigned sum;
+        int unsigned weighted;
+        int unsigned sum_shift;
+        int unsigned recip_index;
+        longint unsigned product;
+        longint unsigned rounded;
+        longint unsigned round_add;
+        int unsigned total_shift;
+        begin
+            for (int bin = 0; bin < 16; bin++) begin
+                logits[bin] = dfl16_input_value(record, bin);
+            end
+            max_value = logits[0];
+            for (int bin = 1; bin < 16; bin++) begin
+                if (logits[bin] > max_value) begin
+                    max_value = logits[bin];
+                end
+            end
+            sum = 0;
+            weighted = 0;
+            for (int bin = 0; bin < 16; bin++) begin
+                exp_values[bin] = dfl_exp_lut[8'(logits[bin] - max_value)][15:0];
+                sum += exp_values[bin];
+                weighted += bin * exp_values[bin];
+            end
+            sum_shift = msb_pos20_tb(sum);
+            recip_index = recip_index_from_sum_tb(sum);
+            product = (longint'(weighted) << 8) * longint'(dfl_recip_lut[recip_index]);
+            total_shift = 28 + sum_shift;
+            round_add = 64'(1) << (total_shift - 1);
+            rounded = (product + round_add) >> total_shift;
+            dfl16_expected_approx = rounded[15:0];
+        end
+    endfunction
+
     task automatic clear_tcdm(input logic [7:0] value);
         for (int i = 0; i < MEM_SIZE; i++) begin
             tcdm_mem[i] = value;
+        end
+    endtask
+
+    task automatic check_dfl16_case(
+        input string name,
+        input int    src_base,
+        input int    dst_base,
+        input int    records
+    );
+        $display("[AFU TB] %s: fused DFL16 src=0x%0h dst=0x%0h records=%0d",
+                 name, src_base, dst_base, records);
+        $fflush();
+
+        for (int i = 0; i < 256; i++) begin
+            dfl_exp_lut[i] = {16'd0, dfl_exp_lut_value(i)};
+            dfl_recip_lut[i] = dfl_recip_lut_value(i);
+        end
+        load_dfl_luts();
+
+        for (int record = 0; record < records; record++) begin
+            for (int ch = 0; ch < 32; ch++) begin
+                if (ch < 16) begin
+                    tcdm_mem[(src_base + record * 32 + ch) % MEM_SIZE] =
+                        dfl16_input_value(record, ch);
+                end else begin
+                    tcdm_mem[(src_base + record * 32 + ch) % MEM_SIZE] =
+                        8'h80 + 8'(ch + record);
+                end
+            end
+        end
+        for (int i = -16; i < records * 2 + 48; i++) begin
+            tcdm_mem[(dst_base + i + MEM_SIZE) % MEM_SIZE] = 8'ha5;
+        end
+
+        start_dfl16_afu(src_base, dst_base, records * 32);
+        wait_done(name);
+
+        for (int record = 0; record < records; record++) begin
+            logic [15:0] expected;
+            logic [15:0] actual;
+            int out_addr;
+            out_addr = dst_base + record * 2;
+            expected = dfl16_expected_approx(record);
+            actual = read_tcdm_half(out_addr);
+            if (actual !== expected) begin
+                $display("[FAIL] %s record=%0d exp=%0d act=%0d",
+                         name, record, expected, actual);
+                errors++;
+            end
+        end
+
+        if (tcdm_mem[(dst_base - 1 + MEM_SIZE) % MEM_SIZE] !== 8'ha5 ||
+            tcdm_mem[(dst_base + records * 2) % MEM_SIZE] !== 8'ha5) begin
+            $display("[FAIL] %s modified output guard bytes", name);
+            errors++;
+        end
+
+        if (errors == 0) begin
+            $display("[PASS] %s", name);
         end
     endtask
 
@@ -559,6 +675,8 @@ module tb_afu;
         check_case("mode16_unaligned_33", MODE_16BIT, 'h13f, 'h584, 33, 1);
         check_case("mode32_unaligned_17", MODE_32BIT, 'h255, 'h684, 17, 2);
         check_dfl_case("dfl_row32_aligned_17", 'h1000, 'h2000, 17);
+        check_dfl16_case("dfl16_row32_unaligned_output_19", 'h1800, 'h2606, 19);
+        check_dfl_case("dfl4_after_dfl16_3", 'h2200, 'h2a00, 3);
         check_class_sigmoid_case("class_sigmoid_row32_high16_17", 'h1200, 'h2800, 17);
         check_case("mode8_after_dfl_pingpong", MODE_8BIT, 'h300, 'h900, 37, 3);
 
