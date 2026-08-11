@@ -222,8 +222,8 @@ uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
         return 0u;
     }
 
-    afu_preload((uint32_t)src_row32, (uint32_t)dst,
-                input_bytes, NPU_AFU_MODE_DFL4_ROW32_Q8);
+    afu_preload_dfl_row32((uint32_t)src_row32, (uint32_t)dst,
+                          input_bytes, 0u);
     for (uint32_t i = 0; i < 256u; i++) {
         afu_load_dfl_exp_lut_entry(i, exp_lut[i]);
         afu_load_dfl_recip_lut_entry(i, recip_lut[i]);
@@ -231,6 +231,27 @@ uint32_t npu_dfl_softmax4_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
 
     afu_start_preloaded();
     return afu_wait_done(100000u + (locations * 128u));
+}
+
+uint32_t npu_dfl_softmax16_row32_i8_q8(const int8_t *src_row32, uint16_t *dst,
+                                       uint32_t records,
+                                       const uint32_t *exp_lut,
+                                       const uint32_t *recip_lut) {
+    uint32_t input_bytes = records * 32u;
+
+    if (!src_row32 || !dst || !exp_lut || !recip_lut) {
+        return 0u;
+    }
+
+    afu_preload_dfl_row32((uint32_t)src_row32, (uint32_t)dst,
+                          input_bytes, 16u);
+    for (uint32_t i = 0; i < 256u; i++) {
+        afu_load_dfl_exp_lut_entry(i, exp_lut[i]);
+        afu_load_dfl_recip_lut_entry(i, recip_lut[i]);
+    }
+
+    afu_start_preloaded();
+    return afu_wait_done(100000u + (records * 256u));
 }
 
 uint32_t npu_class_sigmoid_row32_high16_i8(const int8_t *src_row32, int8_t *dst,
