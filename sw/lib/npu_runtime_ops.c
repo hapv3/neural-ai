@@ -128,6 +128,7 @@ static uint32_t runtime_pointwise_c32(void *context,
     const uint32_t weight_tile_bytes = 32u * 32u;
     const uint32_t stripe_rows = 256u;
     const uint32_t cached_weight_slots = 3u;
+    const uint32_t batched_weight_groups = 4u;
     const uint32_t input_group_stride = command->input_group_stride_bytes;
     const uint32_t output_group_stride = command->output_group_stride_bytes;
     uint32_t cached_weight_sources[3] = {0u, 0u, 0u};
@@ -141,13 +142,17 @@ static uint32_t runtime_pointwise_c32(void *context,
         const uint32_t output_address = ofm + output_group * output_group_stride;
         const uint32_t output_weight_base = weights +
             output_group * command->input_c32_groups * weight_tile_bytes;
-        /* Keep the row-stripe loop outside the input-group loop.  The partial
-           sum scratch is intentionally only one 256-row stripe, so processing
-           all input groups for a stripe must complete before the next stripe.
-           Three 1 KiB command-TCDM slots retain the first input-group tiles;
-           a fourth group (if present) uses the transient slot and is reloaded
-           for each stripe.  The source keys are per invocation, preventing a
+        /* Up to four contiguous 1 KiB tiles fit in the 4 KiB command-TCDM
+           window.  Stage this block once, before the row-stripe loop, and
+           address each input-group tile in place.  For larger group counts,
+           preserve the three cached slots and transient per-stripe reload
+           behavior below.  Source keys are per invocation, preventing a
            stale tile from a previous command from being reused. */
+        if (command->input_c32_groups <= batched_weight_groups &&
+            !idma_memcpy_blocking(output_weight_base, NPU_CMD_TCDM_BASE,
+                                  command->input_c32_groups * weight_tile_bytes)) {
+            return 1u;
+        }
         for (uint32_t row_base = 0u; row_base < command->rows; row_base += stripe_rows) {
             const uint32_t rows = command->rows - row_base > stripe_rows ?
                 stripe_rows : command->rows - row_base;
@@ -156,7 +161,10 @@ static uint32_t runtime_pointwise_c32(void *context,
                 uint32_t weight_address;
                 const uint32_t weight_source = output_weight_base +
                     input_group * weight_tile_bytes;
-                if (input_group < cached_weight_slots) {
+                if (command->input_c32_groups <= batched_weight_groups) {
+                    weight_address = NPU_CMD_TCDM_BASE +
+                        input_group * weight_tile_bytes;
+                } else if (input_group < cached_weight_slots) {
                     weight_address = NPU_CMD_TCDM_BASE +
                         (input_group + 1u) * weight_tile_bytes;
                     if (!cached_weight_valid[input_group] ||
