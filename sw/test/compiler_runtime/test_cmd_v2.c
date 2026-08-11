@@ -245,6 +245,18 @@ static uint32_t mock_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *
     return 0u;
 }
 
+static uint32_t mock_copy_layout(void *context, const nai_cmd_copy_layout_v2_t *command,
+                                 uint32_t source, uint32_t destination)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = source;
+    state->destination = destination;
+    state->mode = command->mode;
+    state->channels = command->valid_channels;
+    return 0u;
+}
+
 static void make_dma_model(uint8_t model[1408])
 {
     nai_model_header_v1_t *header;
@@ -1109,6 +1121,56 @@ int main(void)
     assert(completed == 0u && state.calls == 0u);
     maxpool->ofm.offset = 0x1000u;
     maxpool->kernel_w = 3u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 128;
+    gemm_commands.element_count = 2;
+    nai_cmd_copy_layout_v2_t *head_pack = (nai_cmd_copy_layout_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *head_pack_end =
+        (nai_cmd_control_v2_t *)(gemm_model + 96);
+    head_pack->header.type = NAI_CMD_COPY_LAYOUT;
+    head_pack->header.size_bytes = sizeof(*head_pack);
+    head_pack->source.region = NAI_REGION_TCDM_SCRATCH;
+    head_pack->destination.region = NAI_REGION_TCDM_SCRATCH;
+    head_pack->destination.offset = 0x5000u;
+    head_pack->mode = NAI_COPY_C32_TO_CHW;
+    head_pack->source_layout = NAI_LAYOUT_C32_BLOCKED;
+    head_pack->destination_layout = NAI_LAYOUT_NHWC;
+    head_pack->data_type = NAI_DTYPE_I8;
+    head_pack->dimensions[0] = 1u;
+    head_pack->dimensions[1] = 10u;
+    head_pack->dimensions[2] = 10u;
+    head_pack->dimensions[3] = 144u;
+    head_pack->valid_channels = 144u;
+    head_pack->source_row_stride = 100u * 32u;
+    head_pack->destination_row_stride = 100u;
+    head_pack_end->header.type = NAI_CMD_END;
+    head_pack_end->header.size_bytes = sizeof(*head_pack_end);
+    gemm_ops.copy_layout = mock_copy_layout;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.destination == 0x10105000u);
+    assert(state.mode == NAI_COPY_C32_TO_CHW && state.channels == 144u);
+
+    head_pack->dimensions[1] = 8u;
+    head_pack->dimensions[2] = 8u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
+    head_pack->dimensions[1] = 10u;
+    head_pack->dimensions[2] = 10u;
+    head_pack->destination.region = NAI_REGION_OUTPUT_BINDING;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    head_pack->destination.region = NAI_REGION_TCDM_SCRATCH;
+    head_pack->destination.offset = 0x100u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;

@@ -483,6 +483,20 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
     if (command == 0 || source_address == 0u || destination_address == 0u) return 1u;
     source_l1 = idma_mm_is_l1_addr(source_address);
     destination_l1 = idma_mm_is_l1_addr(destination_address);
+    if (command->mode == NAI_COPY_C32_TO_CHW) {
+        if (!source_l1 || !destination_l1 || command->data_type != NAI_DTYPE_I8 ||
+            command->dimensions[0] != 1u || command->dimensions[1] != command->dimensions[2] ||
+            (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
+             command->dimensions[1] != 40u) || command->valid_channels != 144u)
+            return 1u;
+        pixels = command->dimensions[1] * command->dimensions[2];
+        if (command->source_row_stride != pixels * 32u ||
+            command->destination_row_stride != pixels) return 1u;
+        spatz_c32_to_chw_i8((const int8_t *)(unsigned long)source_address,
+                            (int8_t *)(unsigned long)destination_address,
+                            pixels, command->valid_channels);
+        return 0u;
+    }
     if (source_l1 && destination_l1)
         return nai_copy_layout_v2(command, (const void *)(unsigned long)source_address,
                                   (void *)(unsigned long)destination_address);

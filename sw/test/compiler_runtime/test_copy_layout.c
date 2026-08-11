@@ -70,6 +70,34 @@ int main(void)
     assert(nai_copy_layout_v2(&command, native, output) == 0u);
     assert(memcmp(output, compact, sizeof(compact)) == 0);
 
+    {
+        enum { pixels = 100, channels = 144, padded_channels = 160 };
+        uint8_t head_nhwc[pixels * channels];
+        uint8_t head_c32[pixels * padded_channels];
+        uint8_t head_chw[pixels * channels];
+        for (uint32_t pixel = 0u; pixel < pixels; pixel++) {
+            for (uint32_t channel = 0u; channel < channels; channel++)
+                head_nhwc[pixel * channels + channel] =
+                    (uint8_t)(pixel * 17u + channel * 13u);
+        }
+        configure(&command, NAI_COPY_NHWC_TO_C32, channels);
+        command.dimensions[1] = 10u;
+        command.dimensions[2] = 10u;
+        assert(nai_copy_layout_v2(&command, head_nhwc, head_c32) == 0u);
+        command.mode = NAI_COPY_C32_TO_CHW;
+        command.source_row_stride = pixels * 32u;
+        command.destination_row_stride = pixels;
+        assert(nai_copy_layout_v2(&command, head_c32, head_chw) == 0u);
+        for (uint32_t channel = 0u; channel < channels; channel++) {
+            for (uint32_t pixel = 0u; pixel < pixels; pixel++)
+                assert(head_chw[channel * pixels + pixel] ==
+                       head_nhwc[pixel * channels + channel]);
+        }
+        command.dimensions[1] = 8u;
+        command.dimensions[2] = 8u;
+        assert(nai_copy_layout_v2(&command, head_c32, head_chw) != 0u);
+    }
+
     configure(&command, NAI_COPY_NHWC_TO_C32, 33);
     memset(native, 0xa5, sizeof(native));
     assert(nai_copy_layout_v2(&command, compact, native) == 0u);

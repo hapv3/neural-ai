@@ -1164,6 +1164,13 @@ def _compile_yolov8_maxpool_c128_model():
     )
 
 
+def _compile_yolov8_head_transpose_model():
+    return _compile_tflite_fixture_model(
+        "yolov8_head_transpose_h10w10_c144",
+        "neural-ai-compiled-yolov8-head-transpose-",
+    )
+
+
 def _compile_concat_model():
     return _compile_tflite_fixture_model(
         "concat_h24w24_c32_c32", "neural-ai-compiled-concat-"
@@ -3084,6 +3091,92 @@ async def test_compiler_generated_yolov8_maxpool_c128_package(dut):
     assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == bytes(expected)
     cocotb.log.info(
         "compiler YOLO MaxPool K5/S1/P2 C128 runtime=%s ns PMU cycles=%d",
+        elapsed_ns,
+        counters["cycle"],
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_yolov8_head_transpose_c144_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 10, 10, 144
+    pixels = height * width
+    output_base = 0x80010000
+    input_data = bytes(
+        (index * 37 + 11) & 0xFF for index in range(pixels * channels)
+    )
+    expected = bytes(
+        input_data[pixel * channels + channel]
+        for channel in range(channels)
+        for pixel in range(pixels)
+    )
+
+    model = _compile_yolov8_head_transpose_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    head_pack_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 18 and struct.unpack_from("<H", model, offset + 32)[0] == 5:
+            assert command_size == 96
+            assert struct.unpack_from("<4I", model, offset + 40) == (
+                1,
+                height,
+                width,
+                channels,
+            )
+            assert struct.unpack_from("<3I", model, offset + 56) == (
+                channels,
+                pixels * 32,
+                pixels,
+            )
+            head_pack_commands += 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert head_pack_commands == 1
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, output_base, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=300000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+
+    status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+    fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+    fail_pointer = await _axi_read32(axi_master, NPU_CMD_FAIL_PTR)
+    done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+    assert status == NPU_CMD_STATUS_PASS, (
+        f"runtime failed: status=0x{status:08x} code=0x{fail_code:08x} "
+        f"pointer=0x{fail_pointer:08x} done={done_count}"
+    )
+    assert fail_code == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert done_count == command_count
+    assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == expected
+    cocotb.log.info(
+        "compiler YOLO C144 head transpose runtime=%s ns PMU cycles=%d",
         elapsed_ns,
         counters["cycle"],
     )

@@ -43,6 +43,21 @@ uint32_t nai_copy_layout_v2(const nai_cmd_copy_layout_v2_t *command,
         !checked_multiply(native_bytes, element_bytes, &native_bytes)) return 1u;
 
     if (command->valid_channels != command->dimensions[3]) return 1u;
+    if (command->mode == NAI_COPY_C32_TO_CHW) {
+        if (command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
+            channels != 144u || command->dimensions[1] != command->dimensions[2] ||
+            (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
+             command->dimensions[1] != 40u) ||
+            command->source_row_stride != pixels * 32u ||
+            command->destination_row_stride != pixels) return 1u;
+        for (uint32_t channel = 0u; channel < channels; channel++) {
+            for (uint32_t pixel = 0u; pixel < pixels; pixel++) {
+                destination[channel * pixels + pixel] =
+                    source[c32_offset(pixels, pixel, channel, 1u)];
+            }
+        }
+        return 0u;
+    }
     if (command->mode != NAI_COPY_NHWC_TO_ROW32 &&
         command->mode != NAI_COPY_ROW32_TO_NHWC &&
         command->mode != NAI_COPY_NHWC_TO_C32 &&
