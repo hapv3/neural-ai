@@ -79,6 +79,16 @@ static inline void afu_start_add_i8(uint32_t lhs, uint32_t rhs, uint32_t dst,
     afu_start_binary(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8);
 }
 
+static inline void afu_preload_dfl_row32(uint32_t src, uint32_t dst,
+                                         uint32_t input_bytes,
+                                         uint32_t bins) {
+    REG_WRITE(NPU_AFU_SRC_PTR, src);
+    REG_WRITE(NPU_AFU_SRC2_PTR, bins);
+    REG_WRITE(NPU_AFU_DST_PTR, dst);
+    REG_WRITE(NPU_AFU_LENGTH, input_bytes);
+    REG_WRITE(NPU_AFU_MODE, NPU_AFU_MODE_DFL4_ROW32_Q8);
+}
+
 static inline void afu_preload_class_sigmoid_row32_high16(uint32_t src, uint32_t dst,
                                                           uint32_t input_bytes) {
     afu_preload(src, dst, input_bytes, NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16);

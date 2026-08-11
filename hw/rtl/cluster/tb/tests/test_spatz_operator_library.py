@@ -73,6 +73,7 @@ CONCAT_H = 2
 CONCAT_W = 3
 CONCAT_PIXELS = CONCAT_H * CONCAT_W
 DFL_FUSED_LOCATIONS = 64
+DFL16_FUSED_RECORDS = 19
 CLASS_SIGMOID_LOCATIONS = 17
 GAP_H = 7
 GAP_W = 5
@@ -89,6 +90,7 @@ CLAMP_MIN = 0
 CLAMP_MAX = 63
 DFL_SIDES = 4
 DFL_REG_MAX = 4
+DFL16_REG_MAX = 16
 
 
 def as_i8(value):
@@ -268,6 +270,23 @@ def dfl_expected_fused_value(loc, side):
     exp_values = [dfl_exp_lut_value(dfl_delta_index(value, max_value)) for value in values]
     total = sum(exp_values)
     weighted = sum(bin_idx * exp_values[bin_idx] for bin_idx in range(DFL_REG_MAX))
+    shift = total.bit_length() - 1
+    recip = dfl_recip_lut_value(dfl_recip_index_from_sum(total))
+    total_shift = 28 + shift
+    rounded = (((weighted << 8) * recip) + (1 << (total_shift - 1))) >> total_shift
+    return min(rounded, 0xFFFF)
+
+
+def dfl16_input_value(record, bin_idx):
+    return ((record * 13 + bin_idx * 11 + 7) % 61) - 30
+
+
+def dfl16_expected_fused_value(record):
+    values = [dfl16_input_value(record, bin_idx) for bin_idx in range(DFL16_REG_MAX)]
+    max_value = max(values)
+    exp_values = [dfl_exp_lut_value(dfl_delta_index(value, max_value)) for value in values]
+    total = sum(exp_values)
+    weighted = sum(bin_idx * exp_values[bin_idx] for bin_idx in range(DFL16_REG_MAX))
     shift = total.bit_length() - 1
     recip = dfl_recip_lut_value(dfl_recip_index_from_sum(total))
     total_shift = 28 + shift
@@ -530,6 +549,35 @@ def check_dfl_fused(dut):
             assert got == expected, (
                 f"dfl_fused_q8[{idx}] got={got} expected={expected}"
             )
+
+
+async def preload_dfl16_fused_tcdm(dut):
+    src = []
+    for record in range(DFL16_FUSED_RECORDS):
+        for channel in range(32):
+            value = dfl16_input_value(record, channel) if channel < 16 else record + channel
+            src.append(value & 0xFF)
+
+    write_tcdm_bytes_aligned32(dut, DFL_ROW32_SRC, src)
+    write_tcdm_bytes_aligned32(
+        dut, DFL_EXP_LUT32, pack_u32_le(dfl_exp_lut_value(i) for i in range(256))
+    )
+    write_tcdm_bytes_aligned32(
+        dut, DFL_RECIP_LUT, pack_u32_le(dfl_recip_lut_value(i) for i in range(256))
+    )
+    output_bytes = DFL16_FUSED_RECORDS * 2
+    output_aligned_bytes = ((output_bytes + 31) // 32) * 32
+    write_tcdm_bytes_aligned32(dut, DFL_ROW32_DST, [0] * output_aligned_bytes)
+    await Timer(1, "ps")
+
+
+def check_dfl16_fused(dut):
+    for record in range(DFL16_FUSED_RECORDS):
+        expected = dfl16_expected_fused_value(record)
+        got = read_tcdm_u16(dut, DFL_ROW32_DST + record * 2)
+        assert got == expected, (
+            f"dfl16_fused_q8[{record}] got={got} expected={expected}"
+        )
 
 
 async def preload_class_sigmoid_tcdm(dut):
@@ -905,6 +953,20 @@ async def test_afu_op_dfl_fused(dut):
         check_dfl_fused,
         timeout_cycles=200000,
         pre_release=preload_dfl_fused_tcdm,
+        firmware_dir="sw/test/afu_ops",
+    )
+
+
+@cocotb.test()
+async def test_afu_op_dfl16_fused(dut):
+    await run_firmware_case(
+        dut,
+        "afu_ops_dfl16_fused.bin",
+        "test_afu_op_dfl16_fused",
+        1,
+        check_dfl16_fused,
+        timeout_cycles=200000,
+        pre_release=preload_dfl16_fused_tcdm,
         firmware_dir="sw/test/afu_ops",
     )
 

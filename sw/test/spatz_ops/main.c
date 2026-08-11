@@ -29,6 +29,7 @@
 #define SPATZ_OP_TEST_GLOBAL_AVGPOOL 16u
 #define SPATZ_OP_TEST_CLAMP_RELU6 17u
 #define SPATZ_OP_TEST_QUANT_ADD 18u
+#define SPATZ_OP_TEST_DFL16_FUSED 19u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -109,6 +110,7 @@
 #define CONCAT_C0 32u
 #define CONCAT_C1 32u
 #define DFL_FUSED_LOCATIONS 64u
+#define DFL16_FUSED_RECORDS 19u
 #define CLASS_SIGMOID_LOCATIONS 17u
 #define GAP_H 7u
 #define GAP_W 5u
@@ -349,6 +351,20 @@ static void run_dfl_fused(void) {
     mark_pass();
 }
 
+static void run_dfl16_fused(void) {
+    SIG_STATUS = 0x30001902u;
+    if (!npu_dfl_softmax16_row32_i8_q8((const int8_t *)DFL_ROW32_SRC,
+                                       (uint16_t *)DFL_ROW32_DST,
+                                       DFL16_FUSED_RECORDS,
+                                       (const uint32_t *)DFL_EXP_LUT32,
+                                       (const uint32_t *)DFL_RECIP_LUT)) {
+        fail(19, 0, (int32_t)REG_READ(NPU_AFU_STATUS), NPU_AFU_STATUS_DONE);
+    }
+
+    SIG_STATUS = 0x30001903u;
+    mark_pass();
+}
+
 static void run_class_sigmoid(void) {
     SIG_STATUS = 0x30001501u;
 #if SPATZ_OP_TEST_ID != SPATZ_OP_TEST_CLASS_SIGMOID
@@ -529,6 +545,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_QUANT_ADD) {
         run_quantized_add();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL16_FUSED) {
+        run_dfl16_fused();
     }
 
     SIG_STATUS = PASS_SIGNATURE;
