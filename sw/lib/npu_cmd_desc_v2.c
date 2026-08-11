@@ -527,7 +527,9 @@ static nai_dispatch_status_v2_t run_upsample_nearest(
     uint32_t ifm;
     uint32_t ofm;
     if (command->input_h == 0u || command->input_w == 0u ||
-        command->channels != 32u || command->scale_h != 2u || command->scale_w != 2u ||
+        (command->channels != 32u && command->channels != 128u &&
+         command->channels != 256u) ||
+        command->scale_h != 2u || command->scale_w != 2u ||
         !all_zero(command->reserved, 3u) || ops->upsample_nearest == 0 ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
         command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
