@@ -24,7 +24,7 @@ async def test_debug(dut):
     dut.rst_ni.value = 1
     for _ in range(5): await RisingEdge(dut.clk_i)
 
-    firmware_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/test/matmul/matmul.bin")
+    firmware_path = os.path.join(os.path.dirname(__file__), "../../../../../sw/runtime/neural_ai/neural_ai.bin")
     await load_firmware_axi(dut, axi_master, firmware_path)
 
     for _ in range(5): await RisingEdge(dut.clk_i)
