@@ -188,6 +188,21 @@ static uint32_t mock_afu_lut(void *context, const nai_cmd_afu_lut_v2_t *command,
     return 0u;
 }
 
+static uint32_t mock_afu_dfl16(void *context, const nai_cmd_afu_dfl16_v2_t *command,
+                               uint32_t source, uint32_t destination, uint32_t scratch,
+                               uint32_t exp_lut, uint32_t recip_lut)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = source;
+    state->destination = destination;
+    state->partial_sums = scratch;
+    state->source2 = exp_lut;
+    state->ofm = recip_lut;
+    state->length = command->locations;
+    return 0u;
+}
+
 static uint32_t mock_afu_global_avgpool(
     void *context, const nai_cmd_afu_global_avgpool_v2_t *command,
     uint32_t ifm, uint32_t ofm)
@@ -335,10 +350,10 @@ int main(void)
     nai_runtime_ops_v2_t rq_ops = {0};
     nai_cmd_rq_load_v2_t *rq_command = (nai_cmd_rq_load_v2_t *)rq_model;
     nai_cmd_control_v2_t *rq_end = (nai_cmd_control_v2_t *)(rq_model + 32);
-    uint8_t gemm_model[1152] = {0};
+    uint8_t gemm_model[2176] = {0};
     nai_model_header_v1_t gemm_header = {0};
     nai_section_v1_t gemm_commands = {NAI_SECTION_COMMANDS, 0, 0, 128, 32, 2, {0, 0}};
-    nai_section_v1_t gemm_constants = {NAI_SECTION_CONSTANTS, 0, 128, 1024, 32, 1, {0, 0}};
+    nai_section_v1_t gemm_constants = {NAI_SECTION_CONSTANTS, 0, 128, 2048, 32, 1, {0, 0}};
     nai_model_view_v1_t gemm_view = {0};
     nai_resolver_v1_t gemm_resolver = {0x80020000u, sizeof(gemm_model), 0, 0,
         0x10100000u, 0x7f000u, 0, 0};
@@ -1171,6 +1186,65 @@ int main(void)
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     head_pack->destination.region = NAI_REGION_TCDM_SCRATCH;
     head_pack->destination.offset = 0x100u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 96;
+    gemm_commands.element_count = 2;
+    gemm_constants.offset = 128;
+    gemm_constants.size = 2048;
+    nai_cmd_afu_dfl16_v2_t *dfl16 = (nai_cmd_afu_dfl16_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *dfl16_end = (nai_cmd_control_v2_t *)(gemm_model + 64);
+    dfl16->header.type = NAI_CMD_AFU_DFL16;
+    dfl16->header.size_bytes = sizeof(*dfl16);
+    dfl16->source.region = NAI_REGION_TCDM_SCRATCH;
+    dfl16->destination.region = NAI_REGION_TCDM_SCRATCH;
+    dfl16->destination.offset = 0x50000u;
+    dfl16->scratch.region = NAI_REGION_TCDM_SCRATCH;
+    dfl16->scratch.offset = 0x53000u;
+    dfl16->exp_lut.region = NAI_REGION_MODEL_CONSTANTS;
+    dfl16->recip_lut.region = NAI_REGION_MODEL_CONSTANTS;
+    dfl16->recip_lut.offset = 0x400u;
+    dfl16->locations = 2100u;
+    dfl16_end->header.type = NAI_CMD_END;
+    dfl16_end->header.size_bytes = sizeof(*dfl16_end);
+    gemm_ops.afu_dfl16 = mock_afu_dfl16;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u && state.length == 2100u);
+    assert(state.source == 0x10100000u && state.destination == 0x10150000u);
+    assert(state.partial_sums == 0x10153000u && state.source2 == 0x80020080u);
+    assert(state.ofm == 0x80020480u);
+
+    dfl16->locations = 2099u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->locations = 2100u;
+    dfl16->reserved[0] = 1u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->reserved[0] = 0u;
+    dfl16->scratch.offset = 0x49000u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->scratch.offset = 0x53000u;
+    dfl16->destination.region = NAI_REGION_MODEL_CONSTANTS;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->destination.region = NAI_REGION_TCDM_SCRATCH;
+    dfl16->source.region = NAI_REGION_INPUT_BINDING;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->source.region = NAI_REGION_TCDM_SCRATCH;
+    dfl16->recip_lut.offset = 0x420u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->recip_lut.offset = 0x400u;
+    dfl16->exp_lut.offset = 0xfffffc00u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     return 0;

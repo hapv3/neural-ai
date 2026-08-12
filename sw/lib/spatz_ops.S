@@ -62,6 +62,59 @@ spatz_vec_strided_copy_i8:
 2:
     ret
 
+    .global spatz_pack_dfl16_chw_tile_i8
+    .type spatz_pack_dfl16_chw_tile_i8, @function
+spatz_pack_dfl16_chw_tile_i8:
+    beqz a2, 2f
+    li a4, 16
+    vsetvli t0, a4, e8, m8, ta, ma
+1:
+    vlse8.v v8, (a0), a3
+    vse8.v v8, (a1)
+    addi a0, a0, 1
+    addi a1, a1, 32
+    addi a2, a2, -1
+    bnez a2, 1b
+2:
+    ret
+
+    .global spatz_dfl_q8_to_i8
+    .type spatz_dfl_q8_to_i8, @function
+spatz_dfl_q8_to_i8:
+    beqz a2, 4f
+    mv a6, a0
+    mv a7, a2
+1:
+    vsetvli t0, a2, e16, m4, ta, ma
+    vle16.v v8, (a0)
+    li t1, 11381
+    vmulhu.vx v8, v8, t1
+    vadd.vi v8, v8, 1
+    vsrl.vi v8, v8, 1
+    addi t1, zero, -128
+    vadd.vx v8, v8, t1
+    li t1, -128
+    vmax.vx v8, v8, t1
+    li t1, 127
+    vmin.vx v8, v8, t1
+    vse16.v v8, (a0)
+    slli t1, t0, 1
+    add a0, a0, t1
+    sub a2, a2, t0
+    bnez a2, 1b
+    li t2, 2
+2:
+    vsetvli t0, a7, e8, m8, ta, ma
+    vlse8.v v8, (a6), t2
+    vse8.v v8, (a1)
+    slli t1, t0, 1
+    add a6, a6, t1
+    add a1, a1, t0
+    sub a7, a7, t0
+    bnez a7, 2b
+4:
+    ret
+
     .global spatz_im2col_rect_i8
     .type spatz_im2col_rect_i8, @function
 spatz_im2col_rect_i8:

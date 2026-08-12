@@ -8,6 +8,12 @@
 #include "npu_quant_buffer.h"
 #include "spatz_ops.h"
 
+#if defined(NAI_TRUSTED_FIRMWARE)
+#define NAI_TRUSTED_INVALID(condition) 0u
+#else
+#define NAI_TRUSTED_INVALID(condition) (condition)
+#endif
+
 static uint32_t wait_transfer(uint32_t direction, int transfer_id)
 {
     return transfer_id > 0 && idma_mm_wait_for_completion(direction, (uint32_t)transfer_id) ? 0u : 1u;
@@ -100,8 +106,8 @@ static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command
                                uint32_t partial_sums, uint32_t ofm)
 {
     (void)context;
-    if (command->header.type == NAI_CMD_GEMM32_REQUANT &&
-        !nai_quant_buffer_is_loaded_v1(command->qparam_block)) return 1u;
+    if (NAI_TRUSTED_INVALID(command->header.type == NAI_CMD_GEMM32_REQUANT &&
+        !nai_quant_buffer_is_loaded_v1(command->qparam_block))) return 1u;
     /* The systolic engine reads weights from local TCDM.  Model constants are
        resolved in L2 by the command ABI, so stage each 1 KiB GEMM tile in the
        reserved command window before programming the engine. */
@@ -144,9 +150,9 @@ static uint32_t runtime_pointwise_c32(void *context,
     uint32_t cached_weight_sources[3] = {0u, 0u, 0u};
     uint32_t cached_weight_valid[3] = {0u, 0u, 0u};
     (void)context;
-    if (!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
+    if (NAI_TRUSTED_INVALID(!nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
         command->rows == 0u || command->input_c32_groups == 0u ||
-        command->output_c32_groups != 1u) return 1u;
+        command->output_c32_groups != 1u)) return 1u;
 
     for (uint32_t output_group = 0u; output_group < command->output_c32_groups; output_group++) {
         const uint32_t output_address = ofm + output_group * output_group_stride;
@@ -219,8 +225,8 @@ static uint32_t runtime_depthwise_c32(void *context,
 {
     const uint32_t weight_bytes = 3u * 3u * 32u;
     (void)context;
-    if (command->channels == 0u || command->channels > 32u ||
-        !nai_quant_buffer_is_loaded_v1(command->qparam_block) ||
+    if (NAI_TRUSTED_INVALID(command->channels == 0u || command->channels > 32u ||
+        !nai_quant_buffer_is_loaded_v1(command->qparam_block)) ||
         !idma_memcpy_blocking(weights, NPU_CMD_TCDM_BASE, weight_bytes)) return 1u;
     systolic_depthwise3x3_c32_requant_channels(ifm, NPU_CMD_TCDM_BASE, ofm,
                                                command->input_h, command->input_w,
@@ -237,7 +243,7 @@ static uint32_t runtime_afu_binary(void *context,
                                    uint32_t lhs, uint32_t rhs, uint32_t ofm)
 {
     (void)context;
-    if (command->mode != NAI_AFU_BINARY_ADD_I8) return 1u;
+    if (NAI_TRUSTED_INVALID(command->mode != NAI_AFU_BINARY_ADD_I8)) return 1u;
     afu_start_add_i8(lhs, rhs, ofm, command->length);
     return afu_wait_done(1000000u) ? 0u : 1u;
 }
@@ -484,14 +490,14 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
     source_l1 = idma_mm_is_l1_addr(source_address);
     destination_l1 = idma_mm_is_l1_addr(destination_address);
     if (command->mode == NAI_COPY_C32_TO_CHW) {
-        if (!source_l1 || !destination_l1 || command->data_type != NAI_DTYPE_I8 ||
+        if (NAI_TRUSTED_INVALID(!source_l1 || !destination_l1 || command->data_type != NAI_DTYPE_I8 ||
             command->dimensions[0] != 1u || command->dimensions[1] != command->dimensions[2] ||
             (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
-             command->dimensions[1] != 40u) || command->valid_channels != 144u)
+             command->dimensions[1] != 40u) || command->valid_channels != 144u))
             return 1u;
         pixels = command->dimensions[1] * command->dimensions[2];
-        if (command->source_row_stride != pixels * 32u ||
-            command->destination_row_stride != pixels) return 1u;
+        if (NAI_TRUSTED_INVALID(command->source_row_stride != pixels * 32u ||
+            command->destination_row_stride != pixels)) return 1u;
         spatz_c32_to_chw_i8((const int8_t *)(unsigned long)source_address,
                             (int8_t *)(unsigned long)destination_address,
                             pixels, command->valid_channels);
@@ -515,15 +521,16 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
         uint32_t compact_stride = channels * element_bytes;
         uint32_t native_stride = padded_channels * element_bytes;
         uint32_t length = compact_stride;
-        if (command->source_row_stride == 0u || command->destination_row_stride == 0u)
+        if (NAI_TRUSTED_INVALID(command->source_row_stride == 0u ||
+                                command->destination_row_stride == 0u))
             return 1u;
         if (command->mode == NAI_COPY_NHWC_TO_ROW32) {
-            if (command->source_row_stride != compact_stride ||
-                command->destination_row_stride != native_stride) return 1u;
+            if (NAI_TRUSTED_INVALID(command->source_row_stride != compact_stride ||
+                command->destination_row_stride != native_stride)) return 1u;
             if (destination_l1) runtime_zero(destination_address, native_bytes);
         } else {
-            if (command->source_row_stride != native_stride ||
-                command->destination_row_stride != compact_stride) return 1u;
+            if (NAI_TRUSTED_INVALID(command->source_row_stride != native_stride ||
+                command->destination_row_stride != compact_stride)) return 1u;
             length = compact_stride;
         }
         return runtime_layout_dma_chunked(source_address, destination_address, length,
@@ -566,6 +573,42 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
     return 1u;
 }
 
+static uint32_t runtime_afu_dfl16(void *context, const nai_cmd_afu_dfl16_v2_t *command,
+                                  uint32_t source, uint32_t destination,
+                                  uint32_t scratch, uint32_t exp_lut,
+                                  uint32_t recip_lut)
+{
+    uint16_t *q8 = (uint16_t *)(unsigned long)(scratch + 32u * 32u);
+    (void)context;
+
+    if (runtime_dma_1d(context, exp_lut, NPU_CMD_TCDM_BASE, 512u * 4u,
+                       IDMA_DIR_L2_TO_L1) != 0u) return 1u;
+    for (uint32_t index = 0; index < 256u; index++) {
+        afu_load_dfl_exp_lut_entry(index,
+            ((const uint32_t *)(unsigned long)NPU_CMD_TCDM_BASE)[index]);
+        afu_load_dfl_recip_lut_entry(index,
+            ((const uint32_t *)(unsigned long)(NPU_CMD_TCDM_BASE + 1024u))[index]);
+    }
+
+    for (uint32_t side = 0; side < 4u; side++) {
+        uint32_t side_source = source + side * 16u * 2100u;
+        uint32_t side_destination = destination + side * 2100u;
+        for (uint32_t first = 0; first < 2100u; first += 32u) {
+            uint32_t count = 2100u - first;
+            if (count > 32u) count = 32u;
+            spatz_pack_dfl16_chw_tile_i8(
+                (const int8_t *)(unsigned long)(side_source + first),
+                (int8_t *)(unsigned long)scratch, count, 2100);
+            afu_preload_dfl_row32(scratch, (uint32_t)(unsigned long)q8, count * 32u, 16u);
+            afu_start_preloaded();
+            if (!afu_wait_done(108192u)) return 1u;
+            spatz_dfl_q8_to_i8(q8,
+                               (int8_t *)(unsigned long)(side_destination + first), count);
+        }
+    }
+    return 0u;
+}
+
 static uint32_t runtime_barrier(void *context)
 {
     (void)context;
@@ -598,6 +641,7 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_maxpool,
         runtime_linebuf_job,
         runtime_copy_layout,
+        runtime_afu_dfl16,
         runtime_barrier,
         runtime_rq_load
     };

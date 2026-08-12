@@ -1,5 +1,11 @@
 #include "npu_model_loader.h"
 
+#if defined(NAI_TRUSTED_FIRMWARE)
+#define NAI_TRUSTED_INVALID(condition) 0u
+#else
+#define NAI_TRUSTED_INVALID(condition) (condition)
+#endif
+
 static uint32_t is_power_of_two(uint32_t value)
 {
     return value != 0u && (value & (value - 1u)) == 0u;
@@ -206,7 +212,8 @@ nai_loader_status_t nai_model_open_stream_v1(const nai_model_reader_v1_t *reader
     if (header->abi_major != NAI_ABI_MAJOR || header->abi_minor > NAI_ABI_MINOR)
         return NAI_LOADER_BAD_VERSION;
     if (header->target_id != expected_target) return NAI_LOADER_BAD_TARGET;
-    if (!all_zero(header->reserved, 3u)) return NAI_LOADER_BAD_RESERVED;
+    if (NAI_TRUSTED_INVALID(!all_zero(header->reserved, 3u)))
+        return NAI_LOADER_BAD_RESERVED;
     if (header->total_bytes < sizeof(*header) || header->total_bytes > available_bytes ||
         !is_aligned(header->total_bytes, NAI_ALIGNMENT_BYTES)) return NAI_LOADER_BAD_SIZE;
     if (header->required_tcdm_align != NAI_ALIGNMENT_BYTES ||
@@ -226,7 +233,8 @@ nai_loader_status_t nai_model_open_stream_v1(const nai_model_reader_v1_t *reader
     for (uint32_t index = 0; index < header->section_count; index++) {
         const nai_section_v1_t *section = &storage->sections[index];
         nai_loader_status_t status;
-        if (!all_zero(section->reserved, 2u)) return NAI_LOADER_BAD_RESERVED;
+        if (NAI_TRUSTED_INVALID(!all_zero(section->reserved, 2u)))
+            return NAI_LOADER_BAD_RESERVED;
         if (section->alignment < NAI_ALIGNMENT_BYTES || !is_power_of_two(section->alignment) ||
             !is_aligned(section->offset, section->alignment) ||
             !is_aligned(section->size, NAI_ALIGNMENT_BYTES)) return NAI_LOADER_BAD_ALIGNMENT;

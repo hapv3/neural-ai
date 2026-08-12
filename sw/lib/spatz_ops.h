@@ -26,6 +26,9 @@ void spatz_vec_zero_i8(int8_t *dst, uint32_t count);
 void spatz_vec_zero_i32(uint32_t *dst, uint32_t count);
 void spatz_vec_strided_copy_i8(const int8_t *src, int8_t *dst, uint32_t count,
                                int32_t src_stride, int32_t dst_stride);
+void spatz_pack_dfl16_chw_tile_i8(const int8_t *src, int8_t *dst,
+                                  uint32_t records, int32_t channel_stride);
+void spatz_dfl_q8_to_i8(uint16_t *src, int8_t *dst, uint32_t count);
 void spatz_c32_to_chw_i8(const int8_t *src, int8_t *dst,
                          uint32_t pixels, uint32_t channels);
 void spatz_im2col_rect_i8(const int8_t *src, int8_t *dst,

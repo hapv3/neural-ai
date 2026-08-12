@@ -74,6 +74,7 @@ CONCAT_W = 3
 CONCAT_PIXELS = CONCAT_H * CONCAT_W
 DFL_FUSED_LOCATIONS = 64
 DFL16_FUSED_RECORDS = 19
+DFL_Q8_RECORDS = 37
 CLASS_SIGMOID_LOCATIONS = 17
 GAP_H = 7
 GAP_W = 5
@@ -580,6 +581,15 @@ def check_dfl16_fused(dut):
         )
 
 
+def check_dfl_q8(dut):
+    for index in range(DFL_Q8_RECORDS):
+        value = 0 if index == 0 else (3840 if index == 1 else (index * 379 + 127) % 4096)
+        expected = ((value * 91048 + (1 << 19)) >> 20) - 128
+        expected = max(-128, min(127, expected))
+        got = as_i8(read_tcdm_byte(dut, DFL_ROW32_DST + index))
+        assert got == expected, f"dfl_q8[{index}] got={got} expected={expected}"
+
+
 async def preload_class_sigmoid_tcdm(dut):
     src = []
     for loc in range(CLASS_SIGMOID_LOCATIONS):
@@ -968,6 +978,28 @@ async def test_afu_op_dfl16_fused(dut):
         timeout_cycles=200000,
         pre_release=preload_dfl16_fused_tcdm,
         firmware_dir="sw/test/afu_ops",
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_dfl_q8(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_dfl_q8.bin",
+        "test_spatz_op_dfl_q8",
+        1,
+        check_dfl_q8,
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_dfl16_pack(dut):
+    await run_firmware_case(
+        dut,
+        "spatz_ops_dfl16_pack.bin",
+        "test_spatz_op_dfl16_pack",
+        1,
+        lambda _dut: None,
     )
 
 

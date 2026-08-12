@@ -1,5 +1,11 @@
 #include "npu_quant_buffer.h"
 
+#if defined(NAI_TRUSTED_FIRMWARE)
+#define NAI_TRUSTED_INVALID(condition) 0u
+#else
+#define NAI_TRUSTED_INVALID(condition) (condition)
+#endif
+
 #ifndef NAI_QUANT_BUFFER_HOST_TEST
 #include "hal_systolic.h"
 #include "idma_mm_utils.h"
@@ -20,15 +26,16 @@ nai_quant_buffer_status_t nai_quant_buffer_decode_v1(const nai_qparam_v1_t *qpar
                                                       nai_quant_buffer_v1_t *buffer)
 {
     if (qparams == 0 || buffer == 0) return NAI_QUANT_BUFFER_BAD_ARGUMENT;
-    if (count != NAI_QUANT_CHANNELS_V1) return NAI_QUANT_BUFFER_BAD_COUNT;
-    if (qparams[0].clamp_min < -128 || qparams[0].clamp_max > 127 ||
-        qparams[0].clamp_min > qparams[0].clamp_max) return NAI_QUANT_BUFFER_BAD_PARAMETER;
+    if (NAI_TRUSTED_INVALID(count != NAI_QUANT_CHANNELS_V1))
+        return NAI_QUANT_BUFFER_BAD_COUNT;
+    if (NAI_TRUSTED_INVALID(qparams[0].clamp_min < -128 || qparams[0].clamp_max > 127 ||
+        qparams[0].clamp_min > qparams[0].clamp_max)) return NAI_QUANT_BUFFER_BAD_PARAMETER;
 
     for (uint32_t channel = 0; channel < NAI_QUANT_CHANNELS_V1; channel++) {
         const nai_qparam_v1_t *qparam = &qparams[channel];
-        if (!reserved_zero(qparam) || qparam->shift > 31u ||
+        if (NAI_TRUSTED_INVALID(!reserved_zero(qparam) || qparam->shift > 31u ||
             qparam->clamp_min != qparams[0].clamp_min ||
-            qparam->clamp_max != qparams[0].clamp_max) return NAI_QUANT_BUFFER_BAD_PARAMETER;
+            qparam->clamp_max != qparams[0].clamp_max)) return NAI_QUANT_BUFFER_BAD_PARAMETER;
         buffer->bias[channel] = qparam->bias;
         buffer->multiplier[channel] = qparam->multiplier;
         buffer->shift[channel] = (uint8_t)qparam->shift;

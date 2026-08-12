@@ -67,6 +67,7 @@ ENUMS = {
     "DMASubmit2D": "NAI_CMD_DMA_SUBMIT_2D",
     "DMASubmit3D": "NAI_CMD_DMA_SUBMIT_3D",
     "DMAWait": "NAI_CMD_DMA_WAIT",
+    "AFUDFL16": "NAI_CMD_AFU_DFL16",
     "AddI8": "NAI_AFU_BINARY_ADD_I8",
     "NHWCToRow32": "NAI_COPY_NHWC_TO_ROW32",
     "Row32ToNHWC": "NAI_COPY_ROW32_TO_NHWC",
@@ -101,6 +102,7 @@ STRUCTS = {
     "LinebufJobWireV1": "nai_linebuf_job_wire_v1_t",
     "CommandLineBufferJobV2": "nai_cmd_linebuf_job_v2_t",
     "CommandCopyLayoutV2": "nai_cmd_copy_layout_v2_t",
+    "CommandAFUDFL16V2": "nai_cmd_afu_dfl16_v2_t",
 }
 
 

@@ -225,6 +225,14 @@ def _copy_layout(source, destination, mode, dimensions, tile):
     return command
 
 
+def _afu_dfl16(source, destination, scratch, exp_lut, recip_lut, tile):
+    command = _command_header(28, 64, tile=tile)
+    command += source + destination + scratch + exp_lut + recip_lut
+    command += struct.pack("<2I", 2100, 0)
+    assert len(command) == 64
+    return command
+
+
 def _package(commands, constants, bindings, command_count, required_tcdm_bytes,
              input_count, output_count, qparams=b""):
     payloads = [commands, constants, b"", bindings, qparams]
@@ -378,6 +386,75 @@ def build_afu_add_model():
         + _binding(2, 0, dimensions=dimensions)
     )
     return _package(commands, b"", bindings, 4, 0x480, 2, 1)
+
+
+def _dfl_exp_lut_value(index):
+    if index == 0:
+        return 32768
+    neg_delta = 256 - index
+    shift = neg_delta >> 4
+    fraction = neg_delta & 15
+    base = 1 if shift >= 15 else 32768 >> shift
+    next_value = base >> 1 if base > 1 else 1
+    return (((base * (16 - fraction)) + (next_value * fraction) + 8) >> 4) or 1
+
+
+def _dfl_recip_lut_value(index):
+    midpoint_q9 = 513 + index * 2
+    return ((1 << 37) + (midpoint_q9 >> 1)) // midpoint_q9
+
+
+def _dfl16_q8(values):
+    maximum = max(values)
+    exponentials = [
+        _dfl_exp_lut_value((value - maximum) & 0xFF) for value in values
+    ]
+    total = sum(exponentials)
+    weighted = sum(index * value for index, value in enumerate(exponentials))
+    shift = total.bit_length() - 1
+    normalized = (total << 8) >> shift
+    reciprocal_index = min(max(normalized, 256), 511) & 0xFF
+    reciprocal = _dfl_recip_lut_value(reciprocal_index)
+    total_shift = 28 + shift
+    return min(
+        (((weighted << 8) * reciprocal) + (1 << (total_shift - 1))) >> total_shift,
+        0xFFFF,
+    )
+
+
+def build_afu_dfl16_model():
+    locations = 2100
+    source_bytes = 144 * locations
+    output_bytes = 4 * locations
+    source_offset = 0
+    destination_offset = source_bytes
+    scratch_offset = (destination_offset + output_bytes + 31) & ~31
+    required_tcdm = scratch_offset + 34 * 32
+    constants = b"".join(
+        struct.pack("<I", _dfl_exp_lut_value(index)) for index in range(256)
+    ) + b"".join(
+        struct.pack("<I", _dfl_recip_lut_value(index)) for index in range(256)
+    )
+    commands = b"".join(
+        [
+            _dma_1d(_ref(3), _ref(6, offset=source_offset), source_bytes, 0, 0),
+            _afu_dfl16(
+                _ref(6, offset=source_offset),
+                _ref(6, offset=destination_offset),
+                _ref(6, offset=scratch_offset),
+                _ref(1),
+                _ref(1, offset=1024),
+                1,
+            ),
+            _dma_1d(_ref(6, offset=destination_offset), _ref(4), output_bytes, 1, 2),
+            _command_header(0, 32, tile=3).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=(1, 1, 144, locations))
+        + _binding(2, 0, dimensions=(1, 1, 4, locations))
+    )
+    return _package(commands, constants, bindings, 3, required_tcdm, 1, 1)
 
 
 def build_row32_layout_model(channels, height, width):
@@ -1499,6 +1576,85 @@ async def test_compiler_runtime_afu_add_c32_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_runtime_afu_dfl16_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    locations = 2100
+    input_base = 0x80100000
+    output_base = 0x80150000
+    input_values = bytearray(144 * locations)
+    expected = bytearray(4 * locations)
+    for channel in range(144):
+        for location in range(locations):
+            value = ((location * 13 + channel * 11 + 7) % 61) - 30
+            input_values[channel * locations + location] = value & 0xFF
+    for side in range(4):
+        for location in range(locations):
+            values = [
+                ((location * 13 + (side * 16 + bin_index) * 11 + 7) % 61) - 30
+                for bin_index in range(16)
+            ]
+            q8 = _dfl16_q8(values)
+            value = (((q8 * 11381) >> 16) + 1) // 2 - 128
+            expected[side * locations + location] = max(-128, min(127, value)) & 0xFF
+
+    model = build_afu_dfl16_model()
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    command_offset = struct.unpack_from("<I", model, section_table_offset + 8)[0]
+    command_bytes = struct.unpack_from("<I", model, section_table_offset + 12)[0]
+    offset = command_offset
+    dfl_commands = 0
+    while offset < command_offset + command_bytes:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 28:
+            assert command_size == 64
+            assert struct.unpack_from("<I", model, offset + 56)[0] == locations
+            dfl_commands += 1
+        offset += command_size
+    assert offset == command_offset + command_bytes
+    assert dfl_commands == 1
+
+    runtime_bindings = [
+        (1, 0, input_base, len(input_values)),
+        (2, 0, output_base, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, input_base, input_values)
+    await write_l2_bytes(dut, output_base, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    start_ns = get_sim_time("ns")
+    counters = await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=1000000, measure_pmu=True
+    )
+    elapsed_ns = get_sim_time("ns") - start_ns
+    status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+    fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+    done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+    assert status == NPU_CMD_STATUS_PASS, (
+        f"DFL16 runtime failed: status=0x{status:08x} "
+        f"code=0x{fail_code:08x} done={done_count}"
+    )
+    assert fail_code == 0
+    assert done_count == 3
+    assert bytes(await read_l2_bytes(dut, output_base, len(expected))) == expected
+    cocotb.log.info(
+        "DFL16 runtime=%s ns PMU cycles=%d", elapsed_ns, counters["cycle"]
+    )
 
 
 async def _run_row32_case(dut, axi_master, channels, height, width,

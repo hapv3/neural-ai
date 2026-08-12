@@ -1,5 +1,11 @@
 #include "npu_cmd_desc_v2.h"
 
+#if defined(NAI_TRUSTED_FIRMWARE)
+#define NAI_TRUSTED_INVALID(condition) 0u
+#else
+#define NAI_TRUSTED_INVALID(condition) (condition)
+#endif
+
 static uint32_t all_zero(const uint32_t *words, uint32_t count)
 {
     for (uint32_t index = 0; index < count; index++) {
@@ -91,10 +97,11 @@ static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
 {
     uint32_t source;
     uint32_t destination;
-    if (command->length == 0u || !all_zero(command->reserved, 6u) || ops->dma_1d == 0)
+    if (ops->dma_1d == 0 ||
+        NAI_TRUSTED_INVALID(command->length == 0u || !all_zero(command->reserved, 6u)))
         return NAI_DISPATCH_BAD_COMMAND;
-    if (validate_dma_direction(&command->source, &command->destination,
-            command->direction) != NAI_DISPATCH_OK)
+    if (NAI_TRUSTED_INVALID(validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK))
         return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, command->length, 1u, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, command->length, 1u, &destination) != NAI_DISPATCH_OK) {
@@ -112,8 +119,9 @@ static nai_dispatch_status_v2_t run_rq_load(const nai_cmd_rq_load_v2_t *command,
     uint32_t qparam_offset;
     uint32_t qparam_bytes;
     uint32_t address;
-    if (command->qparam_count != 32u || command->reserved != 0u || ops->rq_load == 0 ||
-        view->qparams == 0 || command->qparam_index > view->qparams->element_count ||
+    if (ops->rq_load == 0 || view->qparams == 0 ||
+        NAI_TRUSTED_INVALID(command->qparam_count != 32u || command->reserved != 0u) ||
+        command->qparam_index > view->qparams->element_count ||
         command->qparam_count > view->qparams->element_count - command->qparam_index ||
         !multiply(command->qparam_index, sizeof(nai_qparam_v1_t), &qparam_offset) ||
         !multiply(command->qparam_count, sizeof(nai_qparam_v1_t), &qparam_bytes) ||
@@ -140,8 +148,9 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
     uint32_t destination;
     uint32_t source_bytes;
     uint32_t destination_bytes;
-    if (command->length == 0u || command->repetitions_2 == 0u || !all_zero(command->reserved, 3u) ||
-        ops->dma_2d == 0 ||
+    if (ops->dma_2d == 0 ||
+        NAI_TRUSTED_INVALID(command->length == 0u || command->repetitions_2 == 0u ||
+            !all_zero(command->reserved, 3u)) ||
         !multiply(command->source_stride_2, command->repetitions_2 - 1u, &source_bytes) ||
         source_bytes > 0xffffffffu - command->length ||
         !multiply(command->destination_stride_2, command->repetitions_2 - 1u, &destination_bytes) ||
@@ -150,8 +159,8 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
     }
     source_bytes += command->length;
     destination_bytes += command->length;
-    if (validate_dma_direction(&command->source, &command->destination,
-            command->direction) != NAI_DISPATCH_OK)
+    if (NAI_TRUSTED_INVALID(validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK))
         return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes, 1u, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination) != NAI_DISPATCH_OK) {
@@ -173,7 +182,9 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
     uint32_t destination_3;
     uint32_t source_bytes;
     uint32_t destination_bytes;
-    if (command->length == 0u || command->repetitions_2 == 0u || command->repetitions_3 == 0u || ops->dma_3d == 0 ||
+    if (ops->dma_3d == 0 ||
+        NAI_TRUSTED_INVALID(command->length == 0u || command->repetitions_2 == 0u ||
+            command->repetitions_3 == 0u) ||
         !multiply(command->source_stride_2, command->repetitions_2 - 1u, &source_2) ||
         !multiply(command->destination_stride_2, command->repetitions_2 - 1u, &destination_2) ||
         !multiply(command->source_stride_3, command->repetitions_3 - 1u, &source_3) ||
@@ -188,8 +199,8 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
     }
     source_bytes += command->length;
     destination_bytes += command->length;
-    if (validate_dma_direction(&command->source, &command->destination,
-            command->direction) != NAI_DISPATCH_OK)
+    if (NAI_TRUSTED_INVALID(validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK))
         return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes, 1u, &source_2) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination_2) != NAI_DISPATCH_OK) {
@@ -222,10 +233,13 @@ static nai_dispatch_status_v2_t run_gemm(const nai_cmd_gemm32_v2_t *command,
     uint32_t partial_stride = command->partial_sum_row_stride != 0u ?
         command->partial_sum_row_stride : 128u;
 
-    if (command->dim_m == 0u || command->dim_m > 256u || !all_zero(command->reserved, 8u) ||
-        ops->gemm32 == 0 || ofm_stride < ofm_row_bytes || (ofm_stride & 31u) != 0u ||
-        partial_stride < 128u || (partial_stride & 31u) != 0u ||
-        (direct_requant && (command->partial_sums.index != 0u || command->partial_sums.offset != 0u)) ||
+    if (ops->gemm32 == 0 ||
+        NAI_TRUSTED_INVALID(command->dim_m == 0u || command->dim_m > 256u ||
+            !all_zero(command->reserved, 8u) || ofm_stride < ofm_row_bytes ||
+            (ofm_stride & 31u) != 0u || partial_stride < 128u ||
+            (partial_stride & 31u) != 0u ||
+            (direct_requant && (command->partial_sums.index != 0u ||
+                                command->partial_sums.offset != 0u))) ||
         !multiply(command->dim_m, 32u, &ifm_bytes) ||
         !multiply(command->dim_m - 1u, ofm_stride, &ofm_bytes) ||
         ofm_bytes > 0xffffffffu - ofm_row_bytes ||
@@ -266,19 +280,19 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
     uint32_t ofm_bytes;
     uint32_t partial_bytes;
 
-    if (command->rows == 0u || command->input_c32_groups == 0u ||
-        command->output_c32_groups != 1u || ops->pointwise_c32 == 0 ||
-        !all_zero(command->reserved, 6u) ||
-        command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
-        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+    if (ops->pointwise_c32 == 0 ||
+        NAI_TRUSTED_INVALID(command->rows == 0u || command->input_c32_groups == 0u ||
+            command->output_c32_groups != 1u || !all_zero(command->reserved, 6u) ||
+            command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
+            command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+            (command->input_group_stride_bytes & (NAI_ALIGNMENT_BYTES - 1u)) != 0u ||
+            (command->output_group_stride_bytes & (NAI_ALIGNMENT_BYTES - 1u)) != 0u) ||
         !multiply(command->input_c32_groups, command->output_c32_groups, &weight_tiles) ||
         !multiply(weight_tiles, 32u * 32u, &weight_bytes) ||
         !multiply(command->rows, 32u, &ifm_groups_bytes) ||
         !multiply(command->rows, 32u, &ofm_groups_bytes) ||
-        command->input_group_stride_bytes < ifm_groups_bytes ||
-        command->output_group_stride_bytes < ofm_groups_bytes ||
-        (command->input_group_stride_bytes & (NAI_ALIGNMENT_BYTES - 1u)) != 0u ||
-        (command->output_group_stride_bytes & (NAI_ALIGNMENT_BYTES - 1u)) != 0u ||
+        NAI_TRUSTED_INVALID(command->input_group_stride_bytes < ifm_groups_bytes ||
+                            command->output_group_stride_bytes < ofm_groups_bytes) ||
         !multiply(command->input_group_stride_bytes, command->input_c32_groups - 1u, &ifm_bytes) ||
         ifm_bytes > 0xffffffffu - ifm_groups_bytes ||
         !multiply(command->output_group_stride_bytes, command->output_c32_groups - 1u, &ofm_bytes) ||
@@ -288,10 +302,12 @@ static nai_dispatch_status_v2_t run_pointwise_c32(
     }
     ifm_bytes += ifm_groups_bytes;
     ofm_bytes += ofm_groups_bytes;
-    if (command->input_c32_groups == 1u) {
-        if (command->partial_sums.region != 0u || command->partial_sums.index != 0u ||
-            command->partial_sums.offset != 0u) return NAI_DISPATCH_BAD_COMMAND;
-    } else if (command->partial_sums.region != NAI_REGION_TCDM_SCRATCH) {
+    if (NAI_TRUSTED_INVALID(
+        (command->input_c32_groups == 1u &&
+         (command->partial_sums.region != 0u || command->partial_sums.index != 0u ||
+          command->partial_sums.offset != 0u)) ||
+        (command->input_c32_groups != 1u &&
+         command->partial_sums.region != NAI_REGION_TCDM_SCRATCH))) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
     if (resolve(view, resolver, &command->weights, weight_bytes, NAI_ALIGNMENT_BYTES, &weights) != NAI_DISPATCH_OK ||
@@ -343,10 +359,10 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
     uint32_t same_shape;
     uint32_t valid_shape;
 
-    if (command->input_h == 0u || command->input_w == 0u ||
+    if (ops->depthwise_c32 == 0 || NAI_TRUSTED_INVALID(
+        command->input_h == 0u || command->input_w == 0u ||
         command->output_h == 0u || command->output_w == 0u ||
-        command->channels == 0u || ops->depthwise_c32 == 0 ||
-        !all_zero(command->reserved, 4u) ||
+        command->channels == 0u || !all_zero(command->reserved, 4u) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
         command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
         (command->stride_h != 1u && command->stride_h != 2u) ||
@@ -354,7 +370,7 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
         command->pad_h > 1u || command->pad_w > 1u ||
         command->input_h > 0xffffu || command->input_w > 0xffffu ||
         command->output_h > 0xffffu || command->output_w > 0xffffu ||
-        command->channels > 32u) {
+        command->channels > 32u)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
     expected_output_h = (command->input_h + command->stride_h - 1u) / command->stride_h;
@@ -371,7 +387,7 @@ static nai_dispatch_status_v2_t run_depthwise_c32(
     valid_shape = command->output_h == expected_valid_h &&
         command->output_w == expected_valid_w && command->pad_h == 0u && command->pad_w == 0u;
     groups = 1u;
-    if ((!same_shape && !valid_shape) ||
+    if (NAI_TRUSTED_INVALID(!same_shape && !valid_shape) ||
         !multiply(command->input_h, command->input_w, &input_pixels) ||
         !multiply(command->output_h, command->output_w, &output_pixels) ||
         !multiply(input_pixels, groups, &input_bytes) ||
@@ -399,11 +415,12 @@ static nai_dispatch_status_v2_t run_afu_binary(
     uint32_t lhs;
     uint32_t rhs;
     uint32_t ofm;
-    if (command->length == 0u || command->mode != NAI_AFU_BINARY_ADD_I8 ||
-        !all_zero(command->reserved, 4u) || ops->afu_binary == 0 ||
+    if (ops->afu_binary == 0 || NAI_TRUSTED_INVALID(
+        command->length == 0u || command->mode != NAI_AFU_BINARY_ADD_I8 ||
+        !all_zero(command->reserved, 4u) ||
         command->lhs.region != NAI_REGION_TCDM_SCRATCH ||
         command->rhs.region != NAI_REGION_TCDM_SCRATCH ||
-        command->ofm.region != NAI_REGION_TCDM_SCRATCH) {
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
     if (resolve(view, resolver, &command->lhs, command->length, NAI_ALIGNMENT_BYTES, &lhs) != NAI_DISPATCH_OK ||
@@ -411,8 +428,8 @@ static nai_dispatch_status_v2_t run_afu_binary(
         resolve(view, resolver, &command->ofm, command->length, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
-    if (ranges_overlap(lhs, ofm, command->length) ||
-        ranges_overlap(rhs, ofm, command->length)) return NAI_DISPATCH_BAD_COMMAND;
+    if (NAI_TRUSTED_INVALID(ranges_overlap(lhs, ofm, command->length) ||
+        ranges_overlap(rhs, ofm, command->length))) return NAI_DISPATCH_BAD_COMMAND;
     return ops->afu_binary(ops->context, command, lhs, rhs, ofm) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
@@ -426,7 +443,8 @@ static nai_dispatch_status_v2_t run_spatz_add(
     uint32_t lhs;
     uint32_t rhs;
     uint32_t ofm;
-    if (command->length == 0u || command->lhs_scale <= 0 || command->rhs_scale <= 0 ||
+    if (ops->spatz_add == 0 || NAI_TRUSTED_INVALID(
+        command->length == 0u || command->lhs_scale <= 0 || command->rhs_scale <= 0 ||
         command->output_scale <= 0 || command->lhs_shift > 63u || command->rhs_shift > 63u ||
         command->output_shift > 63u ||
         (command->double_round_shift != 0u && command->double_round_shift != 20u) ||
@@ -435,16 +453,16 @@ static nai_dispatch_status_v2_t run_spatz_add(
         command->rhs_zero_point < -128 || command->rhs_zero_point > 127 ||
         command->output_zero_point < -128 || command->output_zero_point > 127 ||
         command->clamp_min < -128 || command->clamp_max > 127 ||
-        command->clamp_min > command->clamp_max || ops->spatz_add == 0 ||
+        command->clamp_min > command->clamp_max ||
         command->lhs.region != NAI_REGION_TCDM_SCRATCH ||
         command->rhs.region != NAI_REGION_TCDM_SCRATCH ||
-        command->ofm.region != NAI_REGION_TCDM_SCRATCH) return NAI_DISPATCH_BAD_COMMAND;
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH)) return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->lhs, command->length, NAI_ALIGNMENT_BYTES, &lhs) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->rhs, command->length, NAI_ALIGNMENT_BYTES, &rhs) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->ofm, command->length, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_REFERENCE;
-    if (ranges_overlap(lhs, ofm, command->length) ||
-        ranges_overlap(rhs, ofm, command->length)) return NAI_DISPATCH_BAD_COMMAND;
+    if (NAI_TRUSTED_INVALID(ranges_overlap(lhs, ofm, command->length) ||
+        ranges_overlap(rhs, ofm, command->length))) return NAI_DISPATCH_BAD_COMMAND;
     return ops->spatz_add(ops->context, command, lhs, rhs, ofm) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
@@ -458,12 +476,12 @@ static nai_dispatch_status_v2_t run_afu_lut(
     uint32_t ifm;
     uint32_t ofm;
     uint32_t lut;
-    if (command->length == 0u || !all_zero(command->reserved, 5u) ||
-        ops->afu_lut == 0 ||
+    if (ops->afu_lut == 0 || NAI_TRUSTED_INVALID(
+        command->length == 0u || !all_zero(command->reserved, 5u) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
         command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
         (command->lut.region != NAI_REGION_MODEL_CONSTANTS &&
-         command->lut.region != NAI_REGION_TCDM_SCRATCH)) {
+         command->lut.region != NAI_REGION_TCDM_SCRATCH))) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
     if (resolve(view, resolver, &command->ifm, command->length,
@@ -473,8 +491,53 @@ static nai_dispatch_status_v2_t run_afu_lut(
         resolve(view, resolver, &command->lut, 256u, 1u, &lut) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
-    if (ranges_overlap(ifm, ofm, command->length)) return NAI_DISPATCH_BAD_COMMAND;
+    if (NAI_TRUSTED_INVALID(ranges_overlap(ifm, ofm, command->length)))
+        return NAI_DISPATCH_BAD_COMMAND;
     return ops->afu_lut(ops->context, command, ifm, ofm, lut) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
+static nai_dispatch_status_v2_t run_afu_dfl16(
+    const nai_cmd_afu_dfl16_v2_t *command,
+    const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver,
+    const nai_runtime_ops_v2_t *ops)
+{
+    const uint32_t records = 4u * 2100u;
+    const uint32_t source_bytes = 144u * 2100u;
+    const uint32_t scratch_bytes = 32u * 34u;
+    uint32_t source;
+    uint32_t destination;
+    uint32_t scratch;
+    uint32_t exp_lut;
+    uint32_t recip_lut;
+    if (ops->afu_dfl16 == 0 ||
+        NAI_TRUSTED_INVALID(command->locations != 2100u || command->reserved[0] != 0u ||
+            command->source.region != NAI_REGION_TCDM_SCRATCH ||
+            command->destination.region != NAI_REGION_TCDM_SCRATCH ||
+            command->scratch.region != NAI_REGION_TCDM_SCRATCH ||
+            command->exp_lut.region != NAI_REGION_MODEL_CONSTANTS ||
+            command->recip_lut.region != NAI_REGION_MODEL_CONSTANTS ||
+            command->exp_lut.index != command->recip_lut.index ||
+            command->exp_lut.offset > 0xffffffffu - 1024u ||
+            command->recip_lut.offset != command->exp_lut.offset + 1024u))
+        return NAI_DISPATCH_BAD_COMMAND;
+    if (resolve(view, resolver, &command->source, source_bytes,
+            NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->destination, records,
+            NAI_ALIGNMENT_BYTES, &destination) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->scratch, scratch_bytes,
+            NAI_ALIGNMENT_BYTES, &scratch) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->exp_lut, 2048u, 4u, &exp_lut) != NAI_DISPATCH_OK)
+        return NAI_DISPATCH_BAD_REFERENCE;
+    recip_lut = exp_lut + 1024u;
+    if (NAI_TRUSTED_INVALID(
+        ranges_overlap_sized(source, source_bytes, destination, records) ||
+        ranges_overlap_sized(source, source_bytes, scratch, scratch_bytes) ||
+        ranges_overlap_sized(destination, records, scratch, scratch_bytes)))
+        return NAI_DISPATCH_BAD_COMMAND;
+    return ops->afu_dfl16(ops->context, command, source, destination, scratch,
+                          exp_lut, recip_lut) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
@@ -490,11 +553,11 @@ static nai_dispatch_status_v2_t run_afu_global_avgpool(
     uint32_t output_bytes;
     uint32_t ifm;
     uint32_t ofm;
-    if (command->input_h == 0u || command->input_w == 0u ||
+    if (ops->afu_global_avgpool == 0 || NAI_TRUSTED_INVALID(
+        command->input_h == 0u || command->input_w == 0u ||
         command->channels == 0u || !all_zero(command->reserved, 5u) ||
-        ops->afu_global_avgpool == 0 ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
-        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH) ||
         !multiply(command->input_h, command->input_w, &spatial_count) ||
         command->channels > 0xffffffffu - 31u) {
         return NAI_DISPATCH_BAD_COMMAND;
@@ -509,7 +572,7 @@ static nai_dispatch_status_v2_t run_afu_global_avgpool(
         resolve(view, resolver, &command->ofm, output_bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
-    if (ranges_overlap_sized(ifm, input_bytes, ofm, output_bytes))
+    if (NAI_TRUSTED_INVALID(ranges_overlap_sized(ifm, input_bytes, ofm, output_bytes)))
         return NAI_DISPATCH_BAD_COMMAND;
     return ops->afu_global_avgpool(ops->context, command, ifm, ofm) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
@@ -526,13 +589,14 @@ static nai_dispatch_status_v2_t run_upsample_nearest(
     uint32_t output_bytes;
     uint32_t ifm;
     uint32_t ofm;
-    if (command->input_h == 0u || command->input_w == 0u ||
+    if (ops->upsample_nearest == 0 || NAI_TRUSTED_INVALID(
+        command->input_h == 0u || command->input_w == 0u ||
         (command->channels != 32u && command->channels != 128u &&
          command->channels != 256u) ||
         command->scale_h != 2u || command->scale_w != 2u ||
-        !all_zero(command->reserved, 3u) || ops->upsample_nearest == 0 ||
+        !all_zero(command->reserved, 3u) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
-        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH) ||
         !multiply(command->input_h, command->input_w, &input_pixels) ||
         !multiply(input_pixels, command->channels, &input_bytes) ||
         !multiply(input_bytes, 4u, &output_bytes)) {
@@ -542,7 +606,7 @@ static nai_dispatch_status_v2_t run_upsample_nearest(
         resolve(view, resolver, &command->ofm, output_bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
-    if (ranges_overlap_sized(ifm, input_bytes, ofm, output_bytes))
+    if (NAI_TRUSTED_INVALID(ranges_overlap_sized(ifm, input_bytes, ofm, output_bytes)))
         return NAI_DISPATCH_BAD_COMMAND;
     return ops->upsample_nearest(ops->context, command, ifm, ofm) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
@@ -558,14 +622,15 @@ static nai_dispatch_status_v2_t run_maxpool(
     uint32_t bytes;
     uint32_t ifm;
     uint32_t ofm;
-    if (command->input_h == 0u || command->input_w == 0u ||
+    if (ops->maxpool == 0 || NAI_TRUSTED_INVALID(
+        command->input_h == 0u || command->input_w == 0u ||
         (command->channels != 32u && command->channels != 128u) ||
         command->kernel_h != 5u || command->kernel_w != 5u ||
         command->stride_h != 1u || command->stride_w != 1u ||
         command->pad_h != 2u || command->pad_w != 2u ||
-        !all_zero(command->reserved, 7u) || ops->maxpool == 0 ||
+        !all_zero(command->reserved, 7u) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
-        command->ofm.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH) ||
         !multiply(command->input_h, command->input_w, &pixels) ||
         !multiply(pixels, command->channels, &bytes)) {
         return NAI_DISPATCH_BAD_COMMAND;
@@ -574,7 +639,7 @@ static nai_dispatch_status_v2_t run_maxpool(
         resolve(view, resolver, &command->ofm, bytes, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
-    if (ranges_overlap_sized(ifm, bytes, ofm, bytes))
+    if (NAI_TRUSTED_INVALID(ranges_overlap_sized(ifm, bytes, ofm, bytes)))
         return NAI_DISPATCH_BAD_COMMAND;
     return ops->maxpool(ops->context, command, ifm, ofm) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
@@ -584,6 +649,7 @@ static nai_dispatch_status_v2_t run_linebuf_job(
     const nai_cmd_linebuf_job_v2_t *command,
     const nai_runtime_ops_v2_t *ops)
 {
+#if !defined(NAI_TRUSTED_FIRMWARE)
     const uint32_t max_rows = command->job.gemm.accum_en == 0u ? 1024u : 256u;
     uint32_t expected_k_tiles;
     uint32_t kernel_elements;
@@ -640,6 +706,9 @@ static nai_dispatch_status_v2_t run_linebuf_job(
         command->job.k_tiles > 1u;
     if (command->job.linebuf.c32_group_stationary != expected_group_stationary)
         return NAI_DISPATCH_BAD_COMMAND;
+#else
+    if (ops->linebuf_job == 0) return NAI_DISPATCH_BAD_COMMAND;
+#endif
     return ops->linebuf_job(ops->context, command) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
@@ -660,29 +729,30 @@ static nai_dispatch_status_v2_t run_copy(const nai_cmd_copy_layout_v2_t *command
     uint32_t element_bytes = command->data_type == NAI_DTYPE_I8 ? 1u :
         command->data_type == NAI_DTYPE_I32 ? 4u : 0u;
 
-    if (element_bytes == 0u || command->valid_channels == 0u || command->valid_channels > 0xffffffe0u ||
-        !all_zero(command->reserved, 7u) ||
-        ops->copy_layout == 0) return NAI_DISPATCH_BAD_COMMAND;
+    if (ops->copy_layout == 0 || NAI_TRUSTED_INVALID(element_bytes == 0u ||
+        command->valid_channels == 0u || command->valid_channels > 0xffffffe0u ||
+        !all_zero(command->reserved, 7u))) return NAI_DISPATCH_BAD_COMMAND;
     for (uint32_t axis = 0; axis < 4u; axis++) {
-        if (command->dimensions[axis] == 0u || !multiply(elements, command->dimensions[axis], &elements))
+        if (NAI_TRUSTED_INVALID(command->dimensions[axis] == 0u) ||
+            !multiply(elements, command->dimensions[axis], &elements))
             return NAI_DISPATCH_BAD_COMMAND;
         if (axis < 3u && !multiply(rows, command->dimensions[axis], &rows))
             return NAI_DISPATCH_BAD_COMMAND;
     }
-    if (command->valid_channels != command->dimensions[3] ||
+    if (NAI_TRUSTED_INVALID(command->valid_channels != command->dimensions[3]) ||
         !multiply(elements, element_bytes, &compact_bytes) ||
         !multiply(rows, (command->valid_channels + 31u) & ~31u, &native_bytes) ||
         !multiply(native_bytes, element_bytes, &native_bytes)) return NAI_DISPATCH_BAD_COMMAND;
     if (command->mode == NAI_COPY_C32_TO_CHW) {
         uint32_t expected_source_stride;
-        if (command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
+        if (NAI_TRUSTED_INVALID(command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
             command->dimensions[1] != command->dimensions[2] ||
             (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
              command->dimensions[1] != 40u) || command->dimensions[3] != 144u ||
             command->source_layout != NAI_LAYOUT_C32_BLOCKED ||
             command->destination_layout != NAI_LAYOUT_NHWC ||
             command->source.region != NAI_REGION_TCDM_SCRATCH ||
-            command->destination.region != NAI_REGION_TCDM_SCRATCH ||
+            command->destination.region != NAI_REGION_TCDM_SCRATCH) ||
             !multiply(rows, 32u, &expected_source_stride) ||
             command->source_row_stride != expected_source_stride ||
             command->destination_row_stride != rows)
@@ -699,8 +769,9 @@ static nai_dispatch_status_v2_t run_copy(const nai_cmd_copy_layout_v2_t *command
     if (resolve(view, resolver, &command->source, source_bytes, 1u, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_REFERENCE;
-    if (command->mode == NAI_COPY_C32_TO_CHW &&
+    if (NAI_TRUSTED_INVALID(command->mode == NAI_COPY_C32_TO_CHW &&
         source < destination + destination_bytes && destination < source + source_bytes)
+        )
         return NAI_DISPATCH_BAD_COMMAND;
     return ops->copy_layout(ops->context, command, source, destination) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
@@ -790,6 +861,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
             status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)header, ops);
         } else if (header->type == NAI_CMD_COPY_LAYOUT && header->size_bytes == sizeof(nai_cmd_copy_layout_v2_t)) {
             status = run_copy((const nai_cmd_copy_layout_v2_t *)header, view, resolver, ops);
+        } else if (header->type == NAI_CMD_AFU_DFL16 &&
+                   header->size_bytes == sizeof(nai_cmd_afu_dfl16_v2_t)) {
+            status = run_afu_dfl16((const nai_cmd_afu_dfl16_v2_t *)header,
+                view, resolver, ops);
         } else if ((header->flags & (NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) ==
                    (NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) {
             status = NAI_DISPATCH_OK;
@@ -839,7 +914,8 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
         __builtin_memcpy(&header, command_buffer, sizeof(header));
         if (header.size_bytes < 32u || (header.size_bytes & 31u) != 0u ||
             !valid_range(offset, header.size_bytes, view->commands->size) ||
-            (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u) {
+            NAI_TRUSTED_INVALID(
+                (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u)) {
             status = NAI_DISPATCH_BAD_COMMAND;
         } else if (header.type == NAI_CMD_END || header.type == NAI_CMD_BARRIER ||
                    header.type == NAI_CMD_RQ_LOAD ||
@@ -854,20 +930,23 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_UPSAMPLE_NEAREST ||
                    header.type == NAI_CMD_MAXPOOL ||
                    header.type == NAI_CMD_LINEBUF_JOB ||
-                   header.type == NAI_CMD_COPY_LAYOUT) {
+                   header.type == NAI_CMD_COPY_LAYOUT ||
+                   header.type == NAI_CMD_AFU_DFL16) {
             if (header.size_bytes > prefetched_bytes)
                 status = NAI_DISPATCH_BAD_STREAM;
             else {
                 if (header.type == NAI_CMD_END) {
                     if (header.size_bytes != sizeof(nai_cmd_control_v2_t) ||
-                        !all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) ||
-                        completed != view->header->command_count) status = NAI_DISPATCH_BAD_STREAM;
+                        NAI_TRUSTED_INVALID(
+                            !all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) ||
+                            completed != view->header->command_count)) status = NAI_DISPATCH_BAD_STREAM;
                     else {
                         if (completed_commands != 0) *completed_commands = completed;
                         return NAI_DISPATCH_OK;
                     }
                 } else if (header.type == NAI_CMD_BARRIER && header.size_bytes == sizeof(nai_cmd_control_v2_t)) {
-                    status = all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) &&
+                    status = !NAI_TRUSTED_INVALID(
+                        !all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u)) &&
                         ops->barrier != 0 && ops->barrier(ops->context) == 0u ?
                         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
                 } else if (header.type == NAI_CMD_RQ_LOAD &&
@@ -925,6 +1004,11 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                 } else if (header.type == NAI_CMD_COPY_LAYOUT &&
                            header.size_bytes == sizeof(nai_cmd_copy_layout_v2_t)) {
                     status = run_copy((const nai_cmd_copy_layout_v2_t *)command_buffer, view, resolver, ops);
+                } else if (header.type == NAI_CMD_AFU_DFL16 &&
+                           header.size_bytes == sizeof(nai_cmd_afu_dfl16_v2_t)) {
+                    status = run_afu_dfl16(
+                        (const nai_cmd_afu_dfl16_v2_t *)command_buffer,
+                        view, resolver, ops);
                 } else {
                     status = NAI_DISPATCH_BAD_COMMAND;
                 }

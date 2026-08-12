@@ -10,7 +10,7 @@ SIZE = $(LLVM_BIN)/llvm-size
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -Os -fno-builtin -fno-jump-tables -ffunction-sections -fdata-sections \
          -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib -I../../lib -T link.ld \
-         -Wl,--no-relax -Wl,--gc-sections
+         -Wl,--no-relax -Wl,--gc-sections -DNAI_TRUSTED_FIRMWARE=1
 
 SRCS = start.S main.c \
        ../../lib/npu_cmd_desc.c ../../lib/npu_cmd_desc_v2.c \
