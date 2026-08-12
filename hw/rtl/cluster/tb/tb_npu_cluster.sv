@@ -37,6 +37,11 @@ module tb_npu_cluster #(
     input  logic [31:0] backdoor_addr_i,
     input  logic [7:0]  backdoor_data_i,
     output logic [7:0]  backdoor_rdata_o,
+    input  logic        backdoor_block_toggle_i,
+    input  logic [31:0] backdoor_block_addr_i,
+    input  logic [5:0]  backdoor_block_bytes_i,
+    input  logic [255:0] backdoor_block_data_i,
+    output logic [255:0] backdoor_block_rdata_o,
     output logic [2:0]  debug_sys_state_o,
     output logic [1:0]  debug_sys_drain_state_o,
     output logic [4:0]  debug_linebuf_state_o,
@@ -199,5 +204,34 @@ module tb_npu_cluster #(
 
     // Backdoor read logic
     assign backdoor_rdata_o = u_axi_sim_mem.mem[backdoor_addr_i];
+
+    // VPI-driven block backdoor.  The toggle invokes the task without
+    // advancing the DUT clock, so large L2 fixtures do not consume one
+    // simulated cycle per byte.
+    task automatic backdoor_mem_write_block(
+        input logic [31:0] address,
+        input logic [255:0] data,
+        input logic [5:0] bytes
+    );
+        for (int unsigned index = 0; index < bytes; index++) begin
+            u_axi_sim_mem.mem[address + index] = data[index * 8 +: 8];
+        end
+    endtask
+
+    always @(backdoor_block_toggle_i) begin
+        if (backdoor_block_bytes_i != 0 && backdoor_block_bytes_i <= 32) begin
+            backdoor_mem_write_block(backdoor_block_addr_i,
+                                     backdoor_block_data_i,
+                                     backdoor_block_bytes_i);
+        end
+    end
+
+    always_comb begin
+        backdoor_block_rdata_o = '0;
+        for (int unsigned index = 0; index < 32; index++) begin
+            backdoor_block_rdata_o[index * 8 +: 8] =
+                u_axi_sim_mem.mem[backdoor_block_addr_i + index];
+        end
+    end
 
 endmodule
