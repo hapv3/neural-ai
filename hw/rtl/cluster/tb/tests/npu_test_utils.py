@@ -99,6 +99,11 @@ async def reset_dut(dut):
     if hasattr(dut, "fetch_enable_i"):
         dut.fetch_enable_i.value = 0
     dut.backdoor_we_i.value = 0
+    if hasattr(dut, "backdoor_block_toggle_i"):
+        dut.backdoor_block_bytes_i.value = 0
+        dut.backdoor_block_addr_i.value = 0
+        dut.backdoor_block_data_i.value = 0
+        dut.backdoor_block_toggle_i.value = 0
     await Timer(20, unit="ns")
     dut.rst_ni.value = 1
     await Timer(20, unit="ns")
@@ -109,6 +114,11 @@ async def hold_reset(dut):
     if hasattr(dut, "fetch_enable_i"):
         dut.fetch_enable_i.value = 0
     dut.backdoor_we_i.value = 0
+    if hasattr(dut, "backdoor_block_toggle_i"):
+        dut.backdoor_block_bytes_i.value = 0
+        dut.backdoor_block_addr_i.value = 0
+        dut.backdoor_block_data_i.value = 0
+        dut.backdoor_block_toggle_i.value = 0
     await Timer(20, unit="ns")
 
 
@@ -425,6 +435,21 @@ async def wait_for_host_irq(dut, timeout_cycles=50000, axi_master=None, report_n
     raise AssertionError("timeout waiting for host irq")
 
 async def write_l2_bytes(dut, base_addr, data):
+    if hasattr(dut, "backdoor_block_toggle_i"):
+        dut.backdoor_we_i.value = 0
+        toggle = dut.backdoor_block_toggle_i.value
+        toggle_value = int(toggle) if toggle.is_resolvable else 0
+        for offset in range(0, len(data), 32):
+            block = bytes(data[offset : offset + 32])
+            dut.backdoor_block_addr_i.value = base_addr + offset
+            dut.backdoor_block_bytes_i.value = len(block)
+            dut.backdoor_block_data_i.value = int.from_bytes(block, "little")
+            toggle_value ^= 1
+            dut.backdoor_block_toggle_i.value = toggle_value
+            await Timer(1, unit="ps")
+        dut.backdoor_block_bytes_i.value = 0
+        return
+
     dut.backdoor_we_i.value = 0
     await RisingEdge(dut.clk_i)
     for offset, byte_val in enumerate(data):
@@ -437,6 +462,17 @@ async def write_l2_bytes(dut, base_addr, data):
 
 
 async def read_l2_bytes(dut, base_addr, length):
+    if hasattr(dut, "backdoor_block_rdata_o"):
+        data = bytearray()
+        dut.backdoor_we_i.value = 0
+        for offset in range(0, length, 32):
+            block_bytes = min(32, length - offset)
+            dut.backdoor_block_addr_i.value = base_addr + offset
+            await Timer(1, unit="ps")
+            block = dut.backdoor_block_rdata_o.value.to_unsigned().to_bytes(32, "little")
+            data.extend(block[:block_bytes])
+        return data
+
     data = []
     dut.backdoor_we_i.value = 0
     await RisingEdge(dut.clk_i)
