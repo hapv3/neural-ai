@@ -1,5 +1,11 @@
 #include "npu_layout_ops.h"
 
+#if defined(NAI_TRUSTED_FIRMWARE)
+#define NAI_TRUSTED_INVALID(condition) 0u
+#else
+#define NAI_TRUSTED_INVALID(condition) (condition)
+#endif
+
 static uint32_t checked_multiply(uint32_t lhs, uint32_t rhs, uint32_t *result)
 {
     if (lhs != 0u && rhs > 0xffffffffu / lhs) return 0u;
@@ -33,7 +39,7 @@ uint32_t nai_copy_layout_v2(const nai_cmd_copy_layout_v2_t *command,
     if (command->data_type == NAI_DTYPE_I8) element_bytes = 1u;
     else if (command->data_type == NAI_DTYPE_I32) element_bytes = 4u;
     else return 1u;
-    if (command->valid_channels == 0u ||
+    if (NAI_TRUSTED_INVALID(command->valid_channels == 0u) ||
         !checked_multiply(command->dimensions[0], command->dimensions[1], &pixels) ||
         !checked_multiply(pixels, command->dimensions[2], &pixels)) return 1u;
     channels = command->valid_channels;
@@ -42,14 +48,14 @@ uint32_t nai_copy_layout_v2(const nai_cmd_copy_layout_v2_t *command,
     if (!checked_multiply(pixels, padded_channels, &native_bytes) ||
         !checked_multiply(native_bytes, element_bytes, &native_bytes)) return 1u;
 
-    if (command->valid_channels != command->dimensions[3]) return 1u;
+    if (NAI_TRUSTED_INVALID(command->valid_channels != command->dimensions[3])) return 1u;
     if (command->mode == NAI_COPY_C32_TO_CHW) {
-        if (command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
+        if (NAI_TRUSTED_INVALID(command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
             channels != 144u || command->dimensions[1] != command->dimensions[2] ||
             (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
              command->dimensions[1] != 40u) ||
             command->source_row_stride != pixels * 32u ||
-            command->destination_row_stride != pixels) return 1u;
+            command->destination_row_stride != pixels)) return 1u;
         for (uint32_t channel = 0u; channel < channels; channel++) {
             for (uint32_t pixel = 0u; pixel < pixels; pixel++) {
                 destination[channel * pixels + pixel] =

@@ -8,6 +8,12 @@
 #include "npu_quant_buffer.h"
 #include "npu_runtime_ops.h"
 
+#if defined(NAI_TRUSTED_FIRMWARE)
+#define NAI_TRUSTED_INVALID(condition) 0u
+#else
+#define NAI_TRUSTED_INVALID(condition) (condition)
+#endif
+
 typedef struct {
     uint32_t base;
     uint32_t bytes;
@@ -65,8 +71,9 @@ static uint32_t validate_invocation(const nai_invocation_v1_t *invocation,
 {
     if (invocation->magic != NAI_INVOCATION_MAGIC || invocation->abi_major != NAI_ABI_MAJOR ||
         invocation->abi_minor > NAI_ABI_MINOR || invocation->total_bytes != sizeof(*invocation) ||
-        invocation->total_bytes > invocation_bytes || invocation->flags != 0u ||
-        !all_zero(invocation->reserved, 8u)) return 0u;
+        invocation->total_bytes > invocation_bytes ||
+        NAI_TRUSTED_INVALID(invocation->flags != 0u ||
+                            !all_zero(invocation->reserved, 8u))) return 0u;
     if ((invocation->model_base & 31u) != 0u || (invocation->model_bytes & 31u) != 0u ||
         invocation->model_bytes < sizeof(nai_model_header_v1_t) ||
         (invocation->binding_table_base & 31u) != 0u ||

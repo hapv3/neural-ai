@@ -30,6 +30,8 @@
 #define SPATZ_OP_TEST_CLAMP_RELU6 17u
 #define SPATZ_OP_TEST_QUANT_ADD 18u
 #define SPATZ_OP_TEST_DFL16_FUSED 19u
+#define SPATZ_OP_TEST_DFL_Q8 20u
+#define SPATZ_OP_TEST_DFL16_PACK 21u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -86,6 +88,8 @@
 #define GAP_DST         ((volatile int8_t *)0x1015D000u)
 #define CLAMP_SRC       ((volatile int8_t *)0x10160000u)
 #define CLAMP_DST       ((volatile int8_t *)0x10168000u)
+#define DFL16_PACK_SRC  ((volatile int8_t *)0x10150000u)
+#define DFL16_PACK_DST  ((volatile int8_t *)0x10151000u)
 
 #define VL 32u
 #define LOG_FULL_H 48u
@@ -111,6 +115,8 @@
 #define CONCAT_C1 32u
 #define DFL_FUSED_LOCATIONS 64u
 #define DFL16_FUSED_RECORDS 19u
+#define DFL_Q8_RECORDS 37u
+#define DFL16_PACK_STRIDE 37u
 #define CLASS_SIGMOID_LOCATIONS 17u
 #define GAP_H 7u
 #define GAP_W 5u
@@ -365,6 +371,50 @@ static void run_dfl16_fused(void) {
     mark_pass();
 }
 
+static void run_dfl_q8(void) {
+    volatile uint16_t *src = (volatile uint16_t *)DFL_ROW32_SRC;
+    volatile int8_t *dst = (volatile int8_t *)DFL_ROW32_DST;
+    for (uint32_t index = 0; index < DFL_Q8_RECORDS; index++) {
+        src[index] = index == 0u ? 0u :
+            (index == 1u ? 3840u : (uint16_t)((index * 379u + 127u) % 4096u));
+        dst[index] = 0;
+    }
+    spatz_dfl_q8_to_i8((uint16_t *)src, (int8_t *)dst, DFL_Q8_RECORDS);
+    mark_pass();
+}
+
+static void run_dfl16_pack(void) {
+    for (uint32_t test = 0; test < 2u; test++) {
+        uint32_t records = test == 0u ? 32u : 5u;
+        for (uint32_t channel = 0; channel < 16u; channel++) {
+            for (uint32_t record = 0; record < DFL16_PACK_STRIDE; record++) {
+                DFL16_PACK_SRC[channel * DFL16_PACK_STRIDE + record] =
+                    (int8_t)((channel * 23u + record * 17u + test * 11u) & 0xffu);
+            }
+        }
+        for (uint32_t index = 0; index < 32u * 32u; index++) {
+            DFL16_PACK_DST[index] = (int8_t)0x5a;
+        }
+
+        spatz_pack_dfl16_chw_tile_i8((const int8_t *)DFL16_PACK_SRC,
+                                     (int8_t *)DFL16_PACK_DST, records,
+                                     DFL16_PACK_STRIDE);
+
+        for (uint32_t record = 0; record < records; record++) {
+            for (uint32_t channel = 0; channel < 16u; channel++) {
+                int8_t expected = DFL16_PACK_SRC[channel * DFL16_PACK_STRIDE + record];
+                int8_t got = DFL16_PACK_DST[record * 32u + channel];
+                if (got != expected) fail(21, record * 32u + channel, got, expected);
+            }
+            for (uint32_t channel = 16u; channel < 32u; channel++) {
+                int8_t got = DFL16_PACK_DST[record * 32u + channel];
+                if (got != (int8_t)0x5a) fail(21, record * 32u + channel, got, 0x5a);
+            }
+        }
+    }
+    mark_pass();
+}
+
 static void run_class_sigmoid(void) {
     SIG_STATUS = 0x30001501u;
 #if SPATZ_OP_TEST_ID != SPATZ_OP_TEST_CLASS_SIGMOID
@@ -548,6 +598,12 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL16_FUSED) {
         run_dfl16_fused();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL_Q8) {
+        run_dfl_q8();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL16_PACK) {
+        run_dfl16_pack();
     }
 
     SIG_STATUS = PASS_SIGNATURE;

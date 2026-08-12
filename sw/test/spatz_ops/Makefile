@@ -12,7 +12,7 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
 
 SRCS = start.S main.c ../../lib/spatz_ops.c ../../lib/spatz_ops.S
 
-OP_TESTS = copy relu requant add quant_add mul maxpool upsample concat
+OP_TESTS = copy relu requant add quant_add mul maxpool upsample concat dfl_q8 dfl16_pack
 OP_BINS = $(addprefix spatz_ops_,$(addsuffix .bin,$(OP_TESTS)))
 OP_HEXS = $(addprefix spatz_ops_,$(addsuffix .hex,$(OP_TESTS)))
 
@@ -53,6 +53,12 @@ spatz_ops_upsample.elf: $(SRCS) link.ld
 
 spatz_ops_concat.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=9 $(SRCS) -o $@
+
+spatz_ops_dfl_q8.elf: $(SRCS) link.ld
+	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=20 $(SRCS) -o $@
+
+spatz_ops_dfl16_pack.elf: $(SRCS) link.ld
+	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=21 $(SRCS) -o $@
 
 spatz_ops_%.bin: spatz_ops_%.elf
 	$(OBJCOPY) -O binary $< $@

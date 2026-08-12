@@ -35,7 +35,8 @@ typedef enum {
     NAI_CMD_DMA_SUBMIT_1D = 24,
     NAI_CMD_DMA_SUBMIT_2D = 25,
     NAI_CMD_DMA_SUBMIT_3D = 26,
-    NAI_CMD_DMA_WAIT = 27
+    NAI_CMD_DMA_WAIT = 27,
+    NAI_CMD_AFU_DFL16 = 28
 } nai_cmd_type_v2_t;
 
 typedef struct {
@@ -270,6 +271,17 @@ typedef struct {
     uint32_t reserved[7];
 } nai_cmd_copy_layout_v2_t;
 
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_ref_v1_t source;
+    nai_ref_v1_t destination;
+    nai_ref_v1_t scratch;
+    nai_ref_v1_t exp_lut;
+    nai_ref_v1_t recip_lut;
+    uint32_t locations;
+    uint32_t reserved[1];
+} nai_cmd_afu_dfl16_v2_t;
+
 _Static_assert(sizeof(nai_cmd_header_v2_t) == 16, "nai_cmd_header_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_control_v2_t) == 32, "nai_cmd_control_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_rq_load_v2_t) == 32, "nai_cmd_rq_load_v2_t ABI size");
@@ -293,6 +305,7 @@ _Static_assert(sizeof(nai_cmd_upsample_nearest_v2_t) == 64,
 _Static_assert(sizeof(nai_cmd_maxpool_v2_t) == 96,
                "nai_cmd_maxpool_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_afu_dfl16_v2_t) == 64, "nai_cmd_afu_dfl16_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");
 
@@ -341,6 +354,9 @@ typedef struct {
     uint32_t (*linebuf_job)(void *context, const nai_cmd_linebuf_job_v2_t *command);
     uint32_t (*copy_layout)(void *context, const nai_cmd_copy_layout_v2_t *command,
                            uint32_t source, uint32_t destination);
+    uint32_t (*afu_dfl16)(void *context, const nai_cmd_afu_dfl16_v2_t *command,
+                          uint32_t source, uint32_t destination, uint32_t scratch,
+                          uint32_t exp_lut, uint32_t recip_lut);
     uint32_t (*barrier)(void *context);
     uint32_t (*rq_load)(void *context, uint32_t qparam_address,
                         uint32_t qparam_count, uint32_t qparam_block);
