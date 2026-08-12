@@ -1,4 +1,5 @@
 import random
+import struct
 
 import cocotb
 import numpy as np
@@ -6,8 +7,6 @@ from cocotb.clock import Clock
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
-    NPU_CMD_DIR_L1_TO_L2,
-    NPU_CMD_DIR_L2_TO_L1,
     NPU_CMD_DONE_COUNT,
     NPU_CMD_FAIL_CODE,
     NPU_CMD_FAIL_PTR,
@@ -15,14 +14,9 @@ from npu_test_utils import (
     NPU_CMD_STATUS_PASS,
     NPU_CMD_TCDM_BASE,
     NPU_DTCM_BASE,
-    build_command_table,
-    cmd_barrier,
-    cmd_end,
-    cmd_idma_1d,
-    cmd_systolic_gemm32,
     format_pmu_report,
     firmware_path,
-    load_firmware_axi,
+    load_firmware_elf_axi,
     pmu_snapshot_report,
     program_command_queue,
     read_l2_bytes,
@@ -36,15 +30,18 @@ from npu_test_utils import (
 )
 
 
-EXT_MEM_WEIGHT = 0x80000000
 EXT_MEM_IFM = 0x80001000
 EXT_MEM_OFM = 0x80002000
-EXT_MEM_CMD = 0x80040000
+INVOCATION_BASE = 0x80040000
+MODEL_BASE = 0x80041000
+BINDING_TABLE_BASE = 0x80044000
 WEIGHT_PING_ADDR = 0x10110000
 IFM_PING_ADDR = 0x10120000
-OFM_PING_ADDR = 0x10200000
+OFM_PING_ADDR = 0x10130000
+TCDM_BASE = 0x10100000
 DIM_M = 64
-STREAMING_BARRIER_COUNT = 128
+NAI_MODEL_MAGIC = 0x4D49414E
+NAI_INVOCATION_MAGIC = 0x5649414E
 
 
 def pack_i8_words(matrix):
@@ -61,6 +58,87 @@ def unpack_i32_words(data):
             int.from_bytes(bytes(data[offset : offset + 4]), "little", signed=True)
         )
     return words
+
+
+def ref(region, index=0, offset=0):
+    return struct.pack("<HHI", region, index, offset)
+
+
+def command_header(command_type, size, tile):
+    return struct.pack("<HHIII", command_type, size, 0, 0, tile)
+
+
+def dma_1d(source, destination, length, direction, tile):
+    command = command_header(2, 64, tile) + source + destination
+    return command + struct.pack("<II6I", length, direction, *([0] * 6))
+
+
+def gemm32(weights, ifm, ofm, dim_m, tile):
+    command = command_header(6, 96, tile)
+    command += weights + ifm + ref(6) + ofm
+    return command + struct.pack("<4I8I", dim_m, 128, 128, 0, *([0] * 8))
+
+
+def binding(direction, index, data_type, byte_size):
+    dimensions = (1, 1, DIM_M, 32)
+    descriptor = struct.pack(
+        "<6HI4IIIiI4I",
+        direction, index, data_type, 1, 4, 0, index,
+        *dimensions, byte_size, 0, 0, 0, 0, 0, 0, 0,
+    )
+    assert len(descriptor) == 64
+    return descriptor
+
+
+def build_v2_model(weights):
+    commands = [
+        dma_1d(ref(1), ref(6, offset=WEIGHT_PING_ADDR - TCDM_BASE),
+               len(weights), 0, 0),
+        dma_1d(ref(3), ref(6, offset=IFM_PING_ADDR - TCDM_BASE),
+               DIM_M * 32, 0, 1),
+        gemm32(ref(6, offset=WEIGHT_PING_ADDR - TCDM_BASE),
+               ref(6, offset=IFM_PING_ADDR - TCDM_BASE),
+               ref(6, offset=OFM_PING_ADDR - TCDM_BASE),
+               DIM_M, 2),
+        dma_1d(ref(6, offset=OFM_PING_ADDR - TCDM_BASE), ref(4),
+               DIM_M * 32 * 4, 1, 3),
+    ]
+    command_count = len(commands)
+    commands.append(command_header(0, 32, command_count).ljust(32, b"\x00"))
+    command_bytes = b"".join(commands)
+    bindings = (
+        binding(1, 0, 1, DIM_M * 32) +
+        binding(2, 0, 4, DIM_M * 32 * 4)
+    )
+    payloads = [command_bytes, weights, b"", bindings, b""]
+    section_types = [1, 2, 3, 4, 5]
+    element_counts = [command_count + 1, len(weights), 0, 2, 0]
+    offset = 64 + len(payloads) * 32
+    sections = []
+    for section_type, element_count, payload in zip(section_types, element_counts, payloads):
+        assert offset % 32 == 0 and len(payload) % 32 == 0
+        sections.append(struct.pack("<8I", section_type, 0, offset, len(payload),
+                                    32, element_count, 0, 0))
+        offset += len(payload)
+    required_tcdm_bytes = OFM_PING_ADDR - TCDM_BASE + DIM_M * 32 * 4
+    assert required_tcdm_bytes <= 0x7F000
+    header = struct.pack(
+        "<IHH11I3I", NAI_MODEL_MAGIC, 1, 1, 1, 0, offset, 5, 64, 224,
+        command_count, required_tcdm_bytes, 32, 1, 1, 0, 0, 0,
+    )
+    return header + b"".join(sections) + b"".join(payloads)
+
+
+def build_v2_invocation(model):
+    invocation = struct.pack(
+        "<IHH6I8I", NAI_INVOCATION_MAGIC, 1, 0, 64, MODEL_BASE, len(model),
+        BINDING_TABLE_BASE, 2, 0, *([0] * 8),
+    )
+    addresses = struct.pack(
+        "<HHIIIHHIII", 1, 0, EXT_MEM_IFM, DIM_M * 32, 0,
+        2, 0, EXT_MEM_OFM, DIM_M * 32 * 4, 0,
+    )
+    return invocation, addresses
 
 
 @cocotb.test()
@@ -83,23 +161,19 @@ async def test_matmul(dut):
     ifm = np_rng.integers(0, 6, size=(DIM_M, 32), dtype=np.int32)
     golden = np.dot(ifm, weights).flatten()
 
-    await write_l2_bytes(dut, EXT_MEM_WEIGHT, pack_i8_words(weights))
+    weight_bytes = pack_i8_words(weights)
     await write_l2_bytes(dut, EXT_MEM_IFM, pack_i8_words(ifm))
-    command_stream = build_command_table(
-        ([cmd_barrier(layer_id=0, tile_id=tile_id) for tile_id in range(STREAMING_BARRIER_COUNT)] + [
-            cmd_idma_1d(EXT_MEM_WEIGHT, WEIGHT_PING_ADDR, 32 * 32, NPU_CMD_DIR_L2_TO_L1, layer_id=0, tile_id=0),
-            cmd_idma_1d(EXT_MEM_IFM, IFM_PING_ADDR, DIM_M * 32, NPU_CMD_DIR_L2_TO_L1, layer_id=0, tile_id=1),
-            cmd_systolic_gemm32(WEIGHT_PING_ADDR, IFM_PING_ADDR, OFM_PING_ADDR, DIM_M, layer_id=0, tile_id=2),
-            cmd_idma_1d(OFM_PING_ADDR, EXT_MEM_OFM, DIM_M * 32 * 4, NPU_CMD_DIR_L1_TO_L2, layer_id=0, tile_id=3),
-            cmd_end(layer_id=0, tile_id=4),
-        ])
-    )
-    await write_l2_bytes(dut, EXT_MEM_CMD, command_stream)
-    await load_firmware_axi(
+    model = build_v2_model(weight_bytes)
+    invocation, binding_addresses = build_v2_invocation(model)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await load_firmware_elf_axi(
+        dut,
         axi_master,
-        firmware_path(__file__, "sw/test/matmul/matmul.bin"),
+        firmware_path(__file__, "sw/runtime/neural_ai/neural_ai.elf"),
     )
-    await program_command_queue(axi_master, EXT_MEM_CMD, len(command_stream))
+    await program_command_queue(axi_master, INVOCATION_BASE, len(invocation))
     await release_fetch(dut, axi_master=axi_master)
 
     try:
@@ -133,8 +207,15 @@ async def test_matmul(dut):
             format_pmu_report(pmu),
         )
         raise
-    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == STREAMING_BARRIER_COUNT + 4
+    status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+    fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+    fail_ptr = await _axi_read32(axi_master, NPU_CMD_FAIL_PTR)
+    done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+    assert status == NPU_CMD_STATUS_PASS, (
+        f"matmul V2 dispatch failed: status={status} fail=0x{fail_code:08x} "
+        f"ptr=0x{fail_ptr:08x} done={done_count}"
+    )
+    assert done_count == 4
 
     ofm_data = await read_l2_bytes(dut, EXT_MEM_OFM, DIM_M * 32 * 4)
     ofm_words = unpack_i32_words(ofm_data)
