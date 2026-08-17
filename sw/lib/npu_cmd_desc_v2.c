@@ -503,16 +503,17 @@ static nai_dispatch_status_v2_t run_afu_dfl16(
     const nai_resolver_v1_t *resolver,
     const nai_runtime_ops_v2_t *ops)
 {
-    const uint32_t records = 4u * 2100u;
-    const uint32_t source_bytes = 144u * 2100u;
     const uint32_t scratch_bytes = 32u * 34u;
+    uint32_t records;
+    uint32_t source_bytes;
     uint32_t source;
     uint32_t destination;
     uint32_t scratch;
     uint32_t exp_lut;
     uint32_t recip_lut;
     if (ops->afu_dfl16 == 0 ||
-        NAI_TRUSTED_INVALID(command->locations != 2100u || command->reserved[0] != 0u ||
+        NAI_TRUSTED_INVALID(command->locations == 0u || command->locations > 2100u ||
+            command->reserved[0] != 0u ||
             command->source.region != NAI_REGION_TCDM_SCRATCH ||
             command->destination.region != NAI_REGION_TCDM_SCRATCH ||
             command->scratch.region != NAI_REGION_TCDM_SCRATCH ||
@@ -520,7 +521,9 @@ static nai_dispatch_status_v2_t run_afu_dfl16(
             command->recip_lut.region != NAI_REGION_MODEL_CONSTANTS ||
             command->exp_lut.index != command->recip_lut.index ||
             command->exp_lut.offset > 0xffffffffu - 1024u ||
-            command->recip_lut.offset != command->exp_lut.offset + 1024u))
+            command->recip_lut.offset != command->exp_lut.offset + 1024u) ||
+        !multiply(4u, command->locations, &records) ||
+        !multiply(144u, command->locations, &source_bytes))
         return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes,
             NAI_ALIGNMENT_BYTES, &source) != NAI_DISPATCH_OK ||

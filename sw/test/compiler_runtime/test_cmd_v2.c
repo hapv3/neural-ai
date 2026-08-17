@@ -1212,15 +1212,26 @@ int main(void)
     dfl16_end->header.type = NAI_CMD_END;
     dfl16_end->header.size_bytes = sizeof(*dfl16_end);
     gemm_ops.afu_dfl16 = mock_afu_dfl16;
-    state = (mock_state_t){0};
-    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
-        &completed, &failure) == NAI_DISPATCH_OK);
-    assert(completed == 1u && state.calls == 1u && state.length == 2100u);
-    assert(state.source == 0x10100000u && state.destination == 0x10150000u);
-    assert(state.partial_sums == 0x10153000u && state.source2 == 0x80020080u);
-    assert(state.ofm == 0x80020480u);
+    {
+        const uint32_t selected_locations[] = {100u, 400u, 1600u, 2100u};
+        for (uint32_t index = 0u;
+             index < sizeof(selected_locations) / sizeof(selected_locations[0]); index++) {
+            dfl16->locations = selected_locations[index];
+            state = (mock_state_t){0};
+            assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+                &completed, &failure) == NAI_DISPATCH_OK);
+            assert(completed == 1u && state.calls == 1u &&
+                   state.length == selected_locations[index]);
+            assert(state.source == 0x10100000u && state.destination == 0x10150000u);
+            assert(state.partial_sums == 0x10153000u && state.source2 == 0x80020080u);
+            assert(state.ofm == 0x80020480u);
+        }
+    }
 
-    dfl16->locations = 2099u;
+    dfl16->locations = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->locations = 2101u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     dfl16->locations = 2100u;
