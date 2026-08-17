@@ -598,6 +598,12 @@ int main(void)
         NAI_DISPATCH_OK);
     assert(completed == 1u && state.calls == 1u);
     assert(state.source2 == 0x80020060u && state.length == 64u);
+    afu_lut->ofm.offset = 0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == state.destination);
     afu_lut->ofm.offset = 0x20u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
@@ -1228,6 +1234,16 @@ int main(void)
         }
     }
 
+    dfl16->locations = 1600u;
+    dfl16->source_layout = 1u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u && state.length == 1600u);
+    dfl16->source_layout = 2u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->source_layout = 0u;
     dfl16->locations = 0u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
@@ -1235,10 +1251,6 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     dfl16->locations = 2100u;
-    dfl16->reserved[0] = 1u;
-    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
-        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
-    dfl16->reserved[0] = 0u;
     dfl16->scratch.offset = 0x49000u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);

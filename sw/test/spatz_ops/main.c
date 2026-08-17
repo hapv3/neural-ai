@@ -412,6 +412,32 @@ static void run_dfl16_pack(void) {
             }
         }
     }
+    for (uint32_t test = 0; test < 2u; test++) {
+        uint32_t records = test == 0u ? 32u : 5u;
+        for (uint32_t record = 0; record < records; record++) {
+            for (uint32_t channel = 0; channel < 32u; channel++) {
+                DFL16_PACK_SRC[record * 32u + channel] =
+                    (int8_t)((record * 29u + channel * 13u + test * 7u) & 0xffu);
+                DFL16_PACK_DST[record * 32u + channel] = (int8_t)0x5a;
+            }
+        }
+
+        spatz_pack_dfl16_c32_tile_i8((const int8_t *)DFL16_PACK_SRC,
+                                     (int8_t *)DFL16_PACK_DST, records, 32u);
+
+        for (uint32_t record = 0; record < records; record++) {
+            for (uint32_t channel = 0; channel < 16u; channel++) {
+                int8_t expected = DFL16_PACK_SRC[record * 32u + channel];
+                int8_t got = DFL16_PACK_DST[record * 32u + channel];
+                if (got != expected) fail(21, 0x1000u + record * 32u + channel, got, expected);
+            }
+            for (uint32_t channel = 16u; channel < 32u; channel++) {
+                int8_t got = DFL16_PACK_DST[record * 32u + channel];
+                if (got != (int8_t)0x5a)
+                    fail(21, 0x1000u + record * 32u + channel, got, 0x5a);
+            }
+        }
+    }
     mark_pass();
 }
 
