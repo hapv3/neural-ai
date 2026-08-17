@@ -493,7 +493,7 @@ static uint32_t runtime_copy_layout(void *context, const nai_cmd_copy_layout_v2_
         if (NAI_TRUSTED_INVALID(!source_l1 || !destination_l1 || command->data_type != NAI_DTYPE_I8 ||
             command->dimensions[0] != 1u || command->dimensions[1] != command->dimensions[2] ||
             (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
-             command->dimensions[1] != 40u) || command->valid_channels != 144u))
+             command->dimensions[1] != 40u) || command->valid_channels > 144u))
             return 1u;
         pixels = command->dimensions[1] * command->dimensions[2];
         if (NAI_TRUSTED_INVALID(command->source_row_stride != pixels * 32u ||
