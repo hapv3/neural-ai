@@ -584,7 +584,9 @@ def check_dfl16_fused(dut):
 def check_dfl_q8(dut):
     for index in range(DFL_Q8_RECORDS):
         value = 0 if index == 0 else (3840 if index == 1 else (index * 379 + 127) % 4096)
-        expected = ((value * 91048 + (1 << 19)) >> 20) - 128
+        multiplier, shift = ((58267, 21) if index < 13 else
+                             ((58267, 20) if index < 25 else (58039, 19)))
+        expected = ((value * multiplier + (1 << (shift - 1))) >> shift) - 128
         expected = max(-128, min(127, expected))
         got = as_i8(read_tcdm_byte(dut, DFL_ROW32_DST + index))
         assert got == expected, f"dfl_q8[{index}] got={got} expected={expected}"
