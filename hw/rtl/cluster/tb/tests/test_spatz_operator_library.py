@@ -74,7 +74,7 @@ CONCAT_W = 3
 CONCAT_PIXELS = CONCAT_H * CONCAT_W
 DFL_FUSED_LOCATIONS = 64
 DFL16_FUSED_RECORDS = 19
-DFL_Q8_RECORDS = 37
+DFL_Q8_RECORDS = 45
 CLASS_SIGMOID_LOCATIONS = 17
 GAP_H = 7
 GAP_W = 5
@@ -585,7 +585,8 @@ def check_dfl_q8(dut):
     for index in range(DFL_Q8_RECORDS):
         value = 0 if index == 0 else (3840 if index == 1 else (index * 379 + 127) % 4096)
         multiplier, shift = ((58267, 21) if index < 13 else
-                             ((58267, 20) if index < 25 else (58039, 19)))
+                             ((58267, 20) if index < 25 else
+                              ((58039, 19) if index < 37 else (51003, 8))))
         expected = ((value * multiplier + (1 << (shift - 1))) >> shift) - 128
         expected = max(-128, min(127, expected))
         got = as_i8(read_tcdm_byte(dut, DFL_ROW32_DST + index))

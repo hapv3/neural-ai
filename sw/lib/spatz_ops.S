@@ -297,27 +297,30 @@ spatz_requant_i32_to_i32:
     .global spatz_dfl_q8_to_i8
     .type spatz_dfl_q8_to_i8, @function
 spatz_dfl_q8_to_i8:
-    beqz a2, .Ldfl_q8_done
+    beqz a3, .Ldfl_q8_done
+    li t0, 17
+    bltu a5, t0, .Ldfl_q8_wide
     mv t5, a0
-    mv t6, a2
-    addi t1, a4, -16
+    mv t6, a3
+    addi t1, a5, -16
     addi t2, t1, -1
     li t3, 1
     sll t3, t3, t2
 .Ldfl_q8_loop:
-    vsetvli t0, a2, e16, m4, ta, ma
+    vsetvli t0, a3, e16, m4, ta, ma
     vle16.v v8, (a0)
-    vmulhu.vx v8, v8, a3
+    vmulhu.vx v8, v8, a4
     vadd.vx v8, v8, t3
     vsrl.vx v8, v8, t1
-    vadd.vx v8, v8, a5
-    vmax.vx v8, v8, a6
-    vmin.vx v8, v8, a7
+    vadd.vx v8, v8, a6
+    vmax.vx v8, v8, a7
+    lw t4, 0(sp)
+    vmin.vx v8, v8, t4
     vse16.v v8, (a0)
     slli t2, t0, 1
     add a0, a0, t2
-    sub a2, a2, t0
-    bnez a2, .Ldfl_q8_loop
+    sub a3, a3, t0
+    bnez a3, .Ldfl_q8_loop
     li t2, 2
 .Ldfl_q8_pack:
     vsetvli t0, t6, e8, m8, ta, ma
@@ -328,6 +331,46 @@ spatz_dfl_q8_to_i8:
     add a1, a1, t0
     sub t6, t6, t0
     bnez t6, .Ldfl_q8_pack
+    ret
+
+.Ldfl_q8_wide:
+    mv t4, a2
+    mv t5, a2
+    mv t6, a3
+    beqz a5, .Ldfl_q8_wide_loop
+    li t1, 1
+    addi t2, a5, -1
+    sll t1, t1, t2
+.Ldfl_q8_wide_loop:
+    vsetvli t0, a3, e16, m4, ta, ma
+    vle16.v v24, (a0)
+    vwmulu.vx v8, v24, a4
+    vsetvli zero, t0, e32, m8, ta, ma
+    beqz a5, .Ldfl_q8_wide_unshifted
+    vadd.vx v8, v8, t1
+    vsrl.vx v8, v8, a5
+.Ldfl_q8_wide_unshifted:
+    vadd.vx v8, v8, a6
+    vmax.vx v8, v8, a7
+    lw t2, 0(sp)
+    vmin.vx v8, v8, t2
+    vse32.v v8, (t5)
+    slli t2, t0, 1
+    add a0, a0, t2
+    slli t2, t0, 2
+    add t5, t5, t2
+    sub a3, a3, t0
+    bnez a3, .Ldfl_q8_wide_loop
+    li t2, 4
+.Ldfl_q8_wide_pack:
+    vsetvli t0, t6, e8, m8, ta, ma
+    vlse8.v v8, (t4), t2
+    vse8.v v8, (a1)
+    slli t3, t0, 2
+    add t4, t4, t3
+    add a1, a1, t0
+    sub t6, t6, t0
+    bnez t6, .Ldfl_q8_wide_pack
 .Ldfl_q8_done:
     ret
 

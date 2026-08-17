@@ -30,7 +30,8 @@ void spatz_pack_dfl16_chw_tile_i8(const int8_t *src, int8_t *dst,
                                   uint32_t records, int32_t channel_stride);
 void spatz_pack_dfl16_c32_tile_i8(const int8_t *src, int8_t *dst,
                                   uint32_t records, int32_t record_stride);
-void spatz_dfl_q8_to_i8(const uint16_t *src, int8_t *dst, uint32_t count,
+void spatz_dfl_q8_to_i8(const uint16_t *src, int8_t *dst, int32_t *workspace,
+                        uint32_t count,
                         int32_t multiplier, uint32_t shift,
                         int32_t zero_point, int32_t clamp_min, int32_t clamp_max);
 void spatz_c32_to_chw_i8(const int8_t *src, int8_t *dst,
