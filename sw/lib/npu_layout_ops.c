@@ -51,7 +51,7 @@ uint32_t nai_copy_layout_v2(const nai_cmd_copy_layout_v2_t *command,
     if (NAI_TRUSTED_INVALID(command->valid_channels != command->dimensions[3])) return 1u;
     if (command->mode == NAI_COPY_C32_TO_CHW) {
         if (NAI_TRUSTED_INVALID(command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
-            channels != 144u || command->dimensions[1] != command->dimensions[2] ||
+            channels > 144u || command->dimensions[1] != command->dimensions[2] ||
             (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
              command->dimensions[1] != 40u) ||
             command->source_row_stride != pixels * 32u ||

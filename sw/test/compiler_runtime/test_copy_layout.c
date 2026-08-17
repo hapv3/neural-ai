@@ -93,6 +93,19 @@ int main(void)
                 assert(head_chw[channel * pixels + pixel] ==
                        head_nhwc[pixel * channels + channel]);
         }
+        for (uint32_t part_channels = 64u; part_channels <= 80u; part_channels += 16u) {
+            command.dimensions[3] = part_channels;
+            command.valid_channels = part_channels;
+            memset(head_chw, 0, sizeof(head_chw));
+            assert(nai_copy_layout_v2(&command, head_c32, head_chw) == 0u);
+            for (uint32_t channel = 0u; channel < part_channels; channel++) {
+                for (uint32_t pixel = 0u; pixel < pixels; pixel++)
+                    assert(head_chw[channel * pixels + pixel] ==
+                           head_nhwc[pixel * channels + channel]);
+            }
+        }
+        command.dimensions[3] = channels;
+        command.valid_channels = channels;
         command.dimensions[1] = 8u;
         command.dimensions[2] = 8u;
         assert(nai_copy_layout_v2(&command, head_c32, head_chw) != 0u);

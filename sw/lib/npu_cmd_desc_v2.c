@@ -748,7 +748,7 @@ static nai_dispatch_status_v2_t run_copy(const nai_cmd_copy_layout_v2_t *command
         if (NAI_TRUSTED_INVALID(command->data_type != NAI_DTYPE_I8 || command->dimensions[0] != 1u ||
             command->dimensions[1] != command->dimensions[2] ||
             (command->dimensions[1] != 10u && command->dimensions[1] != 20u &&
-             command->dimensions[1] != 40u) || command->dimensions[3] != 144u ||
+             command->dimensions[1] != 40u) || command->dimensions[3] > 144u ||
             command->source_layout != NAI_LAYOUT_C32_BLOCKED ||
             command->destination_layout != NAI_LAYOUT_NHWC ||
             command->source.region != NAI_REGION_TCDM_SCRATCH ||
