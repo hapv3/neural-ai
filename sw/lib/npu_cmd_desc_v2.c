@@ -515,7 +515,7 @@ static nai_dispatch_status_v2_t run_afu_dfl16(
         NAI_TRUSTED_INVALID(command->locations == 0u || command->locations > 2100u ||
             command->source_layout > 1u ||
             command->output_multiplier <= 0 || command->output_multiplier > 65535 ||
-            command->output_shift < 17u || command->output_shift > 31u ||
+            command->output_shift > 31u ||
             command->output_zero_point < -128 || command->output_zero_point > 127 ||
             command->clamp_min < -128 || command->clamp_max > 127 ||
             command->clamp_min > command->clamp_max ||

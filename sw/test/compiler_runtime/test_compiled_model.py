@@ -229,7 +229,7 @@ def _afu_dfl16(source, destination, scratch, exp_lut, recip_lut, tile):
     command = _command_header(28, 96, tile=tile)
     command += source + destination + scratch + exp_lut + recip_lut
     command += struct.pack("<2I", 2100, 0)
-    command += struct.pack("<iIiii3I", 58267, 20, -128, -128, 127, 0, 0, 0)
+    command += struct.pack("<iIiii3I", 51003, 8, -128, -128, 127, 0, 0, 0)
     assert len(command) == 96
     return command
 
@@ -1606,7 +1606,7 @@ async def test_compiler_runtime_afu_dfl16_package(dut):
                 for bin_index in range(16)
             ]
             q8 = _dfl16_q8(values)
-            value = ((q8 * 58267 + (1 << 19)) >> 20) - 128
+            value = ((q8 * 51003 + (1 << 7)) >> 8) - 128
             expected[side * locations + location] = max(-128, min(127, value)) & 0xFF
 
     model = build_afu_dfl16_model()

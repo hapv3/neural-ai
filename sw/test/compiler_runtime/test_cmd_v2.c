@@ -1261,6 +1261,11 @@ int main(void)
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     dfl16->output_multiplier = 11381;
     dfl16->output_shift = 16u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    dfl16->output_shift = 32u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     dfl16->output_shift = 17u;
