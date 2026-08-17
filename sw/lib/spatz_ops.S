@@ -78,6 +78,22 @@ spatz_pack_dfl16_chw_tile_i8:
 2:
     ret
 
+    .global spatz_pack_dfl16_c32_tile_i8
+    .type spatz_pack_dfl16_c32_tile_i8, @function
+spatz_pack_dfl16_c32_tile_i8:
+    beqz a2, 2f
+    li a4, 16
+    vsetvli t0, a4, e8, m8, ta, ma
+1:
+    vle8.v v8, (a0)
+    vse8.v v8, (a1)
+    add a0, a0, a3
+    addi a1, a1, 32
+    addi a2, a2, -1
+    bnez a2, 1b
+2:
+    ret
+
     .global spatz_dfl_q8_to_i8
     .type spatz_dfl_q8_to_i8, @function
 spatz_dfl_q8_to_i8:

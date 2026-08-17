@@ -279,7 +279,7 @@ typedef struct {
     nai_ref_v1_t exp_lut;
     nai_ref_v1_t recip_lut;
     uint32_t locations;
-    uint32_t reserved[1];
+    uint32_t source_layout;
 } nai_cmd_afu_dfl16_v2_t;
 
 _Static_assert(sizeof(nai_cmd_header_v2_t) == 16, "nai_cmd_header_v2_t ABI size");

@@ -592,14 +592,22 @@ static uint32_t runtime_afu_dfl16(void *context, const nai_cmd_afu_dfl16_v2_t *c
     }
 
     for (uint32_t side = 0; side < 4u; side++) {
-        uint32_t side_source = source + side * 16u * locations;
+        uint32_t side_source = command->source_layout == 1u ?
+            source + (side >> 1) * locations * 32u + (side & 1u) * 16u :
+            source + side * 16u * locations;
         uint32_t side_destination = destination + side * locations;
         for (uint32_t first = 0; first < locations; first += 32u) {
             uint32_t count = locations - first;
             if (count > 32u) count = 32u;
-            spatz_pack_dfl16_chw_tile_i8(
-                (const int8_t *)(unsigned long)(side_source + first),
-                (int8_t *)(unsigned long)scratch, count, locations);
+            if (command->source_layout == 1u) {
+                spatz_pack_dfl16_c32_tile_i8(
+                    (const int8_t *)(unsigned long)(side_source + first * 32u),
+                    (int8_t *)(unsigned long)scratch, count, 32);
+            } else {
+                spatz_pack_dfl16_chw_tile_i8(
+                    (const int8_t *)(unsigned long)(side_source + first),
+                    (int8_t *)(unsigned long)scratch, count, locations);
+            }
             afu_preload_dfl_row32(scratch, (uint32_t)(unsigned long)q8, count * 32u, 16u);
             afu_start_preloaded();
             if (!afu_wait_done(108192u)) return 1u;
