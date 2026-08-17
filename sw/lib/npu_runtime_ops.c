@@ -612,7 +612,10 @@ static uint32_t runtime_afu_dfl16(void *context, const nai_cmd_afu_dfl16_v2_t *c
             afu_start_preloaded();
             if (!afu_wait_done(108192u)) return 1u;
             spatz_dfl_q8_to_i8(q8,
-                               (int8_t *)(unsigned long)(side_destination + first), count);
+                               (int8_t *)(unsigned long)(side_destination + first), count,
+                               command->output_multiplier, command->output_shift,
+                               command->output_zero_point, command->clamp_min,
+                               command->clamp_max);
         }
     }
     return 0u;

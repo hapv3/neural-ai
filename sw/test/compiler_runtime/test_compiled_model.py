@@ -226,10 +226,11 @@ def _copy_layout(source, destination, mode, dimensions, tile):
 
 
 def _afu_dfl16(source, destination, scratch, exp_lut, recip_lut, tile):
-    command = _command_header(28, 64, tile=tile)
+    command = _command_header(28, 96, tile=tile)
     command += source + destination + scratch + exp_lut + recip_lut
     command += struct.pack("<2I", 2100, 0)
-    assert len(command) == 64
+    command += struct.pack("<iIiii3I", 58267, 20, -128, -128, 127, 0, 0, 0)
+    assert len(command) == 96
     return command
 
 
@@ -1605,7 +1606,7 @@ async def test_compiler_runtime_afu_dfl16_package(dut):
                 for bin_index in range(16)
             ]
             q8 = _dfl16_q8(values)
-            value = (((q8 * 11381) >> 16) + 1) // 2 - 128
+            value = ((q8 * 58267 + (1 << 19)) >> 20) - 128
             expected[side * locations + location] = max(-128, min(127, value)) & 0xFF
 
     model = build_afu_dfl16_model()
@@ -1617,7 +1618,7 @@ async def test_compiler_runtime_afu_dfl16_package(dut):
     while offset < command_offset + command_bytes:
         command_type, command_size = struct.unpack_from("<HH", model, offset)
         if command_type == 28:
-            assert command_size == 64
+            assert command_size == 96
             assert struct.unpack_from("<I", model, offset + 56)[0] == locations
             dfl_commands += 1
         offset += command_size

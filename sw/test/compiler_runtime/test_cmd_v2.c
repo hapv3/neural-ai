@@ -570,7 +570,7 @@ int main(void)
     memset(gemm_model, 0, sizeof(gemm_model));
     gemm_header.command_count = 1;
     gemm_header.entry_command_off = 0;
-    gemm_commands.size = 96;
+    gemm_commands.size = 128;
     gemm_commands.element_count = 2;
     gemm_constants.offset = 96;
     gemm_constants.size = 256;
@@ -1198,12 +1198,12 @@ int main(void)
     memset(gemm_model, 0, sizeof(gemm_model));
     gemm_header.command_count = 1;
     gemm_header.entry_command_off = 0;
-    gemm_commands.size = 96;
+    gemm_commands.size = 128;
     gemm_commands.element_count = 2;
     gemm_constants.offset = 128;
     gemm_constants.size = 2048;
     nai_cmd_afu_dfl16_v2_t *dfl16 = (nai_cmd_afu_dfl16_v2_t *)gemm_model;
-    nai_cmd_control_v2_t *dfl16_end = (nai_cmd_control_v2_t *)(gemm_model + 64);
+    nai_cmd_control_v2_t *dfl16_end = (nai_cmd_control_v2_t *)(gemm_model + 96);
     dfl16->header.type = NAI_CMD_AFU_DFL16;
     dfl16->header.size_bytes = sizeof(*dfl16);
     dfl16->source.region = NAI_REGION_TCDM_SCRATCH;
@@ -1215,6 +1215,11 @@ int main(void)
     dfl16->recip_lut.region = NAI_REGION_MODEL_CONSTANTS;
     dfl16->recip_lut.offset = 0x400u;
     dfl16->locations = 2100u;
+    dfl16->output_multiplier = 11381;
+    dfl16->output_shift = 17u;
+    dfl16->output_zero_point = -128;
+    dfl16->clamp_min = -128;
+    dfl16->clamp_max = 127;
     dfl16_end->header.type = NAI_CMD_END;
     dfl16_end->header.size_bytes = sizeof(*dfl16_end);
     gemm_ops.afu_dfl16 = mock_afu_dfl16;
@@ -1251,6 +1256,14 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     dfl16->locations = 2100u;
+    dfl16->output_multiplier = 65536;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->output_multiplier = 11381;
+    dfl16->output_shift = 16u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dfl16->output_shift = 17u;
     dfl16->scratch.offset = 0x49000u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);

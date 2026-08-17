@@ -280,6 +280,12 @@ typedef struct {
     nai_ref_v1_t recip_lut;
     uint32_t locations;
     uint32_t source_layout;
+    int32_t output_multiplier;
+    uint32_t output_shift;
+    int32_t output_zero_point;
+    int32_t clamp_min;
+    int32_t clamp_max;
+    uint32_t reserved[3];
 } nai_cmd_afu_dfl16_v2_t;
 
 _Static_assert(sizeof(nai_cmd_header_v2_t) == 16, "nai_cmd_header_v2_t ABI size");
@@ -305,7 +311,7 @@ _Static_assert(sizeof(nai_cmd_upsample_nearest_v2_t) == 64,
 _Static_assert(sizeof(nai_cmd_maxpool_v2_t) == 96,
                "nai_cmd_maxpool_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_copy_layout_v2_t) == 96, "nai_cmd_copy_layout_v2_t ABI size");
-_Static_assert(sizeof(nai_cmd_afu_dfl16_v2_t) == 64, "nai_cmd_afu_dfl16_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_afu_dfl16_v2_t) == 96, "nai_cmd_afu_dfl16_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, weights) == 16, "GEMM reference offset");
 _Static_assert(offsetof(nai_cmd_gemm32_v2_t, dim_m) == 48, "GEMM dimension offset");
 

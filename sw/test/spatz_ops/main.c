@@ -375,11 +375,18 @@ static void run_dfl_q8(void) {
     volatile uint16_t *src = (volatile uint16_t *)DFL_ROW32_SRC;
     volatile int8_t *dst = (volatile int8_t *)DFL_ROW32_DST;
     for (uint32_t index = 0; index < DFL_Q8_RECORDS; index++) {
-        src[index] = index == 0u ? 0u :
+        uint32_t source_index = index < 13u ? index :
+            (index < 25u ? index + 3u : index + 7u);
+        src[source_index] = index == 0u ? 0u :
             (index == 1u ? 3840u : (uint16_t)((index * 379u + 127u) % 4096u));
         dst[index] = 0;
     }
-    spatz_dfl_q8_to_i8((uint16_t *)src, (int8_t *)dst, DFL_Q8_RECORDS);
+    spatz_dfl_q8_to_i8((const uint16_t *)src, (int8_t *)dst, 13u,
+                       58267, 21u, -128, -128, 127);
+    spatz_dfl_q8_to_i8((const uint16_t *)(src + 16u), (int8_t *)(dst + 13u), 12u,
+                       58267, 20u, -128, -128, 127);
+    spatz_dfl_q8_to_i8((const uint16_t *)(src + 32u), (int8_t *)(dst + 25u), 12u,
+                       58039, 19u, -128, -128, 127);
     mark_pass();
 }
 
