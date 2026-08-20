@@ -8,7 +8,7 @@
 #define NAI_MODEL_MAGIC       0x4D49414Eu
 #define NAI_INVOCATION_MAGIC  0x5649414Eu
 #define NAI_ABI_MAJOR         1u
-#define NAI_ABI_MINOR         1u
+#define NAI_ABI_MINOR         2u
 #define NAI_TARGET_ID         1u
 #define NAI_ALIGNMENT_BYTES   32u
 

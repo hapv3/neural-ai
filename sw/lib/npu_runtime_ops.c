@@ -258,7 +258,7 @@ static uint32_t runtime_spatz_add(void *context,
         command->output_scale, command->output_shift,
         command->lhs_zero_point, command->rhs_zero_point,
         command->output_zero_point, command->clamp_min,
-        command->clamp_max, command->double_round_shift,
+        command->clamp_max, command->double_round_shift, command->mode,
     };
     (void)context;
     spatz_quantized_add_i8((const int8_t *)(unsigned long)lhs,

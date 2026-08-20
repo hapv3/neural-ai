@@ -864,6 +864,30 @@ async def test_spatz_op_quantized_add(dut):
 
 
 @cocotb.test()
+async def test_spatz_op_quantized_sub(dut):
+    def check_quantized_sub(dut):
+        for index in range(VL):
+            lhs = as_i8(index * 17 + 3) - (-3)
+            rhs = as_i8(index * 29 + 11) - 5
+            value = scale_add_value(lhs, 1610612736, 20, 20)
+            value -= scale_add_value(rhs, 1073741824, 20, 20)
+            value = scale_add_value(value, 1073741824, 41, 0) + 7
+            expected = min(max(value, -100), 100)
+            got = as_i8(read_tcdm_byte(dut, ADD_DST + index))
+            assert got == expected, (
+                f"quantized sub mismatch at {index}: got={got} expected={expected}"
+            )
+
+    await run_firmware_case(
+        dut,
+        "spatz_ops_quant_sub.bin",
+        "test_spatz_op_quantized_sub",
+        1,
+        check_quantized_sub,
+    )
+
+
+@cocotb.test()
 async def test_afu_op_add_full(dut):
     await run_firmware_case(
         dut,
