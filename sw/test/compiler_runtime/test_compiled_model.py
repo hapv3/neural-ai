@@ -1194,6 +1194,12 @@ def _compile_quantized_add_model():
     )
 
 
+def _compile_compact_scalar_mul_model():
+    return _compile_tflite_fixture_model(
+        "scalar_mul_p2_l37", "neural-ai-compiled-scalar-mul-"
+    )
+
+
 def _compile_sigmoid_model():
     return _compile_tflite_fixture_model(
         "sigmoid_h2w3_c33", "neural-ai-compiled-sigmoid-"
@@ -2611,6 +2617,69 @@ async def test_compiler_generated_quantized_add_c32_package(dut):
     )
     assert fail_code == 0
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_compact_scalar_mul_lut_package(dut):
+    import numpy as np
+    import tensorflow as tf
+
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 2 * 37
+    input_values = [((index * 37 + 13) & 0xFF) - 128 for index in range(count)]
+    fixture = Path(__file__).with_name("scalar_mul_p2_l37.tflite.b64")
+    tflite_model = base64.b64decode(fixture.read_text(encoding="ascii"))
+    interpreter = tf.lite.Interpreter(
+        model_content=tflite_model,
+        experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    )
+    interpreter.allocate_tensors()
+    input_detail = interpreter.get_input_details()[0]
+    output_detail = interpreter.get_output_details()[0]
+    interpreter.set_tensor(
+        input_detail["index"], np.asarray(input_values, dtype=np.int8).reshape(1, 2, 37)
+    )
+    interpreter.invoke()
+    expected = interpreter.get_tensor(output_detail["index"]).tobytes()
+
+    model = _compile_compact_scalar_mul_model()
+    commands_offset = struct.unpack_from("<I", model, 64 + 8)[0]
+    commands_size = struct.unpack_from("<I", model, 64 + 12)[0]
+    offset = commands_offset
+    lut_commands = 0
+    while offset < commands_offset + commands_size:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 12:
+            assert struct.unpack_from("<I", model, offset + 40)[0] == count
+            lut_commands += 1
+        assert command_type != 17
+        offset += command_size
+    assert offset == commands_offset + commands_size
+    assert lut_commands == 1
+
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, bytes(value & 0xFF for value in input_values))
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
 
 
 @cocotb.test()
