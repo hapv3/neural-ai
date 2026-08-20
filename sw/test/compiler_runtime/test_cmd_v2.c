@@ -934,6 +934,7 @@ int main(void)
     spatz_add->clamp_min = -100;
     spatz_add->clamp_max = 100;
     spatz_add->double_round_shift = 20u;
+    spatz_add->mode = NAI_SPATZ_BINARY_SUBTRACT;
     spatz_add_end->header.type = NAI_CMD_END;
     spatz_add_end->header.size_bytes = sizeof(*spatz_add_end);
     gemm_ops.spatz_add = mock_spatz_add;
@@ -944,6 +945,7 @@ int main(void)
     assert(state.source == 0x10100000u && state.source2 == 0x10100100u);
     assert(state.destination == 0x10100200u && state.length == 64u);
     assert(state.mode == 20u);
+    assert(spatz_add->mode == NAI_SPATZ_BINARY_SUBTRACT);
 
     gemm_memory.data = gemm_model;
     gemm_memory.bytes = sizeof(gemm_model);
@@ -968,6 +970,10 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     spatz_add->lhs_scale = 0x60000000;
+    spatz_add->mode = 2u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    spatz_add->mode = NAI_SPATZ_BINARY_SUBTRACT;
     spatz_add->output_shift = 64u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);

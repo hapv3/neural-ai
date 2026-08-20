@@ -19,6 +19,7 @@ typedef struct {
     int32_t clamp_min;
     int32_t clamp_max;
     uint32_t double_round_shift;
+    uint32_t mode;
 } spatz_quantized_add_params_t;
 
 void spatz_vec_copy_i8(const int8_t *src, int8_t *dst, uint32_t count);

@@ -448,7 +448,7 @@ static nai_dispatch_status_v2_t run_spatz_add(
         command->output_scale <= 0 || command->lhs_shift > 63u || command->rhs_shift > 63u ||
         command->output_shift > 63u ||
         (command->double_round_shift != 0u && command->double_round_shift != 20u) ||
-        command->reserved != 0u ||
+        command->mode > NAI_SPATZ_BINARY_SUBTRACT ||
         command->lhs_zero_point < -128 || command->lhs_zero_point > 127 ||
         command->rhs_zero_point < -128 || command->rhs_zero_point > 127 ||
         command->output_zero_point < -128 || command->output_zero_point > 127 ||

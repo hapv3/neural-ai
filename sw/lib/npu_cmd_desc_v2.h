@@ -179,6 +179,11 @@ typedef enum {
     NAI_AFU_BINARY_ADD_I8 = 1
 } nai_afu_binary_mode_v2_t;
 
+typedef enum {
+    NAI_SPATZ_BINARY_ADD = 0,
+    NAI_SPATZ_BINARY_SUBTRACT = 1
+} nai_spatz_binary_mode_v2_t;
+
 typedef struct {
     nai_cmd_header_v2_t header;
     nai_ref_v1_t lhs;
@@ -207,7 +212,7 @@ typedef struct {
     int32_t clamp_min;
     int32_t clamp_max;
     uint32_t double_round_shift;
-    uint32_t reserved;
+    uint32_t mode;
 } nai_cmd_spatz_add_v2_t;
 
 typedef struct {

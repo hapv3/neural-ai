@@ -32,6 +32,7 @@
 #define SPATZ_OP_TEST_DFL16_FUSED 19u
 #define SPATZ_OP_TEST_DFL_Q8 20u
 #define SPATZ_OP_TEST_DFL16_PACK 21u
+#define SPATZ_OP_TEST_QUANT_SUB 22u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -229,6 +230,33 @@ static void run_quantized_add(void) {
     params.clamp_min = -100;
     params.clamp_max = 100;
     params.double_round_shift = 20;
+    params.mode = 0;
+    for (uint32_t i = 0; i < VL; i++) {
+        ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
+        ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
+        ADD_DST[i] = 0;
+    }
+    spatz_quantized_add_i8((const int8_t *)ADD_LHS,
+                           (const int8_t *)ADD_RHS,
+                           (int8_t *)ADD_DST, VL, &params);
+    mark_pass();
+}
+
+static void run_quantized_sub(void) {
+    spatz_quantized_add_params_t params;
+    params.lhs_scale = 1610612736;
+    params.lhs_shift = 20;
+    params.rhs_scale = 1073741824;
+    params.rhs_shift = 20;
+    params.output_scale = 1073741824;
+    params.output_shift = 41;
+    params.lhs_zero_point = -3;
+    params.rhs_zero_point = 5;
+    params.output_zero_point = 7;
+    params.clamp_min = -100;
+    params.clamp_max = 100;
+    params.double_round_shift = 20;
+    params.mode = 1;
     for (uint32_t i = 0; i < VL; i++) {
         ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
         ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
@@ -644,6 +672,9 @@ int main(void) {
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_DFL16_PACK) {
         run_dfl16_pack();
+    }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_QUANT_SUB) {
+        run_quantized_sub();
     }
 
     SIG_STATUS = PASS_SIGNATURE;

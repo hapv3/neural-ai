@@ -422,7 +422,13 @@ spatz_quantized_add_i8:
     lw t4, 44(s4)
     spatz_scale_i32 v12, v12, s6, s7, t4
     spatz_scale_i32 v20, v20, s8, s9, t4
+    lw t4, 48(s4)
+    bnez t4, .Lquant_sub_scaled
     vadd.vv v12, v12, v20
+    j .Lquant_binary_scaled
+.Lquant_sub_scaled:
+    vsub.vv v12, v12, v20
+.Lquant_binary_scaled:
     li t4, 0
     spatz_scale_i32 v12, v12, s10, s11, t4
 
