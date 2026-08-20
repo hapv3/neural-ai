@@ -22,7 +22,7 @@ typedef struct {
 } l2_reader_context_t;
 
 static nai_model_stream_storage_v1_t g_model_storage;
-static nai_binding_address_v1_t g_binding_addresses[NAI_MAX_PUBLIC_BINDINGS_V1];
+static nai_binding_address_v1_t g_binding_addresses[NAI_MAX_BINDINGS_V1];
 /* The stream reader must accommodate the largest v2 record.  LINEBUF_JOB is
    160 bytes, larger than the 96-byte GEMM/pointwise/depthwise records. */
 static uint8_t g_command_buffer[sizeof(nai_cmd_linebuf_job_v2_t)];
@@ -77,7 +77,7 @@ static uint32_t validate_invocation(const nai_invocation_v1_t *invocation,
     if ((invocation->model_base & 31u) != 0u || (invocation->model_bytes & 31u) != 0u ||
         invocation->model_bytes < sizeof(nai_model_header_v1_t) ||
         (invocation->binding_table_base & 31u) != 0u ||
-        invocation->binding_count > NAI_MAX_PUBLIC_BINDINGS_V1) return 0u;
+        invocation->binding_count > NAI_MAX_BINDINGS_V1) return 0u;
     if ((invocation->model_bytes != 0u && invocation->model_base > 0xffffffffu - invocation->model_bytes) ||
         (invocation->binding_count != 0u && invocation->binding_table_base >
             0xffffffffu - invocation->binding_count * sizeof(nai_binding_address_v1_t))) return 0u;
@@ -87,8 +87,8 @@ static uint32_t validate_invocation(const nai_invocation_v1_t *invocation,
 static uint32_t validate_runtime_bindings(const nai_model_view_v1_t *view,
                                           const nai_invocation_v1_t *invocation)
 {
-    uint32_t public_count = view->header->input_count + view->header->output_count;
-    if (invocation->binding_count < public_count) return 0u;
+    uint32_t model_count = view->bindings->element_count;
+    if (invocation->binding_count != model_count) return 0u;
 
     for (uint32_t index = 0; index < invocation->binding_count; index++) {
         const nai_binding_address_v1_t *address = &g_binding_addresses[index];
@@ -97,7 +97,7 @@ static uint32_t validate_runtime_bindings(const nai_model_view_v1_t *view,
            references still request 32-byte alignment when they need it; the
            binding table itself must not reject a valid compact base. */
         if (address->direction == NAI_BINDING_INPUT || address->direction == NAI_BINDING_OUTPUT) {
-            for (uint32_t public_index = 0u; public_index < public_count; public_index++) {
+            for (uint32_t public_index = 0u; public_index < model_count; public_index++) {
                 const nai_binding_v1_t *binding = &view->public_bindings[public_index];
                 if (binding->direction == address->direction && binding->index == address->index &&
                     binding->layout == NAI_LAYOUT_NHWC) {
@@ -116,7 +116,7 @@ static uint32_t validate_runtime_bindings(const nai_model_view_v1_t *view,
         }
     }
 
-    for (uint32_t model_index = 0; model_index < public_count; model_index++) {
+    for (uint32_t model_index = 0; model_index < model_count; model_index++) {
         const nai_binding_v1_t *binding = &view->public_bindings[model_index];
         uint32_t found = 0u;
         for (uint32_t runtime_index = 0; runtime_index < invocation->binding_count; runtime_index++) {

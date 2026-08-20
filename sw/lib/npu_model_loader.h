@@ -34,6 +34,7 @@ typedef struct {
 
 #define NAI_MAX_SECTIONS_V1 6u
 #define NAI_MAX_PUBLIC_BINDINGS_V1 64u
+#define NAI_MAX_BINDINGS_V1 (NAI_MAX_PUBLIC_BINDINGS_V1 + 1u)
 
 typedef struct {
     void *context;
@@ -43,7 +44,7 @@ typedef struct {
 typedef struct {
     nai_model_header_v1_t header;
     nai_section_v1_t sections[NAI_MAX_SECTIONS_V1];
-    nai_binding_v1_t bindings[NAI_MAX_PUBLIC_BINDINGS_V1];
+    nai_binding_v1_t bindings[NAI_MAX_BINDINGS_V1];
 } nai_model_stream_storage_v1_t;
 
 typedef struct {

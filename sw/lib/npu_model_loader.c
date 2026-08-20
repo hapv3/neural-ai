@@ -143,23 +143,28 @@ static uint32_t multiply_checked(uint32_t lhs, uint32_t rhs, uint32_t *result)
 
 nai_loader_status_t nai_model_validate_bindings_v1(const nai_model_view_v1_t *view)
 {
-    uint32_t expected_count;
+    uint32_t public_count;
+    uint32_t binding_count;
     uint32_t required_bytes;
+    uint32_t input_count = 0u;
+    uint32_t output_count = 0u;
+    uint32_t temporary_count = 0u;
 
     if (view == 0 || view->header == 0 || view->bindings == 0) {
         return NAI_LOADER_BAD_ARGUMENT;
     }
-    expected_count = view->header->input_count + view->header->output_count;
-    if (expected_count < view->header->input_count ||
-        view->bindings->element_count != expected_count ||
-        !multiply_checked(expected_count, sizeof(nai_binding_v1_t), &required_bytes) ||
+    public_count = view->header->input_count + view->header->output_count;
+    binding_count = view->bindings->element_count;
+    if (public_count < view->header->input_count || binding_count < public_count ||
+        binding_count > public_count + 1u || binding_count > NAI_MAX_BINDINGS_V1 ||
+        !multiply_checked(binding_count, sizeof(nai_binding_v1_t), &required_bytes) ||
         required_bytes > view->bindings->size) {
         return NAI_LOADER_BAD_BINDING;
     }
 
     const nai_binding_v1_t *bindings = view->public_bindings;
     if (bindings == 0) return NAI_LOADER_BAD_ARGUMENT;
-    for (uint32_t index = 0; index < expected_count; index++) {
+    for (uint32_t index = 0; index < binding_count; index++) {
         const nai_binding_v1_t *binding = &bindings[index];
         uint32_t elements = 1u;
         uint32_t element_bytes;
@@ -167,10 +172,20 @@ nai_loader_status_t nai_model_validate_bindings_v1(const nai_model_view_v1_t *vi
             !all_zero(binding->reserved, 4u)) {
             return NAI_LOADER_BAD_BINDING;
         }
-        if ((binding->direction != NAI_BINDING_INPUT && binding->direction != NAI_BINDING_OUTPUT) ||
-            (binding->rank == 4u && binding->layout != NAI_LAYOUT_NHWC)) {
+        if (binding->direction == NAI_BINDING_INPUT) {
+            if (binding->index >= view->header->input_count) return NAI_LOADER_BAD_BINDING;
+            input_count++;
+        } else if (binding->direction == NAI_BINDING_OUTPUT) {
+            if (binding->index >= view->header->output_count) return NAI_LOADER_BAD_BINDING;
+            output_count++;
+        } else if (binding->direction == NAI_BINDING_L2_TEMPORARY) {
+            if (binding->index != 0u || temporary_count != 0u) return NAI_LOADER_BAD_BINDING;
+            temporary_count++;
+        } else {
             return NAI_LOADER_BAD_BINDING;
         }
+        if ((binding->direction == NAI_BINDING_INPUT || binding->direction == NAI_BINDING_OUTPUT) &&
+            binding->rank == 4u && binding->layout != NAI_LAYOUT_NHWC) return NAI_LOADER_BAD_BINDING;
         if (binding->data_type == NAI_DTYPE_I8) {
             element_bytes = 1u;
         } else if (binding->data_type == NAI_DTYPE_I32) {
@@ -188,7 +203,13 @@ nai_loader_status_t nai_model_validate_bindings_v1(const nai_model_view_v1_t *vi
             binding->byte_size != required_bytes) {
             return NAI_LOADER_BAD_BINDING;
         }
+        for (uint32_t previous = 0u; previous < index; previous++) {
+            if (bindings[previous].direction == binding->direction &&
+                bindings[previous].index == binding->index) return NAI_LOADER_BAD_BINDING;
+        }
     }
+    if (input_count != view->header->input_count || output_count != view->header->output_count)
+        return NAI_LOADER_BAD_BINDING;
     return NAI_LOADER_OK;
 }
 
@@ -248,9 +269,9 @@ nai_loader_status_t nai_model_open_stream_v1(const nai_model_reader_v1_t *reader
         header->entry_command_off >= view->commands->offset + view->commands->size ||
         !is_aligned(header->entry_command_off, NAI_ALIGNMENT_BYTES)) return NAI_LOADER_BAD_SECTION;
 
-    uint32_t binding_count = header->input_count + header->output_count;
+    uint32_t binding_count = view->bindings->element_count;
     uint32_t binding_bytes;
-    if (binding_count < header->input_count || binding_count > NAI_MAX_PUBLIC_BINDINGS_V1 ||
+    if (binding_count > NAI_MAX_BINDINGS_V1 ||
         !multiply_checked(binding_count, sizeof(nai_binding_v1_t), &binding_bytes) ||
         binding_bytes > view->bindings->size) return NAI_LOADER_BAD_BINDING;
     if (binding_bytes != 0u && reader->read(reader->context, view->bindings->offset,
