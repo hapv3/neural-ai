@@ -116,18 +116,25 @@ static uint32_t validate_runtime_bindings(const nai_model_view_v1_t *view,
         }
     }
 
+    /* Canonicalise the runtime table once so trusted command dispatch can
+       resolve compiler-owned references by model binding slot in O(1). */
     for (uint32_t model_index = 0; model_index < model_count; model_index++) {
         const nai_binding_v1_t *binding = &view->public_bindings[model_index];
-        uint32_t found = 0u;
-        for (uint32_t runtime_index = 0; runtime_index < invocation->binding_count; runtime_index++) {
+        uint32_t found = model_count;
+        for (uint32_t runtime_index = model_index; runtime_index < invocation->binding_count; runtime_index++) {
             const nai_binding_address_v1_t *address = &g_binding_addresses[runtime_index];
             if (address->direction == binding->direction && address->index == binding->index) {
                 if (address->byte_size < binding->byte_size) return 0u;
-                found = 1u;
+                found = runtime_index;
                 break;
             }
         }
-        if (!found) return 0u;
+        if (found == model_count) return 0u;
+        if (found != model_index) {
+            nai_binding_address_v1_t temporary = g_binding_addresses[model_index];
+            g_binding_addresses[model_index] = g_binding_addresses[found];
+            g_binding_addresses[found] = temporary;
+        }
     }
     return 1u;
 }

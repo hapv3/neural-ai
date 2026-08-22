@@ -32,8 +32,39 @@ static nai_dispatch_status_v2_t resolve(const nai_model_view_v1_t *view,
                                         const nai_ref_v1_t *ref, uint32_t bytes,
                                         uint32_t alignment, uint32_t *address)
 {
+#if defined(NAI_TRUSTED_FIRMWARE)
+    uint32_t base;
+    (void)bytes;
+    (void)alignment;
+    switch (ref->region) {
+        case NAI_REGION_MODEL_CONSTANTS:
+            base = resolver->model_base + view->constants->offset;
+            break;
+        case NAI_REGION_MODEL_COMMANDS:
+            base = resolver->model_base + view->commands->offset;
+            break;
+        case NAI_REGION_INPUT_BINDING:
+            base = resolver->bindings[ref->index].base;
+            break;
+        case NAI_REGION_OUTPUT_BINDING:
+            base = resolver->bindings[view->header->input_count + ref->index].base;
+            break;
+        case NAI_REGION_L2_TEMP_BINDING:
+            base = resolver->bindings[view->header->input_count +
+                view->header->output_count].base;
+            break;
+        case NAI_REGION_TCDM_SCRATCH:
+            base = resolver->tcdm_scratch_base;
+            break;
+        default:
+            return NAI_DISPATCH_BAD_REFERENCE;
+    }
+    *address = base + ref->offset;
+    return NAI_DISPATCH_OK;
+#else
     nai_loader_status_t status = nai_resolve_ref_v1(view, resolver, ref, bytes, alignment, address);
     return status == NAI_LOADER_OK ? NAI_DISPATCH_OK : NAI_DISPATCH_BAD_REFERENCE;
+#endif
 }
 
 static uint32_t multiply(uint32_t lhs, uint32_t rhs, uint32_t *result)
@@ -117,10 +148,15 @@ static nai_dispatch_status_v2_t run_rq_load(const nai_cmd_rq_load_v2_t *command,
                                              const nai_runtime_ops_v2_t *ops)
 {
     uint32_t qparam_offset;
+#if !defined(NAI_TRUSTED_FIRMWARE)
     uint32_t qparam_bytes;
+#endif
     uint32_t address;
-    if (ops->rq_load == 0 || view->qparams == 0 ||
-        NAI_TRUSTED_INVALID(command->qparam_count != 32u || command->reserved != 0u) ||
+    if (ops->rq_load == 0 || view->qparams == 0) return NAI_DISPATCH_BAD_COMMAND;
+#if defined(NAI_TRUSTED_FIRMWARE)
+    qparam_offset = command->qparam_index * sizeof(nai_qparam_v1_t);
+#else
+    if (command->qparam_count != 32u || command->reserved != 0u ||
         command->qparam_index > view->qparams->element_count ||
         command->qparam_count > view->qparams->element_count - command->qparam_index ||
         !multiply(command->qparam_index, sizeof(nai_qparam_v1_t), &qparam_offset) ||
@@ -133,8 +169,11 @@ static nai_dispatch_status_v2_t run_rq_load(const nai_cmd_rq_load_v2_t *command,
         resolver->model_base + view->qparams->offset > 0xffffffffu - qparam_offset) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
+#endif
     address = resolver->model_base + view->qparams->offset + qparam_offset;
+#if !defined(NAI_TRUSTED_FIRMWARE)
     if ((address & (NAI_ALIGNMENT_BYTES - 1u)) != 0u) return NAI_DISPATCH_BAD_REFERENCE;
+#endif
     return ops->rq_load(ops->context, address, command->qparam_count,
         command->qparam_block) == 0u ? NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
@@ -146,11 +185,14 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
 {
     uint32_t source;
     uint32_t destination;
+#if !defined(NAI_TRUSTED_FIRMWARE)
     uint32_t source_bytes;
     uint32_t destination_bytes;
-    if (ops->dma_2d == 0 ||
-        NAI_TRUSTED_INVALID(command->length == 0u || command->repetitions_2 == 0u ||
-            !all_zero(command->reserved, 3u)) ||
+#endif
+    if (ops->dma_2d == 0) return NAI_DISPATCH_BAD_COMMAND;
+#if !defined(NAI_TRUSTED_FIRMWARE)
+    if (command->length == 0u || command->repetitions_2 == 0u ||
+        !all_zero(command->reserved, 3u) ||
         !multiply(command->source_stride_2, command->repetitions_2 - 1u, &source_bytes) ||
         source_bytes > 0xffffffffu - command->length ||
         !multiply(command->destination_stride_2, command->repetitions_2 - 1u, &destination_bytes) ||
@@ -159,13 +201,19 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
     }
     source_bytes += command->length;
     destination_bytes += command->length;
-    if (NAI_TRUSTED_INVALID(validate_dma_direction(&command->source, &command->destination,
-            command->direction) != NAI_DISPATCH_OK))
+    if (validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes, 1u, &source) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
+#else
+    if (resolve(view, resolver, &command->source, 0u, 1u, &source) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->destination, 0u, 1u, &destination) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+#endif
     return ops->dma_2d(ops->context, source, destination, command->length,
         command->source_stride_2, command->destination_stride_2, command->repetitions_2,
         command->direction) == 0u ? NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
@@ -178,13 +226,16 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
 {
     uint32_t source_2;
     uint32_t destination_2;
+#if !defined(NAI_TRUSTED_FIRMWARE)
     uint32_t source_3;
     uint32_t destination_3;
     uint32_t source_bytes;
     uint32_t destination_bytes;
-    if (ops->dma_3d == 0 ||
-        NAI_TRUSTED_INVALID(command->length == 0u || command->repetitions_2 == 0u ||
-            command->repetitions_3 == 0u) ||
+#endif
+    if (ops->dma_3d == 0) return NAI_DISPATCH_BAD_COMMAND;
+#if !defined(NAI_TRUSTED_FIRMWARE)
+    if (command->length == 0u || command->repetitions_2 == 0u ||
+        command->repetitions_3 == 0u ||
         !multiply(command->source_stride_2, command->repetitions_2 - 1u, &source_2) ||
         !multiply(command->destination_stride_2, command->repetitions_2 - 1u, &destination_2) ||
         !multiply(command->source_stride_3, command->repetitions_3 - 1u, &source_3) ||
@@ -199,13 +250,19 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
     }
     source_bytes += command->length;
     destination_bytes += command->length;
-    if (NAI_TRUSTED_INVALID(validate_dma_direction(&command->source, &command->destination,
-            command->direction) != NAI_DISPATCH_OK))
+    if (validate_dma_direction(&command->source, &command->destination,
+            command->direction) != NAI_DISPATCH_OK)
         return NAI_DISPATCH_BAD_COMMAND;
     if (resolve(view, resolver, &command->source, source_bytes, 1u, &source_2) != NAI_DISPATCH_OK ||
         resolve(view, resolver, &command->destination, destination_bytes, 1u, &destination_2) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
+#else
+    if (resolve(view, resolver, &command->source, 0u, 1u, &source_2) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->destination, 0u, 1u, &destination_2) != NAI_DISPATCH_OK) {
+        return NAI_DISPATCH_BAD_REFERENCE;
+    }
+#endif
     return ops->dma_3d(ops->context, source_2, destination_2, command->length,
         command->source_stride_2, command->destination_stride_2, command->repetitions_2,
         command->source_stride_3, command->destination_stride_3, command->repetitions_3,
