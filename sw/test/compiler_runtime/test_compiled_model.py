@@ -1164,6 +1164,12 @@ def _compile_generic_k3_conv_model():
     )
 
 
+def _compile_generic_k3_c48_conv_model():
+    return _compile_tflite_fixture_model(
+        "generic_k3_conv_h4w4_k48_n32", "neural-ai-compiled-k3-c48-", compressed=True
+    )
+
+
 def _compile_high_c16_slice_model():
     return _compile_tflite_fixture_model(
         "c32_high_c16_slice_h2w3", "neural-ai-compiled-high-c16-slice-"
@@ -3616,6 +3622,75 @@ async def test_compiler_generated_generic_k3_conv_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == bytes(expected)
+
+
+@cocotb.test()
+async def test_compiler_generated_generic_k3_c48_tail_package(dut):
+    import numpy as np
+    import tensorflow as tf
+
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 4, 4, 48
+    input_values = [((pixel * 5 + channel * 3) % 17) - 8
+                    for pixel in range(height * width)
+                    for channel in range(channels)]
+    fixture = Path(__file__).with_name(
+        "generic_k3_conv_h4w4_k48_n32.tflite.zlib.b64"
+    )
+    tflite_model = zlib.decompress(base64.b64decode(fixture.read_text(encoding="ascii")))
+    interpreter = tf.lite.Interpreter(
+        model_content=tflite_model,
+        experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    )
+    interpreter.allocate_tensors()
+    input_detail = interpreter.get_input_details()[0]
+    output_detail = interpreter.get_output_details()[0]
+    interpreter.set_tensor(
+        input_detail["index"], np.asarray(input_values, dtype=np.int8).reshape(1, 4, 4, 48)
+    )
+    interpreter.invoke()
+    expected = interpreter.get_tensor(output_detail["index"]).tobytes()
+
+    model = _compile_generic_k3_c48_conv_model()
+    commands_offset = struct.unpack_from("<I", model, 64 + 8)[0]
+    commands_size = struct.unpack_from("<I", model, 64 + 12)[0]
+    offset = commands_offset
+    linebuffer_jobs = 0
+    while offset < commands_offset + commands_size:
+        command_type, command_size = struct.unpack_from("<HH", model, offset)
+        if command_type == 9:
+            linebuffer_jobs += 1
+        offset += command_size
+    assert offset == commands_offset + commands_size
+    assert linebuffer_jobs == 2
+
+    input_data = bytes(value & 0xFF for value in input_values)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
 
 
 @cocotb.test()
