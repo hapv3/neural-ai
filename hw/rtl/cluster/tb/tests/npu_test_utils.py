@@ -63,6 +63,7 @@ PMU_COUNTER_NAMES = [
 TCDM_NUM_BANKS = 16
 TCDM_BANK_WORDS = 1024
 TCDM_WORD_BYTES = 32
+TCDM_TOTAL_BYTES = TCDM_NUM_BANKS * TCDM_BANK_WORDS * TCDM_WORD_BYTES
 NPU_DTCM_BASE = 0x10008000
 NPU_CMD_CTRL_BASE = 0x20005000
 NPU_CMD_L2_BASE = NPU_CMD_CTRL_BASE + 0x00
@@ -403,6 +404,41 @@ def read_tcdm_word32(dut, addr):
     for byte_idx in range(4):
         word |= read_tcdm_byte(dut, addr + byte_idx) << (byte_idx * 8)
     return word
+
+
+def read_tcdm_bytes(dut):
+    """Read the complete interleaved TCDM image in logical address order."""
+    data = bytearray(TCDM_TOTAL_BYTES)
+    for bank_idx in range(TCDM_NUM_BANKS):
+        memory = dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem
+        for word_index in range(TCDM_BANK_WORDS):
+            value = memory[word_index].value
+            if not value.is_resolvable:
+                raise AssertionError(
+                    f"unresolved TCDM word bank={bank_idx} word={word_index}"
+                )
+            logical_word = word_index * TCDM_NUM_BANKS + bank_idx
+            offset = logical_word * TCDM_WORD_BYTES
+            data[offset : offset + TCDM_WORD_BYTES] = value.to_unsigned().to_bytes(
+                TCDM_WORD_BYTES, "little"
+            )
+    return bytes(data)
+
+
+def write_tcdm_bytes(dut, data):
+    """Restore a complete logical-address TCDM image through VPI deposits."""
+    if len(data) != TCDM_TOTAL_BYTES:
+        raise ValueError(
+            f"TCDM snapshot has {len(data)} bytes, expected {TCDM_TOTAL_BYTES}"
+        )
+    for bank_idx in range(TCDM_NUM_BANKS):
+        memory = dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem
+        for word_index in range(TCDM_BANK_WORDS):
+            logical_word = word_index * TCDM_NUM_BANKS + bank_idx
+            offset = logical_word * TCDM_WORD_BYTES
+            memory[word_index].value = int.from_bytes(
+                data[offset : offset + TCDM_WORD_BYTES], "little"
+            )
 
 
 def read_dtcm_word(dut, addr):

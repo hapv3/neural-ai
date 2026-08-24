@@ -309,7 +309,74 @@ This splits RGB staging/configuration from the first linebuffer job and proves
 that the second segment consumes preserved SRAM state. The current smoke test
 passes both segments; command 6 completes in 52,081 PMU cycles after reset.
 
-### 5.4 Full selected graph
+### 5.4 Persistent snapshots between simulator runs
+
+Segmented continuation avoids replay inside one simulator process. To avoid
+replaying an established prefix after stopping and starting a new process,
+write a persistent snapshot at a clean command boundary:
+
+```bash
+env \
+  PYTHONPATH=/home/dev01/neural-ai/sw/test/compiler_runtime \
+  YOLO320_SEGMENT_ENDS=131 \
+  YOLO320_SEGMENT_TIMEOUT_CYCLES=1000000 \
+  YOLO320_SNAPSHOT_OUT=/tmp/yolo320-command-131.snapshot \
+  make -j10 sim \
+    COCOTB_TEST_MODULES=test_compiled_model \
+    COCOTB_TEST_FILTER=test_compiler_generated_selected_yolo320_segmented_prefix \
+    CLUSTER_SIM_NAME=test_compiled_model
+```
+
+Resume in a separate simulator run without executing commands 1–131:
+
+```bash
+env \
+  PYTHONPATH=/home/dev01/neural-ai/sw/test/compiler_runtime \
+  YOLO320_SNAPSHOT_IN=/tmp/yolo320-command-131.snapshot \
+  YOLO320_SEGMENT_ENDS=141 \
+  YOLO320_SEGMENT_TIMEOUT_CYCLES=1000000 \
+  YOLO320_SNAPSHOT_OUT=/tmp/yolo320-command-141.snapshot \
+  make -j10 sim \
+    COCOTB_TEST_MODULES=test_compiled_model \
+    COCOTB_TEST_FILTER=test_compiler_generated_selected_yolo320_segmented_prefix \
+    CLUSTER_SIM_NAME=test_compiled_model
+```
+
+The snapshot contains:
+
+- the command boundary;
+- CRC32 of the complete compiled model;
+- all 16 x 1,024 x 32-byte physical TCDM storage in logical-address order;
+- the 307,200-byte selected-model L2 temporary arena;
+- the 176,400-byte public output buffer;
+- sizes and CRC32 of the uncompressed state payload;
+- a zlib-compressed payload.
+
+The deterministic input binding and `.nai` model are loaded normally. Model
+constants do not need to be duplicated in the snapshot. Restore is performed
+while logic is held in reset; TCDM and L2 state are deposited before reset is
+released and trusted firmware starts the suffix command stream.
+
+Snapshot safety rules:
+
+- create snapshots only after a segment reports PASS and IRQ;
+- a snapshot must match the exact full-model CRC, so recompiling to a different
+  package invalidates it even if tensor shapes look unchanged;
+- the boundary stored in the snapshot must be lower than the first requested
+  segment end;
+- do not edit or concatenate snapshot files;
+- keep snapshots in `/tmp` or another artifact directory, not in Git;
+- a restored suffix must produce the same status, command count, PMU behavior,
+  and output as continuation in one simulator process.
+
+Minimal two-process validation uses command 5 as the saved boundary. First
+generate `/tmp/yolo320-command-5.snapshot`, then restore it with
+`YOLO320_SEGMENT_ENDS=6`. This checks both VPI TCDM restore and L2 restore before
+using a large checkpoint. The verified restore run executes only command 6 and
+reports 52,081 PMU cycles, exactly matching command 6 after in-process segmented
+continuation; its systolic, DMA, and TCDM event counts also match.
+
+### 5.5 Full selected graph
 
 ```bash
 env PYTHONPATH=/home/dev01/neural-ai/sw/test/compiler_runtime \
@@ -323,7 +390,7 @@ The full test compiles all 3,910 commands and compares the public output with
 TensorFlow Lite `BUILTIN_REF`. Use it only after focused and segmented gates
 are green.
 
-### 5.5 Parallel broad regression
+### 5.6 Parallel broad regression
 
 ```bash
 cd /home/dev01/neural-ai

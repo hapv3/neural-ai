@@ -23,14 +23,18 @@ from npu_test_utils import (
     NPU_CMD_STATUS_PASS,
     _axi_read32,
     format_pmu_report,
+    hold_reset,
     load_firmware_elf_axi,
     program_command_queue,
     read_dtcm_word,
     read_l2_bytes,
+    read_tcdm_bytes,
     release_fetch,
+    release_reset,
     reset_dut,
     wait_for_host_irq,
     write_l2_bytes,
+    write_tcdm_bytes,
 )
 
 
@@ -1262,6 +1266,49 @@ def _extract_selected_yolo320_command_range(model, first_command, end_command):
     struct.pack_into("<I", package, commands_descriptor + 12, len(selected) + 32)
     struct.pack_into("<I", package, commands_descriptor + 20, command_count)
     return bytes(package)
+
+
+_YOLO320_SNAPSHOT_MAGIC = b"NAISNP01"
+_YOLO320_SNAPSHOT_HEADER = struct.Struct("<8s6I")
+
+
+def _encode_yolo320_snapshot(model, command_boundary, tcdm, l2_temporary, output):
+    payload = bytes(tcdm) + bytes(l2_temporary) + bytes(output)
+    header = _YOLO320_SNAPSHOT_HEADER.pack(
+        _YOLO320_SNAPSHOT_MAGIC,
+        command_boundary,
+        zlib.crc32(model) & 0xFFFFFFFF,
+        len(tcdm),
+        len(l2_temporary),
+        len(output),
+        zlib.crc32(payload) & 0xFFFFFFFF,
+    )
+    return header + zlib.compress(payload, level=1)
+
+
+def _decode_yolo320_snapshot(model, snapshot):
+    if len(snapshot) < _YOLO320_SNAPSHOT_HEADER.size:
+        raise ValueError("YOLO320 snapshot is truncated")
+    magic, boundary, model_crc, tcdm_bytes, temporary_bytes, output_bytes, payload_crc = (
+        _YOLO320_SNAPSHOT_HEADER.unpack_from(snapshot)
+    )
+    if magic != _YOLO320_SNAPSHOT_MAGIC:
+        raise ValueError("YOLO320 snapshot magic is invalid")
+    if model_crc != (zlib.crc32(model) & 0xFFFFFFFF):
+        raise ValueError("YOLO320 snapshot model CRC does not match")
+    payload = zlib.decompress(snapshot[_YOLO320_SNAPSHOT_HEADER.size :])
+    if len(payload) != tcdm_bytes + temporary_bytes + output_bytes:
+        raise ValueError("YOLO320 snapshot payload size does not match")
+    if payload_crc != (zlib.crc32(payload) & 0xFFFFFFFF):
+        raise ValueError("YOLO320 snapshot payload CRC does not match")
+    temporary_offset = tcdm_bytes
+    output_offset = temporary_offset + temporary_bytes
+    return (
+        boundary,
+        payload[:temporary_offset],
+        payload[temporary_offset:output_offset],
+        payload[output_offset:],
+    )
 
 
 def _compile_high_c16_slice_model():
@@ -4004,17 +4051,15 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
 
     _, full_model = _compile_selected_yolo320_model()
     total_commands = struct.unpack_from("<I", full_model, 32)[0]
+    snapshot_input_path = os.environ.get("YOLO320_SNAPSHOT_IN", "")
+    snapshot_output_path = os.environ.get("YOLO320_SNAPSHOT_OUT", "")
+    first_command = 0
     segment_ends = [
         int(value)
         for value in os.environ.get("YOLO320_SEGMENT_ENDS", "131,141").split(",")
         if value.strip()
     ]
     assert segment_ends
-    assert all(
-        previous < current
-        for previous, current in zip([0] + segment_ends[:-1], segment_ends)
-    )
-    assert segment_ends[-1] <= total_commands
     timeout_cycles = int(os.environ.get("YOLO320_SEGMENT_TIMEOUT_CYCLES", "1000000"))
 
     input_base = 0x80000000
@@ -4033,10 +4078,33 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
         (3, 0, l2_temporary_base, l2_temporary_bytes),
     ]
     await write_l2_bytes(dut, input_base, input_data)
-    await write_l2_bytes(dut, output_base, bytes(output_bytes))
-    await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
+    if snapshot_input_path:
+        boundary, tcdm, l2_temporary, output = _decode_yolo320_snapshot(
+            full_model, Path(snapshot_input_path).read_bytes()
+        )
+        assert len(l2_temporary) == l2_temporary_bytes
+        assert len(output) == output_bytes
+        first_command = boundary
+        await hold_reset(dut)
+        write_tcdm_bytes(dut, tcdm)
+        await write_l2_bytes(dut, l2_temporary_base, l2_temporary)
+        await write_l2_bytes(dut, output_base, output)
+        await release_reset(dut)
+        dut._log.info(
+            "YOLO320 restored snapshot after command %d from %s",
+            first_command,
+            snapshot_input_path,
+        )
+    else:
+        await write_l2_bytes(dut, output_base, bytes(output_bytes))
+        await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
 
-    first_command = 0
+    assert all(
+        previous < current
+        for previous, current in zip([first_command] + segment_ends[:-1], segment_ends)
+    )
+    assert segment_ends[-1] <= total_commands
+
     for segment_index, end_command in enumerate(segment_ends):
         if segment_index != 0:
             await reset_dut(dut)
@@ -4072,6 +4140,22 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
             end_command,
         )
         first_command = end_command
+
+    if snapshot_output_path:
+        snapshot = _encode_yolo320_snapshot(
+            full_model,
+            first_command,
+            read_tcdm_bytes(dut),
+            await read_l2_bytes(dut, l2_temporary_base, l2_temporary_bytes),
+            await read_l2_bytes(dut, output_base, output_bytes),
+        )
+        Path(snapshot_output_path).write_bytes(snapshot)
+        dut._log.info(
+            "YOLO320 wrote snapshot after command %d to %s (%d bytes)",
+            first_command,
+            snapshot_output_path,
+            len(snapshot),
+        )
 
 
 @cocotb.test()
