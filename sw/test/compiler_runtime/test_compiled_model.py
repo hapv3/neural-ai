@@ -25,6 +25,7 @@ from npu_test_utils import (
     format_pmu_report,
     load_firmware_elf_axi,
     program_command_queue,
+    read_dtcm_word,
     read_l2_bytes,
     release_fetch,
     reset_dut,
@@ -1170,6 +1171,99 @@ def _compile_generic_k3_c48_conv_model():
     )
 
 
+def _compile_selected_yolo320_model():
+    default_root = Path(__file__).resolve().parents[4] / "neural-compiler"
+    compiler_root = Path(os.environ.get("NEURAL_COMPILER_ROOT", default_root)).resolve()
+    model_path = compiler_root / "test/model/yolov8n_320_int8.tflite"
+    extension_modules = list((compiler_root / "ethosu").glob("regor*.so"))
+    if not extension_modules or not model_path.is_file():
+        raise RuntimeError("Selected YOLO320 compiler model or Python extension is missing")
+    with tempfile.TemporaryDirectory(prefix="neural-ai-compiled-yolo320-") as temporary_dir:
+        output_path = Path(temporary_dir) / "output"
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; from ethosu.vela.vela import main; raise SystemExit(main(sys.argv[1:]))",
+            "--accelerator-config=neural-ai",
+            "--output-format=nai",
+            f"--output-dir={output_path}",
+            str(model_path),
+        ]
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(compiler_root), environment.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        result = subprocess.run(
+            command,
+            cwd=compiler_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Neural compiler failed ({result.returncode}):\n{result.stdout}\n{result.stderr}"
+            )
+        package = (output_path / "yolov8n_320_int8.nai").read_bytes()
+    assert package[:4] == b"NAIM"
+    return model_path, package
+
+
+def _extract_selected_yolo320_command_prefix(model, command_count):
+    package = _extract_selected_yolo320_command_range(model, 0, command_count)
+    section_table_offset = struct.unpack_from("<I", package, 24)[0]
+    section_count = struct.unpack_from("<I", package, 20)[0]
+    commands_offset = next(
+        struct.unpack_from("<I", package, section_table_offset + index * 32 + 8)[0]
+        for index in range(section_count)
+        if struct.unpack_from("<I", package, section_table_offset + index * 32)[0] == 1
+    )
+    first_stem_types = [3, 3, 3, 3, 5, 9]
+    offset = commands_offset
+    assert command_count >= len(first_stem_types)
+    for expected_type in first_stem_types:
+        command_type, command_size = struct.unpack_from("<HH", package, offset)
+        assert command_type == expected_type
+        offset += command_size
+    return package
+
+
+def _extract_selected_yolo320_command_range(model, first_command, end_command):
+    package = bytearray(model)
+    section_table_offset = struct.unpack_from("<I", package, 24)[0]
+    section_count = struct.unpack_from("<I", package, 20)[0]
+    commands_descriptor = None
+    for index in range(section_count):
+        descriptor = section_table_offset + index * 32
+        if struct.unpack_from("<I", package, descriptor)[0] == 1:
+            commands_descriptor = descriptor
+            break
+    assert commands_descriptor is not None
+
+    commands_offset = struct.unpack_from("<I", package, commands_descriptor + 8)[0]
+    total_commands = struct.unpack_from("<I", package, 32)[0]
+    assert 0 <= first_command < end_command <= total_commands
+    offset = commands_offset
+    command_offsets = [commands_offset]
+    for _ in range(total_commands):
+        command_type, command_size = struct.unpack_from("<HH", package, offset)
+        assert command_type != 0
+        assert command_size >= 32
+        offset += command_size
+        command_offsets.append(offset)
+
+    selected = bytes(package[command_offsets[first_command] : command_offsets[end_command]])
+    selected_end = commands_offset + len(selected)
+    package[commands_offset:selected_end] = selected
+    package[selected_end:selected_end + 32] = _command_header(0, 32) + bytes(16)
+    command_count = end_command - first_command
+    struct.pack_into("<I", package, 32, command_count)
+    struct.pack_into("<I", package, commands_descriptor + 12, len(selected) + 32)
+    struct.pack_into("<I", package, commands_descriptor + 20, command_count)
+    return bytes(package)
+
+
 def _compile_high_c16_slice_model():
     return _compile_tflite_fixture_model(
         "c32_high_c16_slice_h2w3", "neural-ai-compiled-high-c16-slice-"
@@ -1364,6 +1458,124 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
 
 
 
+def _firmware_symbol_address(symbol_name):
+    repository_root = Path(__file__).resolve().parents[3]
+    nm = repository_root / "hw/spatz/install/llvm/bin/llvm-nm"
+    firmware = repository_root / "sw/runtime/neural_ai/neural_ai.elf"
+    result = subprocess.run(
+        [str(nm), "-n", str(firmware)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) == 3 and fields[2] == symbol_name:
+            return int(fields[0], 16)
+    raise AssertionError(f"firmware symbol not found: {symbol_name}")
+
+
+def _describe_model_command(model, descriptor_header):
+    command_type, command_size, _flags, layer_id, tile_id = struct.unpack(
+        "<HHIII", descriptor_header
+    )
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    section_count = struct.unpack_from("<I", model, 20)[0]
+    commands_offset = None
+    for section_index in range(section_count):
+        descriptor_offset = section_table_offset + section_index * 32
+        if struct.unpack_from("<I", model, descriptor_offset)[0] == 1:
+            commands_offset = struct.unpack_from("<I", model, descriptor_offset + 8)[0]
+            break
+    if commands_offset is None:
+        return "command=unknown (commands section missing)"
+
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    offset = commands_offset
+    matches = []
+    for command_index in range(command_count):
+        if model[offset : offset + 16] == descriptor_header:
+            matches.append(command_index)
+        _, size = struct.unpack_from("<HH", model, offset)
+        offset += size
+    if len(matches) == 1:
+        command = f"command={matches[0] + 1}/{command_count} (index={matches[0]})"
+    elif matches:
+        command = f"command_candidates={matches}"
+    else:
+        command = "command=unknown"
+    return (
+        f"{command}, type={command_type}, size={command_size}, "
+        f"layer={layer_id}, tile={tile_id}"
+    )
+
+
+def _current_model_command(dut, model, command_buffer_address):
+    descriptor_header = b"".join(
+        read_dtcm_word(dut, command_buffer_address + offset).to_bytes(4, "little")
+        for offset in range(0, 16, 4)
+    )
+    return _describe_model_command(model, descriptor_header)
+
+
+def _systolic_debug_state(dut):
+    systolic_states = ("IDLE", "LOAD_WEIGHTS", "COMPUTE", "WAIT_DRAIN", "DONE")
+    drain_states = ("IDLE", "ACCUM_READ", "ACCUM_WRITE", "ACCUM_REQUANT")
+    linebuf_states = (
+        "IDLE",
+        "ENSURE",
+        "FILL_REQ0",
+        "FILL_REQ1",
+        "FILL_DRAIN",
+        "WINDOW_REQ",
+        "WINDOW_WAIT",
+        "STREAM_PRIME",
+        "STREAM_EMIT",
+        "BYPASS_PREP",
+        "BYPASS_REQ0",
+        "BYPASS_WAIT0",
+        "BYPASS_REQ1",
+        "BYPASS_WAIT1",
+        "STREAM_DONE",
+    )
+
+    def state_name(signal, names):
+        value = int(signal.value) if signal.value.is_resolvable else -1
+        return names[value] if 0 <= value < len(names) else str(value)
+
+    details = [
+        f"sys={state_name(dut.debug_sys_state_o, systolic_states)}",
+        f"drain={state_name(dut.debug_sys_drain_state_o, drain_states)}",
+        f"linebuf={state_name(dut.debug_linebuf_state_o, linebuf_states)}",
+    ]
+    controller = getattr(dut.u_npu_cluster, "u_sys_ctrl", None)
+    if controller is None:
+        return ", ".join(details)
+    for label, signal_name in (
+        ("req", "req_cnt_q"),
+        ("rsp", "rsp_cnt_q"),
+        ("remaining", "drain_cnt_q"),
+        ("k_tile", "k_tile_idx_q"),
+        ("weight_empty", "weight_fifo_empty"),
+        ("ofm_empty", "ofm_fifo_empty"),
+        ("lb_prefetch_busy", "linebuf_prefetch_busy"),
+    ):
+        signal = getattr(controller, signal_name, None)
+        if signal is not None and signal.value.is_resolvable:
+            details.append(f"{label}={int(signal.value)}")
+    linebuffer = getattr(controller, "i_conv_channel_linebuf_packer", None)
+    if linebuffer is not None:
+        for label, signal_name in (
+            ("bg", "bg_state_q"),
+            ("beat_fifo", "bf_count_q"),
+            ("emitted", "emitted_vectors_q"),
+        ):
+            signal = getattr(linebuffer, signal_name, None)
+            if signal is not None and signal.value.is_resolvable:
+                details.append(f"{label}={int(signal.value)}")
+    return ", ".join(details)
+
+
 async def _load_and_run(
     dut,
     axi_master,
@@ -1371,6 +1583,7 @@ async def _load_and_run(
     timeout_cycles=600000,
     measure_pmu=False,
     invocation_base=INVOCATION_BASE,
+    model=None,
 ):
     await load_firmware_elf_axi(
         dut,
@@ -1379,12 +1592,26 @@ async def _load_and_run(
     )
     await program_command_queue(axi_master, invocation_base, len(invocation))
     await release_fetch(dut, axi_master=axi_master)
+    command_buffer_address = (
+        _firmware_symbol_address("g_command_buffer") if model is not None else None
+    )
+    progress_callback = lambda: "; ".join(
+        detail
+        for detail in (
+            _current_model_command(dut, model, command_buffer_address)
+            if model is not None
+            else "",
+            _systolic_debug_state(dut),
+        )
+        if detail
+    )
     try:
         counters = await wait_for_host_irq(
             dut,
             timeout_cycles=timeout_cycles,
             axi_master=axi_master,
             report_name="test_compiler_runtime",
+            progress_callback=progress_callback,
         )
     except AssertionError as error:
         status = await _axi_read32(axi_master, NPU_CMD_STATUS)
@@ -1395,10 +1622,16 @@ async def _load_and_run(
         program_counter = (
             pc_signal.value.to_unsigned() if pc_signal.value.is_resolvable else 0
         )
+        command_progress = (
+            _current_model_command(dut, model, command_buffer_address)
+            if model is not None
+            else "command=unavailable"
+        )
+        systolic_progress = _systolic_debug_state(dut)
         raise AssertionError(
             f"{error}; status={status} fail=0x{fail_code:08x} "
             f"pointer=0x{fail_pointer:08x} done={done_count} "
-            f"pc=0x{program_counter:08x}"
+            f"pc=0x{program_counter:08x}; {command_progress}; {systolic_progress}"
         ) from error
     if measure_pmu:
         return counters
@@ -3691,6 +3924,228 @@ async def test_compiler_generated_generic_k3_c48_tail_package(dut):
     command_count = struct.unpack_from("<I", model, 32)[0]
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_selected_yolo320_first_stem_tile(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    _, full_model = _compile_selected_yolo320_model()
+    prefix_commands = int(os.environ.get("YOLO320_PREFIX_COMMANDS", "6"))
+    timeout_cycles = int(os.environ.get("YOLO320_PREFIX_TIMEOUT_CYCLES", "1000000"))
+    model = _extract_selected_yolo320_command_prefix(full_model, prefix_commands)
+    input_base = 0x80000000
+    output_base = 0x80100000
+    l2_temporary_base = 0x80200000
+    invocation_base = 0x81400000
+    model_base = 0x81000000
+    binding_table_base = 0x81401000
+    input_bytes = 320 * 320 * 3
+    output_bytes = 84 * 2100
+    l2_temporary_bytes = 307200
+    input_data = bytes(((index * 37 + 11) & 0xFF) for index in range(input_bytes))
+    runtime_bindings = [
+        (1, 0, input_base, input_bytes),
+        (2, 0, output_base, output_bytes),
+        (3, 0, l2_temporary_base, l2_temporary_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(output_bytes))
+    await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=timeout_cycles,
+        invocation_base=invocation_base,
+        model=model,
+    )
+
+    status = await _axi_read32(axi_master, NPU_CMD_STATUS)
+    fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
+    fail_pointer = await _axi_read32(axi_master, NPU_CMD_FAIL_PTR)
+    done_count = await _axi_read32(axi_master, NPU_CMD_DONE_COUNT)
+    assert (status, fail_code, fail_pointer, done_count) == (
+        NPU_CMD_STATUS_PASS,
+        0,
+        0,
+        prefix_commands,
+    )
+
+
+@cocotb.test()
+async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
+    """Continue a YOLO command prefix across resets without clearing SRAM."""
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    _, full_model = _compile_selected_yolo320_model()
+    total_commands = struct.unpack_from("<I", full_model, 32)[0]
+    segment_ends = [
+        int(value)
+        for value in os.environ.get("YOLO320_SEGMENT_ENDS", "131,141").split(",")
+        if value.strip()
+    ]
+    assert segment_ends
+    assert all(
+        previous < current
+        for previous, current in zip([0] + segment_ends[:-1], segment_ends)
+    )
+    assert segment_ends[-1] <= total_commands
+    timeout_cycles = int(os.environ.get("YOLO320_SEGMENT_TIMEOUT_CYCLES", "1000000"))
+
+    input_base = 0x80000000
+    output_base = 0x80100000
+    l2_temporary_base = 0x80200000
+    invocation_base = 0x81400000
+    model_base = 0x81000000
+    binding_table_base = 0x81401000
+    input_bytes = 320 * 320 * 3
+    output_bytes = 84 * 2100
+    l2_temporary_bytes = 307200
+    input_data = bytes(((index * 37 + 11) & 0xFF) for index in range(input_bytes))
+    runtime_bindings = [
+        (1, 0, input_base, input_bytes),
+        (2, 0, output_base, output_bytes),
+        (3, 0, l2_temporary_base, l2_temporary_bytes),
+    ]
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(output_bytes))
+    await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
+
+    first_command = 0
+    for segment_index, end_command in enumerate(segment_ends):
+        if segment_index != 0:
+            await reset_dut(dut)
+        model = _extract_selected_yolo320_command_range(
+            full_model, first_command, end_command
+        )
+        invocation, binding_addresses = build_invocation_with_bindings(
+            model,
+            runtime_bindings,
+            model_base=model_base,
+            binding_table_base=binding_table_base,
+        )
+        await write_l2_bytes(dut, model_base, model)
+        await write_l2_bytes(dut, binding_table_base, binding_addresses)
+        await write_l2_bytes(dut, invocation_base, invocation)
+
+        await _load_and_run(
+            dut,
+            axi_master,
+            invocation,
+            timeout_cycles=timeout_cycles,
+            invocation_base=invocation_base,
+            model=model,
+        )
+        segment_commands = end_command - first_command
+        assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+        assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+        assert await _axi_read32(axi_master, NPU_CMD_FAIL_PTR) == 0
+        assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == segment_commands
+        dut._log.info(
+            "YOLO320 segmented prefix completed commands %d-%d",
+            first_command + 1,
+            end_command,
+        )
+        first_command = end_command
+
+
+@cocotb.test()
+async def test_compiler_generated_selected_yolo320_full_graph(dut):
+    import numpy as np
+    import tensorflow as tf
+
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model_path, model = _compile_selected_yolo320_model()
+    input_base = 0x80000000
+    output_base = 0x80100000
+    l2_temporary_base = 0x80200000
+    invocation_base = 0x81400000
+    model_base = 0x81000000
+    binding_table_base = 0x81401000
+    input_bytes = 320 * 320 * 3
+    output_bytes = 84 * 2100
+    l2_temporary_bytes = 307200
+
+    interpreter = tf.lite.Interpreter(
+        model_path=str(model_path),
+        experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    )
+    interpreter.allocate_tensors()
+    input_detail = interpreter.get_input_details()[0]
+    output_detail = interpreter.get_output_details()[0]
+    input_values = ((np.arange(input_bytes, dtype=np.uint32) * 37 + 11) & 0xFF).astype(np.uint8)
+    input_tensor = input_values.view(np.int8).reshape(1, 320, 320, 3)
+    interpreter.set_tensor(input_detail["index"], input_tensor)
+    interpreter.invoke()
+    expected = interpreter.get_tensor(output_detail["index"]).tobytes()
+    assert len(expected) == output_bytes
+
+    assert struct.unpack_from("<I", model, 32)[0] == 3910
+    assert struct.unpack_from("<I", model, 36)[0] <= 520192
+    runtime_bindings = [
+        (1, 0, input_base, input_bytes),
+        (2, 0, output_base, output_bytes),
+        (3, 0, l2_temporary_base, l2_temporary_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, input_base, input_values.tobytes())
+    await write_l2_bytes(dut, output_base, bytes(output_bytes))
+    await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=10_000_000,
+        invocation_base=invocation_base,
+        model=model,
+    )
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 3910
+    assert bytes(await read_l2_bytes(dut, output_base, output_bytes)) == expected
 
 
 @cocotb.test()

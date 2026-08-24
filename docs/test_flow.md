@@ -3,6 +3,10 @@
 **Scope**: Current cluster verification after DMA/TCDM and Spatz integration work.
 **Firmware layout**: all standalone test firmware lives under `sw/test/<name>`.
 
+For copy-paste build commands, compiler-generated YOLO prefix/segmented tests,
+progress-log fields, PMU interpretation, and failure triage, see
+[compiler_runtime_verilator_test_debug_guide.md](compiler_runtime_verilator_test_debug_guide.md).
+
 ---
 
 ## 1. SW Test Layout

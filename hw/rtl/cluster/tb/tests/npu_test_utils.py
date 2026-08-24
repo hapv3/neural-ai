@@ -1,7 +1,13 @@
 import os
 import struct
 
-from cocotb.triggers import ClockCycles, RisingEdge, Timer
+from cocotb.triggers import (
+    ClockCycles,
+    RisingEdge,
+    SimTimeoutError,
+    Timer,
+    with_timeout,
+)
 
 
 PASS_SIGNATURE = 0xDEADBEEF
@@ -291,8 +297,19 @@ async def release_fetch(dut, axi_master=None, enable_pmu=True):
     await Timer(1, unit="ns")
 
 
-async def wait_for_host_irq(dut, timeout_cycles=50000, axi_master=None, report_name=None):
-    for _ in range(timeout_cycles):
+async def wait_for_host_irq(
+    dut,
+    timeout_cycles=50000,
+    axi_master=None,
+    report_name=None,
+    progress_callback=None,
+):
+    # Cluster tests use a 1 ns clock.  Waiting on each edge from Python makes
+    # full-model simulations needlessly slow, so let the simulator run until
+    # IRQ or the next progress interval instead.
+    progress_interval_cycles = 100_000
+    elapsed_cycles = 0
+    while elapsed_cycles < timeout_cycles:
         irq_value = dut.irq_o.value
         if irq_value.is_resolvable and int(irq_value) == 1:
             if axi_master is not None:
@@ -301,7 +318,23 @@ async def wait_for_host_irq(dut, timeout_cycles=50000, axi_master=None, report_n
                 dut._log.info("%s%s", prefix, format_pmu_report(report))
                 return report
             return None
-        await RisingEdge(dut.clk_i)
+        interval_cycles = min(
+            progress_interval_cycles,
+            timeout_cycles - elapsed_cycles,
+        )
+        try:
+            await with_timeout(
+                RisingEdge(dut.irq_o),
+                interval_cycles,
+                timeout_unit="ns",
+            )
+        except SimTimeoutError:
+            elapsed_cycles += interval_cycles
+            progress = progress_callback() if progress_callback is not None else ""
+            dut._log.info(
+                f"waiting for host irq: {elapsed_cycles:,}/{timeout_cycles:,} cycles"
+                f"{'; ' + progress if progress else ''}"
+            )
     raise AssertionError("timeout waiting for host irq")
 
 async def write_l2_bytes(dut, base_addr, data):
