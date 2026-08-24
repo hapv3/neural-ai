@@ -7,6 +7,9 @@
 #define SYSTOLIC_GEMM32_N 32u
 #define SYSTOLIC_GEMM32_TILE_M 1024u
 #define SYSTOLIC_GEMM32_ACCUM_TILE_M 256u
+#define SYSTOLIC_LINEBUF_SCHEDULE_NONE 0u
+#define SYSTOLIC_LINEBUF_SCHEDULE_C32_GROUP_STATIONARY 1u
+#define SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32 2u
 
 typedef struct {
     uint32_t input_base;
@@ -31,6 +34,7 @@ typedef struct {
     uint16_t pool;
     uint16_t c32_fast;
     uint16_t depthwise;
+    /* Bit mask selecting a Regor-prevalidated multi-K seed schedule. */
     uint16_t c32_group_stationary;
     uint16_t block_valid_bytes;
     uint16_t k_seed_kh;

@@ -715,7 +715,7 @@ static void linebuf_config_from_conv(const npu_conv2d_packed_cfg_t *cfg,
     if (linebuf_cfg->c32_fast && kgen &&
         stride_c == SYSTOLIC_GEMM32_K &&
         cfg->input_c_base == 0u &&
-        cfg->input_c > SYSTOLIC_GEMM32_K &&
+        cfg->input_c >= SYSTOLIC_GEMM32_K &&
         ((cfg->input_c % SYSTOLIC_GEMM32_K) == 0u)) {
         linebuf_cfg->channel_addr_offset = cfg->input_h * row_stride_bytes;
         linebuf_cfg->c32_group_stationary = 1u;
@@ -765,7 +765,8 @@ static void linebuf_job_apply_c32_group_span(const npu_conv2d_packed_cfg_t *cfg,
          * adds when k_seed_ic crosses into the next C32 group.
          */
         job->linebuf.channel_addr_offset = cfg->input_h * input_row_stride_bytes(cfg);
-        job->linebuf.c32_group_stationary = (uint16_t)(cfg->input_c > NPU_CONV2D_PACKED_K_TILE);
+        job->linebuf.c32_group_stationary =
+            SYSTOLIC_LINEBUF_SCHEDULE_C32_GROUP_STATIONARY;
     }
 }
 

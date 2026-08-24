@@ -247,6 +247,7 @@ module systolic_controller #(
     logic          cfg_linebuf_c32_fast_i;
     logic          cfg_linebuf_depthwise_i;
     logic          cfg_linebuf_c32_group_stationary_i;
+    logic          cfg_linebuf_generic_linear_k32_i;
     logic [31:0]   cfg_linebuf_input_base_i;
     logic [15:0]   cfg_linebuf_input_h_i;
     logic [15:0]   cfg_linebuf_input_w_i;
@@ -439,13 +440,11 @@ module systolic_controller #(
     assign debug_linebuf_state_o = linebuf_debug_state;
     assign linebuf_spatial_m = (cfg_linebuf_spatial_m_i != 32'd0) ? cfg_linebuf_spatial_m_i : cfg_sys_dim_m_i;
     assign linebuf_kgen_multi = cfg_linebuf_en_i && cfg_linebuf_coalesce_i && cfg_linebuf_kgen_i &&
-                                cfg_linebuf_c32_fast_i &&
-                                (cfg_linebuf_lane_base_i == 6'd0) &&
-                                (cfg_linebuf_block_valid_bytes_eff == 6'(ARRAY_DIM)) &&
-                                (cfg_linebuf_input_c_i >= 16'(ARRAY_DIM)) &&
-                                (cfg_linebuf_input_c_i[4:0] == 5'd0) &&
+                                (cfg_linebuf_c32_group_stationary_i ||
+                                 cfg_linebuf_generic_linear_k32_i) &&
                                 (cfg_linebuf_k_tiles_i > 32'd1);
-    assign linebuf_c32_group_stationary = linebuf_kgen_multi;
+    assign linebuf_c32_group_stationary = linebuf_kgen_multi &&
+                                          cfg_linebuf_c32_group_stationary_i;
     assign linebuf_pool_mode = cfg_linebuf_en_i && cfg_linebuf_pool_i;
     assign linebuf_depthwise_mode = cfg_linebuf_en_i && cfg_linebuf_depthwise_i;
     assign dw_tap_is_last = (({27'd0, dw_tap_count_q} + 32'd1) == pool_kernel_vectors);
@@ -585,6 +584,33 @@ module systolic_controller #(
         end
     endfunction
 
+    function automatic void advance_k_seed32_generic_linear_k32(
+        input  logic [7:0]  kh_i,
+        input  logic [7:0]  kw_i,
+        input  logic [15:0] ic_i,
+        input  logic [15:0] kernel_h_i,
+        input  logic [15:0] kernel_w_i,
+        output logic [7:0]  kh_o,
+        output logic [7:0]  kw_o,
+        output logic [15:0] ic_o
+    );
+        begin
+            kh_o = kh_i;
+            kw_o = kw_i;
+            ic_o = ic_i;
+            if ((kw_i + 8'd1) == kernel_w_i[7:0]) begin
+                kw_o = '0;
+                if ((kh_i + 8'd1) == kernel_h_i[7:0]) begin
+                    kh_o = '0;
+                end else begin
+                    kh_o = kh_i + 8'd1;
+                end
+            end else begin
+                kw_o = kw_i + 8'd1;
+            end
+        end
+    endfunction
+
     always_comb begin
         if (linebuf_c32_group_stationary) begin
             advance_k_seed32_c32_group_stationary(k_seed_kh_q,
@@ -596,6 +622,15 @@ module systolic_controller #(
                                                   k_seed_kh_next,
                                                   k_seed_kw_next,
                                                   k_seed_ic_next);
+        end else if (linebuf_kgen_multi && cfg_linebuf_generic_linear_k32_i) begin
+            advance_k_seed32_generic_linear_k32(k_seed_kh_q,
+                                                k_seed_kw_q,
+                                                k_seed_ic_q,
+                                                cfg_linebuf_kernel_h_i,
+                                                cfg_linebuf_kernel_w_i,
+                                                k_seed_kh_next,
+                                                k_seed_kw_next,
+                                                k_seed_ic_next);
         end else begin
             k_seed_kh_next = cfg_linebuf_k_seed_kh_i;
             k_seed_kw_next = cfg_linebuf_k_seed_kw_i;
@@ -1114,6 +1149,7 @@ module systolic_controller #(
         .cfg_linebuf_c32_fast_o(cfg_linebuf_c32_fast_i),
         .cfg_linebuf_depthwise_o(cfg_linebuf_depthwise_i),
         .cfg_linebuf_c32_group_stationary_o(cfg_linebuf_c32_group_stationary_i),
+        .cfg_linebuf_generic_linear_k32_o(cfg_linebuf_generic_linear_k32_i),
         .cfg_linebuf_kgen_o (cfg_linebuf_kgen_i),
         .cfg_linebuf_input_base_o(cfg_linebuf_input_base_i),
         .cfg_linebuf_input_h_o(cfg_linebuf_input_h_i),
@@ -1589,6 +1625,15 @@ module systolic_controller #(
                     array_flush_cnt_d = array_flush_cnt_q - 1'b1;
                 end
 
+                // The line-buffer formatter may still hold its final row after
+                // the last compute input was accepted.  Keep the output
+                // handshake open until that pipeline is empty; otherwise a
+                // following one-cycle START can arrive while the line-buffer
+                // is still in CH_STREAM_DONE and be lost.
+                if (cfg_linebuf_en_i) begin
+                    linebuf_row_ready = 1'b1;
+                end
+
                 service_weight_preload_engine();
                 service_linebuf_prefetch_engine();
 
@@ -1600,7 +1645,7 @@ module systolic_controller #(
                             advance_to_next_k_tile(1'b0);
                         end else if (linebuf_has_next_k_tile) begin
                             state_d = WAIT_DRAIN;
-                        end else begin
+                        end else if (!cfg_linebuf_en_i || !linebuf_busy) begin
                             state_d = DONE;
                         end
                     end
@@ -1612,7 +1657,7 @@ module systolic_controller #(
                             advance_to_next_k_tile(1'b0);
                         end else if (linebuf_has_next_k_tile) begin
                             state_d = WAIT_DRAIN;
-                        end else begin
+                        end else if (!cfg_linebuf_en_i || !linebuf_busy) begin
                             state_d = DONE;
                         end
                     end

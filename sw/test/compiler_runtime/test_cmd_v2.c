@@ -869,6 +869,19 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 0u && state.calls == 0u);
+    linebuf->job.linebuf.c32_fast = 0u;
+    linebuf->job.linebuf.block_valid_bytes = 16u;
+    linebuf->job.linebuf.c32_group_stationary =
+        SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    linebuf->job.linebuf.c32_group_stationary = 0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 0u && state.calls == 0u);
 
     memset(gemm_model, 0, sizeof(gemm_model));
     gemm_header.command_count = 1;

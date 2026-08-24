@@ -52,6 +52,8 @@ LB_COALESCE = 0x2
 LB_KGEN = 0x4
 LB_POOL = 0x8
 LB_C32_FAST = 0x10
+LB_C32_GROUP_STATIONARY = 0x40
+LB_GENERIC_LINEAR_K32 = 0x80
 
 
 def mem_index(addr):
@@ -202,7 +204,9 @@ async def program_linebuf(dut, *, input_base, input_h, input_w, input_c,
                           output_h, output_w, kernel_h, kernel_w,
                           stride_h=1, stride_w=1, pad_h=0, pad_w=0,
                           c_base=0, lane_base=0, coalesce=False, kgen=False,
-                          pool=False, c32_fast=False, k_tiles=1,
+                          pool=False, c32_fast=False, c32_group_stationary=None,
+                          generic_linear_k32=False,
+                          k_tiles=1,
                           k_seed_kh=0, k_seed_kw=0, k_seed_ic=0,
                           block_valid_bytes=0, channel_offset=0,
                           coalesce_k_bytes=0, dim_m=None,
@@ -248,6 +252,12 @@ async def program_linebuf(dut, *, input_base, input_h, input_w, input_c,
         ctrl |= LB_POOL
     if c32_fast:
         ctrl |= LB_C32_FAST
+    if c32_group_stationary is None:
+        c32_group_stationary = c32_fast and coalesce and kgen and k_tiles > 1
+    if c32_group_stationary:
+        ctrl |= LB_C32_GROUP_STATIONARY
+    if generic_linear_k32:
+        ctrl |= LB_GENERIC_LINEAR_K32
     await mmio_write(dut, REG_LB_CTRL, ctrl)
 
 
@@ -262,6 +272,10 @@ async def start_and_wait(dut, timeout_cycles=20000):
         if int(dut.perf_weight_load_en_o.value) == 1:
             weight += 1
         if int(dut.cfg_sys_done_o.value) == 1:
+            if int(dut.dut.cfg_linebuf_en_i.value) == 1:
+                assert int(dut.dut.linebuf_busy.value) == 0, (
+                    "systolic_controller asserted done while line-buffer was busy"
+                )
             return {"compute": compute, "weight": weight}
     raise AssertionError("systolic_controller did not complete before timeout")
 

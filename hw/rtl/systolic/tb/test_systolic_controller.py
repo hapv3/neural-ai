@@ -594,7 +594,11 @@ async def systolic_controller_channel_linebuf_kgen_3x3_c32(dut):
     await mmio_write(dut, REG_LB_K_TILES, k_tiles)
     await mmio_write(dut, REG_LB_K_SEED, 0)
     await configure_c32_linebuf_fast_path(dut, kernel_h, kernel_w)
-    await mmio_write(dut, REG_LB_CTRL, 0x7 | REG_LB_CTRL_C32_FAST)
+    await mmio_write(
+        dut,
+        REG_LB_CTRL,
+        0x7 | REG_LB_CTRL_C32_FAST | REG_LB_CTRL_C32_GROUP_STATIONARY,
+    )
     await mmio_write(dut, REG_SYS_START, 1)
 
     compute_pulses = 0
@@ -846,7 +850,11 @@ async def systolic_controller_channel_linebuf_kgen_3x3_c32_requant(dut):
     await mmio_write(dut, REG_LB_K_TILES, k_tiles)
     await mmio_write(dut, REG_LB_K_SEED, 0)
     await configure_c32_linebuf_fast_path(dut, kernel_h, kernel_w)
-    await mmio_write(dut, REG_LB_CTRL, 0x7 | REG_LB_CTRL_C32_FAST)
+    await mmio_write(
+        dut,
+        REG_LB_CTRL,
+        0x7 | REG_LB_CTRL_C32_FAST | REG_LB_CTRL_C32_GROUP_STATIONARY,
+    )
     await mmio_write(dut, REG_SYS_START, 1)
 
     compute_pulses = 0

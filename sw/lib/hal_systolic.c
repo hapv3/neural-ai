@@ -181,7 +181,12 @@ void systolic_linebuf_config(const systolic_linebuf_cfg_t *cfg) {
                            (cfg->pool ? REG_LB_CTRL_POOL : 0u) |
                            (cfg->c32_fast ? REG_LB_CTRL_C32_FAST : 0u) |
                            (cfg->depthwise ? REG_LB_CTRL_DEPTHWISE : 0u) |
-                           (cfg->c32_group_stationary ? REG_LB_CTRL_C32_GROUP_STATIONARY : 0u));
+                           ((cfg->c32_group_stationary &
+                             SYSTOLIC_LINEBUF_SCHEDULE_C32_GROUP_STATIONARY) ?
+                                REG_LB_CTRL_C32_GROUP_STATIONARY : 0u) |
+                           ((cfg->c32_group_stationary &
+                             SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32) ?
+                                REG_LB_CTRL_GENERIC_LINEAR_K32 : 0u));
 }
 
 void systolic_maxpool5x5s1p2_c32_linebuf(uint32_t input_addr,

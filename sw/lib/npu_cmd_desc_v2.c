@@ -720,7 +720,7 @@ static nai_dispatch_status_v2_t run_linebuf_job(
     const uint32_t max_rows = command->job.gemm.accum_en == 0u ? 1024u : 256u;
     uint32_t expected_k_tiles;
     uint32_t kernel_elements;
-    uint32_t expected_group_stationary;
+    uint32_t expected_kgen_schedule;
     if (command->job.rows == 0u || command->job.rows > max_rows ||
         command->job.k_tiles == 0u || command->job.k_tiles > 0xffffu ||
         command->job.linebuf.kernel_h == 0u || command->job.linebuf.kernel_h > 5u ||
@@ -746,7 +746,7 @@ static nai_dispatch_status_v2_t run_linebuf_job(
         command->job.gemm.accum_en > 3u ||
         command->job.linebuf.coalesce > 1u || command->job.linebuf.kgen > 1u ||
         command->job.linebuf.pool > 1u || command->job.linebuf.c32_fast > 1u ||
-        command->job.linebuf.depthwise > 1u || command->job.linebuf.c32_group_stationary > 1u ||
+        command->job.linebuf.depthwise > 1u || command->job.linebuf.c32_group_stationary > 2u ||
         command->job.linebuf.stride_h == 0u || command->job.linebuf.stride_h > 2u ||
         command->job.linebuf.stride_w == 0u || command->job.linebuf.stride_w > 2u ||
         command->job.linebuf.kernel_h == 0u || command->job.linebuf.kernel_h > 5u ||
@@ -762,16 +762,22 @@ static nai_dispatch_status_v2_t run_linebuf_job(
         (command->job.gemm.accum_en != 0u && command->job.gemm.psum_row_stride_bytes == 0u)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
-    expected_group_stationary =
-        command->job.linebuf.coalesce == 1u &&
-        command->job.linebuf.kgen == 1u &&
-        command->job.linebuf.c32_fast == 1u &&
-        command->job.linebuf.lane_base == 0u &&
-        command->job.linebuf.block_valid_bytes == 32u &&
-        command->job.linebuf.input_c >= 32u &&
-        (command->job.linebuf.input_c & 31u) == 0u &&
-        command->job.k_tiles > 1u;
-    if (command->job.linebuf.c32_group_stationary != expected_group_stationary)
+    expected_kgen_schedule = SYSTOLIC_LINEBUF_SCHEDULE_NONE;
+    if (command->job.linebuf.coalesce == 1u &&
+        command->job.linebuf.kgen == 1u && command->job.k_tiles > 1u) {
+        if (command->job.linebuf.c32_fast == 1u &&
+            command->job.linebuf.lane_base == 0u &&
+            command->job.linebuf.block_valid_bytes == 32u &&
+            command->job.linebuf.input_c >= 32u &&
+            (command->job.linebuf.input_c & 31u) == 0u) {
+            expected_kgen_schedule = SYSTOLIC_LINEBUF_SCHEDULE_C32_GROUP_STATIONARY;
+        } else if (command->job.linebuf.c32_fast == 0u &&
+                   command->job.linebuf.input_c == 32u &&
+                   command->job.linebuf.pixel_stride_bytes == 32u) {
+            expected_kgen_schedule = SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32;
+        }
+    }
+    if (command->job.linebuf.c32_group_stationary != expected_kgen_schedule)
         return NAI_DISPATCH_BAD_COMMAND;
 #else
     if (ops->linebuf_job == 0) return NAI_DISPATCH_BAD_COMMAND;

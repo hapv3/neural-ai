@@ -11,6 +11,8 @@ from systolic_controller_case_utils import (
     OFM_ADDR,
     WEIGHT_ADDR,
     clear_output_i32,
+    clear_output_i8,
+    configure_identity_requant,
     disable_optional_modes,
     fill_weight_tiles,
     pack_u8,
@@ -239,3 +241,60 @@ async def systolic_controller_linebuf_kgen_3x3_stride2_c32fast(dut):
         expected_channels=32,
         timeout_cycles=40000,
     )
+
+
+@cocotb.test()
+async def systolic_controller_linebuf_generic_kgen_consecutive_spatial_tiles(dut):
+    """Generic C16 KGEN must finish all K tiles and release the formatter."""
+    await start_clock_and_reset(dut)
+    await disable_optional_modes(dut)
+
+    input_h = 7
+    input_w = 161
+    input_c = 32
+    output_h = 3
+    output_w = 80
+    rows = output_h * output_w
+    k_tiles = 9
+    first_ifm = 0x00004000
+    second_ifm = first_ifm + input_w * input_c
+    first_ofm = 0x00012000
+    second_ofm = 0x00014000
+
+    write_bytes(dut, first_ifm, [1] * (input_h * input_w * input_c))
+    fill_weight_tiles(dut, WEIGHT_ADDR, k_tiles=k_tiles)
+    clear_output_i8(dut, first_ofm, rows)
+    clear_output_i8(dut, second_ofm, rows)
+    await configure_identity_requant(dut, shift=0)
+
+    async def run_tile(input_base, output_base):
+        await program_linebuf(
+            dut,
+            input_base=input_base,
+            input_h=input_h,
+            input_w=input_w,
+            input_c=input_c,
+            output_h=output_h,
+            output_w=output_w,
+            kernel_h=3,
+            kernel_w=3,
+            stride_h=2,
+            stride_w=2,
+            pad_h=1,
+            pad_w=1,
+            coalesce=True,
+            kgen=True,
+            c32_fast=False,
+            generic_linear_k32=True,
+            k_tiles=k_tiles,
+            block_valid_bytes=16,
+            channel_offset=0,
+            coalesce_k_bytes=3 * 3 * 16,
+            dim_m=rows,
+            ofm_addr=output_base,
+        )
+        stats = await start_and_wait(dut, timeout_cycles=500000)
+        assert stats["compute"] == rows * k_tiles
+
+    await run_tile(first_ifm, first_ofm)
+    await run_tile(second_ifm, second_ofm)
