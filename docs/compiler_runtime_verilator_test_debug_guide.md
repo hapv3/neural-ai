@@ -357,6 +357,24 @@ constants do not need to be duplicated in the snapshot. Restore is performed
 while logic is held in reset; TCDM and L2 state are deposited before reset is
 released and trusted firmware starts the suffix command stream.
 
+When `YOLO320_SEGMENT_ENDS` contains multiple boundaries, the harness writes a
+snapshot immediately after every segment that reports PASS. Use a `{command}`
+placeholder for explicit filenames:
+
+```bash
+YOLO320_SEGMENT_ENDS=611,623,635,647,659,671,683,700 \
+YOLO320_SNAPSHOT_OUT='/tmp/yolo320-command-{command}.snapshot'
+```
+
+This creates snapshots for commands 611, 623, 635, 647, 659, 671, 683, and
+700. A path such as `/tmp/yolo320-command-700.snapshot` is also accepted; the
+trailing command value is replaced for each boundary. For a generic path such
+as `/tmp/yolo320-checkpoint.snapshot`, the generated names are
+`yolo320-checkpoint-command-611.snapshot`, etc. A single boundary retains the
+exact output path for backward compatibility. Because each snapshot is written
+before the next logic reset, completed checkpoints remain available if a later
+segment times out or fails.
+
 Snapshot safety rules:
 
 - create snapshots only after a segment reports PASS and IRQ;

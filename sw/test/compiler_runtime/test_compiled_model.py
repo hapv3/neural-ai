@@ -1311,6 +1311,21 @@ def _decode_yolo320_snapshot(model, snapshot):
     )
 
 
+def _yolo320_snapshot_output_path(path_spec, command_boundary, multiple_boundaries):
+    if "{command}" in path_spec:
+        return Path(path_spec.replace("{command}", str(command_boundary)))
+    path = Path(path_spec)
+    if not multiple_boundaries:
+        return path
+    marker = "command-"
+    marker_offset = path.stem.rfind(marker)
+    if marker_offset >= 0 and path.stem[marker_offset + len(marker) :].isdigit():
+        stem = path.stem[: marker_offset + len(marker)] + str(command_boundary)
+    else:
+        stem = f"{path.stem}-command-{command_boundary}"
+    return path.with_name(stem + path.suffix)
+
+
 def _compile_high_c16_slice_model():
     return _compile_tflite_fixture_model(
         "c32_high_c16_slice_h2w3", "neural-ai-compiled-high-c16-slice-"
@@ -4105,6 +4120,7 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
     )
     assert segment_ends[-1] <= total_commands
 
+    multiple_snapshot_boundaries = len(segment_ends) > 1
     for segment_index, end_command in enumerate(segment_ends):
         if segment_index != 0:
             await reset_dut(dut)
@@ -4140,22 +4156,24 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
             end_command,
         )
         first_command = end_command
-
-    if snapshot_output_path:
-        snapshot = _encode_yolo320_snapshot(
-            full_model,
-            first_command,
-            read_tcdm_bytes(dut),
-            await read_l2_bytes(dut, l2_temporary_base, l2_temporary_bytes),
-            await read_l2_bytes(dut, output_base, output_bytes),
-        )
-        Path(snapshot_output_path).write_bytes(snapshot)
-        dut._log.info(
-            "YOLO320 wrote snapshot after command %d to %s (%d bytes)",
-            first_command,
-            snapshot_output_path,
-            len(snapshot),
-        )
+        if snapshot_output_path:
+            output_path = _yolo320_snapshot_output_path(
+                snapshot_output_path, first_command, multiple_snapshot_boundaries
+            )
+            snapshot = _encode_yolo320_snapshot(
+                full_model,
+                first_command,
+                read_tcdm_bytes(dut),
+                await read_l2_bytes(dut, l2_temporary_base, l2_temporary_bytes),
+                await read_l2_bytes(dut, output_base, output_bytes),
+            )
+            output_path.write_bytes(snapshot)
+            dut._log.info(
+                "YOLO320 wrote snapshot after command %d to %s (%d bytes)",
+                first_command,
+                output_path,
+                len(snapshot),
+            )
 
 
 @cocotb.test()
