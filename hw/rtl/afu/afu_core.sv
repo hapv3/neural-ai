@@ -13,6 +13,7 @@ module afu_core #(
     input  logic [31:0]  cfg_dst_ptr_i,
     input  logic [31:0]  cfg_length_i,
     input  logic [2:0]   cfg_mode_i,
+    input  logic signed [31:0] cfg_add_bias_i,
     input  logic         cfg_start_i,
 
     // LUT write interface
@@ -299,17 +300,26 @@ module afu_core #(
 
     function automatic logic [7:0] add_i8_byte(
         input logic [7:0] lhs_u8,
-        input logic [7:0] rhs_u8
+        input logic [7:0] rhs_u8,
+        input logic signed [9:0] bias_i10
     );
         logic signed [7:0] lhs_i8;
         logic signed [7:0] rhs_i8;
-        logic signed [15:0] sum_i16;
+        logic signed [10:0] sum_i11;
         logic signed [8:0] clamped_i9;
         begin
             lhs_i8 = $signed(lhs_u8);
             rhs_i8 = $signed(rhs_u8);
-            sum_i16 = lhs_i8 + rhs_i8;
-            clamped_i9 = clamp_i8(sum_i16);
+            sum_i11 = {{3{lhs_i8[7]}}, lhs_i8} +
+                      {{3{rhs_i8[7]}}, rhs_i8} +
+                      {{1{bias_i10[9]}}, bias_i10};
+            if (sum_i11 > 11'sd127) begin
+                clamped_i9 = 9'sd127;
+            end else if (sum_i11 < -11'sd128) begin
+                clamped_i9 = -9'sd128;
+            end else begin
+                clamped_i9 = 9'(sum_i11);
+            end
             add_i8_byte = clamped_i9[7:0];
         end
     endfunction
@@ -1542,7 +1552,8 @@ module afu_core #(
                         cur_out_off = p1_dst_addr_q[4:0] + 5'(i);
                         s2_out_buf_comb[cur_out_off * 8 +: 8] = add_i8_byte(
                             select_input_byte(p1_lhs_data_q, {1'b0, p1_src_addr_q[4:0]} + 6'(i)),
-                            select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i))
+                            select_input_byte(p1_rhs_data_q, {1'b0, p1_rhs_addr_q[4:0]} + 6'(i)),
+                            $signed(cfg_add_bias_i[9:0])
                         );
                         s2_out_be_comb[cur_out_off] = 1'b1;
                     end

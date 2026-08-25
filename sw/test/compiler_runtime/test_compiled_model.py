@@ -178,10 +178,10 @@ def _depthwise_c32(weights, ifm, ofm, input_h, input_w, output_h, output_w,
     return command
 
 
-def _afu_binary(lhs, rhs, ofm, length, mode, tile):
+def _afu_binary(lhs, rhs, ofm, length, mode, tile, bias=0):
     command = _command_header(13, 64, tile=tile)
     command += lhs + rhs + ofm
-    command += struct.pack("<2I4I", length, mode, 0, 0, 0, 0)
+    command += struct.pack("<2Ii3I", length, mode, bias, 0, 0, 0)
     assert len(command) == 64
     return command
 
@@ -381,6 +381,29 @@ def build_afu_add_model():
             _afu_binary(
                 _ref(6), _ref(6, offset=0x200), _ref(6, offset=0x400),
                 tensor_bytes, 1, 2,
+            ),
+            _copy_layout(_ref(6, offset=0x400), _ref(4), 4, dimensions, 3),
+            _command_header(0, 32, tile=4).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=dimensions)
+        + _binding(1, 1, dimensions=dimensions)
+        + _binding(2, 0, dimensions=dimensions)
+    )
+    return _package(commands, b"", bindings, 4, 0x480, 2, 1)
+
+
+def build_afu_add_bias_model(bias):
+    dimensions = (1, 2, 2, 32)
+    tensor_bytes = 2 * 2 * 32
+    commands = b"".join(
+        [
+            _copy_layout(_ref(3, 0), _ref(6), 3, dimensions, 0),
+            _copy_layout(_ref(3, 1), _ref(6, offset=0x200), 3, dimensions, 1),
+            _afu_binary(
+                _ref(6), _ref(6, offset=0x200), _ref(6, offset=0x400),
+                tensor_bytes, 2, 2, bias,
             ),
             _copy_layout(_ref(6, offset=0x400), _ref(4), 4, dimensions, 3),
             _command_header(0, 32, tile=4).ljust(32, b"\x00"),
@@ -1873,6 +1896,53 @@ async def test_compiler_runtime_afu_add_c32_package(dut):
     invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
     await write_l2_bytes(dut, INPUT_BASE, bytes(value & 0xFF for value in lhs_values))
     await write_l2_bytes(dut, INPUT2_BASE, bytes(value & 0xFF for value in rhs_values))
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_runtime_afu_add_bias_c32_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 2 * 2 * 32
+    bias = 110
+    lhs_values = [((index * 37 + 11) & 0xFF) - 128 for index in range(count)]
+    rhs_values = [((index * 19 + 7) & 0xFF) - 128 for index in range(count)]
+    expected = bytes(
+        max(-128, min(127, lhs + rhs + bias)) & 0xFF
+        for lhs, rhs in zip(lhs_values, rhs_values)
+    )
+    model = build_afu_add_bias_model(bias)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (1, 1, INPUT2_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(
+        dut, INPUT_BASE, bytes(value & 0xFF for value in lhs_values)
+    )
+    await write_l2_bytes(
+        dut, INPUT2_BASE, bytes(value & 0xFF for value in rhs_values)
+    )
     await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
     await write_l2_bytes(dut, MODEL_BASE, model)
     await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)

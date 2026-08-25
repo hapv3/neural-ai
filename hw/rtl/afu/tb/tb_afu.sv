@@ -13,6 +13,7 @@ module tb_afu;
     localparam logic [2:0] MODE_8BIT  = 3'd0;
     localparam logic [2:0] MODE_16BIT = 3'd1;
     localparam logic [2:0] MODE_32BIT = 3'd2;
+    localparam logic [2:0] MODE_ADD_I8 = 3'd4;
     localparam logic [2:0] MODE_DFL4_ROW32_Q8 = 3'd5;
     localparam logic [2:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 3'd6;
     localparam logic [31:0] AFU_CSR_BASE = 32'h400;
@@ -86,13 +87,11 @@ module tb_afu;
         .done_o         (done)
     );
 
-    assign obi_rhs_gnt = 1'b0;
-    assign obi_rhs_rvalid = 1'b0;
-    assign obi_rhs_rdata = '0;
-
     logic [7:0] tcdm_mem [0:MEM_SIZE-1];
     logic       read_pending_q;
     logic [31:0] read_addr_q;
+    logic       rhs_read_pending_q;
+    logic [31:0] rhs_read_addr_q;
     int unsigned mem_cycle_q;
 
     int errors;
@@ -103,6 +102,34 @@ module tb_afu;
     initial begin
         clk_i = 1'b0;
         forever #5 clk_i = ~clk_i;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            obi_rhs_gnt       <= 1'b0;
+            obi_rhs_rvalid    <= 1'b0;
+            obi_rhs_rdata     <= '0;
+            rhs_read_pending_q <= 1'b0;
+            rhs_read_addr_q   <= '0;
+        end else begin
+            int unsigned base;
+            obi_rhs_gnt    <= 1'b0;
+            obi_rhs_rvalid <= 1'b0;
+            obi_rhs_rdata  <= '0;
+            if (rhs_read_pending_q) begin
+                base = rhs_read_addr_q % MEM_SIZE;
+                for (int b = 0; b < MEM_BYTES; b++) begin
+                    obi_rhs_rdata[b*8 +: 8] <= tcdm_mem[(base + b) % MEM_SIZE];
+                end
+                obi_rhs_rvalid     <= 1'b1;
+                rhs_read_pending_q <= 1'b0;
+            end
+            if (obi_rhs_req && !obi_rhs_gnt && ((mem_cycle_q % 7) != 0)) begin
+                obi_rhs_gnt       <= 1'b1;
+                rhs_read_pending_q <= 1'b1;
+                rhs_read_addr_q   <= obi_rhs_addr;
+            end
+        end
     end
 
     initial begin
@@ -225,6 +252,22 @@ module tb_afu;
         write_obi(AFU_CSR_BASE + 32'h0c, length);
         write_obi(AFU_CSR_BASE + 32'h10, {29'd0, MODE_DFL4_ROW32_Q8});
         write_obi(AFU_CSR_BASE + 32'h14, 32'd16);
+        write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
+    endtask
+
+    task automatic start_add_bias_afu(
+        input logic [31:0] lhs_ptr,
+        input logic [31:0] rhs_ptr,
+        input logic [31:0] dst_ptr,
+        input logic [31:0] length,
+        input integer      bias
+    );
+        write_obi(AFU_CSR_BASE + 32'h04, lhs_ptr);
+        write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
+        write_obi(AFU_CSR_BASE + 32'h0c, length);
+        write_obi(AFU_CSR_BASE + 32'h10, {29'd0, MODE_ADD_I8});
+        write_obi(AFU_CSR_BASE + 32'h14, rhs_ptr);
+        write_obi(AFU_CSR_BASE + 32'h18, 32'(bias));
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
 
@@ -545,6 +588,57 @@ module tb_afu;
         end
     endtask
 
+    task automatic check_add_bias_case(
+        input string name,
+        input int lhs_base,
+        input int rhs_base,
+        input int dst_base,
+        input int length,
+        input int bias
+    );
+        $display("[AFU TB] %s: biased add lhs=0x%0h rhs=0x%0h dst=0x%0h len=%0d bias=%0d",
+                 name, lhs_base, rhs_base, dst_base, length, bias);
+        $fflush();
+        for (int i = 0; i < length; i++) begin
+            tcdm_mem[(lhs_base + i) % MEM_SIZE] = 8'(((i * 37 + 11) % 256) - 128);
+            tcdm_mem[(rhs_base + i) % MEM_SIZE] = 8'(((i * 19 + 7) % 256) - 128);
+        end
+        for (int i = -16; i < length + 16; i++) begin
+            tcdm_mem[(dst_base + i + MEM_SIZE) % MEM_SIZE] = 8'ha5;
+        end
+
+        start_add_bias_afu(lhs_base, rhs_base, dst_base, length, bias);
+        wait_done(name);
+
+        for (int i = 0; i < length; i++) begin
+            int lhs;
+            int rhs;
+            int expected;
+            logic [7:0] actual;
+            lhs = $signed({{24{tcdm_mem[(lhs_base + i) % MEM_SIZE][7]}},
+                           tcdm_mem[(lhs_base + i) % MEM_SIZE]});
+            rhs = $signed({{24{tcdm_mem[(rhs_base + i) % MEM_SIZE][7]}},
+                           tcdm_mem[(rhs_base + i) % MEM_SIZE]});
+            expected = lhs + rhs + bias;
+            if (expected > 127) expected = 127;
+            if (expected < -128) expected = -128;
+            actual = tcdm_mem[(dst_base + i) % MEM_SIZE];
+            if (actual !== 8'(expected)) begin
+                $display("[FAIL] %s idx=%0d lhs=%0d rhs=%0d exp=%0d act=%0d",
+                         name, i, lhs, rhs, expected, $signed(actual));
+                errors++;
+            end
+        end
+        if (tcdm_mem[(dst_base - 1 + MEM_SIZE) % MEM_SIZE] !== 8'ha5 ||
+            tcdm_mem[(dst_base + length) % MEM_SIZE] !== 8'ha5) begin
+            $display("[FAIL] %s modified output guard bytes", name);
+            errors++;
+        end
+        if (errors == 0) begin
+            $display("[PASS] %s", name);
+        end
+    endtask
+
     task automatic check_dfl_case(
         input string name,
         input int    src_base,
@@ -674,6 +768,8 @@ module tb_afu;
         check_case("mode8_unaligned_65", MODE_8BIT,  'h123, 'h477, 65,  0);
         check_case("mode16_unaligned_33", MODE_16BIT, 'h13f, 'h584, 33, 1);
         check_case("mode32_unaligned_17", MODE_32BIT, 'h255, 'h684, 17, 2);
+        check_add_bias_case("add_bias110_unaligned_65", 'h3000, 'h3400, 'h3803, 65, 110);
+        check_add_bias_case("add_bias_minus382_tail_33", 'h3000, 'h3400, 'h3805, 33, -382);
         check_dfl_case("dfl_row32_aligned_17", 'h1000, 'h2000, 17);
         check_dfl16_case("dfl16_row32_unaligned_output_19", 'h1800, 'h2606, 19);
         check_dfl_case("dfl4_after_dfl16_3", 'h2200, 'h2a00, 3);

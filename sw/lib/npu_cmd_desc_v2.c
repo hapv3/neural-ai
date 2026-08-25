@@ -472,9 +472,12 @@ static nai_dispatch_status_v2_t run_afu_binary(
     uint32_t lhs;
     uint32_t rhs;
     uint32_t ofm;
+    const uint32_t biased = command->mode == NAI_AFU_BINARY_ADD_I8_BIAS;
     if (ops->afu_binary == 0 || NAI_TRUSTED_INVALID(
-        command->length == 0u || command->mode != NAI_AFU_BINARY_ADD_I8 ||
-        !all_zero(command->reserved, 4u) ||
+        command->length == 0u ||
+        (command->mode != NAI_AFU_BINARY_ADD_I8 && !biased) ||
+        (!biased && command->bias != 0) || command->bias < -382 || command->bias > 383 ||
+        !all_zero(command->reserved, 3u) ||
         command->lhs.region != NAI_REGION_TCDM_SCRATCH ||
         command->rhs.region != NAI_REGION_TCDM_SCRATCH ||
         command->ofm.region != NAI_REGION_TCDM_SCRATCH)) {

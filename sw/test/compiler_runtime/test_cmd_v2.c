@@ -11,6 +11,7 @@ typedef struct {
     uint32_t length;
     uint32_t direction;
     uint32_t mode;
+    int32_t bias;
     uint32_t qparam_address;
     uint32_t qparam_count;
     uint32_t qparam_block;
@@ -160,6 +161,7 @@ static uint32_t mock_afu_binary(void *context, const nai_cmd_afu_binary_v2_t *co
     state->destination = ofm;
     state->length = command->length;
     state->mode = command->mode;
+    state->bias = command->bias;
     return 0u;
 }
 
@@ -909,6 +911,20 @@ int main(void)
     assert(state.source == 0x10100000u && state.source2 == 0x10100100u);
     assert(state.destination == 0x10100200u && state.length == 64u);
     assert(state.mode == NAI_AFU_BINARY_ADD_I8);
+    assert(state.bias == 0);
+
+    afu_binary->mode = NAI_AFU_BINARY_ADD_I8_BIAS;
+    afu_binary->bias = 110;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.mode == NAI_AFU_BINARY_ADD_I8_BIAS && state.bias == 110);
+
+    afu_binary->bias = 384;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    afu_binary->bias = 0;
 
     afu_binary->ofm.offset = 0x120u;
     state = (mock_state_t){0};

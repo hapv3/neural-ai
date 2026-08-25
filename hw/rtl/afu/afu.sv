@@ -50,6 +50,7 @@ module afu #(
     logic [31:0] cfg_dst_ptr;
     logic [31:0] cfg_length;
     logic [2:0]  cfg_mode;
+    logic signed [31:0] cfg_add_bias;
     logic        cfg_start;
     
     // LUT write interface
@@ -101,6 +102,7 @@ module afu #(
         .cfg_dst_ptr_o  (cfg_dst_ptr),
         .cfg_length_o   (cfg_length),
         .cfg_mode_o     (cfg_mode),
+        .cfg_add_bias_o (cfg_add_bias),
         .cfg_start_o    (cfg_start),
         .lut_we_o       (lut_we),
         .lut_addr_o     (lut_addr),
@@ -167,6 +169,7 @@ module afu #(
         .cfg_dst_ptr_i  (cfg_dst_ptr),
         .cfg_length_i   (cfg_length),
         .cfg_mode_i     (cfg_mode),
+        .cfg_add_bias_i (cfg_add_bias),
         .cfg_start_i    (cfg_start),
         .lut_we_i       (lut_we),
         .lut_addr_i     (lut_addr),

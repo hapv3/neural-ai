@@ -56,6 +56,18 @@ static inline void afu_preload_binary(uint32_t lhs, uint32_t rhs, uint32_t dst,
     REG_WRITE(NPU_AFU_DST_PTR, dst);
     REG_WRITE(NPU_AFU_LENGTH, length);
     REG_WRITE(NPU_AFU_MODE, mode);
+    REG_WRITE(NPU_AFU_ADD_BIAS, 0u);
+}
+
+static inline void afu_preload_binary_bias(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                           uint32_t length, uint32_t mode,
+                                           int32_t bias) {
+    REG_WRITE(NPU_AFU_SRC_PTR, lhs);
+    REG_WRITE(NPU_AFU_SRC2_PTR, rhs);
+    REG_WRITE(NPU_AFU_DST_PTR, dst);
+    REG_WRITE(NPU_AFU_LENGTH, length);
+    REG_WRITE(NPU_AFU_MODE, mode);
+    REG_WRITE(NPU_AFU_ADD_BIAS, (uint32_t)bias);
 }
 
 static inline void afu_start(uint32_t src, uint32_t dst, uint32_t length, uint32_t mode) {
@@ -77,6 +89,12 @@ static inline void afu_start_mul_q7(uint32_t lhs, uint32_t rhs, uint32_t dst,
 static inline void afu_start_add_i8(uint32_t lhs, uint32_t rhs, uint32_t dst,
                                     uint32_t length) {
     afu_start_binary(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8);
+}
+
+static inline void afu_start_add_i8_bias(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                         uint32_t length, int32_t bias) {
+    afu_preload_binary_bias(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8, bias);
+    afu_start_preloaded();
 }
 
 static inline void afu_preload_dfl_row32(uint32_t src, uint32_t dst,

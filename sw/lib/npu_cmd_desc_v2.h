@@ -176,7 +176,8 @@ typedef struct {
 } nai_cmd_afu_lut_v2_t;
 
 typedef enum {
-    NAI_AFU_BINARY_ADD_I8 = 1
+    NAI_AFU_BINARY_ADD_I8 = 1,
+    NAI_AFU_BINARY_ADD_I8_BIAS = 2
 } nai_afu_binary_mode_v2_t;
 
 typedef enum {
@@ -191,7 +192,8 @@ typedef struct {
     nai_ref_v1_t ofm;
     uint32_t length;
     uint32_t mode;
-    uint32_t reserved[4];
+    int32_t bias;
+    uint32_t reserved[3];
 } nai_cmd_afu_binary_v2_t;
 
 typedef struct {

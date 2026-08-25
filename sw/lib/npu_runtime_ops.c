@@ -243,8 +243,13 @@ static uint32_t runtime_afu_binary(void *context,
                                    uint32_t lhs, uint32_t rhs, uint32_t ofm)
 {
     (void)context;
-    if (NAI_TRUSTED_INVALID(command->mode != NAI_AFU_BINARY_ADD_I8)) return 1u;
-    afu_start_add_i8(lhs, rhs, ofm, command->length);
+    if (NAI_TRUSTED_INVALID(command->mode != NAI_AFU_BINARY_ADD_I8 &&
+        command->mode != NAI_AFU_BINARY_ADD_I8_BIAS)) return 1u;
+    if (command->mode == NAI_AFU_BINARY_ADD_I8_BIAS) {
+        afu_start_add_i8_bias(lhs, rhs, ofm, command->length, command->bias);
+    } else {
+        afu_start_add_i8(lhs, rhs, ofm, command->length);
+    }
     return afu_wait_done(1000000u) ? 0u : 1u;
 }
 

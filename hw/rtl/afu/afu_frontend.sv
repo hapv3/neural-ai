@@ -24,6 +24,7 @@ module afu_frontend #(
     output logic [31:0]             cfg_dst_ptr_o,
     output logic [31:0]             cfg_length_o,
     output logic [2:0]              cfg_mode_o,
+    output logic signed [31:0]      cfg_add_bias_o,
     output logic                    cfg_start_o,
     input  logic                    afu_done_i,
     input  logic                    afu_busy_i,
@@ -43,6 +44,7 @@ module afu_frontend #(
     logic [31:0] cfg_dst_ptr_q;
     logic [31:0] cfg_length_q;
     logic [2:0]  cfg_mode_q;
+    logic signed [31:0] cfg_add_bias_q;
     logic        cfg_start_q;
 
     logic [31:0] cfg_src_ptr_shadow_q;
@@ -50,6 +52,7 @@ module afu_frontend #(
     logic [31:0] cfg_dst_ptr_shadow_q;
     logic [31:0] cfg_length_shadow_q;
     logic [2:0]  cfg_mode_shadow_q;
+    logic signed [31:0] cfg_add_bias_shadow_q;
 
     logic        obi_s_rvalid_q;
     logic [31:0] obi_s_rdata_q;
@@ -70,6 +73,7 @@ module afu_frontend #(
     assign cfg_dst_ptr_o = cfg_dst_ptr_q;
     assign cfg_length_o  = cfg_length_q;
     assign cfg_mode_o    = cfg_mode_q;
+    assign cfg_add_bias_o = cfg_add_bias_q;
     assign cfg_start_o   = cfg_start_q;
 
     assign lut_pingpong_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b00);
@@ -112,12 +116,14 @@ module afu_frontend #(
             cfg_dst_ptr_q  <= '0;
             cfg_length_q   <= '0;
             cfg_mode_q     <= '0;
+            cfg_add_bias_q <= '0;
             cfg_start_q    <= 1'b0;
             cfg_src_ptr_shadow_q  <= '0;
             cfg_src2_ptr_shadow_q <= '0;
             cfg_dst_ptr_shadow_q  <= '0;
             cfg_length_shadow_q   <= '0;
             cfg_mode_shadow_q     <= '0;
+            cfg_add_bias_shadow_q <= '0;
         end else begin
             obi_s_rvalid_q <= obi_s_req_i;
             obi_s_rdata_q  <= '0;
@@ -130,6 +136,7 @@ module afu_frontend #(
                     6'h0c: cfg_length_shadow_q <= apply_cfg_be(cfg_length_shadow_q, obi_s_wdata_i, obi_s_be_i);
                     6'h10: cfg_mode_shadow_q <= apply_cfg_be({29'd0, cfg_mode_shadow_q}, obi_s_wdata_i, obi_s_be_i)[2:0];
                     6'h14: cfg_src2_ptr_shadow_q <= apply_cfg_be(cfg_src2_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    6'h18: cfg_add_bias_shadow_q <= apply_cfg_be(cfg_add_bias_shadow_q, obi_s_wdata_i, obi_s_be_i);
                     default: ;
                 endcase
             end
@@ -140,6 +147,7 @@ module afu_frontend #(
                 cfg_dst_ptr_q <= cfg_dst_ptr_shadow_q;
                 cfg_length_q <= cfg_length_shadow_q;
                 cfg_mode_q <= cfg_mode_shadow_q;
+                cfg_add_bias_q <= cfg_add_bias_shadow_q;
                 cfg_start_q <= 1'b1;
             end
 
@@ -152,6 +160,7 @@ module afu_frontend #(
                         6'h0c: obi_s_rdata_q <= cfg_length_shadow_q;
                         6'h10: obi_s_rdata_q <= {29'd0, cfg_mode_shadow_q};
                         6'h14: obi_s_rdata_q <= cfg_src2_ptr_shadow_q;
+                        6'h18: obi_s_rdata_q <= cfg_add_bias_shadow_q;
                         default: obi_s_rdata_q <= '0;
                     endcase
                 end
