@@ -30,6 +30,7 @@ DST_I8 = 0x10100100
 RELU_I8 = 0x10100200
 DST_REQUANT = 0x10100500
 ADD_DST = 0x10100800
+QUANT_ADD_DST = 0x10120000
 MUL_DST = 0x10100B00
 LOG_DST = 0x10100D00
 LOG_LUT = 0x10100E00
@@ -56,6 +57,7 @@ CLAMP_DST = 0x10168000
 
 VL = 32
 QUANT_BINARY_VL = 137
+QUANT_ADD_OVERLAP_VL = 1024
 LOG_FULL_H = 48
 LOG_FULL_W = 48
 LOG_FULL_C = 32
@@ -843,14 +845,14 @@ async def test_spatz_op_add(dut):
 @cocotb.test()
 async def test_spatz_op_quantized_add(dut):
     def check_quantized_add(dut):
-        for index in range(QUANT_BINARY_VL):
+        for index in range(QUANT_ADD_OVERLAP_VL):
             lhs = as_i8(index * 17 + 3) - (-3)
             rhs = as_i8(index * 29 + 11) - 5
             value = scale_add_value(lhs, 1610612736, 20, 20)
             value += scale_add_value(rhs, 1073741824, 20, 20)
             value = scale_add_value(value, 1073741824, 41, 0) + 7
             expected = min(max(value, -100), 100)
-            got = as_i8(read_tcdm_byte(dut, ADD_DST + index))
+            got = as_i8(read_tcdm_byte(dut, QUANT_ADD_DST + index))
             assert got == expected, (
                 f"quantized add mismatch at {index}: got={got} expected={expected}"
             )

@@ -438,7 +438,7 @@ spatz_quantized_add_i8:
     vadd.vx v12, v12, t1
     vmax.vx v12, v12, t2
     vmin.vx v12, v12, t3
-    lui t1, 0x10140
+    lui t1, 0x1017f
     vse32.v v12, (t1)
     li t2, 4
     vsetvli zero, s5, e8, m8, ta, ma

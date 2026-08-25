@@ -54,6 +54,9 @@
 #define ADD_LHS      ((volatile int8_t *)0x10100600u)
 #define ADD_RHS      ((volatile int8_t *)0x10100700u)
 #define ADD_DST      ((volatile int8_t *)0x10100800u)
+#define QUANT_ADD_LHS ((volatile int8_t *)0x1013FF00u)
+#define QUANT_ADD_RHS ((volatile int8_t *)0x10130000u)
+#define QUANT_ADD_DST ((volatile int8_t *)0x10120000u)
 #define MUL_LHS      ((volatile int8_t *)0x10100900u)
 #define MUL_RHS      ((volatile int8_t *)0x10100A00u)
 #define MUL_DST      ((volatile int8_t *)0x10100B00u)
@@ -94,6 +97,7 @@
 
 #define VL 32u
 #define QUANT_BINARY_VL 137u
+#define QUANT_ADD_OVERLAP_VL 1024u
 #define LOG_FULL_H 48u
 #define LOG_FULL_W 48u
 #define LOG_FULL_C 32u
@@ -232,14 +236,15 @@ static void run_quantized_add(void) {
     params.clamp_max = 100;
     params.double_round_shift = 20;
     params.mode = 0;
-    for (uint32_t i = 0; i < QUANT_BINARY_VL; i++) {
-        ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
-        ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
-        ADD_DST[i] = 0;
+    for (uint32_t i = 0; i < QUANT_ADD_OVERLAP_VL; i++) {
+        QUANT_ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
+        QUANT_ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
+        QUANT_ADD_DST[i] = 0;
     }
-    spatz_quantized_add_i8((const int8_t *)ADD_LHS,
-                           (const int8_t *)ADD_RHS,
-                           (int8_t *)ADD_DST, QUANT_BINARY_VL, &params);
+    spatz_quantized_add_i8((const int8_t *)QUANT_ADD_LHS,
+                           (const int8_t *)QUANT_ADD_RHS,
+                           (int8_t *)QUANT_ADD_DST,
+                           QUANT_ADD_OVERLAP_VL, &params);
     mark_pass();
 }
 
