@@ -440,15 +440,10 @@ spatz_quantized_add_i8:
     vmin.vx v12, v12, t3
     lui t1, 0x10140
     vse32.v v12, (t1)
-    mv t2, s2
-    mv t3, s5
-.Lquant_add_pack:
-    lw t4, 0(t1)
-    sb t4, 0(t2)
-    addi t1, t1, 4
-    addi t2, t2, 1
-    addi t3, t3, -1
-    bnez t3, .Lquant_add_pack
+    li t2, 4
+    vsetvli zero, s5, e8, m8, ta, ma
+    vlse8.v v8, (t1), t2
+    vse8.v v8, (s2)
 
     add s0, s0, s5
     add s1, s1, s5

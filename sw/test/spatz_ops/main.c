@@ -93,6 +93,7 @@
 #define DFL16_PACK_DST  ((volatile int8_t *)0x10151000u)
 
 #define VL 32u
+#define QUANT_BINARY_VL 137u
 #define LOG_FULL_H 48u
 #define LOG_FULL_W 48u
 #define LOG_FULL_C 32u
@@ -231,14 +232,14 @@ static void run_quantized_add(void) {
     params.clamp_max = 100;
     params.double_round_shift = 20;
     params.mode = 0;
-    for (uint32_t i = 0; i < VL; i++) {
+    for (uint32_t i = 0; i < QUANT_BINARY_VL; i++) {
         ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
         ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
         ADD_DST[i] = 0;
     }
     spatz_quantized_add_i8((const int8_t *)ADD_LHS,
                            (const int8_t *)ADD_RHS,
-                           (int8_t *)ADD_DST, VL, &params);
+                           (int8_t *)ADD_DST, QUANT_BINARY_VL, &params);
     mark_pass();
 }
 
@@ -257,14 +258,14 @@ static void run_quantized_sub(void) {
     params.clamp_max = 100;
     params.double_round_shift = 20;
     params.mode = 1;
-    for (uint32_t i = 0; i < VL; i++) {
+    for (uint32_t i = 0; i < QUANT_BINARY_VL; i++) {
         ADD_LHS[i] = (int8_t)((i * 17u + 3u) & 0xffu);
         ADD_RHS[i] = (int8_t)((i * 29u + 11u) & 0xffu);
         ADD_DST[i] = 0;
     }
     spatz_quantized_add_i8((const int8_t *)ADD_LHS,
                            (const int8_t *)ADD_RHS,
-                           (int8_t *)ADD_DST, VL, &params);
+                           (int8_t *)ADD_DST, QUANT_BINARY_VL, &params);
     mark_pass();
 }
 

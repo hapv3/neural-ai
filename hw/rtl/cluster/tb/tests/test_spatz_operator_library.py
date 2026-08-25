@@ -55,6 +55,7 @@ CLAMP_SRC = 0x10160000
 CLAMP_DST = 0x10168000
 
 VL = 32
+QUANT_BINARY_VL = 137
 LOG_FULL_H = 48
 LOG_FULL_W = 48
 LOG_FULL_C = 32
@@ -842,7 +843,7 @@ async def test_spatz_op_add(dut):
 @cocotb.test()
 async def test_spatz_op_quantized_add(dut):
     def check_quantized_add(dut):
-        for index in range(VL):
+        for index in range(QUANT_BINARY_VL):
             lhs = as_i8(index * 17 + 3) - (-3)
             rhs = as_i8(index * 29 + 11) - 5
             value = scale_add_value(lhs, 1610612736, 20, 20)
@@ -866,7 +867,7 @@ async def test_spatz_op_quantized_add(dut):
 @cocotb.test()
 async def test_spatz_op_quantized_sub(dut):
     def check_quantized_sub(dut):
-        for index in range(VL):
+        for index in range(QUANT_BINARY_VL):
             lhs = as_i8(index * 17 + 3) - (-3)
             rhs = as_i8(index * 29 + 11) - 5
             value = scale_add_value(lhs, 1610612736, 20, 20)
