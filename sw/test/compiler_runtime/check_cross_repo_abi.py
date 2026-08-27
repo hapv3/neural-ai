@@ -93,6 +93,7 @@ STRUCTS = {
     "CommandDMA1DV2": "nai_cmd_dma_1d_v2_t",
     "CommandDMA2DV2": "nai_cmd_dma_2d_v2_t",
     "CommandDMA3DV2": "nai_cmd_dma_3d_v2_t",
+    "CommandDMAWaitV2": "nai_cmd_dma_wait_v2_t",
     "CommandGemm32V2": "nai_cmd_gemm32_v2_t",
     "CommandPointwiseC32V2": "nai_cmd_pointwise_c32_v2_t",
     "CommandDepthwiseC32V2": "nai_cmd_depthwise_c32_v2_t",
