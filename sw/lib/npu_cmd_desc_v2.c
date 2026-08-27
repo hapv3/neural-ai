@@ -126,9 +126,11 @@ static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
                                            const nai_resolver_v1_t *resolver,
                                            const nai_runtime_ops_v2_t *ops)
 {
+    uint32_t (*execute)(void *, uint32_t, uint32_t, uint32_t, uint32_t) =
+        command->header.type == NAI_CMD_DMA_SUBMIT_1D ? ops->dma_submit_1d : ops->dma_1d;
     uint32_t source;
     uint32_t destination;
-    if (ops->dma_1d == 0 ||
+    if (execute == 0 ||
         NAI_TRUSTED_INVALID(command->length == 0u || !all_zero(command->reserved, 6u)))
         return NAI_DISPATCH_BAD_COMMAND;
     if (NAI_TRUSTED_INVALID(validate_dma_direction(&command->source, &command->destination,
@@ -138,7 +140,18 @@ static nai_dispatch_status_v2_t run_dma_1d(const nai_cmd_dma_1d_v2_t *command,
         resolve(view, resolver, &command->destination, command->length, 1u, &destination) != NAI_DISPATCH_OK) {
         return NAI_DISPATCH_BAD_REFERENCE;
     }
-    return ops->dma_1d(ops->context, source, destination, command->length, command->direction) == 0u ?
+    return execute(ops->context, source, destination, command->length, command->direction) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
+static nai_dispatch_status_v2_t run_dma_wait(const nai_cmd_dma_wait_v2_t *command,
+                                              const nai_runtime_ops_v2_t *ops)
+{
+    if (ops->dma_wait == 0 ||
+        NAI_TRUSTED_INVALID(command->direction > NAI_DMA_LOCAL_TO_EXTERNAL ||
+                            !all_zero(command->reserved, 3u)))
+        return NAI_DISPATCH_BAD_COMMAND;
+    return ops->dma_wait(ops->context, command->direction) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
@@ -183,13 +196,16 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
                                            const nai_resolver_v1_t *resolver,
                                            const nai_runtime_ops_v2_t *ops)
 {
+    uint32_t (*execute)(void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                        uint32_t, uint32_t) =
+        command->header.type == NAI_CMD_DMA_SUBMIT_2D ? ops->dma_submit_2d : ops->dma_2d;
     uint32_t source;
     uint32_t destination;
 #if !defined(NAI_TRUSTED_FIRMWARE)
     uint32_t source_bytes;
     uint32_t destination_bytes;
 #endif
-    if (ops->dma_2d == 0) return NAI_DISPATCH_BAD_COMMAND;
+    if (execute == 0) return NAI_DISPATCH_BAD_COMMAND;
 #if !defined(NAI_TRUSTED_FIRMWARE)
     if (command->length == 0u || command->repetitions_2 == 0u ||
         !all_zero(command->reserved, 3u) ||
@@ -214,7 +230,7 @@ static nai_dispatch_status_v2_t run_dma_2d(const nai_cmd_dma_2d_v2_t *command,
         return NAI_DISPATCH_BAD_REFERENCE;
     }
 #endif
-    return ops->dma_2d(ops->context, source, destination, command->length,
+    return execute(ops->context, source, destination, command->length,
         command->source_stride_2, command->destination_stride_2, command->repetitions_2,
         command->direction) == 0u ? NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
@@ -224,6 +240,9 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
                                            const nai_resolver_v1_t *resolver,
                                            const nai_runtime_ops_v2_t *ops)
 {
+    uint32_t (*execute)(void *, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                        uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) =
+        command->header.type == NAI_CMD_DMA_SUBMIT_3D ? ops->dma_submit_3d : ops->dma_3d;
     uint32_t source_2;
     uint32_t destination_2;
 #if !defined(NAI_TRUSTED_FIRMWARE)
@@ -232,7 +251,7 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
     uint32_t source_bytes;
     uint32_t destination_bytes;
 #endif
-    if (ops->dma_3d == 0) return NAI_DISPATCH_BAD_COMMAND;
+    if (execute == 0) return NAI_DISPATCH_BAD_COMMAND;
 #if !defined(NAI_TRUSTED_FIRMWARE)
     if (command->length == 0u || command->repetitions_2 == 0u ||
         command->repetitions_3 == 0u ||
@@ -263,7 +282,7 @@ static nai_dispatch_status_v2_t run_dma_3d(const nai_cmd_dma_3d_v2_t *command,
         return NAI_DISPATCH_BAD_REFERENCE;
     }
 #endif
-    return ops->dma_3d(ops->context, source_2, destination_2, command->length,
+    return execute(ops->context, source_2, destination_2, command->length,
         command->source_stride_2, command->destination_stride_2, command->repetitions_2,
         command->source_stride_3, command->destination_stride_3, command->repetitions_3,
         command->direction) == 0u ? NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
@@ -891,12 +910,18 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                 NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
         } else if (header->type == NAI_CMD_RQ_LOAD && header->size_bytes == sizeof(nai_cmd_rq_load_v2_t)) {
             status = run_rq_load((const nai_cmd_rq_load_v2_t *)header, view, resolver, ops);
-        } else if (header->type == NAI_CMD_DMA_1D && header->size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
+        } else if ((header->type == NAI_CMD_DMA_1D || header->type == NAI_CMD_DMA_SUBMIT_1D) &&
+                   header->size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
             status = run_dma_1d((const nai_cmd_dma_1d_v2_t *)header, view, resolver, ops);
-        } else if (header->type == NAI_CMD_DMA_2D && header->size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {
+        } else if ((header->type == NAI_CMD_DMA_2D || header->type == NAI_CMD_DMA_SUBMIT_2D) &&
+                   header->size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {
             status = run_dma_2d((const nai_cmd_dma_2d_v2_t *)header, view, resolver, ops);
-        } else if (header->type == NAI_CMD_DMA_3D && header->size_bytes == sizeof(nai_cmd_dma_3d_v2_t)) {
+        } else if ((header->type == NAI_CMD_DMA_3D || header->type == NAI_CMD_DMA_SUBMIT_3D) &&
+                   header->size_bytes == sizeof(nai_cmd_dma_3d_v2_t)) {
             status = run_dma_3d((const nai_cmd_dma_3d_v2_t *)header, view, resolver, ops);
+        } else if (header->type == NAI_CMD_DMA_WAIT &&
+                   header->size_bytes == sizeof(nai_cmd_dma_wait_v2_t)) {
+            status = run_dma_wait((const nai_cmd_dma_wait_v2_t *)header, ops);
         } else if ((header->type == NAI_CMD_GEMM32 || header->type == NAI_CMD_GEMM32_ACCUM ||
                     header->type == NAI_CMD_GEMM32_REQUANT) && header->size_bytes == sizeof(nai_cmd_gemm32_v2_t)) {
             status = run_gemm((const nai_cmd_gemm32_v2_t *)header, view, resolver, ops);
@@ -996,7 +1021,9 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
         } else if (header.type == NAI_CMD_END || header.type == NAI_CMD_BARRIER ||
                    header.type == NAI_CMD_RQ_LOAD ||
                    header.type == NAI_CMD_DMA_1D || header.type == NAI_CMD_DMA_2D ||
-                   header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_GEMM32 ||
+                   header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_DMA_SUBMIT_1D ||
+                   header.type == NAI_CMD_DMA_SUBMIT_2D || header.type == NAI_CMD_DMA_SUBMIT_3D ||
+                   header.type == NAI_CMD_DMA_WAIT || header.type == NAI_CMD_GEMM32 ||
                    header.type == NAI_CMD_GEMM32_ACCUM || header.type == NAI_CMD_GEMM32_REQUANT ||
                    header.type == NAI_CMD_POINTWISE_C32 || header.type == NAI_CMD_DEPTHWISE_C32 ||
                    header.type == NAI_CMD_AFU_LUT ||
@@ -1029,12 +1056,18 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                            header.size_bytes == sizeof(nai_cmd_rq_load_v2_t)) {
                     status = run_rq_load((const nai_cmd_rq_load_v2_t *)command_buffer,
                         view, resolver, ops);
-                } else if (header.type == NAI_CMD_DMA_1D && header.size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
+                } else if ((header.type == NAI_CMD_DMA_1D || header.type == NAI_CMD_DMA_SUBMIT_1D) &&
+                           header.size_bytes == sizeof(nai_cmd_dma_1d_v2_t)) {
                     status = run_dma_1d((const nai_cmd_dma_1d_v2_t *)command_buffer, view, resolver, ops);
-                } else if (header.type == NAI_CMD_DMA_2D && header.size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {
+                } else if ((header.type == NAI_CMD_DMA_2D || header.type == NAI_CMD_DMA_SUBMIT_2D) &&
+                           header.size_bytes == sizeof(nai_cmd_dma_2d_v2_t)) {
                     status = run_dma_2d((const nai_cmd_dma_2d_v2_t *)command_buffer, view, resolver, ops);
-                } else if (header.type == NAI_CMD_DMA_3D && header.size_bytes == sizeof(nai_cmd_dma_3d_v2_t)) {
+                } else if ((header.type == NAI_CMD_DMA_3D || header.type == NAI_CMD_DMA_SUBMIT_3D) &&
+                           header.size_bytes == sizeof(nai_cmd_dma_3d_v2_t)) {
                     status = run_dma_3d((const nai_cmd_dma_3d_v2_t *)command_buffer, view, resolver, ops);
+                } else if (header.type == NAI_CMD_DMA_WAIT &&
+                           header.size_bytes == sizeof(nai_cmd_dma_wait_v2_t)) {
+                    status = run_dma_wait((const nai_cmd_dma_wait_v2_t *)command_buffer, ops);
                 } else if ((header.type == NAI_CMD_GEMM32 || header.type == NAI_CMD_GEMM32_ACCUM ||
                             header.type == NAI_CMD_GEMM32_REQUANT) &&
                            header.size_bytes == sizeof(nai_cmd_gemm32_v2_t)) {

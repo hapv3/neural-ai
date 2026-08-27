@@ -14,6 +14,15 @@
 #define NAI_TRUSTED_INVALID(condition) (condition)
 #endif
 
+typedef struct {
+    int transfer_id[2];
+} nai_dma_async_state_t;
+
+static nai_dma_async_state_t s_dma_async_state;
+
+static uint32_t record_async_transfer(void *context, uint32_t direction, int transfer_id);
+static uint32_t async_transfer_available(void *context, uint32_t direction);
+
 static uint32_t wait_transfer(uint32_t direction, int transfer_id)
 {
     return transfer_id > 0 && idma_mm_wait_for_completion(direction, (uint32_t)transfer_id) ? 0u : 1u;
@@ -29,21 +38,67 @@ static uint32_t dma_direction(uint32_t source, uint32_t destination, uint32_t re
     return requested;
 }
 
-static uint32_t runtime_dma_1d(void *context, uint32_t source, uint32_t destination,
-                               uint32_t length, uint32_t requested)
+static uint32_t runtime_dma_1d_mode(void *context, uint32_t source,
+                                    uint32_t destination, uint32_t length,
+                                    uint32_t requested, uint32_t asynchronous)
 {
     uint32_t direction = dma_direction(source, destination, requested);
-    (void)context;
+    int transfer_id;
+    if (asynchronous && direction <= IDMA_DIR_L1_TO_L2 &&
+        !async_transfer_available(context, direction)) return 1u;
     if (direction == IDMA_DIR_L2_TO_L1)
-        return wait_transfer(direction, idma_L2ToL1(source, destination, length));
-    if (direction == IDMA_DIR_L1_TO_L2)
-        return wait_transfer(direction, idma_L1ToL2(source, destination, length));
-    if (direction == 2u) {
+        transfer_id = idma_L2ToL1(source, destination, length);
+    else if (direction == IDMA_DIR_L1_TO_L2)
+        transfer_id = idma_L1ToL2(source, destination, length);
+    else if (direction == 2u) {
         spatz_vec_copy_i8((const int8_t *)(unsigned long)source,
                           (int8_t *)(unsigned long)destination, length);
         return 0u;
-    }
-    return 1u;
+    } else return 1u;
+    return asynchronous ? record_async_transfer(context, direction, transfer_id) :
+        wait_transfer(direction, transfer_id);
+}
+
+static uint32_t runtime_dma_1d(void *context, uint32_t source, uint32_t destination,
+                               uint32_t length, uint32_t requested)
+{
+    return runtime_dma_1d_mode(context, source, destination, length, requested, 0u);
+}
+
+static uint32_t runtime_dma_submit_1d(void *context, uint32_t source,
+                                      uint32_t destination, uint32_t length,
+                                      uint32_t requested)
+{
+    return runtime_dma_1d_mode(context, source, destination, length, requested, 1u);
+}
+
+static uint32_t runtime_dma_2d_mode(void *context, uint32_t source,
+                                    uint32_t destination, uint32_t length,
+                                    uint32_t source_stride,
+                                    uint32_t destination_stride,
+                                    uint32_t repetitions, uint32_t requested,
+                                    uint32_t asynchronous)
+{
+    uint32_t direction = dma_direction(source, destination, requested);
+    int transfer_id;
+    if (asynchronous && direction <= IDMA_DIR_L1_TO_L2 &&
+        !async_transfer_available(context, direction)) return 1u;
+    if (direction == IDMA_DIR_L2_TO_L1)
+        transfer_id = idma_L2ToL1_2d(source, destination, length,
+            source_stride, destination_stride, repetitions);
+    else if (direction == IDMA_DIR_L1_TO_L2)
+        transfer_id = idma_L1ToL2_2d(source, destination, length,
+            source_stride, destination_stride, repetitions);
+    else if (direction == 2u) {
+        for (uint32_t rep = 0; rep < repetitions; rep++) {
+            spatz_vec_copy_i8(
+                (const int8_t *)(unsigned long)(source + rep * source_stride),
+                (int8_t *)(unsigned long)(destination + rep * destination_stride), length);
+        }
+        return 0u;
+    } else return 1u;
+    return asynchronous ? record_async_transfer(context, direction, transfer_id) :
+        wait_transfer(direction, transfer_id);
 }
 
 static uint32_t runtime_dma_2d(void *context, uint32_t source, uint32_t destination,
@@ -51,42 +106,43 @@ static uint32_t runtime_dma_2d(void *context, uint32_t source, uint32_t destinat
                                uint32_t destination_stride, uint32_t repetitions,
                                uint32_t requested)
 {
-    uint32_t direction = dma_direction(source, destination, requested);
-    (void)context;
-    if (direction == IDMA_DIR_L2_TO_L1)
-        return wait_transfer(direction, idma_L2ToL1_2d(source, destination, length,
-            source_stride, destination_stride, repetitions));
-    if (direction == IDMA_DIR_L1_TO_L2)
-        return wait_transfer(direction, idma_L1ToL2_2d(source, destination, length,
-            source_stride, destination_stride, repetitions));
-    if (direction == 2u) {
-        for (uint32_t rep = 0; rep < repetitions; rep++) {
-            spatz_vec_copy_i8(
-                (const int8_t *)(unsigned long)(source + rep * source_stride),
-                (int8_t *)(unsigned long)(destination + rep * destination_stride), length);
-        }
-        return 0u;
-    }
-    return 1u;
+    return runtime_dma_2d_mode(context, source, destination, length, source_stride,
+        destination_stride, repetitions, requested, 0u);
 }
 
-static uint32_t runtime_dma_3d(void *context, uint32_t source, uint32_t destination,
-                               uint32_t length, uint32_t source_stride_2,
-                               uint32_t destination_stride_2, uint32_t repetitions_2,
-                               uint32_t source_stride_3, uint32_t destination_stride_3,
-                               uint32_t repetitions_3, uint32_t requested)
+static uint32_t runtime_dma_submit_2d(void *context, uint32_t source,
+                                      uint32_t destination, uint32_t length,
+                                      uint32_t source_stride,
+                                      uint32_t destination_stride,
+                                      uint32_t repetitions, uint32_t requested)
+{
+    return runtime_dma_2d_mode(context, source, destination, length, source_stride,
+        destination_stride, repetitions, requested, 1u);
+}
+
+static uint32_t runtime_dma_3d_mode(void *context, uint32_t source,
+                                    uint32_t destination, uint32_t length,
+                                    uint32_t source_stride_2,
+                                    uint32_t destination_stride_2,
+                                    uint32_t repetitions_2,
+                                    uint32_t source_stride_3,
+                                    uint32_t destination_stride_3,
+                                    uint32_t repetitions_3, uint32_t requested,
+                                    uint32_t asynchronous)
 {
     uint32_t direction = dma_direction(source, destination, requested);
-    (void)context;
+    int transfer_id;
+    if (asynchronous && direction <= IDMA_DIR_L1_TO_L2 &&
+        !async_transfer_available(context, direction)) return 1u;
     if (direction == IDMA_DIR_L2_TO_L1)
-        return wait_transfer(direction, idma_L2ToL1_3d(source, destination, length,
+        transfer_id = idma_L2ToL1_3d(source, destination, length,
             source_stride_2, destination_stride_2, repetitions_2,
-            source_stride_3, destination_stride_3, repetitions_3));
-    if (direction == IDMA_DIR_L1_TO_L2)
-        return wait_transfer(direction, idma_L1ToL2_3d(source, destination, length,
+            source_stride_3, destination_stride_3, repetitions_3);
+    else if (direction == IDMA_DIR_L1_TO_L2)
+        transfer_id = idma_L1ToL2_3d(source, destination, length,
             source_stride_2, destination_stride_2, repetitions_2,
-            source_stride_3, destination_stride_3, repetitions_3));
-    if (direction == 2u) {
+            source_stride_3, destination_stride_3, repetitions_3);
+    else if (direction == 2u) {
         for (uint32_t rep3 = 0; rep3 < repetitions_3; rep3++) {
             for (uint32_t rep2 = 0; rep2 < repetitions_2; rep2++) {
                 spatz_vec_copy_i8(
@@ -97,8 +153,61 @@ static uint32_t runtime_dma_3d(void *context, uint32_t source, uint32_t destinat
             }
         }
         return 0u;
-    }
-    return 1u;
+    } else return 1u;
+    return asynchronous ? record_async_transfer(context, direction, transfer_id) :
+        wait_transfer(direction, transfer_id);
+}
+
+static uint32_t runtime_dma_3d(void *context, uint32_t source, uint32_t destination,
+                               uint32_t length, uint32_t source_stride_2,
+                               uint32_t destination_stride_2, uint32_t repetitions_2,
+                               uint32_t source_stride_3, uint32_t destination_stride_3,
+                               uint32_t repetitions_3, uint32_t requested)
+{
+    return runtime_dma_3d_mode(context, source, destination, length,
+        source_stride_2, destination_stride_2, repetitions_2, source_stride_3,
+        destination_stride_3, repetitions_3, requested, 0u);
+}
+
+static uint32_t runtime_dma_submit_3d(void *context, uint32_t source,
+                                      uint32_t destination, uint32_t length,
+                                      uint32_t source_stride_2,
+                                      uint32_t destination_stride_2,
+                                      uint32_t repetitions_2,
+                                      uint32_t source_stride_3,
+                                      uint32_t destination_stride_3,
+                                      uint32_t repetitions_3, uint32_t requested)
+{
+    return runtime_dma_3d_mode(context, source, destination, length,
+        source_stride_2, destination_stride_2, repetitions_2, source_stride_3,
+        destination_stride_3, repetitions_3, requested, 1u);
+}
+
+static uint32_t record_async_transfer(void *context, uint32_t direction, int transfer_id)
+{
+    nai_dma_async_state_t *state = (nai_dma_async_state_t *)context;
+    if (state == 0 || direction > IDMA_DIR_L1_TO_L2 || transfer_id <= 0 ||
+        state->transfer_id[direction] != 0) return 1u;
+    state->transfer_id[direction] = transfer_id;
+    return 0u;
+}
+
+static uint32_t async_transfer_available(void *context, uint32_t direction)
+{
+    const nai_dma_async_state_t *state = (const nai_dma_async_state_t *)context;
+    return state != 0 && direction <= IDMA_DIR_L1_TO_L2 &&
+        state->transfer_id[direction] == 0;
+}
+
+static uint32_t runtime_dma_wait(void *context, uint32_t direction)
+{
+    nai_dma_async_state_t *state = (nai_dma_async_state_t *)context;
+    int transfer_id;
+    if (state == 0 || direction > IDMA_DIR_L1_TO_L2) return 1u;
+    transfer_id = state->transfer_id[direction];
+    if (transfer_id == 0 || wait_transfer(direction, transfer_id) != 0u) return 1u;
+    state->transfer_id[direction] = 0;
+    return 0u;
 }
 
 static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command,
@@ -629,7 +738,14 @@ static uint32_t runtime_afu_dfl16(void *context, const nai_cmd_afu_dfl16_v2_t *c
 
 static uint32_t runtime_barrier(void *context)
 {
-    (void)context;
+    nai_dma_async_state_t *state = (nai_dma_async_state_t *)context;
+    if (state != 0) {
+        for (uint32_t direction = IDMA_DIR_L2_TO_L1;
+             direction <= IDMA_DIR_L1_TO_L2; direction++) {
+            if (state->transfer_id[direction] != 0 &&
+                runtime_dma_wait(context, direction) != 0u) return 1u;
+        }
+    }
     dma_barrier();
     return 0u;
 }
@@ -644,7 +760,7 @@ static uint32_t runtime_rq_load(void *context, uint32_t qparam_address,
 const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
 {
     static const nai_runtime_ops_v2_t ops = {
-        0,
+        &s_dma_async_state,
         runtime_dma_1d,
         runtime_dma_2d,
         runtime_dma_3d,
@@ -661,7 +777,11 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_copy_layout,
         runtime_afu_dfl16,
         runtime_barrier,
-        runtime_rq_load
+        runtime_rq_load,
+        runtime_dma_submit_1d,
+        runtime_dma_submit_2d,
+        runtime_dma_submit_3d,
+        runtime_dma_wait
     };
     return &ops;
 }

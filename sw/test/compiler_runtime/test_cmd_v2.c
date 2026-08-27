@@ -89,6 +89,14 @@ static uint32_t mock_dma_3d(void *context, uint32_t source, uint32_t destination
     return mock_dma_1d(context, source, destination, length, direction);
 }
 
+static uint32_t mock_dma_wait(void *context, uint32_t direction)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->direction = direction;
+    return 0u;
+}
+
 static uint32_t mock_rq_load(void *context, uint32_t qparam_address,
                              uint32_t qparam_count, uint32_t qparam_block)
 {
@@ -337,6 +345,7 @@ int main(void)
     nai_resolver_v1_t resolver = {0x80000000u, 1408, &address, 1, 0x10100000u, 0x7f000u, 0, 0};
     mock_state_t state = {0};
     nai_runtime_ops_v2_t ops = {0};
+    nai_cmd_dma_1d_v2_t *dma;
     uint32_t completed;
     uint32_t failure;
     uint8_t command_buffer[96];
@@ -377,6 +386,16 @@ int main(void)
     assert(state.length == 32u);
     assert(state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
 
+    dma = (nai_cmd_dma_1d_v2_t *)(model + 224);
+    dma->header.type = NAI_CMD_DMA_SUBMIT_1D;
+    ops.dma_submit_1d = mock_dma_1d;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x80000140u && state.destination == 0x10100000u);
+    dma->header.type = NAI_CMD_DMA_1D;
+
     state = (mock_state_t){0};
     assert(nai_model_open_stream_v1(&reader, sizeof(model), NAI_TARGET_ID,
         &stream_storage, &stream_view) == NAI_LOADER_OK);
@@ -390,7 +409,6 @@ int main(void)
     assert(memory.reads == 5u);
     assert(memory.largest_read == 160u);
 
-    nai_cmd_dma_1d_v2_t *dma = (nai_cmd_dma_1d_v2_t *)(model + 224);
     dma->direction = NAI_DMA_LOCAL_TO_EXTERNAL;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
@@ -449,6 +467,13 @@ int main(void)
     assert(state.calls == 1u && state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
     assert(state.source == 0x80000143u && state.destination == 0x10100000u);
     assert(state.length == 3u);
+    dma_2d->header.type = NAI_CMD_DMA_SUBMIT_2D;
+    ops.dma_submit_2d = mock_dma_2d;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(state.calls == 1u && state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
+    dma_2d->header.type = NAI_CMD_DMA_2D;
     dma_2d->direction = NAI_DMA_LOCAL_TO_EXTERNAL;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
@@ -476,6 +501,13 @@ int main(void)
     assert(state.calls == 1u && state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
     assert(state.source == 0x80000143u && state.destination == 0x10100000u);
     assert(state.length == 31u);
+    dma_3d->header.type = NAI_CMD_DMA_SUBMIT_3D;
+    ops.dma_submit_3d = mock_dma_3d;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(state.calls == 1u && state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
+    dma_3d->header.type = NAI_CMD_DMA_3D;
     dma_3d->destination.region = NAI_REGION_OUTPUT_BINDING;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
@@ -488,6 +520,40 @@ int main(void)
     ((nai_cmd_header_v2_t *)(model + 224))->flags = NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE;
     assert(nai_cmd_dispatch_v2(&view, &resolver, &ops, &completed, &failure) == NAI_DISPATCH_OK);
     assert(completed == 1u);
+
+    make_dma_model(model);
+    {
+        nai_model_header_v1_t *header = (nai_model_header_v1_t *)model;
+        nai_section_v1_t *sections = (nai_section_v1_t *)(model + 64);
+        nai_cmd_dma_wait_v2_t *wait = (nai_cmd_dma_wait_v2_t *)(model + 224);
+        nai_cmd_control_v2_t *end = (nai_cmd_control_v2_t *)(model + 256);
+        memset(model + 224, 0, 96);
+        sections[0].size = 64;
+        wait->header.type = NAI_CMD_DMA_WAIT;
+        wait->header.size_bytes = sizeof(*wait);
+        wait->direction = NAI_DMA_LOCAL_TO_EXTERNAL;
+        end->header.type = NAI_CMD_END;
+        end->header.size_bytes = sizeof(*end);
+        header->command_count = 1;
+        ops.dma_wait = mock_dma_wait;
+        assert(nai_model_open_v1(model, sizeof(model), NAI_TARGET_ID, &view) == NAI_LOADER_OK);
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
+            &completed, &failure) == NAI_DISPATCH_OK);
+        assert(completed == 1u && state.calls == 1u);
+        assert(state.direction == NAI_DMA_LOCAL_TO_EXTERNAL);
+        memory = (memory_reader_t){model, sizeof(model), 0, 0};
+        assert(nai_model_open_stream_v1(&reader, sizeof(model), NAI_TARGET_ID,
+            &stream_storage, &stream_view) == NAI_LOADER_OK);
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_stream_v2(&stream_view, &resolver, &ops, &reader,
+            command_buffer, sizeof(command_buffer), &completed, &failure) == NAI_DISPATCH_OK);
+        assert(completed == 1u && state.calls == 1u);
+        assert(state.direction == NAI_DMA_LOCAL_TO_EXTERNAL);
+        wait->direction = NAI_DMA_LOCAL_TO_LOCAL;
+        assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
+            &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    }
 
     rq_header.command_count = 1;
     rq_header.entry_command_off = 0;

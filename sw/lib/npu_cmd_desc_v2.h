@@ -101,6 +101,15 @@ typedef struct {
     uint32_t direction;
 } nai_cmd_dma_3d_v2_t;
 
+/* Async DMA uses the same transfer descriptors as blocking DMA.  One transfer
+   may be outstanding in each external direction.  DMA_WAIT selects the
+   direction to join; local-to-local transfers remain synchronous. */
+typedef struct {
+    nai_cmd_header_v2_t header;
+    uint32_t direction;
+    uint32_t reserved[3];
+} nai_cmd_dma_wait_v2_t;
+
 typedef struct {
     nai_cmd_header_v2_t header;
     nai_ref_v1_t weights;
@@ -303,6 +312,7 @@ _Static_assert(offsetof(nai_cmd_rq_load_v2_t, qparam_block) == 24, "RQ load bloc
 _Static_assert(sizeof(nai_cmd_dma_1d_v2_t) == 64, "nai_cmd_dma_1d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_2d_v2_t) == 64, "nai_cmd_dma_2d_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_dma_3d_v2_t) == 64, "nai_cmd_dma_3d_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_dma_wait_v2_t) == 32, "nai_cmd_dma_wait_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size");
 _Static_assert(sizeof(nai_linebuf_job_wire_v1_t) == 124, "nai_linebuf_job_wire_v1_t ABI size");
 _Static_assert(sizeof(nai_cmd_linebuf_job_v2_t) == 160, "nai_cmd_linebuf_job_v2_t ABI size");
@@ -373,6 +383,18 @@ typedef struct {
     uint32_t (*barrier)(void *context);
     uint32_t (*rq_load)(void *context, uint32_t qparam_address,
                         uint32_t qparam_count, uint32_t qparam_block);
+    uint32_t (*dma_submit_1d)(void *context, uint32_t source, uint32_t destination,
+                              uint32_t length, uint32_t direction);
+    uint32_t (*dma_submit_2d)(void *context, uint32_t source, uint32_t destination,
+                              uint32_t length, uint32_t source_stride,
+                              uint32_t destination_stride, uint32_t repetitions,
+                              uint32_t direction);
+    uint32_t (*dma_submit_3d)(void *context, uint32_t source, uint32_t destination,
+                              uint32_t length, uint32_t source_stride_2,
+                              uint32_t destination_stride_2, uint32_t repetitions_2,
+                              uint32_t source_stride_3, uint32_t destination_stride_3,
+                              uint32_t repetitions_3, uint32_t direction);
+    uint32_t (*dma_wait)(void *context, uint32_t direction);
 } nai_runtime_ops_v2_t;
 
 nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
