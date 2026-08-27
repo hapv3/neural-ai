@@ -205,9 +205,8 @@ static uint32_t runtime_dma_wait(void *context, uint32_t direction)
     int transfer_id;
     if (state == 0 || direction > IDMA_DIR_L1_TO_L2) return 1u;
     transfer_id = state->transfer_id[direction];
-    if (transfer_id == 0 || wait_transfer(direction, transfer_id) != 0u) return 1u;
     state->transfer_id[direction] = 0;
-    return 0u;
+    return transfer_id != 0 && wait_transfer(direction, transfer_id) == 0u ? 0u : 1u;
 }
 
 static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command,

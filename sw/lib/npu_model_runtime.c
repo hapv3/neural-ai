@@ -182,9 +182,13 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
         view.header->required_tcdm_bytes, 0u, 0u};
     nai_quant_buffer_reset_v1();
     REG_WRITE(NPU_CMD_STATUS, NPU_CMD_STATUS_RUNNING);
+    const nai_runtime_ops_v2_t *runtime_ops = nai_default_runtime_ops_v2();
     nai_dispatch_status_v2_t status = nai_cmd_dispatch_stream_v2(&view, &resolver,
-        nai_default_runtime_ops_v2(), &model_reader, g_command_buffer, sizeof(g_command_buffer),
+        runtime_ops, &model_reader, g_command_buffer, sizeof(g_command_buffer),
         &completed, &failure_offset);
+    if (runtime_ops->barrier == 0 || runtime_ops->barrier(runtime_ops->context) != 0u) {
+        if (status == NAI_DISPATCH_OK) status = NAI_DISPATCH_OPERATION_FAILED;
+    }
     if (status != NAI_DISPATCH_OK) return fail(NPU_CMD_FAIL_V2_DISPATCH + (uint32_t)status,
         invocation.model_base + failure_offset, completed);
 
