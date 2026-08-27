@@ -270,6 +270,13 @@ static uint32_t mock_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *
     return 0u;
 }
 
+static uint32_t mock_systolic_wait(void *context)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    return 0u;
+}
+
 static uint32_t mock_copy_layout(void *context, const nai_cmd_copy_layout_v2_t *command,
                                  uint32_t source, uint32_t destination)
 {
@@ -348,7 +355,7 @@ int main(void)
     nai_cmd_dma_1d_v2_t *dma;
     uint32_t completed;
     uint32_t failure;
-    uint8_t command_buffer[96];
+    uint8_t command_buffer[160];
     memory_reader_t memory = {model, sizeof(model), 0, 0};
     nai_model_reader_v1_t reader = {&memory, memory_read};
     uint8_t rq_model[1088] = {0};
@@ -938,6 +945,7 @@ int main(void)
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 0u && state.calls == 0u);
     linebuf->job.linebuf.c32_fast = 0u;
+
     linebuf->job.linebuf.block_valid_bytes = 16u;
     linebuf->job.linebuf.c32_group_stationary =
         SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32;
@@ -950,6 +958,49 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 0u && state.calls == 0u);
+
+    memset(linebuf->reserved, 0, sizeof(linebuf->reserved));
+    linebuf->header.type = NAI_CMD_LINEBUF_SUBMIT;
+    linebuf->job.rows = 4u;
+    linebuf->job.linebuf.spatial_m = 4u;
+    linebuf->job.gemm.dim_m = 4u;
+    linebuf->job.gemm.accum_en = 0u;
+    linebuf->job.gemm.psum_row_stride_bytes = 0u;
+    linebuf->job.linebuf.k_tiles = 9u;
+    linebuf->job.linebuf.c32_group_stationary =
+        SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32;
+    nai_cmd_control_v2_t *systolic_wait =
+        (nai_cmd_control_v2_t *)(gemm_model + 160);
+    linebuf_end = (nai_cmd_control_v2_t *)(gemm_model + 192);
+    systolic_wait->header.type = NAI_CMD_SYSTOLIC_WAIT;
+    systolic_wait->header.size_bytes = sizeof(*systolic_wait);
+    linebuf_end->header.type = NAI_CMD_END;
+    linebuf_end->header.size_bytes = sizeof(*linebuf_end);
+    gemm_header.command_count = 2;
+    gemm_commands.size = 224;
+    gemm_commands.element_count = 3;
+    gemm_ops.linebuf_submit = mock_linebuf_job;
+    gemm_ops.systolic_wait = mock_systolic_wait;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 2u && state.calls == 2u);
+    assert(state.linebuf_rows == 4u && state.linebuf_k_tiles == 9u);
+    gemm_memory.data = gemm_model;
+    gemm_memory.bytes = sizeof(gemm_model);
+    gemm_memory.largest_read = 0u;
+    gemm_memory.reads = 0u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_stream_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &gemm_reader, command_buffer, sizeof(command_buffer), &completed, &failure) ==
+        NAI_DISPATCH_OK);
+    assert(completed == 2u && state.calls == 2u);
+    assert(state.linebuf_rows == 4u && state.linebuf_k_tiles == 9u);
+    systolic_wait->reserved[0] = 1u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    assert(completed == 1u && state.calls == 1u);
 
     memset(gemm_model, 0, sizeof(gemm_model));
     gemm_header.command_count = 1;

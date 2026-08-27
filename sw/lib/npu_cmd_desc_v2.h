@@ -36,7 +36,9 @@ typedef enum {
     NAI_CMD_DMA_SUBMIT_2D = 25,
     NAI_CMD_DMA_SUBMIT_3D = 26,
     NAI_CMD_DMA_WAIT = 27,
-    NAI_CMD_AFU_DFL16 = 28
+    NAI_CMD_AFU_DFL16 = 28,
+    NAI_CMD_LINEBUF_SUBMIT = 29,
+    NAI_CMD_SYSTOLIC_WAIT = 30
 } nai_cmd_type_v2_t;
 
 typedef struct {
@@ -395,6 +397,8 @@ typedef struct {
                               uint32_t source_stride_3, uint32_t destination_stride_3,
                               uint32_t repetitions_3, uint32_t direction);
     uint32_t (*dma_wait)(void *context, uint32_t direction);
+    uint32_t (*linebuf_submit)(void *context, const nai_cmd_linebuf_job_v2_t *command);
+    uint32_t (*systolic_wait)(void *context);
 } nai_runtime_ops_v2_t;
 
 nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
