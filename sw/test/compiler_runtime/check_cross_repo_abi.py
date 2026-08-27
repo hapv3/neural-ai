@@ -68,6 +68,8 @@ ENUMS = {
     "DMASubmit3D": "NAI_CMD_DMA_SUBMIT_3D",
     "DMAWait": "NAI_CMD_DMA_WAIT",
     "AFUDFL16": "NAI_CMD_AFU_DFL16",
+    "LineBufferSubmit": "NAI_CMD_LINEBUF_SUBMIT",
+    "SystolicWait": "NAI_CMD_SYSTOLIC_WAIT",
     "AddI8": "NAI_AFU_BINARY_ADD_I8",
     "AddI8Bias": "NAI_AFU_BINARY_ADD_I8_BIAS",
     "Add": "NAI_SPATZ_BINARY_ADD",
