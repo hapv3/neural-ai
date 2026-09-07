@@ -6,16 +6,17 @@ COCOTB_TESTCASE ?=
 
 .PHONY: all check check_cross_repo_abi firmware sim clean
 
-all: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer
+all: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer test_dma_async_state
 
 test_model_abi: test_model_abi.c ../../lib/npu_model_abi.h ../../lib/npu_cmd_desc_v2.h ../../lib/npu_model_loader.h ../../lib/npu_model_loader.c ../../lib/npu_memory_map.h
 	$(CC) $(CFLAGS) -I../../lib test_model_abi.c ../../lib/npu_model_loader.c -o $@
 
-check: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer check_cross_repo_abi
+check: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer test_dma_async_state check_cross_repo_abi
 	./test_model_abi
 	./test_cmd_v2
 	./test_copy_layout
 	./test_quant_buffer
+	./test_dma_async_state
 
 check_cross_repo_abi:
 	NEURAL_COMPILER_ROOT="$(NEURAL_COMPILER_ROOT)" python3 ./check_cross_repo_abi.py
@@ -40,5 +41,8 @@ test_copy_layout: test_copy_layout.c ../../lib/npu_layout_ops.h ../../lib/npu_la
 test_quant_buffer: test_quant_buffer.c ../../lib/npu_quant_buffer.h ../../lib/npu_quant_buffer.c
 	$(CC) $(CFLAGS) -DNAI_QUANT_BUFFER_HOST_TEST -I../../lib test_quant_buffer.c ../../lib/npu_quant_buffer.c -o $@
 
+test_dma_async_state: test_dma_async_state.c ../../lib/npu_dma_async_state.h
+	$(CC) $(CFLAGS) -I../../lib test_dma_async_state.c -o $@
+
 clean:
-	rm -f test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer
+	rm -f test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer test_dma_async_state

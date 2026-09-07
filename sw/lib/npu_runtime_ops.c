@@ -4,6 +4,7 @@
 #include "hal_systolic.h"
 #include "idma_mm_utils.h"
 #include "npu_layout_ops.h"
+#include "npu_dma_async_state.h"
 #include "npu_memory_map.h"
 #include "npu_quant_buffer.h"
 #include "spatz_ops.h"
@@ -14,19 +15,14 @@
 #define NAI_TRUSTED_INVALID(condition) (condition)
 #endif
 
-typedef struct {
-    int transfer_id[2];
-    uint32_t systolic_pending;
-} nai_dma_async_state_t;
-
 static nai_dma_async_state_t s_dma_async_state;
 
-static uint32_t record_async_transfer(void *context, uint32_t direction, int transfer_id);
+static uint32_t record_async_transfer(void *context, uint32_t direction, uint32_t transfer_id);
 static uint32_t async_transfer_available(void *context, uint32_t direction);
 
-static uint32_t wait_transfer(uint32_t direction, int transfer_id)
+static uint32_t wait_transfer(uint32_t direction, uint32_t transfer_id)
 {
-    return transfer_id > 0 && idma_mm_wait_for_completion(direction, (uint32_t)transfer_id) ? 0u : 1u;
+    return transfer_id != 0u && idma_mm_wait_for_completion(direction, transfer_id) ? 0u : 1u;
 }
 
 static uint32_t dma_direction(uint32_t source, uint32_t destination, uint32_t requested)
@@ -44,7 +40,7 @@ static uint32_t runtime_dma_1d_mode(void *context, uint32_t source,
                                     uint32_t requested, uint32_t asynchronous)
 {
     uint32_t direction = dma_direction(source, destination, requested);
-    int transfer_id;
+    uint32_t transfer_id;
     if (asynchronous && direction <= IDMA_DIR_L1_TO_L2 &&
         !async_transfer_available(context, direction)) return 1u;
     if (direction == IDMA_DIR_L2_TO_L1)
@@ -81,7 +77,7 @@ static uint32_t runtime_dma_2d_mode(void *context, uint32_t source,
                                     uint32_t asynchronous)
 {
     uint32_t direction = dma_direction(source, destination, requested);
-    int transfer_id;
+    uint32_t transfer_id;
     if (asynchronous && direction <= IDMA_DIR_L1_TO_L2 &&
         !async_transfer_available(context, direction)) return 1u;
     if (direction == IDMA_DIR_L2_TO_L1)
@@ -132,7 +128,7 @@ static uint32_t runtime_dma_3d_mode(void *context, uint32_t source,
                                     uint32_t asynchronous)
 {
     uint32_t direction = dma_direction(source, destination, requested);
-    int transfer_id;
+    uint32_t transfer_id;
     if (asynchronous && direction <= IDMA_DIR_L1_TO_L2 &&
         !async_transfer_available(context, direction)) return 1u;
     if (direction == IDMA_DIR_L2_TO_L1)
@@ -184,30 +180,25 @@ static uint32_t runtime_dma_submit_3d(void *context, uint32_t source,
         destination_stride_3, repetitions_3, requested, 1u);
 }
 
-static uint32_t record_async_transfer(void *context, uint32_t direction, int transfer_id)
+static uint32_t record_async_transfer(void *context, uint32_t direction, uint32_t transfer_id)
 {
     nai_dma_async_state_t *state = (nai_dma_async_state_t *)context;
-    if (state == 0 || direction > IDMA_DIR_L1_TO_L2 || transfer_id <= 0 ||
-        state->transfer_id[direction] != 0) return 1u;
-    state->transfer_id[direction] = transfer_id;
-    return 0u;
+    return nai_dma_async_record(state, direction, transfer_id);
 }
 
 static uint32_t async_transfer_available(void *context, uint32_t direction)
 {
     const nai_dma_async_state_t *state = (const nai_dma_async_state_t *)context;
-    return state != 0 && direction <= IDMA_DIR_L1_TO_L2 &&
-        state->transfer_id[direction] == 0;
+    return nai_dma_async_can_submit(state, direction);
 }
 
 static uint32_t runtime_dma_wait(void *context, uint32_t direction)
 {
     nai_dma_async_state_t *state = (nai_dma_async_state_t *)context;
-    int transfer_id;
+    uint32_t transfer_id;
     if (state == 0 || direction > IDMA_DIR_L1_TO_L2) return 1u;
-    transfer_id = state->transfer_id[direction];
-    state->transfer_id[direction] = 0;
-    return transfer_id != 0 && wait_transfer(direction, transfer_id) == 0u ? 0u : 1u;
+    if (nai_dma_async_take_last(state, direction, &transfer_id) != 0u) return 1u;
+    return wait_transfer(direction, transfer_id);
 }
 
 static uint32_t runtime_gemm32(void *context, const nai_cmd_gemm32_v2_t *command,
@@ -772,7 +763,7 @@ static uint32_t runtime_barrier(void *context)
     if (state != 0) {
         for (uint32_t direction = IDMA_DIR_L2_TO_L1;
              direction <= IDMA_DIR_L1_TO_L2; direction++) {
-            if (state->transfer_id[direction] != 0 &&
+            if (state->queued_transfers[direction] != 0u &&
                 runtime_dma_wait(context, direction) != 0u) return 1u;
         }
     }

@@ -24,7 +24,7 @@ SRCS = start.S main.c \
 HDRS = ../../lib/npu_cmd_desc.h ../../lib/npu_cmd_desc_v2.h \
        ../../lib/npu_model_abi.h ../../lib/npu_model_loader.h \
        ../../lib/npu_model_runtime.h ../../lib/npu_layout_ops.h \
-       ../../lib/npu_quant_buffer.h \
+       ../../lib/npu_quant_buffer.h ../../lib/npu_dma_async_state.h \
        ../../lib/npu_runtime_ops.h ../../lib/npu_memory_map.h \
        ../../lib/npu_types.h ../../lib/idma_mm_utils.h ../../lib/hal_systolic.h
 
