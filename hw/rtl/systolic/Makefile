@@ -20,6 +20,11 @@ SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
 # TOPLEVEL is the name of the toplevel module in your Verilog
 TOPLEVEL = npu_systolic_array
 
+ifeq ($(MODULE),test_binary_requant_pipeline)
+TOPLEVEL = binary_requant_pipeline
+VERILOG_SOURCES = $(PWD)/binary_requant_pipeline.sv
+endif
+
 # Extra args for verilator
 EXTRA_ARGS += -Wno-fatal --timing -j $(VERILATOR_JOBS)
 BUILD_ARGS += -j$(VERILATOR_JOBS)
