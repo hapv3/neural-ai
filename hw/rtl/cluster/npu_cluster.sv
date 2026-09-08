@@ -778,9 +778,9 @@ module npu_cluster #(
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (13 Masters)
+    // 5. Shared Data TCDM Interconnect (14 Masters)
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 13;
+    localparam int unsigned NUM_MASTERS = 14;
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
@@ -794,6 +794,7 @@ module npu_cluster #(
     // Master 10: AFU LUT processor
     // Master 11: Systolic Controller weight read (I-TCDM)
     // Master 12: AFU RHS read port
+    // Master 13: Systolic Controller binary RHS read port
 
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
@@ -843,9 +844,9 @@ module npu_cluster #(
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(13'h1DFA), // M1, M3-M8, M10-M12: Spatz + Systolic + AFU
-        .DMA_MASTER_MASK (13'h0204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(13'h0001)  // M0: Snitch D-Bus
+        .HWPE_MASTER_MASK(14'h3DFA), // M1, M3-M8, M10-M13: Spatz + Systolic + AFU
+        .DMA_MASTER_MASK (14'h0204), // M2, M9: iDMA local write/read ports
+        .CORE_MASTER_MASK(14'h0001)  // M0: Snitch D-Bus
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -1254,6 +1255,14 @@ module npu_cluster #(
     logic [OBI_DATA_WIDTH-1:0] sys_obi_w_wdata;
     logic                      sys_obi_w_rvalid;
     logic [OBI_DATA_WIDTH-1:0] sys_obi_w_rdata;
+    logic                      sys_obi_b_req;
+    logic                      sys_obi_b_gnt;
+    logic [OBI_ADDR_WIDTH-1:0] sys_obi_b_addr;
+    logic                      sys_obi_b_we;
+    logic [(OBI_DATA_WIDTH/8)-1:0] sys_obi_b_be;
+    logic [OBI_DATA_WIDTH-1:0] sys_obi_b_wdata;
+    logic                      sys_obi_b_rvalid;
+    logic [OBI_DATA_WIDTH-1:0] sys_obi_b_rdata;
 
     logic [3:0]                      sys_obi_o_req;
     logic [3:0]                      sys_obi_o_tcdm_req;
@@ -1315,6 +1324,15 @@ module npu_cluster #(
         .obi_w_rvalid_i     (sys_obi_w_rvalid),
         .obi_w_rdata_i      (sys_obi_w_rdata),
 
+        .obi_b_req_o        (sys_obi_b_req),
+        .obi_b_gnt_i        (sys_obi_b_gnt),
+        .obi_b_addr_o       (sys_obi_b_addr),
+        .obi_b_we_o         (sys_obi_b_we),
+        .obi_b_be_o         (sys_obi_b_be),
+        .obi_b_wdata_o      (sys_obi_b_wdata),
+        .obi_b_rvalid_i     (sys_obi_b_rvalid),
+        .obi_b_rdata_i      (sys_obi_b_rdata),
+
         .obi_o_req_o        (sys_obi_o_req),
         .obi_o_gnt_i        (sys_obi_o_gnt),
         .obi_o_addr_o       (sys_obi_o_addr),
@@ -1354,6 +1372,17 @@ module npu_cluster #(
     assign sys_obi_w_gnt    = master_rsp[11].gnt;
     assign sys_obi_w_rvalid = master_rsp[11].rvalid;
     assign sys_obi_w_rdata  = master_rsp[11].rdata;
+
+    // Master 13: Systolic Controller binary RHS read port (I-TCDM)
+    assign master_req[13].req   = sys_obi_b_req;
+    assign master_req[13].we    = sys_obi_b_we;
+    assign master_req[13].be    = sys_obi_b_be;
+    assign master_req[13].addr  = sys_obi_b_addr;
+    assign master_req[13].wdata = sys_obi_b_wdata;
+
+    assign sys_obi_b_gnt    = master_rsp[13].gnt;
+    assign sys_obi_b_rvalid = master_rsp[13].rvalid;
+    assign sys_obi_b_rdata  = master_rsp[13].rdata;
 
     if (SYSTOLIC_OTCDM_STALL_PERIOD == 0 || SYSTOLIC_OTCDM_STALL_HOLD == 0) begin : gen_no_sys_otcdm_stall
         assign sys_otcdm_stall_active = 1'b0;
@@ -1436,9 +1465,11 @@ module npu_cluster #(
         pmu_event_inc[20] = PMU_INC_WIDTH'(sys_weight_load_en);
         pmu_event_inc[21] = PMU_INC_WIDTH'(sys_ofm_valid);
         pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req) +
-                            PMU_INC_WIDTH'(master_req[11].req);
+                            PMU_INC_WIDTH'(master_req[11].req) +
+                            PMU_INC_WIDTH'(master_req[13].req);
         pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req & ~master_rsp[3].gnt) +
-                            PMU_INC_WIDTH'(master_req[11].req & ~master_rsp[11].gnt);
+                            PMU_INC_WIDTH'(master_req[11].req & ~master_rsp[11].gnt) +
+                            PMU_INC_WIDTH'(master_req[13].req & ~master_rsp[13].gnt);
         for (int port = 0; port < 4; port++) begin
             pmu_event_inc[24] += PMU_INC_WIDTH'(sys_obi_o_req[port]);
             pmu_event_inc[25] += PMU_INC_WIDTH'(sys_obi_o_req[port] & ~sys_obi_o_gnt[port]);

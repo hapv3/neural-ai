@@ -102,6 +102,8 @@
 ../../../../hw/rtl/afu/afu.sv
 ../../../../hw/rtl/interconnect/tcdm_interconnect.sv
 ../../../../hw/rtl/systolic/requant_pipeline.sv
+../../../../hw/rtl/systolic/binary_requant_pipeline.sv
+../../../../hw/rtl/systolic/binary_operand_stream.sv
 ../../../../hw/rtl/systolic/conv_linebuf_stream_packer.sv
 ../../../../hw/rtl/systolic/systolic_controller.sv
 ../../../../hw/rtl/systolic/npu_systolic_array.sv
