@@ -1,7 +1,7 @@
 # Systolic Array Architecture Specification
 
 **Version**: Current implemented cluster baseline
-**Last Updated**: 2026-07-21
+**Last Updated**: 2026-09-08
 
 This document describes the RTL/software behavior that is currently implemented
 in the Neural AI repository. It is not a wishlist architecture. When a feature
@@ -15,6 +15,8 @@ Primary source references:
 - Array datapath: `hw/rtl/systolic/npu_systolic_array.sv`
 - Linebuffer/window packer: `hw/rtl/systolic/conv_linebuf_stream_packer.sv`
 - Requant pipeline: `hw/rtl/systolic/requant_pipeline.sv`
+- General binary post-op pipeline: `hw/rtl/systolic/binary_requant_pipeline.sv`
+- Binary operand prefetch: `hw/rtl/systolic/binary_operand_stream.sv`
 - Depthwise MAC datapath: `hw/rtl/systolic/depthwise_mac_engine.sv`
 - Firmware register definitions: `sw/lib/npu_memory_map.h`
 - Operator-level usage: `docs/operator_support_matrix.md`
@@ -34,6 +36,9 @@ The current subsystem contains these blocks:
 - a controller FSM with direct GEMM, linebuffer Conv, pool, and depthwise modes;
 - a banked row-ring/window linebuffer for Conv/Pool/Depthwise input streams;
 - a 3-stage INT32-to-INT8 requant pipeline;
+- an optional 10-stage, 32-lane quantized Add/Sub/Mul post-op pipeline;
+- a credit-controlled operand-B prefetch stream with multiple OBI reads in
+  flight;
 - an OFM FIFO and a PSum FIFO for drain/read decoupling;
 - a 64 KiB dual-bank on-chip PSum buffer for multi-K-tile accumulation;
 - a shadow-register MMIO file so firmware can preload a full job and atomically
@@ -49,6 +54,8 @@ graph TD
         DW["depthwise_mac_engine"]
         Array["32x32 npu_systolic_array"]
         RQ["requant_pipeline"]
+        BRQ["binary_requant_pipeline<br/>optional Add/Sub/Mul"]
+        BFetch["binary_operand_stream<br/>credit + response FIFO"]
         PSum["2-bank on-chip PSum buffer<br/>256 rows x 128B x 2"]
         TCDM["Shared TCDM"]
     end
@@ -65,15 +72,22 @@ graph TD
     DW -->|INT32 rows| Ctrl
     Ctrl <--> PSum
     Ctrl -->|INT32 rows| RQ
-    RQ -->|INT8 rows| Ctrl
+    RQ -->|lhs INT8 rows| BRQ
+    Ctrl -->|start + active binary config| BFetch
+    BFetch -->|obi_b: rhs read| TCDM
+    TCDM -->|rhs INT8 rows| BFetch
+    BFetch -->|ready/valid rhs| BRQ
+    BRQ -->|final INT8 rows| Ctrl
+    RQ -->|bypass when binary disabled| Ctrl
     Ctrl -->|obi_o[3:0]: psum read / output write| TCDM
 ```
 
-Important mismatch with older notes: the current controller has **two read
-masters**, not one. `obi_i` is used for direct IFM and linebuffer reads.
-`obi_w` is used for weight reads. The four `obi_o` ports are output-side OBI
-masters and are also used for external PSum reads when accumulation must read
-old partial sums from TCDM.
+Important mismatch with older notes: the updated controller interface has
+**three dedicated read masters**. `obi_i` is used for direct IFM and linebuffer
+reads, `obi_w` is used for weight reads, and `obi_b` fetches the independent
+INT8 operand for a fused binary post-op. The four `obi_o` ports are output-side
+OBI masters and are also used for external PSum reads when accumulation must
+read old partial sums from TCDM.
 
 ---
 
@@ -164,6 +178,8 @@ The drain side is decoupled from the main FSM by:
 - a PSum FIFO, depth `OFM_FIFO_DEPTH=128`;
 - a 2-bank on-chip PSum buffer;
 - a 3-stage requant pipeline.
+- an 8-entry 256-bit binary-operand response FIFO in the default controller
+  configuration (`2 * INPUT_FIFO_DEPTH`).
 
 The implemented drain states are:
 
@@ -201,6 +217,7 @@ later K tiles.
 | Linebuffer banks | `BANKS=14`, `BANK_DEPTH=320`, 256-bit words | Row-ring/window storage for streaming Conv/Pool/Depthwise input rows up to `input_w=640`. |
 | Linebuffer beat FIFO | 4 entries | Tracks outstanding OBI beat metadata for row/tap fetches. |
 | Window register | `5 x 5 x 256b` logical window | Holds current tap vectors; used by linebuffer stream formatting. |
+| Binary operand FIFO | 8 x 256-bit rows by default | Holds returned operand-B rows and decouples TCDM response timing from the binary post-op. Credits include both FIFO-resident and outstanding rows. |
 
 Linebuffer storage is not a full activation-tile resident cache. With current
 localparams:
@@ -243,6 +260,82 @@ Limits:
   ranges that fit the intended INT8/UINT8 interpretation.
 - Graph convenience ops may still use uniform qparams, even though the RTL
   register file supports per-lane bias/multiplier/shift/zero-point.
+
+### 2.6 General Binary Post-Op
+
+The optional binary path is placed after the existing Conv/GEMM requant stage:
+
+```text
+INT32 accumulator
+  -> per-channel requant_pipeline
+  -> lhs INT8 row --------------------+
+                                      +-> binary_requant_pipeline -> obi_o[0]
+TCDM -> obi_b -> binary_operand_stream -> rhs INT8 row
+```
+
+This placement keeps the 32x32 MAC array and its accumulator path unchanged.
+When `REG_BINARY_CTRL.EN=0`, `requant_pipeline` connects directly to the normal
+INT8 output writer. When enabled, the controller only accepts a requant row and
+an operand-B row in the same handshake. Neither side can advance alone, so a
+TCDM stall or output backpressure cannot misalign the two tensors.
+
+For each lane, let:
+
+```text
+lhs_c = lhs_i8 - lhs_zero_point
+rhs_c = rhs_i8 - rhs_zero_point
+```
+
+ADD and SUB independently rescale both inputs before combining them:
+
+```text
+lhs_s = rounded_shift(lhs_c * lhs_multiplier, lhs_shift)
+rhs_s = rounded_shift(rhs_c * rhs_multiplier, rhs_shift)
+combined_add = lhs_s + rhs_s
+combined_sub = lhs_s - rhs_s
+```
+
+MUL uses the product of the centered INT8 operands directly:
+
+```text
+combined_mul = lhs_c * rhs_c
+```
+
+All three modes then share the output scale:
+
+```text
+result = rounded_shift(combined * output_multiplier, output_shift)
+result = clamp(result + output_zero_point, clamp_min, clamp_max)
+```
+
+`rounded_shift()` uses the same normal and optional double-round offset contract
+implemented by the standalone binary pipeline. The host/compiler must provide
+the integer multipliers and shifts; firmware is not expected to derive them.
+
+The pipeline is a 10-stage elastic ready/valid design. Its important internal
+widths are 9-bit centered operands, 41-bit scaled-input products, an 18-bit
+centered MUL product, a 33-bit combined value, and a 65-bit output-scale path.
+Only valid bits are asynchronously reset; datapath registers are overwritten
+when their stage accepts valid data. With no stalls it accepts and produces one
+256-bit C32 row per cycle after fill latency.
+
+`binary_operand_stream` issues sequential 32-byte reads and supports a regular
+strided 2-D traversal. `REG_BINARY_RHS_TILE_COLS` specifies the number of
+contiguous C32 rows before applying `REG_BINARY_RHS_ROW_STRIDE`. A zero stride
+or zero tile-column count selects a contiguous stream. Its credit count covers
+both accepted reads awaiting responses and returned rows held in the FIFO, so
+the block cannot overrun its response storage.
+
+Current controller validity rules are:
+
+- normal requant must also be enabled;
+- mode must be ADD (`0`), SUB (`1`), or MUL (`2`);
+- output multiplier must be positive; ADD/SUB input multipliers must also be
+  positive;
+- all three shifts must be `0..63`, and double-round shift must be `0..30`;
+- clamp minimum must not exceed clamp maximum;
+- operand-B base must be 32-byte aligned;
+- pool and depthwise modes do not currently accept the fused binary option.
 
 ---
 
@@ -405,6 +498,7 @@ The current controller has seven OBI master interfaces:
 |---|---:|---|---|
 | `obi_i` | 256-bit | Read-only IFM/linebuffer data | Used by direct IFM reads and linebuffer row/tap fetches. |
 | `obi_w` | 256-bit | Read-only weight data | Separate from `obi_i`, enabling weight preload to overlap linebuffer prefetch subject to TCDM bank conflicts. |
+| `obi_b` | 256-bit | Read-only binary operand B | Uses credit-controlled multi-outstanding reads. Active only for the fused binary post-op. |
 | `obi_o[0]` | 256-bit | Output/PSum read-write | Used for INT8 output writes and lane group 0 of INT32 rows. |
 | `obi_o[1]` | 256-bit | Output/PSum read-write | Used for lane group 1 of INT32 rows. |
 | `obi_o[2]` | 256-bit | Output/PSum read-write | Used for lane group 2 of INT32 rows. |
@@ -414,6 +508,8 @@ Output bandwidth:
 
 - INT32 OFM row: 1024 bits, all four `obi_o` ports in one row transaction.
 - INT8 requant/pool/depthwise row: 256 bits, `obi_o[0]` only.
+- Fused binary operand row: one 256-bit read through `obi_b`, paired with one
+  256-bit requant result, followed by one 256-bit write through `obi_o[0]`.
 - External PSum read: 1024 bits, all four `obi_o` ports as read masters.
 
 The ports connect to shared TCDM through the cluster interconnect. There is no
@@ -462,6 +558,19 @@ Consequences:
 | `0x0120` | `REG_RQ_CTRL` | R/W shadow | `0` | Bit 0 enables requant pipeline. |
 | `0x0124` | `REG_RQ_CMIN` | R/W shadow | `0xFFFF_FF80` | Signed clamp minimum, default `-128`. |
 | `0x0128` | `REG_RQ_CMAX` | R/W shadow | `0x0000_007F` | Signed clamp maximum, default `127`. |
+| `0x012C` | `REG_BINARY_CTRL` | R/W shadow | `0` | Bit 0 enables binary post-op; bits `[2:1]` select ADD=`0`, SUB=`1`, MUL=`2`. |
+| `0x0130` | `REG_BINARY_RHS_PTR` | R/W shadow | `0` | 32-byte-aligned TCDM base of operand B. |
+| `0x0134` | `REG_BINARY_RHS_ROW_STRIDE` | R/W shadow | `0` | Byte stride between logical operand-B rows. Zero selects contiguous traversal. |
+| `0x0138` | `REG_BINARY_RHS_TILE_COLS` | R/W shadow | `0` | Number of contiguous C32 rows before applying RHS row stride. Zero selects contiguous traversal. |
+| `0x013C` | `REG_BINARY_LHS_MULT` | R/W shadow | `1` | Signed positive input multiplier for lhs in ADD/SUB modes. |
+| `0x0140` | `REG_BINARY_LHS_SHIFT` | R/W shadow | `0` | Unsigned lhs shift, valid range `0..63`. |
+| `0x0144` | `REG_BINARY_RHS_MULT` | R/W shadow | `1` | Signed positive input multiplier for rhs in ADD/SUB modes. |
+| `0x0148` | `REG_BINARY_RHS_SHIFT` | R/W shadow | `0` | Unsigned rhs shift, valid range `0..63`. |
+| `0x014C` | `REG_BINARY_OUTPUT_MULT` | R/W shadow | `1` | Signed positive common output multiplier. |
+| `0x0150` | `REG_BINARY_OUTPUT_SHIFT` | R/W shadow | `0` | Unsigned common output shift, valid range `0..63`. |
+| `0x0154` | `REG_BINARY_ZERO_POINTS` | R/W shadow | `0` | Packed signed INT8 `{reserved[7:0], output_zp[7:0], rhs_zp[7:0], lhs_zp[7:0]}`. Active outputs are sign-extended to 32 bits. |
+| `0x0158` | `REG_BINARY_CLAMP` | R/W shadow | `0x0000_7F80` | Packed signed INT8 `{reserved[15:0], clamp_max[7:0], clamp_min[7:0]}`. |
+| `0x015C` | `REG_BINARY_DOUBLE_ROUND` | R/W shadow | `0` | Optional double-round shift in bits `[5:0]`, valid range `0..30`; zero disables it. |
 | `0x0200..0x027C` | `REG_RQ_BIAS(ch)` | R/W shadow | `0` | 32 per-lane INT32 bias registers. |
 | `0x0280..0x02FC` | `REG_RQ_MULT(ch)` | R/W shadow | `1` | 32 per-lane INT32 multiplier registers. |
 | `0x0300..0x037C` | `REG_RQ_SHIFT(ch)` | R/W shadow | `0` | 32 per-lane 8-bit shift registers. |
@@ -506,6 +615,7 @@ contracts are the graph/HAL paths listed in `docs/operator_support_matrix.md`.
 | Operator family | Current stable path | Key limits |
 |---|---|---|
 | Direct GEMM | `SYSTOLIC_GEMM32`, `SYSTOLIC_GEMM32_REQUANT` | K/N fixed to 32 per RTL start; larger shapes are HAL scheduled. |
+| Requant + binary post-op | Optional hardware tail of a Conv/GEMM job | Consumes one aligned C32 operand-B row per requant output row; supports independently quantized ADD/SUB and centered MUL. |
 | Pointwise / Linear-like C32 | `CONV2D_POINTWISE_C32_REQUANT` | IC and OC must be multiples of 32. Multi-IC uses INT32 PSum scratch. |
 | RGB stem Conv | `CONV2D_RGB_LINEBUF_REQUANT` | Specialized RGB C3, OC32, 3x3/s2/p1. |
 | C32 Conv | `CONV2D_C32_LINEBUF*` and `CONV2D_C32_MULTI_LINEBUF_REQUANT` | Stable graph path is Conv3x3, pad1, stride1/2 variants. Multi-C32 requires channel multiples of 32. |
@@ -548,6 +658,9 @@ Firmware should not own model-level scheduling decisions for optimized paths.
 | PSum buffer `M` capacity | 256 rows | On-chip PSum multi-K overlap only applies when `M <= 256`. Larger M uses external PSum/TCDM behavior. |
 | Depthwise max taps | 25 | Depthwise/pool tap loops cannot exceed 5x5. |
 | Requant shift | 0..31 | Shift above 31 marks output invalid. |
+| Binary input/output shifts | 0..63 | A larger shift makes the binary configuration invalid. |
+| Binary double-round shift | 0..30 | Zero disables double rounding. |
+| Binary operand alignment | 32 bytes | Misaligned operand-B base makes the job invalid. |
 
 ### 7.2 Performance Limits
 
@@ -578,6 +691,12 @@ Firmware should not own model-level scheduling decisions for optimized paths.
    - INT32 rows use four 256-bit ports and can be one row per granted cycle.
    - INT8 rows use one 256-bit port and are smaller, but can still backpressure
      through the requant/output ready-valid chain.
+   - The binary post-op has initiation interval 1 after pipeline fill, but
+     sustained throughput also requires one granted/returned `obi_b` row and
+     one granted `obi_o[0]` write per output row.
+   - Its 10 elastic stages add latency without reducing steady-state row rate;
+     stalls propagate through ready/valid rather than dropping or reordering
+     operand pairs.
 
 5. **Depthwise**
    - Current depthwise datapath is one C32 tap vector per accepted cycle, with
@@ -602,6 +721,9 @@ Firmware should not own model-level scheduling decisions for optimized paths.
   views. Materializing them in firmware adds avoidable cycles.
 - The register file exposes per-lane requant parameters, but graph-level
   convenience ops may not yet expose per-lane/per-channel qparams everywhere.
+- Fused binary mode applies only after normal INT32-to-INT8 requant. It is not
+  an alternate INT32 accumulator input, and it is currently invalid with pool
+  or depthwise controller modes.
 
 ---
 
@@ -623,3 +745,6 @@ Use these rules when adding or debugging tests:
    expect a Spatz/software fallback until a graph-level native variant exists.
 7. Always program shadow registers completely before `REG_SYS_START`; reads
    after shadow writes but before start show the previous active job.
+8. For a fused Add/Sub/Mul, program normal requant and all binary registers in
+   the same shadow job. Keep operand B in C32 row order matching the emitted
+   output tile, including the same logical row traversal when stride is used.
