@@ -23,9 +23,8 @@ typedef struct {
 
 static nai_model_stream_storage_v1_t g_model_storage;
 static nai_binding_address_v1_t g_binding_addresses[NAI_MAX_BINDINGS_V1];
-/* The stream reader must accommodate the largest v2 record.  LINEBUF_JOB is
-   160 bytes, larger than the 96-byte GEMM/pointwise/depthwise records. */
-static uint8_t g_command_buffer[sizeof(nai_cmd_linebuf_job_v2_t)];
+/* The stream reader must accommodate the largest v2 record. */
+static uint8_t g_command_buffer[sizeof(nai_cmd_linebuf_binary_v2_t)];
 
 static uint32_t l2_read(void *context_pointer, uint32_t offset, void *destination, uint32_t bytes)
 {

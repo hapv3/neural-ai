@@ -738,9 +738,14 @@ static nai_dispatch_status_v2_t run_linebuf_job(
     const nai_cmd_linebuf_job_v2_t *command,
     const nai_runtime_ops_v2_t *ops)
 {
+    const uint32_t binary = command->header.type == NAI_CMD_LINEBUF_BINARY ||
+                            command->header.type == NAI_CMD_LINEBUF_BINARY_SUBMIT;
     uint32_t (*execute)(void *, const nai_cmd_linebuf_job_v2_t *) =
         command->header.type == NAI_CMD_LINEBUF_SUBMIT ?
             ops->linebuf_submit : ops->linebuf_job;
+    uint32_t (*execute_binary)(void *, const nai_cmd_linebuf_binary_v2_t *) =
+        command->header.type == NAI_CMD_LINEBUF_BINARY_SUBMIT ?
+            ops->linebuf_binary_submit : ops->linebuf_binary_job;
 #if !defined(NAI_TRUSTED_FIRMWARE)
     const uint32_t max_rows = command->job.gemm.accum_en == 0u ? 1024u : 256u;
     uint32_t expected_k_tiles;
@@ -750,7 +755,11 @@ static nai_dispatch_status_v2_t run_linebuf_job(
         command->job.k_tiles == 0u || command->job.k_tiles > 0xffffu ||
         command->job.linebuf.kernel_h == 0u || command->job.linebuf.kernel_h > 5u ||
         command->job.linebuf.kernel_w == 0u || command->job.linebuf.kernel_w > 5u ||
-        !all_zero_bytes(command->reserved, sizeof(command->reserved)) || execute == 0) {
+        ((!binary && !all_zero_bytes(command->reserved, sizeof(command->reserved))) ||
+         (binary && !all_zero_bytes(
+             ((const nai_cmd_linebuf_binary_v2_t *)command)->reserved,
+             sizeof(((const nai_cmd_linebuf_binary_v2_t *)command)->reserved)))) ||
+        (binary ? execute_binary == 0 : execute == 0)) {
         return NAI_DISPATCH_BAD_COMMAND;
     }
     if (command->job.linebuf.input_c != 0u &&
@@ -804,10 +813,31 @@ static nai_dispatch_status_v2_t run_linebuf_job(
     }
     if (command->job.linebuf.c32_group_stationary != expected_kgen_schedule)
         return NAI_DISPATCH_BAD_COMMAND;
+    if (binary) {
+        const systolic_binary_cfg_t *cfg =
+            &((const nai_cmd_linebuf_binary_v2_t *)command)->binary;
+        if ((command->job.gemm.accum_en != 0u && command->job.gemm.accum_en != 2u) ||
+            (cfg->rhs_addr & 31u) != 0u || cfg->rhs_tile_cols == 0u ||
+            (cfg->rhs_row_stride_bytes & 31u) != 0u || cfg->mode > SYSTOLIC_BINARY_MUL ||
+            (cfg->mode != SYSTOLIC_BINARY_MUL &&
+             (cfg->lhs_multiplier <= 0 || cfg->rhs_multiplier <= 0)) ||
+            cfg->output_multiplier <= 0 || cfg->lhs_shift > 63u ||
+            cfg->rhs_shift > 63u || cfg->output_shift > 63u ||
+            cfg->double_round_shift > 30u ||
+            cfg->lhs_zero_point < -128 || cfg->lhs_zero_point > 127 ||
+            cfg->rhs_zero_point < -128 || cfg->rhs_zero_point > 127 ||
+            cfg->output_zero_point < -128 || cfg->output_zero_point > 127 ||
+            cfg->clamp_min < -128 || cfg->clamp_min > 127 ||
+            cfg->clamp_max < -128 || cfg->clamp_max > 127 ||
+            cfg->clamp_min > cfg->clamp_max)
+            return NAI_DISPATCH_BAD_COMMAND;
+    }
 #else
-    if (execute == 0) return NAI_DISPATCH_BAD_COMMAND;
+    if (binary ? execute_binary == 0 : execute == 0) return NAI_DISPATCH_BAD_COMMAND;
 #endif
-    return execute(ops->context, command) == 0u ?
+    return (binary ?
+        execute_binary(ops->context, (const nai_cmd_linebuf_binary_v2_t *)command) :
+        execute(ops->context, command)) == 0u ?
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
@@ -973,6 +1003,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                     header->type == NAI_CMD_LINEBUF_SUBMIT) &&
                    header->size_bytes == sizeof(nai_cmd_linebuf_job_v2_t)) {
             status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)header, ops);
+        } else if ((header->type == NAI_CMD_LINEBUF_BINARY ||
+                    header->type == NAI_CMD_LINEBUF_BINARY_SUBMIT) &&
+                   header->size_bytes == sizeof(nai_cmd_linebuf_binary_v2_t)) {
+            status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)header, ops);
         } else if (header->type == NAI_CMD_SYSTOLIC_WAIT &&
                    header->size_bytes == sizeof(nai_cmd_control_v2_t)) {
             status = run_systolic_wait((const nai_cmd_control_v2_t *)header, ops);
@@ -1052,6 +1086,8 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                    header.type == NAI_CMD_COPY_LAYOUT ||
                    header.type == NAI_CMD_AFU_DFL16 ||
                    header.type == NAI_CMD_LINEBUF_SUBMIT ||
+                   header.type == NAI_CMD_LINEBUF_BINARY ||
+                   header.type == NAI_CMD_LINEBUF_BINARY_SUBMIT ||
                    header.type == NAI_CMD_SYSTOLIC_WAIT) {
             if (header.size_bytes > prefetched_bytes)
                 status = NAI_DISPATCH_BAD_STREAM;
@@ -1128,6 +1164,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                 } else if ((header.type == NAI_CMD_LINEBUF_JOB ||
                             header.type == NAI_CMD_LINEBUF_SUBMIT) &&
                            header.size_bytes == sizeof(nai_cmd_linebuf_job_v2_t)) {
+                    status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)command_buffer, ops);
+                } else if ((header.type == NAI_CMD_LINEBUF_BINARY ||
+                            header.type == NAI_CMD_LINEBUF_BINARY_SUBMIT) &&
+                           header.size_bytes == sizeof(nai_cmd_linebuf_binary_v2_t)) {
                     status = run_linebuf_job((const nai_cmd_linebuf_job_v2_t *)command_buffer, ops);
                 } else if (header.type == NAI_CMD_SYSTOLIC_WAIT &&
                            header.size_bytes == sizeof(nai_cmd_control_v2_t)) {

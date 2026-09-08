@@ -443,15 +443,18 @@ static void finish_systolic_linebuf(void)
     systolic_gemm32_wait_done();
     REG_WRITE(REG_SYS_ACCUM_CTRL, 0u);
     systolic_linebuf_disable();
+    systolic_binary_disable();
     systolic_requant_disable();
 }
 
 static uint32_t runtime_linebuf_job_mode(void *context,
-                                         const nai_cmd_linebuf_job_v2_t *command,
+                                         const nai_linebuf_job_wire_v1_t *job,
+                                         const systolic_binary_cfg_t *binary_cfg,
                                          uint32_t asynchronous)
 {
-    systolic_linebuf_cfg_t linebuf = command->job.linebuf;
-    systolic_gemm32_req_t gemm = command->job.gemm;
+    systolic_linebuf_cfg_t linebuf = job->linebuf;
+    systolic_gemm32_req_t gemm = job->gemm;
+    systolic_binary_cfg_t binary;
     nai_dma_async_state_t *state = (nai_dma_async_state_t *)context;
     if (state == 0 || state->systolic_pending != 0u) return 1u;
     /* The fixed 124-byte linebuffer wire record carries compact TCDM offsets,
@@ -461,7 +464,8 @@ static uint32_t runtime_linebuf_job_mode(void *context,
        padding row. */
     if (linebuf.input_base >= NPU_TCDM_SIZE || gemm.weight_addr >= NPU_TCDM_SIZE ||
         gemm.ifm_addr >= NPU_TCDM_SIZE || gemm.psum_addr >= NPU_TCDM_SIZE ||
-        gemm.ofm_addr >= NPU_TCDM_SIZE) return 1u;
+        gemm.ofm_addr >= NPU_TCDM_SIZE ||
+        (binary_cfg != 0 && binary_cfg->rhs_addr >= NPU_TCDM_SIZE)) return 1u;
     /* The HAL linebuffer contract addresses the virtual top-padding row by
        subtracting pad_h*row_stride from input_base.  Keep the wire field a
        compact TCDM offset, then perform that subtraction after relocation so
@@ -478,11 +482,16 @@ static uint32_t runtime_linebuf_job_mode(void *context,
     gemm.ifm_addr += NPU_TCDM_BASE;
     gemm.psum_addr += NPU_TCDM_BASE;
     gemm.ofm_addr += NPU_TCDM_BASE;
+    if (binary_cfg != 0) {
+        binary = *binary_cfg;
+        binary.rhs_addr += NPU_TCDM_BASE;
+    }
     systolic_linebuf_config(&linebuf);
     if (gemm.accum_en == 1u) {
         /* Initialize the external partial-sum tile without reading its old
            contents.  The raw INT32 result is written directly to PSUM. */
         systolic_requant_disable();
+        systolic_binary_disable();
         gemm.ofm_addr = gemm.psum_addr;
         gemm.accum_en = 0u;
         gemm.ofm_row_stride_bytes = gemm.psum_row_stride_bytes;
@@ -491,13 +500,16 @@ static uint32_t runtime_linebuf_job_mode(void *context,
         /* Intermediate input groups accumulate in place in the external
            partial-sum tile; only the final group writes the quantized OFM. */
         systolic_requant_disable();
+        systolic_binary_disable();
         gemm.ofm_addr = gemm.psum_addr;
         gemm.accum_en = 1u;
         gemm.ofm_row_stride_bytes = gemm.psum_row_stride_bytes;
     } else {
         REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
+        if (binary_cfg != 0) systolic_binary_config(&binary);
+        else systolic_binary_disable();
         gemm.accum_en = gemm.accum_en == 2u ? 1u : 0u;
-        if (command->job.k_tiles <= 1u) {
+        if (job->k_tiles <= 1u) {
             gemm.ofm_row_stride_bytes = 0u;
             gemm.ofm_tile_cols = 0u;
             gemm.psum_row_stride_bytes = 0u;
@@ -515,13 +527,25 @@ static uint32_t runtime_linebuf_job_mode(void *context,
 
 static uint32_t runtime_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *command)
 {
-    return runtime_linebuf_job_mode(context, command, 0u);
+    return runtime_linebuf_job_mode(context, &command->job, 0, 0u);
 }
 
 static uint32_t runtime_linebuf_submit(void *context,
                                         const nai_cmd_linebuf_job_v2_t *command)
 {
-    return runtime_linebuf_job_mode(context, command, 1u);
+    return runtime_linebuf_job_mode(context, &command->job, 0, 1u);
+}
+
+static uint32_t runtime_linebuf_binary_job(
+    void *context, const nai_cmd_linebuf_binary_v2_t *command)
+{
+    return runtime_linebuf_job_mode(context, &command->job, &command->binary, 0u);
+}
+
+static uint32_t runtime_linebuf_binary_submit(
+    void *context, const nai_cmd_linebuf_binary_v2_t *command)
+{
+    return runtime_linebuf_job_mode(context, &command->job, &command->binary, 1u);
 }
 
 static uint32_t runtime_systolic_wait(void *context)
@@ -806,7 +830,9 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_dma_submit_3d,
         runtime_dma_wait,
         runtime_linebuf_submit,
-        runtime_systolic_wait
+        runtime_systolic_wait,
+        runtime_linebuf_binary_job,
+        runtime_linebuf_binary_submit
     };
     return &ops;
 }

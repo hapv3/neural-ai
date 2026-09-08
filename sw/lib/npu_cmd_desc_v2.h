@@ -38,7 +38,9 @@ typedef enum {
     NAI_CMD_DMA_WAIT = 27,
     NAI_CMD_AFU_DFL16 = 28,
     NAI_CMD_LINEBUF_SUBMIT = 29,
-    NAI_CMD_SYSTOLIC_WAIT = 30
+    NAI_CMD_SYSTOLIC_WAIT = 30,
+    NAI_CMD_LINEBUF_BINARY = 31,
+    NAI_CMD_LINEBUF_BINARY_SUBMIT = 32
 } nai_cmd_type_v2_t;
 
 typedef struct {
@@ -137,6 +139,15 @@ typedef struct {
     nai_linebuf_job_wire_v1_t job;
     uint8_t reserved[20];
 } nai_cmd_linebuf_job_v2_t;
+
+/* Fused Conv/linebuffer -> requant -> binary post-op.  The RHS address is a
+   compact TCDM offset on the wire and is relocated by the runtime. */
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_linebuf_job_wire_v1_t job;
+    systolic_binary_cfg_t binary;
+    uint8_t reserved[20];
+} nai_cmd_linebuf_binary_v2_t;
 
 /* Pointwise 1x1 C32 command. Activations are group-major C32 blocked;
    weights are OCG-major, then ICG-major, with one 32x32 tile per pair.
@@ -318,6 +329,9 @@ _Static_assert(sizeof(nai_cmd_dma_wait_v2_t) == 32, "nai_cmd_dma_wait_v2_t ABI s
 _Static_assert(sizeof(nai_cmd_gemm32_v2_t) == 96, "nai_cmd_gemm32_v2_t ABI size");
 _Static_assert(sizeof(nai_linebuf_job_wire_v1_t) == 124, "nai_linebuf_job_wire_v1_t ABI size");
 _Static_assert(sizeof(nai_cmd_linebuf_job_v2_t) == 160, "nai_cmd_linebuf_job_v2_t ABI size");
+_Static_assert(sizeof(systolic_binary_cfg_t) == 64, "systolic_binary_cfg_t ABI size");
+_Static_assert(sizeof(nai_cmd_linebuf_binary_v2_t) == 224,
+               "nai_cmd_linebuf_binary_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_pointwise_c32_v2_t) == 96, "nai_cmd_pointwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_depthwise_c32_v2_t) == 96, "nai_cmd_depthwise_c32_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_lut_v2_t) == 64, "nai_cmd_afu_lut_v2_t ABI size");
@@ -399,6 +413,10 @@ typedef struct {
     uint32_t (*dma_wait)(void *context, uint32_t direction);
     uint32_t (*linebuf_submit)(void *context, const nai_cmd_linebuf_job_v2_t *command);
     uint32_t (*systolic_wait)(void *context);
+    uint32_t (*linebuf_binary_job)(
+        void *context, const nai_cmd_linebuf_binary_v2_t *command);
+    uint32_t (*linebuf_binary_submit)(
+        void *context, const nai_cmd_linebuf_binary_v2_t *command);
 } nai_runtime_ops_v2_t;
 
 nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,

@@ -31,6 +31,8 @@ typedef struct {
     uint32_t pad_w;
     uint32_t linebuf_rows;
     uint32_t linebuf_k_tiles;
+    uint32_t binary_rhs;
+    uint32_t binary_lhs_shift;
 } mock_state_t;
 
 typedef struct {
@@ -267,6 +269,19 @@ static uint32_t mock_linebuf_job(void *context, const nai_cmd_linebuf_job_v2_t *
     state->calls++;
     state->linebuf_rows = command->job.rows;
     state->linebuf_k_tiles = command->job.k_tiles;
+    return 0u;
+}
+
+static uint32_t mock_linebuf_binary_job(
+    void *context, const nai_cmd_linebuf_binary_v2_t *command)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->linebuf_rows = command->job.rows;
+    state->linebuf_k_tiles = command->job.k_tiles;
+    state->binary_rhs = command->binary.rhs_addr;
+    state->binary_lhs_shift = command->binary.lhs_shift;
+    state->mode = command->binary.mode;
     return 0u;
 }
 
@@ -1001,6 +1016,67 @@ int main(void)
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     assert(completed == 1u && state.calls == 1u);
+
+    {
+        nai_linebuf_job_wire_v1_t binary_job = linebuf->job;
+        uint8_t binary_command_buffer[sizeof(nai_cmd_linebuf_binary_v2_t)];
+        nai_cmd_linebuf_binary_v2_t *binary;
+        nai_cmd_control_v2_t *binary_end;
+
+        memset(gemm_model, 0, sizeof(gemm_model));
+        binary = (nai_cmd_linebuf_binary_v2_t *)gemm_model;
+        binary_end = (nai_cmd_control_v2_t *)(gemm_model + sizeof(*binary));
+        binary->header.type = NAI_CMD_LINEBUF_BINARY;
+        binary->header.size_bytes = sizeof(*binary);
+        binary->job = binary_job;
+        binary->binary.rhs_addr = 0x4000u;
+        binary->binary.rhs_row_stride_bytes = 64u;
+        binary->binary.rhs_tile_cols = 2u;
+        binary->binary.lhs_multiplier = 17;
+        binary->binary.lhs_shift = 8u;
+        binary->binary.rhs_multiplier = 19;
+        binary->binary.rhs_shift = 9u;
+        binary->binary.output_multiplier = 23;
+        binary->binary.output_shift = 10u;
+        binary->binary.lhs_zero_point = -7;
+        binary->binary.rhs_zero_point = 5;
+        binary->binary.output_zero_point = -3;
+        binary->binary.clamp_min = -100;
+        binary->binary.clamp_max = 99;
+        binary->binary.double_round_shift = 1u;
+        binary->binary.mode = SYSTOLIC_BINARY_SUB;
+        binary_end->header.type = NAI_CMD_END;
+        binary_end->header.size_bytes = sizeof(*binary_end);
+        gemm_header.command_count = 1;
+        gemm_header.total_bytes = sizeof(*binary) + sizeof(*binary_end);
+        gemm_commands.size = gemm_header.total_bytes;
+        gemm_commands.element_count = 2;
+        gemm_ops.linebuf_binary_job = mock_linebuf_binary_job;
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+            &completed, &failure) == NAI_DISPATCH_OK);
+        assert(completed == 1u && state.calls == 1u);
+        assert(state.linebuf_rows == 4u && state.linebuf_k_tiles == 9u);
+        assert(state.binary_rhs == 0x4000u && state.binary_lhs_shift == 8u);
+        assert(state.mode == SYSTOLIC_BINARY_SUB);
+
+        gemm_memory.data = gemm_model;
+        gemm_memory.bytes = gemm_header.total_bytes;
+        gemm_memory.largest_read = 0u;
+        gemm_memory.reads = 0u;
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_stream_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+            &gemm_reader, binary_command_buffer, sizeof(binary_command_buffer),
+            &completed, &failure) == NAI_DISPATCH_OK);
+        assert(completed == 1u && state.calls == 1u);
+        assert(gemm_memory.largest_read == sizeof(binary_command_buffer));
+
+        binary->binary.lhs_shift = 64u;
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+            &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+        assert(completed == 0u && state.calls == 0u);
+    }
 
     memset(gemm_model, 0, sizeof(gemm_model));
     gemm_header.command_count = 1;

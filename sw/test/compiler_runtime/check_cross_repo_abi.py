@@ -70,6 +70,8 @@ ENUMS = {
     "AFUDFL16": "NAI_CMD_AFU_DFL16",
     "LineBufferSubmit": "NAI_CMD_LINEBUF_SUBMIT",
     "SystolicWait": "NAI_CMD_SYSTOLIC_WAIT",
+    "LineBufferBinary": "NAI_CMD_LINEBUF_BINARY",
+    "LineBufferBinarySubmit": "NAI_CMD_LINEBUF_BINARY_SUBMIT",
     "AddI8": "NAI_AFU_BINARY_ADD_I8",
     "AddI8Bias": "NAI_AFU_BINARY_ADD_I8_BIAS",
     "Add": "NAI_SPATZ_BINARY_ADD",
@@ -107,6 +109,7 @@ STRUCTS = {
     "CommandMaxPoolV2": "nai_cmd_maxpool_v2_t",
     "LinebufJobWireV1": "nai_linebuf_job_wire_v1_t",
     "CommandLineBufferJobV2": "nai_cmd_linebuf_job_v2_t",
+    "CommandLineBufferBinaryV2": "nai_cmd_linebuf_binary_v2_t",
     "CommandCopyLayoutV2": "nai_cmd_copy_layout_v2_t",
     "CommandAFUDFL16V2": "nai_cmd_afu_dfl16_v2_t",
 }
