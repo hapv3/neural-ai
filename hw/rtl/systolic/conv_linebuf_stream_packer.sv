@@ -255,13 +255,6 @@ module conv_linebuf_stream_packer #(
     logic [DATA_WIDTH-1:0] pad_vector;
     logic [31:0] pad_row_offset;
     
-    typedef struct packed {
-        logic       valid;
-        logic [2:0] kh;
-        logic [2:0] kw;
-        logic [4:0] src_lane;
-    } fmt_lane_desc_t;
-
     // Stage 1 Pipeline Registers (Coordinates)
     logic [ARRAY_DIM-1:0][7:0] stg1_lane_kh_q;
     logic [ARRAY_DIM-1:0][7:0] stg1_lane_kw_q;
@@ -270,51 +263,17 @@ module conv_linebuf_stream_packer #(
     logic [15:0] stg1_tap_kw_q;
     logic        stg1_valid_q;
 
-    // Formatter pipeline:
-    //   S1: descriptor/window snapshot
-    //   S2: per-output-lane tap/source descriptor
-    //   S3: per-output-lane 256b tap vector select
-    //   S4: per-output-lane byte pack
-    //   S5: row_data_q/row_valid_out_q
-    window_t fmt_s1_window_q;
-    logic [ARRAY_DIM-1:0][7:0] fmt_s1_lane_kh_q;
-    logic [ARRAY_DIM-1:0][7:0] fmt_s1_lane_kw_q;
-    logic [ARRAY_DIM-1:0][15:0] fmt_s1_lane_ic_q;
-    logic [15:0] fmt_s1_tap_kh_q;
-    logic [15:0] fmt_s1_tap_kw_q;
-    logic [15:0] fmt_s1_kernel_h_q;
-    logic [15:0] fmt_s1_kernel_w_q;
-    logic [15:0] fmt_s1_c_base_q;
-    logic [15:0] fmt_s1_input_c_q;
-    logic [5:0]  fmt_s1_lane_base_q;
-    logic [5:0]  fmt_s1_block_valid_bytes_q;
-    logic        fmt_s1_coalesce_q;
-    logic        fmt_s1_kgen_q;
-    logic        fmt_s1_c32_kgen_fast_q;
-    logic        fmt_s1_valid_q;
-
-    window_t fmt_s2_window_q;
-    fmt_lane_desc_t fmt_s2_desc_q [ARRAY_DIM];
-    logic fmt_s2_valid_q;
-
-    logic [ARRAY_DIM-1:0][DATA_WIDTH-1:0] fmt_s3_tap_vec_q;
-    fmt_lane_desc_t fmt_s3_desc_q [ARRAY_DIM];
-    logic fmt_s3_valid_q;
-
-    input_row_t fmt_s4_row_q;
-    logic fmt_s4_valid_q;
-
     logic stg2_ready;
     logic formatter_pipe_ready;
+    input_row_t formatter_row;
+    logic formatter_valid;
+    logic formatter_empty;
     logic formatter_stream_drained;
 
     assign formatter_pipe_ready = row_ready_i || !row_valid_out_q;
     assign stg2_ready = formatter_pipe_ready;
     assign formatter_stream_drained = !stg1_valid_q &&
-                                      !fmt_s1_valid_q &&
-                                      !fmt_s2_valid_q &&
-                                      !fmt_s3_valid_q &&
-                                      !fmt_s4_valid_q &&
+                                      formatter_empty &&
                                       (!row_valid_out_q || row_ready_i);
 
     assign row_data_o = row_data_q;
@@ -349,6 +308,37 @@ module conv_linebuf_stream_packer #(
             .rdata_o ({bank_rdata[bank],  bank_w_rdata_unused[bank]})
         );
     end
+
+    conv_linebuf_formatter_pipeline #(
+        .DATA_WIDTH       (DATA_WIDTH),
+        .ARRAY_DIM        (ARRAY_DIM),
+        .INPUT_ELEM_WIDTH (INPUT_ELEM_WIDTH),
+        .K_MAX            (K_MAX)
+    ) i_formatter_pipeline (
+        .clk_i,
+        .rst_ni,
+        .flush_i             (state_q == CH_IDLE),
+        .advance_i           (formatter_pipe_ready && !bypass_active),
+        .window_i            (window_q),
+        .lane_kh_i           (stg1_lane_kh_q),
+        .lane_kw_i           (stg1_lane_kw_q),
+        .lane_ic_i           (stg1_lane_ic_q),
+        .tap_kh_i            (stg1_tap_kh_q),
+        .tap_kw_i            (stg1_tap_kw_q),
+        .kernel_h_i          (cfg_kernel_h_i),
+        .kernel_w_i          (cfg_kernel_w_i),
+        .c_base_i            (cfg_c_base_i),
+        .input_c_i           (cfg_input_c_i),
+        .lane_base_i         (cfg_lane_base_i),
+        .block_valid_bytes_i (block_valid_bytes),
+        .coalesce_i          (cfg_coalesce_i),
+        .kgen_i              (cfg_kgen_i),
+        .c32_kgen_fast_i     (c32_kgen_fast),
+        .valid_i             (stg1_valid_q),
+        .row_o               (formatter_row),
+        .valid_o             (formatter_valid),
+        .empty_o             (formatter_empty)
+    );
 
     function automatic logic [31:0] beat_base(input logic [31:0] addr);
         beat_base = {addr[31:BYTE_SEL_BITS], {BYTE_SEL_BITS{1'b0}}};
@@ -552,170 +542,6 @@ module conv_linebuf_stream_packer #(
 
             quotient_o = quotient;
             remainder_o = remainder;
-        end
-    endtask
-
-    function automatic input_row_t build_emit_row(
-        input window_t win,
-        input logic [15:0] tap_kh,
-        input logic [15:0] tap_kw,
-        input logic [ARRAY_DIM-1:0][7:0] l_kh,
-        input logic [ARRAY_DIM-1:0][7:0] l_kw,
-        input logic [ARRAY_DIM-1:0][15:0] l_ic
-    );
-        input_row_t row;
-        logic [6:0] dst_lane;
-        logic [15:0] src_lane;
-        logic [15:0] dst_count;
-        begin
-            row = '0;
-            if (c32_kgen_fast) begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][(lane << 3) +: 8];
-                end
-            end else if (cfg_coalesce_i && cfg_kgen_i) begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    if (({8'd0, l_kh[lane]} < cfg_kernel_h_i) &&
-                        ({8'd0, l_kw[lane]} < cfg_kernel_w_i) &&
-                        (l_ic[lane] >= cfg_c_base_i) &&
-                        (l_ic[lane] < (cfg_c_base_i + 16'(ARRAY_DIM))) &&
-                        (l_ic[lane] < cfg_input_c_i)) begin
-                        src_lane = l_ic[lane] - cfg_c_base_i;
-                        row[lane] = win[l_kh[lane][2:0]][l_kw[lane][2:0]][{src_lane[4:0], 3'b000} +: 8];
-                    end
-                end
-            end else if (cfg_coalesce_i) begin
-                dst_count = {10'd0, cfg_lane_base_i};
-                for (int unsigned kh = 0; kh < K_MAX; kh++) begin
-                    for (int unsigned kw = 0; kw < K_MAX; kw++) begin
-                        for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                            if ((kh < cfg_kernel_h_i) &&
-                                (kw < cfg_kernel_w_i) &&
-                                (lane < block_valid_bytes) &&
-                                (dst_count < 16'(ARRAY_DIM))) begin
-                                row[dst_count[4:0]] = win[kh][kw][(lane << 3) +: 8];
-                                dst_count = dst_count + 16'd1;
-                            end
-                        end
-                    end
-                end
-            end else begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    dst_lane = {1'b0, cfg_lane_base_i} + 7'(lane);
-                    if ((lane < block_valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
-                        row[dst_lane[4:0]] = win[tap_kh[2:0]][tap_kw[2:0]][(lane << 3) +: 8];
-                    end
-                end
-            end
-            build_emit_row = row;
-        end
-    endfunction
-
-    task automatic build_formatter_desc(
-        input logic [15:0] tap_kh,
-        input logic [15:0] tap_kw,
-        input logic [ARRAY_DIM-1:0][7:0] lane_kh_i,
-        input logic [ARRAY_DIM-1:0][7:0] lane_kw_i,
-        input logic [ARRAY_DIM-1:0][15:0] lane_ic_i,
-        input logic [15:0] kernel_h,
-        input logic [15:0] kernel_w,
-        input logic [15:0] c_base,
-        input logic [15:0] input_c,
-        input logic [5:0] lane_base,
-        input logic [5:0] valid_bytes,
-        input logic coalesce,
-        input logic kgen,
-        input logic c32_fast,
-        output fmt_lane_desc_t desc_o [ARRAY_DIM]
-    );
-        logic [6:0] dst_lane;
-        logic [15:0] src_lane;
-        logic [15:0] dst_count;
-        begin
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                desc_o[lane] = '0;
-            end
-
-            if (c32_fast) begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    desc_o[lane].valid = 1'b1;
-                    desc_o[lane].kh = lane_kh_i[lane][2:0];
-                    desc_o[lane].kw = lane_kw_i[lane][2:0];
-                    desc_o[lane].src_lane = 5'(lane);
-                end
-            end else if (coalesce && kgen) begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    if (({8'd0, lane_kh_i[lane]} < kernel_h) &&
-                        ({8'd0, lane_kw_i[lane]} < kernel_w) &&
-                        (lane_ic_i[lane] >= c_base) &&
-                        (lane_ic_i[lane] < (c_base + 16'(ARRAY_DIM))) &&
-                        (lane_ic_i[lane] < input_c)) begin
-                        src_lane = lane_ic_i[lane] - c_base;
-                        desc_o[lane].valid = 1'b1;
-                        desc_o[lane].kh = lane_kh_i[lane][2:0];
-                        desc_o[lane].kw = lane_kw_i[lane][2:0];
-                        desc_o[lane].src_lane = src_lane[4:0];
-                    end
-                end
-            end else if (coalesce) begin
-                dst_count = {10'd0, lane_base};
-                for (int unsigned kh = 0; kh < K_MAX; kh++) begin
-                    for (int unsigned kw = 0; kw < K_MAX; kw++) begin
-                        for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                            if ((kh < kernel_h) &&
-                                (kw < kernel_w) &&
-                                (lane < valid_bytes) &&
-                                (dst_count < 16'(ARRAY_DIM))) begin
-                                desc_o[dst_count[4:0]].valid = 1'b1;
-                                desc_o[dst_count[4:0]].kh = 3'(kh);
-                                desc_o[dst_count[4:0]].kw = 3'(kw);
-                                desc_o[dst_count[4:0]].src_lane = 5'(lane);
-                                dst_count = dst_count + 16'd1;
-                            end
-                        end
-                    end
-                end
-            end else begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    dst_lane = {1'b0, lane_base} + 7'(lane);
-                    if ((lane < valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
-                        desc_o[dst_lane[4:0]].valid = 1'b1;
-                        desc_o[dst_lane[4:0]].kh = tap_kh[2:0];
-                        desc_o[dst_lane[4:0]].kw = tap_kw[2:0];
-                        desc_o[dst_lane[4:0]].src_lane = 5'(lane);
-                    end
-                end
-            end
-        end
-    endtask
-
-    task automatic select_formatter_taps(
-        input window_t win,
-        input fmt_lane_desc_t desc_i [ARRAY_DIM],
-        output logic [ARRAY_DIM-1:0][DATA_WIDTH-1:0] tap_vec_o
-    );
-        begin
-            tap_vec_o = '0;
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                if (desc_i[lane].valid) begin
-                    tap_vec_o[lane] = win[desc_i[lane].kh][desc_i[lane].kw];
-                end
-            end
-        end
-    endtask
-
-    task automatic pack_formatter_row(
-        input logic [ARRAY_DIM-1:0][DATA_WIDTH-1:0] tap_vec_i,
-        input fmt_lane_desc_t desc_i [ARRAY_DIM],
-        output input_row_t row_o
-    );
-        begin
-            row_o = '0;
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                if (desc_i[lane].valid) begin
-                    row_o[lane] = tap_vec_i[lane][{desc_i[lane].src_lane, 3'b000} +: 8];
-                end
-            end
         end
     endtask
 
@@ -1229,32 +1055,6 @@ module conv_linebuf_stream_packer #(
             stg1_lane_ic_q <= '0;
             stg1_tap_kh_q <= '0;
             stg1_tap_kw_q <= '0;
-            fmt_s1_window_q <= '0;
-            fmt_s1_lane_kh_q <= '0;
-            fmt_s1_lane_kw_q <= '0;
-            fmt_s1_lane_ic_q <= '0;
-            fmt_s1_tap_kh_q <= '0;
-            fmt_s1_tap_kw_q <= '0;
-            fmt_s1_kernel_h_q <= '0;
-            fmt_s1_kernel_w_q <= '0;
-            fmt_s1_c_base_q <= '0;
-            fmt_s1_input_c_q <= '0;
-            fmt_s1_lane_base_q <= '0;
-            fmt_s1_block_valid_bytes_q <= '0;
-            fmt_s1_coalesce_q <= 1'b0;
-            fmt_s1_kgen_q <= 1'b0;
-            fmt_s1_c32_kgen_fast_q <= 1'b0;
-            fmt_s1_valid_q <= 1'b0;
-            fmt_s2_window_q <= '0;
-            fmt_s2_valid_q <= 1'b0;
-            fmt_s3_tap_vec_q <= '0;
-            fmt_s3_valid_q <= 1'b0;
-            fmt_s4_row_q <= '0;
-            fmt_s4_valid_q <= 1'b0;
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                fmt_s2_desc_q[lane] <= '0;
-                fmt_s3_desc_q[lane] <= '0;
-            end
         end
     endtask
 
@@ -1364,10 +1164,6 @@ module conv_linebuf_stream_packer #(
         begin
             stg1_valid_q <= 1'b0;
             row_valid_out_q <= 1'b0;
-            fmt_s1_valid_q <= 1'b0;
-            fmt_s2_valid_q <= 1'b0;
-            fmt_s3_valid_q <= 1'b0;
-            fmt_s4_valid_q <= 1'b0;
             if (start_i) begin
                 reset_spatial_walk();
                 emitted_vectors_q <= '0;
@@ -1855,62 +1651,10 @@ module conv_linebuf_stream_packer #(
     endtask
 
     task automatic tick_output_stage;
-        fmt_lane_desc_t desc_next [ARRAY_DIM];
-        logic [ARRAY_DIM-1:0][DATA_WIDTH-1:0] tap_vec_next;
-        input_row_t row_next;
         begin
-            build_formatter_desc(fmt_s1_tap_kh_q,
-                                 fmt_s1_tap_kw_q,
-                                 fmt_s1_lane_kh_q,
-                                 fmt_s1_lane_kw_q,
-                                 fmt_s1_lane_ic_q,
-                                 fmt_s1_kernel_h_q,
-                                 fmt_s1_kernel_w_q,
-                                 fmt_s1_c_base_q,
-                                 fmt_s1_input_c_q,
-                                 fmt_s1_lane_base_q,
-                                 fmt_s1_block_valid_bytes_q,
-                                 fmt_s1_coalesce_q,
-                                 fmt_s1_kgen_q,
-                                 fmt_s1_c32_kgen_fast_q,
-                                 desc_next);
-            select_formatter_taps(fmt_s2_window_q, fmt_s2_desc_q, tap_vec_next);
-            pack_formatter_row(fmt_s3_tap_vec_q, fmt_s3_desc_q, row_next);
-
             if (formatter_pipe_ready && !bypass_active) begin
-                row_data_q <= fmt_s4_row_q;
-                row_valid_out_q <= fmt_s4_valid_q;
-
-                fmt_s4_row_q <= row_next;
-                fmt_s4_valid_q <= fmt_s3_valid_q;
-
-                fmt_s3_tap_vec_q <= tap_vec_next;
-                fmt_s3_valid_q <= fmt_s2_valid_q;
-
-                fmt_s2_window_q <= fmt_s1_window_q;
-                fmt_s2_valid_q <= fmt_s1_valid_q;
-
-                fmt_s1_window_q <= window_q;
-                fmt_s1_lane_kh_q <= stg1_lane_kh_q;
-                fmt_s1_lane_kw_q <= stg1_lane_kw_q;
-                fmt_s1_lane_ic_q <= stg1_lane_ic_q;
-                fmt_s1_tap_kh_q <= stg1_tap_kh_q;
-                fmt_s1_tap_kw_q <= stg1_tap_kw_q;
-                fmt_s1_kernel_h_q <= cfg_kernel_h_i;
-                fmt_s1_kernel_w_q <= cfg_kernel_w_i;
-                fmt_s1_c_base_q <= cfg_c_base_i;
-                fmt_s1_input_c_q <= cfg_input_c_i;
-                fmt_s1_lane_base_q <= cfg_lane_base_i;
-                fmt_s1_block_valid_bytes_q <= block_valid_bytes;
-                fmt_s1_coalesce_q <= cfg_coalesce_i;
-                fmt_s1_kgen_q <= cfg_kgen_i;
-                fmt_s1_c32_kgen_fast_q <= c32_kgen_fast;
-                fmt_s1_valid_q <= stg1_valid_q;
-
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    fmt_s2_desc_q[lane] <= desc_next[lane];
-                    fmt_s3_desc_q[lane] <= fmt_s2_desc_q[lane];
-                end
+                row_data_q <= formatter_row;
+                row_valid_out_q <= formatter_valid;
             end
         end
     endtask

@@ -38,6 +38,11 @@ TOPLEVEL = systolic_ctrl_regs
 VERILOG_SOURCES = $(PWD)/systolic_ctrl_regs.sv
 endif
 
+ifeq ($(MODULE),test_conv_linebuf_formatter_pipeline)
+TOPLEVEL = conv_linebuf_formatter_pipeline
+VERILOG_SOURCES = $(PWD)/conv_linebuf_formatter_pipeline.sv
+endif
+
 # Extra args for verilator
 EXTRA_ARGS += -Wno-fatal --timing -j $(VERILATOR_JOBS)
 BUILD_ARGS += -j$(VERILATOR_JOBS)
@@ -53,6 +58,7 @@ VERILOG_SOURCES = \
 	$(PWD)/binary_requant_pipeline.sv \
 	$(PWD)/binary_operand_stream.sv \
 	$(PWD)/npu_systolic_array.sv \
+	$(PWD)/conv_linebuf_formatter_pipeline.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv \
 	$(PWD)/depthwise_mac_engine.sv \
 	$(PWD)/systolic_ctrl_regs.sv \
@@ -76,6 +82,7 @@ VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_clk.sv \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
+	$(PWD)/conv_linebuf_formatter_pipeline.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv
 endif
 
