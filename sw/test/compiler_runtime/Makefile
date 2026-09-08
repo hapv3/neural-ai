@@ -41,7 +41,7 @@ test_copy_layout: test_copy_layout.c ../../lib/npu_layout_ops.h ../../lib/npu_la
 test_quant_buffer: test_quant_buffer.c ../../lib/npu_quant_buffer.h ../../lib/npu_quant_buffer.c
 	$(CC) $(CFLAGS) -DNAI_QUANT_BUFFER_HOST_TEST -I../../lib test_quant_buffer.c ../../lib/npu_quant_buffer.c -o $@
 
-test_dma_async_state: test_dma_async_state.c ../../lib/npu_dma_async_state.h
+test_dma_async_state: test_dma_async_state.c ../../lib/npu_dma_async_state.h ../../lib/idma_transfer_id.h
 	$(CC) $(CFLAGS) -I../../lib test_dma_async_state.c -o $@
 
 clean:

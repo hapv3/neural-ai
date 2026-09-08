@@ -2,6 +2,7 @@
 #define IDMA_MM_UTILS_H
 
 #include "npu_memory_map.h"
+#include "idma_transfer_id.h"
 #include "npu_types.h"
 
 #define IDMA_MM_DIRECTION_OFFSET IDMA_DIR_OFFSET
@@ -160,8 +161,8 @@ static inline uint32_t idma_mm_wait_for_completion(uint32_t direction, uint32_t 
     uint32_t timeout = 1000000u;
 
     while (timeout-- > 0u) {
-        if (!idma_mm_is_busy_dir(is_l1_to_l2, 0) &&
-            idma_mm_get_done_id_dir(is_l1_to_l2, 0) == transfer_id) {
+        if (idma_mm_transfer_completed(
+                idma_mm_get_done_id_dir(is_l1_to_l2, 0), transfer_id)) {
             return 1;
         }
         wait_nop(10);
