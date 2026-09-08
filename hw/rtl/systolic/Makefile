@@ -33,6 +33,11 @@ VERILOG_SOURCES = \
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
 endif
 
+ifeq ($(MODULE),test_systolic_ctrl_regs)
+TOPLEVEL = systolic_ctrl_regs
+VERILOG_SOURCES = $(PWD)/systolic_ctrl_regs.sv
+endif
+
 # Extra args for verilator
 EXTRA_ARGS += -Wno-fatal --timing -j $(VERILATOR_JOBS)
 BUILD_ARGS += -j$(VERILATOR_JOBS)

@@ -32,6 +32,23 @@ module systolic_ctrl_regs #(
     output logic [31:0][31:0]         cfg_requant_zero_point_o,
     output logic [31:0]               cfg_requant_clamp_min_o,
     output logic [31:0]               cfg_requant_clamp_max_o,
+    output logic                      cfg_binary_en_o,
+    output logic [1:0]                cfg_binary_mode_o,
+    output logic [31:0]               cfg_binary_rhs_ptr_o,
+    output logic [31:0]               cfg_binary_rhs_row_stride_bytes_o,
+    output logic [31:0]               cfg_binary_rhs_tile_cols_o,
+    output logic [31:0]               cfg_binary_lhs_multiplier_o,
+    output logic [6:0]                cfg_binary_lhs_shift_o,
+    output logic [31:0]               cfg_binary_rhs_multiplier_o,
+    output logic [6:0]                cfg_binary_rhs_shift_o,
+    output logic [31:0]               cfg_binary_output_multiplier_o,
+    output logic [6:0]                cfg_binary_output_shift_o,
+    output logic signed [31:0]        cfg_binary_lhs_zero_point_o,
+    output logic signed [31:0]        cfg_binary_rhs_zero_point_o,
+    output logic signed [31:0]        cfg_binary_output_zero_point_o,
+    output logic signed [31:0]        cfg_binary_clamp_min_o,
+    output logic signed [31:0]        cfg_binary_clamp_max_o,
+    output logic [5:0]                cfg_binary_double_round_shift_o,
     output logic                      cfg_linebuf_en_o,
     output logic                      cfg_linebuf_coalesce_o,
     output logic                      cfg_linebuf_pool_o,
@@ -79,6 +96,19 @@ module systolic_ctrl_regs #(
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_CTRL   = 32'h0120;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_CMIN   = 32'h0124;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_CMAX   = 32'h0128;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_CTRL = 32'h012C;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_RHS_PTR = 32'h0130;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_RHS_ROW_STRIDE = 32'h0134;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_RHS_TILE_COLS = 32'h0138;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_LHS_MULT = 32'h013C;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_LHS_SHIFT = 32'h0140;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_RHS_MULT = 32'h0144;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_RHS_SHIFT = 32'h0148;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_OUTPUT_MULT = 32'h014C;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_OUTPUT_SHIFT = 32'h0150;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_ZERO_POINTS = 32'h0154;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_CLAMP = 32'h0158;
+    localparam logic [ADDR_WIDTH-1:0] REG_BINARY_DOUBLE_ROUND = 32'h015C;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_BIAS_BASE = 32'h0200;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_MULT_BASE = 32'h0280;
     localparam logic [ADDR_WIDTH-1:0] REG_RQ_SHIFT_BASE = 32'h0300;
@@ -126,6 +156,23 @@ module systolic_ctrl_regs #(
     logic [31:0][31:0] r_requant_zero_point;
     logic [31:0]       r_requant_clamp_min;
     logic [31:0]       r_requant_clamp_max;
+    logic              r_binary_en;
+    logic [1:0]        r_binary_mode;
+    logic [31:0]       r_binary_rhs_ptr;
+    logic [31:0]       r_binary_rhs_row_stride_bytes;
+    logic [31:0]       r_binary_rhs_tile_cols;
+    logic [31:0]       r_binary_lhs_multiplier;
+    logic [6:0]        r_binary_lhs_shift;
+    logic [31:0]       r_binary_rhs_multiplier;
+    logic [6:0]        r_binary_rhs_shift;
+    logic [31:0]       r_binary_output_multiplier;
+    logic [6:0]        r_binary_output_shift;
+    logic signed [7:0] r_binary_lhs_zero_point;
+    logic signed [7:0] r_binary_rhs_zero_point;
+    logic signed [7:0] r_binary_output_zero_point;
+    logic signed [7:0] r_binary_clamp_min;
+    logic signed [7:0] r_binary_clamp_max;
+    logic [5:0]        r_binary_double_round_shift;
     logic              r_linebuf_en;
     logic              r_linebuf_coalesce;
     logic              r_linebuf_pool;
@@ -176,6 +223,23 @@ module systolic_ctrl_regs #(
     logic [31:0][31:0] s_requant_zero_point;
     logic [31:0]       s_requant_clamp_min;
     logic [31:0]       s_requant_clamp_max;
+    logic              s_binary_en;
+    logic [1:0]        s_binary_mode;
+    logic [31:0]       s_binary_rhs_ptr;
+    logic [31:0]       s_binary_rhs_row_stride_bytes;
+    logic [31:0]       s_binary_rhs_tile_cols;
+    logic [31:0]       s_binary_lhs_multiplier;
+    logic [6:0]        s_binary_lhs_shift;
+    logic [31:0]       s_binary_rhs_multiplier;
+    logic [6:0]        s_binary_rhs_shift;
+    logic [31:0]       s_binary_output_multiplier;
+    logic [6:0]        s_binary_output_shift;
+    logic signed [7:0] s_binary_lhs_zero_point;
+    logic signed [7:0] s_binary_rhs_zero_point;
+    logic signed [7:0] s_binary_output_zero_point;
+    logic signed [7:0] s_binary_clamp_min;
+    logic signed [7:0] s_binary_clamp_max;
+    logic [5:0]        s_binary_double_round_shift;
     logic              s_linebuf_en;
     logic              s_linebuf_coalesce;
     logic              s_linebuf_pool;
@@ -233,6 +297,23 @@ module systolic_ctrl_regs #(
             r_requant_en <= 1'b0;
             r_requant_clamp_min <= 32'hFFFF_FF80;
             r_requant_clamp_max <= 32'h0000_007F;
+            r_binary_en <= 1'b0;
+            r_binary_mode <= '0;
+            r_binary_rhs_ptr <= '0;
+            r_binary_rhs_row_stride_bytes <= '0;
+            r_binary_rhs_tile_cols <= '0;
+            r_binary_lhs_multiplier <= 32'd1;
+            r_binary_lhs_shift <= '0;
+            r_binary_rhs_multiplier <= 32'd1;
+            r_binary_rhs_shift <= '0;
+            r_binary_output_multiplier <= 32'd1;
+            r_binary_output_shift <= '0;
+            r_binary_lhs_zero_point <= '0;
+            r_binary_rhs_zero_point <= '0;
+            r_binary_output_zero_point <= '0;
+            r_binary_clamp_min <= -8'sd128;
+            r_binary_clamp_max <= 8'sd127;
+            r_binary_double_round_shift <= '0;
             r_linebuf_en <= 1'b0;
             r_linebuf_coalesce <= 1'b0;
             r_linebuf_pool <= 1'b0;
@@ -278,6 +359,23 @@ module systolic_ctrl_regs #(
             s_requant_en <= 1'b0;
             s_requant_clamp_min <= 32'hFFFF_FF80;
             s_requant_clamp_max <= 32'h0000_007F;
+            s_binary_en <= 1'b0;
+            s_binary_mode <= '0;
+            s_binary_rhs_ptr <= '0;
+            s_binary_rhs_row_stride_bytes <= '0;
+            s_binary_rhs_tile_cols <= '0;
+            s_binary_lhs_multiplier <= 32'd1;
+            s_binary_lhs_shift <= '0;
+            s_binary_rhs_multiplier <= 32'd1;
+            s_binary_rhs_shift <= '0;
+            s_binary_output_multiplier <= 32'd1;
+            s_binary_output_shift <= '0;
+            s_binary_lhs_zero_point <= '0;
+            s_binary_rhs_zero_point <= '0;
+            s_binary_output_zero_point <= '0;
+            s_binary_clamp_min <= -8'sd128;
+            s_binary_clamp_max <= 8'sd127;
+            s_binary_double_round_shift <= '0;
             s_linebuf_en <= 1'b0;
             s_linebuf_coalesce <= 1'b0;
             s_linebuf_pool <= 1'b0;
@@ -355,6 +453,23 @@ module systolic_ctrl_regs #(
                                     r_requant_en <= s_requant_en;
                                     r_requant_clamp_min <= s_requant_clamp_min;
                                     r_requant_clamp_max <= s_requant_clamp_max;
+                                    r_binary_en <= s_binary_en;
+                                    r_binary_mode <= s_binary_mode;
+                                    r_binary_rhs_ptr <= s_binary_rhs_ptr;
+                                    r_binary_rhs_row_stride_bytes <= s_binary_rhs_row_stride_bytes;
+                                    r_binary_rhs_tile_cols <= s_binary_rhs_tile_cols;
+                                    r_binary_lhs_multiplier <= s_binary_lhs_multiplier;
+                                    r_binary_lhs_shift <= s_binary_lhs_shift;
+                                    r_binary_rhs_multiplier <= s_binary_rhs_multiplier;
+                                    r_binary_rhs_shift <= s_binary_rhs_shift;
+                                    r_binary_output_multiplier <= s_binary_output_multiplier;
+                                    r_binary_output_shift <= s_binary_output_shift;
+                                    r_binary_lhs_zero_point <= s_binary_lhs_zero_point;
+                                    r_binary_rhs_zero_point <= s_binary_rhs_zero_point;
+                                    r_binary_output_zero_point <= s_binary_output_zero_point;
+                                    r_binary_clamp_min <= s_binary_clamp_min;
+                                    r_binary_clamp_max <= s_binary_clamp_max;
+                                    r_binary_double_round_shift <= s_binary_double_round_shift;
                                     r_linebuf_en <= s_linebuf_en;
                                     r_linebuf_coalesce <= s_linebuf_coalesce;
                                     r_linebuf_kgen <= s_linebuf_kgen;
@@ -403,6 +518,30 @@ module systolic_ctrl_regs #(
                             REG_RQ_CTRL:   s_requant_en <= wdata_i[0];
                             REG_RQ_CMIN:   s_requant_clamp_min <= wdata_i;
                             REG_RQ_CMAX:   s_requant_clamp_max <= wdata_i;
+                            REG_BINARY_CTRL: begin
+                                s_binary_en <= wdata_i[0];
+                                s_binary_mode <= wdata_i[2:1];
+                            end
+                            REG_BINARY_RHS_PTR: s_binary_rhs_ptr <= wdata_i;
+                            REG_BINARY_RHS_ROW_STRIDE: s_binary_rhs_row_stride_bytes <= wdata_i;
+                            REG_BINARY_RHS_TILE_COLS: s_binary_rhs_tile_cols <= wdata_i;
+                            REG_BINARY_LHS_MULT: s_binary_lhs_multiplier <= wdata_i;
+                            REG_BINARY_LHS_SHIFT: s_binary_lhs_shift <= wdata_i[6:0];
+                            REG_BINARY_RHS_MULT: s_binary_rhs_multiplier <= wdata_i;
+                            REG_BINARY_RHS_SHIFT: s_binary_rhs_shift <= wdata_i[6:0];
+                            REG_BINARY_OUTPUT_MULT: s_binary_output_multiplier <= wdata_i;
+                            REG_BINARY_OUTPUT_SHIFT: s_binary_output_shift <= wdata_i[6:0];
+                            REG_BINARY_ZERO_POINTS: begin
+                                s_binary_lhs_zero_point <= wdata_i[7:0];
+                                s_binary_rhs_zero_point <= wdata_i[15:8];
+                                s_binary_output_zero_point <= wdata_i[23:16];
+                            end
+                            REG_BINARY_CLAMP: begin
+                                s_binary_clamp_min <= wdata_i[7:0];
+                                s_binary_clamp_max <= wdata_i[15:8];
+                            end
+                            REG_BINARY_DOUBLE_ROUND:
+                                s_binary_double_round_shift <= wdata_i[5:0];
                             REG_LB_CTRL: begin
                                 s_linebuf_en <= wdata_i[0];
                                 s_linebuf_coalesce <= wdata_i[1];
@@ -487,6 +626,22 @@ module systolic_ctrl_regs #(
                 REG_RQ_CTRL:   rdata_o = {31'd0, r_requant_en};
                 REG_RQ_CMIN:   rdata_o = r_requant_clamp_min;
                 REG_RQ_CMAX:   rdata_o = r_requant_clamp_max;
+                REG_BINARY_CTRL: rdata_o = {29'd0, r_binary_mode, r_binary_en};
+                REG_BINARY_RHS_PTR: rdata_o = r_binary_rhs_ptr;
+                REG_BINARY_RHS_ROW_STRIDE: rdata_o = r_binary_rhs_row_stride_bytes;
+                REG_BINARY_RHS_TILE_COLS: rdata_o = r_binary_rhs_tile_cols;
+                REG_BINARY_LHS_MULT: rdata_o = r_binary_lhs_multiplier;
+                REG_BINARY_LHS_SHIFT: rdata_o = {25'd0, r_binary_lhs_shift};
+                REG_BINARY_RHS_MULT: rdata_o = r_binary_rhs_multiplier;
+                REG_BINARY_RHS_SHIFT: rdata_o = {25'd0, r_binary_rhs_shift};
+                REG_BINARY_OUTPUT_MULT: rdata_o = r_binary_output_multiplier;
+                REG_BINARY_OUTPUT_SHIFT: rdata_o = {25'd0, r_binary_output_shift};
+                REG_BINARY_ZERO_POINTS: rdata_o = {8'd0, r_binary_output_zero_point,
+                                                    r_binary_rhs_zero_point,
+                                                    r_binary_lhs_zero_point};
+                REG_BINARY_CLAMP: rdata_o = {16'd0, r_binary_clamp_max,
+                                             r_binary_clamp_min};
+                REG_BINARY_DOUBLE_ROUND: rdata_o = {26'd0, r_binary_double_round_shift};
                 REG_LB_CTRL: rdata_o = {24'd0, r_linebuf_generic_linear_k32,
                                          r_linebuf_c32_group_stationary, r_linebuf_depthwise,
                                          r_linebuf_c32_fast, r_linebuf_pool, r_linebuf_kgen,
@@ -543,6 +698,26 @@ module systolic_ctrl_regs #(
     assign cfg_requant_zero_point_o = r_requant_zero_point;
     assign cfg_requant_clamp_min_o = r_requant_clamp_min;
     assign cfg_requant_clamp_max_o = r_requant_clamp_max;
+    assign cfg_binary_en_o = r_binary_en;
+    assign cfg_binary_mode_o = r_binary_mode;
+    assign cfg_binary_rhs_ptr_o = r_binary_rhs_ptr;
+    assign cfg_binary_rhs_row_stride_bytes_o = r_binary_rhs_row_stride_bytes;
+    assign cfg_binary_rhs_tile_cols_o = r_binary_rhs_tile_cols;
+    assign cfg_binary_lhs_multiplier_o = r_binary_lhs_multiplier;
+    assign cfg_binary_lhs_shift_o = r_binary_lhs_shift;
+    assign cfg_binary_rhs_multiplier_o = r_binary_rhs_multiplier;
+    assign cfg_binary_rhs_shift_o = r_binary_rhs_shift;
+    assign cfg_binary_output_multiplier_o = r_binary_output_multiplier;
+    assign cfg_binary_output_shift_o = r_binary_output_shift;
+    assign cfg_binary_lhs_zero_point_o = {{24{r_binary_lhs_zero_point[7]}},
+                                          r_binary_lhs_zero_point};
+    assign cfg_binary_rhs_zero_point_o = {{24{r_binary_rhs_zero_point[7]}},
+                                          r_binary_rhs_zero_point};
+    assign cfg_binary_output_zero_point_o = {{24{r_binary_output_zero_point[7]}},
+                                             r_binary_output_zero_point};
+    assign cfg_binary_clamp_min_o = {{24{r_binary_clamp_min[7]}}, r_binary_clamp_min};
+    assign cfg_binary_clamp_max_o = {{24{r_binary_clamp_max[7]}}, r_binary_clamp_max};
+    assign cfg_binary_double_round_shift_o = r_binary_double_round_shift;
     assign cfg_linebuf_en_o = r_linebuf_en;
     assign cfg_linebuf_coalesce_o = r_linebuf_coalesce;
     assign cfg_linebuf_pool_o = r_linebuf_pool;
