@@ -2,7 +2,7 @@ import random
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import FallingEdge, RisingEdge, Timer
 
 
 MODE_ADD = 0
@@ -22,6 +22,11 @@ def scale_product(value, multiplier, shift, double_round_shift):
     return product >> shift
 
 
+def signed32(value):
+    value &= 0xFFFFFFFF
+    return value if value < 0x80000000 else value - 0x100000000
+
+
 def reference(lhs, rhs, mode, params):
     result = []
     for lhs_value, rhs_value in zip(lhs, rhs):
@@ -30,18 +35,18 @@ def reference(lhs, rhs, mode, params):
         if mode == MODE_MUL:
             combined = lhs_centered * rhs_centered
         else:
-            lhs_scaled = scale_product(
+            lhs_scaled = signed32(scale_product(
                 lhs_centered,
                 params["lhs_multiplier"],
                 params["lhs_shift"],
                 params["double_round_shift"],
-            )
-            rhs_scaled = scale_product(
+            ))
+            rhs_scaled = signed32(scale_product(
                 rhs_centered,
                 params["rhs_multiplier"],
                 params["rhs_shift"],
                 params["double_round_shift"],
-            )
+            ))
             combined = lhs_scaled + rhs_scaled if mode == MODE_ADD else lhs_scaled - rhs_scaled
         output = scale_product(
             combined,
@@ -72,22 +77,24 @@ async def reset(dut):
 
 
 async def push(dut, lhs, rhs, mode, params):
+    await FallingEdge(dut.clk_i)
     dut.lhs_i.value = pack(lhs)
     dut.rhs_i.value = pack(rhs)
     dut.mode_i.value = mode
     for name, value in params.items():
         getattr(dut, f"{name}_i").value = value
     dut.in_valid_i.value = 1
-    while True:
+    while not dut.in_ready_o.value:
         await RisingEdge(dut.clk_i)
-        if dut.in_ready_o.value:
-            break
+        await FallingEdge(dut.clk_i)
+    await RisingEdge(dut.clk_i)
+    await FallingEdge(dut.clk_i)
     dut.in_valid_i.value = 0
 
 
 @cocotb.test()
 async def binary_requant_pipeline_all_modes_and_backpressure(dut):
-    cocotb.start_soon(Clock(dut.clk_i, 2, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk_i, 2, unit="ns").start())
     await reset(dut)
 
     rng = random.Random(0xB1A2)
@@ -112,39 +119,66 @@ async def binary_requant_pipeline_all_modes_and_backpressure(dut):
             }
             cases.append((lhs, rhs, mode, params, reference(lhs, rhs, mode, params)))
 
-    expected = []
+    expected = [case[4] for case in cases]
     received = []
-    producer_done = False
+    send_index = 0
+    input_active = False
+    cycle = 0
 
-    async def producer():
-        nonlocal producer_done
-        for lhs, rhs, mode, params, result in cases:
-            await push(dut, lhs, rhs, mode, params)
-            expected.append(result)
-        producer_done = True
+    # Drive and sample both interfaces in one coroutine.  This avoids a race
+    # where a producer observes in_ready before the consumer changes out_ready
+    # on the same falling edge.
+    while send_index < len(cases) or input_active or len(received) < len(expected):
+        await FallingEdge(dut.clk_i)
+        out_ready = cycle % 7 not in (2, 3)
+        dut.out_ready_i.value = out_ready
 
-    async def consumer():
-        cycle = 0
-        while not producer_done or len(received) < len(expected):
-            dut.out_ready_i.value = 0 if cycle % 7 in (2, 3) else 1
-            await RisingEdge(dut.clk_i)
-            if dut.out_valid_o.value and dut.out_ready_i.value:
-                assert not dut.invalid_o.value
-                received.append([
-                    (int(dut.packed_o.value) >> (lane * 8)) & 0xFF
-                    for lane in range(LANES)
-                ])
-            cycle += 1
-            assert cycle < 500
+        if not input_active and send_index < len(cases):
+            lhs, rhs, mode, params, _ = cases[send_index]
+            dut.lhs_i.value = pack(lhs)
+            dut.rhs_i.value = pack(rhs)
+            dut.mode_i.value = mode
+            for name, value in params.items():
+                getattr(dut, f"{name}_i").value = value
+            dut.in_valid_i.value = 1
+            input_active = True
+        elif not input_active:
+            dut.in_valid_i.value = 0
 
-    await cocotb.start(producer())
-    await consumer()
-    assert received == expected
+        # Let the combinational ready chain settle after changing out_ready.
+        await Timer(1, unit="ps")
+        input_accepted = input_active and bool(dut.in_ready_o.value)
+        if dut.out_valid_o.value and out_ready:
+            assert not dut.invalid_o.value
+            received.append([
+                (int(dut.packed_o.value) >> (lane * 8)) & 0xFF
+                for lane in range(LANES)
+            ])
+
+        await RisingEdge(dut.clk_i)
+        if input_accepted:
+            send_index += 1
+            input_active = False
+        cycle += 1
+        assert cycle < 500, (
+            f"sent={send_index}/{len(cases)} input_active={input_active} "
+            f"received={len(received)}/{len(expected)} "
+            f"valid_q=0x{int(dut.valid_q.value):x} "
+            f"in_ready={int(dut.in_ready_o.value)} "
+            f"out_valid={int(dut.out_valid_o.value)} "
+            f"out_ready={int(dut.out_ready_i.value)} "
+            f"received_heads={[values[:4] for values in received]}"
+        )
+
+    dut.in_valid_i.value = 0
+    assert len(received) == len(expected)
+    for transaction, (actual, wanted) in enumerate(zip(received, expected)):
+        assert actual == wanted, f"transaction {transaction}: {actual} != {wanted}"
 
 
 @cocotb.test()
 async def binary_requant_pipeline_flush_and_invalid_config(dut):
-    cocotb.start_soon(Clock(dut.clk_i, 2, units="ns").start())
+    cocotb.start_soon(Clock(dut.clk_i, 2, unit="ns").start())
     await reset(dut)
 
     params = {
@@ -180,3 +214,64 @@ async def binary_requant_pipeline_flush_and_invalid_config(dut):
             break
     else:
         raise AssertionError("invalid transaction did not leave the pipeline")
+
+
+@cocotb.test()
+async def binary_requant_pipeline_accepts_one_c32_per_cycle(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 2, unit="ns").start())
+    await reset(dut)
+    dut.out_ready_i.value = 1
+    params = {
+        "lhs_multiplier": 1,
+        "lhs_shift": 0,
+        "rhs_multiplier": 1,
+        "rhs_shift": 0,
+        "output_multiplier": 1,
+        "output_shift": 0,
+        "lhs_zero_point": 0,
+        "rhs_zero_point": 0,
+        "output_zero_point": 0,
+        "clamp_min": -128,
+        "clamp_max": 127,
+        "double_round_shift": 0,
+    }
+    expected = []
+    received = []
+    output_cycles = []
+
+    async def monitor():
+        cycle = 0
+        while len(received) < 16:
+            await FallingEdge(dut.clk_i)
+            if dut.out_valid_o.value and dut.out_ready_i.value:
+                received.append([
+                    (int(dut.packed_o.value) >> (lane * 8)) & 0xFF
+                    for lane in range(LANES)
+                ])
+                output_cycles.append(cycle)
+            await RisingEdge(dut.clk_i)
+            cycle += 1
+            assert cycle < 80
+
+    monitor_task = cocotb.start_soon(monitor())
+    for transaction in range(16):
+        await FallingEdge(dut.clk_i)
+        lhs = [transaction - 8] * LANES
+        rhs = [lane - 16 for lane in range(LANES)]
+        expected.append(reference(lhs, rhs, MODE_ADD, params))
+        dut.lhs_i.value = pack(lhs)
+        dut.rhs_i.value = pack(rhs)
+        dut.mode_i.value = MODE_ADD
+        for name, value in params.items():
+            getattr(dut, f"{name}_i").value = value
+        dut.in_valid_i.value = 1
+        assert dut.in_ready_o.value
+        await RisingEdge(dut.clk_i)
+    await FallingEdge(dut.clk_i)
+    dut.in_valid_i.value = 0
+    await monitor_task
+    assert received == expected
+    assert all(
+        second == first + 1
+        for first, second in zip(output_cycles, output_cycles[1:])
+    )
