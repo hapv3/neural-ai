@@ -11,6 +11,31 @@
 #define SYSTOLIC_LINEBUF_SCHEDULE_C32_GROUP_STATIONARY 1u
 #define SYSTOLIC_LINEBUF_SCHEDULE_GENERIC_LINEAR_K32 2u
 
+typedef enum {
+    SYSTOLIC_BINARY_ADD = 0,
+    SYSTOLIC_BINARY_SUB = 1,
+    SYSTOLIC_BINARY_MUL = 2
+} systolic_binary_mode_t;
+
+typedef struct {
+    uint32_t rhs_addr;
+    uint32_t rhs_row_stride_bytes;
+    uint32_t rhs_tile_cols;
+    int32_t lhs_multiplier;
+    uint32_t lhs_shift;
+    int32_t rhs_multiplier;
+    uint32_t rhs_shift;
+    int32_t output_multiplier;
+    uint32_t output_shift;
+    int32_t lhs_zero_point;
+    int32_t rhs_zero_point;
+    int32_t output_zero_point;
+    int32_t clamp_min;
+    int32_t clamp_max;
+    uint32_t double_round_shift;
+    uint32_t mode;
+} systolic_binary_cfg_t;
+
 typedef struct {
     uint32_t input_base;
     uint16_t input_h;
@@ -183,6 +208,8 @@ void systolic_gemm32_accumulate_requant_strided(uint32_t weight_addr,
                                                 uint32_t ofm_row_stride_bytes,
                                                 uint32_t psum_row_stride_bytes);
 void systolic_requant_disable(void);
+void systolic_binary_disable(void);
+void systolic_binary_config(const systolic_binary_cfg_t *cfg);
 void systolic_requant_config_per_channel(const int32_t *bias,
                                          const int32_t *multiplier,
                                          const uint8_t *shift,

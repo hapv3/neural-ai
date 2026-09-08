@@ -313,6 +313,37 @@ void systolic_requant_disable(void) {
     REG_WRITE(REG_RQ_CTRL, 0u);
 }
 
+void systolic_binary_disable(void) {
+    REG_WRITE(REG_BINARY_CTRL, 0u);
+}
+
+void systolic_binary_config(const systolic_binary_cfg_t *cfg) {
+    uint32_t zero_points;
+    uint32_t clamp;
+
+    REG_WRITE(REG_BINARY_CTRL, 0u);
+    REG_WRITE(REG_BINARY_RHS_PTR, cfg->rhs_addr);
+    REG_WRITE(REG_BINARY_RHS_ROW_STRIDE, cfg->rhs_row_stride_bytes);
+    REG_WRITE(REG_BINARY_RHS_TILE_COLS, cfg->rhs_tile_cols);
+    REG_WRITE(REG_BINARY_LHS_MULT, (uint32_t)cfg->lhs_multiplier);
+    REG_WRITE(REG_BINARY_LHS_SHIFT, cfg->lhs_shift);
+    REG_WRITE(REG_BINARY_RHS_MULT, (uint32_t)cfg->rhs_multiplier);
+    REG_WRITE(REG_BINARY_RHS_SHIFT, cfg->rhs_shift);
+    REG_WRITE(REG_BINARY_OUTPUT_MULT, (uint32_t)cfg->output_multiplier);
+    REG_WRITE(REG_BINARY_OUTPUT_SHIFT, cfg->output_shift);
+
+    zero_points = ((uint32_t)cfg->lhs_zero_point & 0xffu) |
+                  (((uint32_t)cfg->rhs_zero_point & 0xffu) << 8) |
+                  (((uint32_t)cfg->output_zero_point & 0xffu) << 16);
+    clamp = ((uint32_t)cfg->clamp_min & 0xffu) |
+            (((uint32_t)cfg->clamp_max & 0xffu) << 8);
+    REG_WRITE(REG_BINARY_ZERO_POINTS, zero_points);
+    REG_WRITE(REG_BINARY_CLAMP, clamp);
+    REG_WRITE(REG_BINARY_DOUBLE_ROUND, cfg->double_round_shift);
+    REG_WRITE(REG_BINARY_CTRL,
+              REG_BINARY_CTRL_EN | (cfg->mode << REG_BINARY_CTRL_MODE_SHIFT));
+}
+
 void systolic_requant_config_per_channel(const int32_t *bias,
                                          const int32_t *multiplier,
                                          const uint8_t *shift,
