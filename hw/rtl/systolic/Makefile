@@ -50,6 +50,8 @@ VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
 	$(PWD)/requant_pipeline.sv \
+	$(PWD)/binary_requant_pipeline.sv \
+	$(PWD)/binary_operand_stream.sv \
 	$(PWD)/npu_systolic_array.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv \
 	$(PWD)/depthwise_mac_engine.sv \
