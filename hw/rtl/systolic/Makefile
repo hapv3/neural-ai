@@ -43,6 +43,11 @@ TOPLEVEL = conv_linebuf_formatter_pipeline
 VERILOG_SOURCES = $(PWD)/conv_linebuf_formatter_pipeline.sv
 endif
 
+ifeq ($(MODULE),test_systolic_maxpool_engine)
+TOPLEVEL = systolic_maxpool_engine
+VERILOG_SOURCES = $(PWD)/systolic_maxpool_engine.sv
+endif
+
 # Extra args for verilator
 EXTRA_ARGS += -Wno-fatal --timing -j $(VERILATOR_JOBS)
 BUILD_ARGS += -j$(VERILATOR_JOBS)
@@ -61,6 +66,7 @@ VERILOG_SOURCES = \
 	$(PWD)/conv_linebuf_formatter_pipeline.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv \
 	$(PWD)/depthwise_mac_engine.sv \
+	$(PWD)/systolic_maxpool_engine.sv \
 	$(PWD)/systolic_ctrl_regs.sv \
 	$(PWD)/systolic_controller.sv \
 	$(PWD)/tb/tb_systolic_controller.sv

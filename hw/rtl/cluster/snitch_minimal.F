@@ -150,6 +150,7 @@ $(REPO_ROOT)/hw/rtl/systolic/binary_operand_stream.sv
 $(REPO_ROOT)/hw/rtl/systolic/conv_linebuf_formatter_pipeline.sv
 $(REPO_ROOT)/hw/rtl/systolic/conv_linebuf_stream_packer.sv
 $(REPO_ROOT)/hw/rtl/systolic/depthwise_mac_engine.sv
+$(REPO_ROOT)/hw/rtl/systolic/systolic_maxpool_engine.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_controller.sv
 $(REPO_ROOT)/hw/rtl/systolic/npu_systolic_array.sv
 $(REPO_ROOT)/hw/rtl/cluster/snitch_core.sv

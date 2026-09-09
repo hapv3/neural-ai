@@ -75,6 +75,7 @@
 ../../../../hw/rtl/systolic/conv_linebuf_formatter_pipeline.sv
 ../../../../hw/rtl/systolic/conv_linebuf_stream_packer.sv
 ../../../../hw/rtl/systolic/npu_systolic_array.sv
+../../../../hw/rtl/systolic/systolic_maxpool_engine.sv
 ../../../../hw/rtl/systolic/systolic_controller.sv
 
 ../../../../hw/rtl/cluster/tcdm_to_obi_bridge.sv

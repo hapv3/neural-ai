@@ -386,11 +386,10 @@ module systolic_controller #(
     logic [31:0]   linebuf_fetch_beats;
     logic [31:0]   linebuf_bypass_vectors;
     logic [4:0]    linebuf_debug_state;
-    input_row_t    pool_acc_q, pool_acc_d;
-    input_row_t    pool_out_q, pool_out_d;
-    input_row_t    pool_next_acc;
-    logic          pool_out_valid_q, pool_out_valid_d;
-    logic [7:0]    pool_tap_count_q, pool_tap_count_d;
+    input_row_t    pool_out_data;
+    logic          pool_in_ready;
+    logic          pool_out_valid;
+    logic          pool_out_ready;
     logic [31:0]   pool_kernel_vectors;
     localparam int unsigned DW_MAX_TAPS = 25;
     localparam int unsigned DW_TAP_COUNT_W = $clog2(DW_MAX_TAPS + 1);
@@ -577,19 +576,6 @@ module systolic_controller #(
                                          mask_packed_lanes(quantized_packed_data,
                                                            dw_group_valid_bytes) :
                                          quantized_packed_data;
-
-    function automatic input_row_t max_i8_row(
-        input input_row_t lhs,
-        input input_row_t rhs
-    );
-        input_row_t result;
-        begin
-            for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
-                result[ch] = ($signed(lhs[ch]) >= $signed(rhs[ch])) ? lhs[ch] : rhs[ch];
-            end
-            max_i8_row = result;
-        end
-    endfunction
 
     always_comb begin
         for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
@@ -1058,6 +1044,23 @@ module systolic_controller #(
             linebuf_pool_mode || linebuf_depthwise_mode);
     end
 
+    systolic_maxpool_engine #(
+        .LANES           (ARRAY_DIM),
+        .ELEM_WIDTH      (INPUT_ELEM_WIDTH),
+        .TAP_COUNT_WIDTH (8)
+    ) i_maxpool_engine (
+        .clk_i,
+        .rst_ni,
+        .flush_i          (fifo_flush),
+        .kernel_vectors_i (pool_kernel_vectors),
+        .in_data_i        (linebuf_row_data),
+        .in_valid_i       (linebuf_pool_mode && (state_q == COMPUTE) && linebuf_row_valid),
+        .in_ready_o       (pool_in_ready),
+        .out_data_o       (pool_out_data),
+        .out_valid_o      (pool_out_valid),
+        .out_ready_i      (pool_out_ready)
+    );
+
     depthwise_mac_engine #(
         .ARRAY_DIM       (ARRAY_DIM),
         .INPUT_ELEM_WIDTH(INPUT_ELEM_WIDTH),
@@ -1440,11 +1443,6 @@ module systolic_controller #(
         weight_preload_ptr_d = weight_preload_ptr_q;
         ofm_push_row_idx_d = ofm_push_row_idx_q;
         psum_buf_sel_d = psum_buf_sel_q;
-        pool_acc_d = pool_acc_q;
-        pool_out_d = pool_out_q;
-        pool_out_valid_d = pool_out_valid_q;
-        pool_tap_count_d = pool_tap_count_q;
-        pool_next_acc = pool_acc_q;
         dw_tap_count_d = dw_tap_count_q;
         dw_group_idx_d = dw_group_idx_q;
         dw_group_input_offset_d = dw_group_input_offset_q;
@@ -1508,6 +1506,7 @@ module systolic_controller #(
         psum_fifo_data = psum_read_row_q;
         requant_in_valid = 1'b0;
         quantized_out_ready = 1'b0;
+        pool_out_ready = 1'b0;
         dw_engine_in_valid = 1'b0;
         dw_engine_out_ready = 1'b0;
         ofm_fifo_push = drain_enabled && ofm_valid && ofm_ready;
@@ -1557,10 +1556,6 @@ module systolic_controller #(
                     k_seed_kh_d = cfg_linebuf_k_seed_kh_i;
                     k_channel_offset_d = '0;
                     ofm_push_row_idx_d = '0;
-                    pool_acc_d = '0;
-                    pool_out_d = '0;
-                    pool_out_valid_d = 1'b0;
-                    pool_tap_count_d = '0;
                     dw_tap_count_d = '0;
                     dw_group_idx_d = '0;
                     dw_group_input_offset_d = '0;
@@ -1732,14 +1727,14 @@ module systolic_controller #(
                     obi_i_req_o = linebuf_obi_req;
                     obi_i_addr_o = linebuf_obi_addr;
 
-                    if (pool_out_valid_q) begin
+                    if (pool_out_valid) begin
                         obi_o_req_o[0] = 1'b1;
                         obi_o_we_o[0] = 1'b1;
                         obi_o_be_o[0] = '1;
                         obi_o_addr_o[0] = o_ptr_q;
-                        obi_o_wdata_o[0] = pool_out_q;
+                        obi_o_wdata_o[0] = pool_out_data;
                         if (obi_o_gnt_i[0]) begin
-                            pool_out_valid_d = 1'b0;
+                            pool_out_ready = 1'b1;
                             o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
                                                        cfg_sys_ofm_row_stride_bytes_i,
                                                        cfg_sys_ofm_tile_cols_i);
@@ -1748,25 +1743,9 @@ module systolic_controller #(
                         end
                     end
 
-                    if (linebuf_row_valid && !pool_out_valid_q) begin
-                        linebuf_row_ready = 1'b1;
-                        if (pool_tap_count_q == 8'd0) begin
-                            pool_next_acc = linebuf_row_data;
-                        end else begin
-                            pool_next_acc = max_i8_row(pool_acc_q, linebuf_row_data);
-                        end
-                        pool_acc_d = pool_next_acc;
+                    linebuf_row_ready = linebuf_row_valid && pool_in_ready;
 
-                        if ({24'd0, pool_tap_count_q} + 32'd1 == pool_kernel_vectors) begin
-                            pool_out_d = pool_next_acc;
-                            pool_out_valid_d = 1'b1;
-                            pool_tap_count_d = '0;
-                        end else begin
-                            pool_tap_count_d = pool_tap_count_q + 8'd1;
-                        end
-                    end
-
-                    if ((drain_cnt_q == 32'd0) && !pool_out_valid_q && !linebuf_busy) begin
+                    if ((drain_cnt_q == 32'd0) && !pool_out_valid && !linebuf_busy) begin
                         state_d = DONE;
                     end
                 end else if (cfg_linebuf_en_i) begin
@@ -1871,10 +1850,6 @@ module systolic_controller #(
             weight_preload_ptr_q <= '0;
             ofm_push_row_idx_q <= '0;
             psum_buf_sel_q <= 1'b0;
-            pool_acc_q <= '0;
-            pool_out_q <= '0;
-            pool_out_valid_q <= 1'b0;
-            pool_tap_count_q <= '0;
             dw_tap_count_q <= '0;
             dw_group_idx_q <= '0;
             dw_group_input_offset_q <= '0;
@@ -1918,10 +1893,6 @@ module systolic_controller #(
             weight_preload_ptr_q <= weight_preload_ptr_d;
             ofm_push_row_idx_q <= ofm_push_row_idx_d;
             psum_buf_sel_q <= psum_buf_sel_d;
-            pool_acc_q <= pool_acc_d;
-            pool_out_q <= pool_out_d;
-            pool_out_valid_q <= pool_out_valid_d;
-            pool_tap_count_q <= pool_tap_count_d;
             dw_tap_count_q <= dw_tap_count_d;
             dw_group_idx_q <= dw_group_idx_d;
             dw_group_input_offset_q <= dw_group_input_offset_d;
