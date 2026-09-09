@@ -63,8 +63,6 @@ module conv_linebuf_stream_packer #(
     output logic [4:0]                debug_state_o
 );
 
-    localparam int unsigned BEAT_BYTES = DATA_WIDTH / 8;
-    localparam int unsigned BYTE_SEL_BITS = $clog2(BEAT_BYTES);
     localparam int unsigned K_MAX = 5;
     localparam int unsigned STRIDE_MAX = 2;
     localparam int unsigned ROW_SLOTS = K_MAX + STRIDE_MAX;
@@ -115,14 +113,11 @@ module conv_linebuf_stream_packer #(
     logic [31:0] spatial_rows_q;
     logic [31:0] emitted_vectors_q;
     logic [31:0] fetch_engine_beats;
-    logic [31:0] bypass_fetch_beats_q;
-    logic [31:0] bypass_vectors_q;
     logic [31:0] k_tile_idx_q;
     logic row_cache_full;
     logic [15:0] cached_c_base;
 
     logic [15:0] fill_kh_q;
-    logic [31:0] pending_beat_addr_q;
 
     logic [15:0] window_kw_q;
     logic [15:0] window_req_kw;
@@ -132,12 +127,6 @@ module conv_linebuf_stream_packer #(
     logic window_slide_commit;
 
     logic bg_started_for_row_q;
-
-    logic [31:0] bypass_addr_q;
-    logic [31:0] bypass_candidate_addr;
-    logic [DATA_WIDTH-1:0] bypass_beat0_q;
-    logic [5:0] bypass_valid_bytes_q;
-    logic bypass_crosses_beat_q;
 
     input_row_t row_data_q;
     logic row_valid_out_q;
@@ -154,12 +143,10 @@ module conv_linebuf_stream_packer #(
 
     logic signed [31:0] fill_ih;
     logic fill_row_in_bounds;
-    logic bypass_in_bounds;
-    logic bypass_crosses_current;
     logic bypass_active;
+    logic config_rejected;
     logic emit_fire;
     logic stg1_fire;
-    logic output_fire;
     logic last_kernel_vector;
     logic vector_last_for_spatial;
     logic last_spatial;
@@ -195,7 +182,14 @@ module conv_linebuf_stream_packer #(
     logic fetch_obi_req;
     logic fetch_obi_gnt;
     logic [ADDR_WIDTH-1:0] fetch_obi_addr;
+    logic bypass_start;
     logic bypass_obi_req;
+    logic [ADDR_WIDTH-1:0] bypass_obi_addr;
+    input_row_t bypass_row;
+    logic bypass_row_valid;
+    logic [31:0] bypass_fetch_beats;
+    logic [31:0] bypass_emitted_vectors;
+    logic [4:0] bypass_debug_state;
     logic beat_push;
     logic [$clog2(ROW_SLOTS)-1:0] beat_push_slot;
     logic beat_push_last_for_row;
@@ -240,15 +234,15 @@ module conv_linebuf_stream_packer #(
                                       formatter_empty &&
                                       (!row_valid_out_q || row_ready_i);
 
-    assign row_data_o = row_data_q;
-    assign row_valid_o = row_valid_out_q;
+    assign row_data_o = bypass_active ? bypass_row : row_data_q;
+    assign row_valid_o = bypass_active ? bypass_row_valid : row_valid_out_q;
     assign busy_o = state_q != CH_IDLE;
     assign done_o = done_q;
     assign prefetch_busy_o = prefetch_active_q;
     assign emitted_vectors_o = emitted_vectors_q;
-    assign fetch_beats_o = fetch_engine_beats + bypass_fetch_beats_q;
-    assign bypass_vectors_o = bypass_vectors_q;
-    assign debug_state_o = state_q;
+    assign fetch_beats_o = fetch_engine_beats + bypass_fetch_beats;
+    assign bypass_vectors_o = bypass_emitted_vectors;
+    assign debug_state_o = (state_q == CH_BYPASS_PREP) ? bypass_debug_state : state_q;
 
     conv_linebuf_config_decoder #(
         .DATA_WIDTH (DATA_WIDTH),
@@ -362,6 +356,38 @@ module conv_linebuf_stream_packer #(
         .bank_write_data_o              (bank_w_data)
     );
 
+    conv_linebuf_bypass_engine #(
+        .ADDR_WIDTH       (ADDR_WIDTH),
+        .DATA_WIDTH       (DATA_WIDTH),
+        .ARRAY_DIM        (ARRAY_DIM),
+        .INPUT_ELEM_WIDTH (INPUT_ELEM_WIDTH)
+    ) i_bypass_engine (
+        .clk_i,
+        .rst_ni,
+        .start_i                 (bypass_start),
+        .last_i                  (last_spatial),
+        .spatial_addr_i          (output_spatial_addr_q),
+        .base_ih_i               (output_base_ih_q),
+        .base_iw_i               (output_base_iw_q),
+        .input_h_i               (cfg_input_h_i),
+        .input_w_i               (cfg_input_w_i),
+        .channel_addr_offset_i   (channel_addr_offset),
+        .valid_bytes_i           (block_valid_bytes),
+        .lane_base_i             (cfg_lane_base_i),
+        .c32_blocked_mode_i      (c32_blocked_mode),
+        .obi_req_o               (bypass_obi_req),
+        .obi_gnt_i,
+        .obi_addr_o              (bypass_obi_addr),
+        .obi_rvalid_i,
+        .obi_rdata_i,
+        .row_o                   (bypass_row),
+        .row_valid_o             (bypass_row_valid),
+        .row_ready_i,
+        .fetch_beats_o           (bypass_fetch_beats),
+        .emitted_vectors_o       (bypass_emitted_vectors),
+        .debug_state_o           (bypass_debug_state)
+    );
+
     conv_linebuf_row_store #(
         .DATA_WIDTH        (DATA_WIDTH),
         .ROW_SLOTS        (ROW_SLOTS),
@@ -470,53 +496,6 @@ module conv_linebuf_stream_packer #(
         .empty_o             (formatter_empty)
     );
 
-    function automatic logic [31:0] beat_base(input logic [31:0] addr);
-        beat_base = {addr[31:BYTE_SEL_BITS], {BYTE_SEL_BITS{1'b0}}};
-    endfunction
-
-    function automatic logic [DATA_WIDTH-1:0] merge_beats(
-        input logic [DATA_WIDTH-1:0] beat0,
-        input logic [DATA_WIDTH-1:0] beat1,
-        input logic [BYTE_SEL_BITS-1:0] addr_lsb,
-        input logic [5:0] valid_bytes
-    );
-        logic [DATA_WIDTH-1:0] merged;
-        logic [BYTE_SEL_BITS:0] byte_sel;
-        begin
-            merged = '0;
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                byte_sel = {1'b0, addr_lsb} + (BYTE_SEL_BITS+1)'(lane);
-                if (lane < valid_bytes) begin
-                    if (byte_sel < (BYTE_SEL_BITS+1)'(BEAT_BYTES)) begin
-                        merged[(lane << 3) +: 8] = beat0[{byte_sel[BYTE_SEL_BITS-1:0], 3'b000} +: 8];
-                    end else begin
-                        merged[(lane << 3) +: 8] = beat1[{byte_sel[BYTE_SEL_BITS-1:0], 3'b000} +: 8];
-                    end
-                end
-            end
-            merge_beats = merged;
-        end
-    endfunction
-
-    function automatic input_row_t unpack_row(
-        input logic [DATA_WIDTH-1:0] data,
-        input logic [5:0] valid_bytes,
-        input logic [5:0] lane_base
-    );
-        input_row_t row;
-        logic [6:0] dst_lane;
-        begin
-            row = '0;
-            for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                dst_lane = {1'b0, lane_base} + 7'(lane);
-                if ((lane < valid_bytes) && (dst_lane < 7'(ARRAY_DIM))) begin
-                    row[dst_lane[4:0]] = data[(lane << 3) +: 8];
-                end
-            end
-            unpack_row = row;
-        end
-    endfunction
-
     function automatic logic [2:0] mod7_u16(input logic [15:0] value);
         logic [5:0] sum0;
         logic [5:0] rem0;
@@ -607,19 +586,26 @@ module conv_linebuf_stream_packer #(
 
     task automatic derive_bypass_status;
         begin
-            bypass_candidate_addr = output_spatial_addr_q + channel_addr_offset;
-            bypass_in_bounds = (output_base_ih_q >= 32'sd0) &&
-                               (output_base_iw_q >= 32'sd0) &&
-                               (output_base_ih_q < $signed({16'd0, cfg_input_h_i})) &&
-                               (output_base_iw_q < $signed({16'd0, cfg_input_w_i})) &&
-                               (block_valid_bytes != 6'd0);
-            bypass_crosses_current = ({2'b00, bypass_candidate_addr[BYTE_SEL_BITS-1:0]} +
-                                      {1'b0, block_valid_bytes}) >
-                                     (BYTE_SEL_BITS+2)'(BEAT_BYTES);
             bypass_active = (cfg_kernel_h_i == 16'd1) &&
                             (cfg_kernel_w_i == 16'd1) &&
                             (cfg_pad_h_i == 16'd0) &&
                             (cfg_pad_w_i == 16'd0);
+            config_rejected = (dim_m_i == 32'd0) ||
+                              (cfg_output_w_i == 16'd0) ||
+                              (cfg_kernel_h_i == 16'd0) ||
+                              (cfg_kernel_w_i == 16'd0) ||
+                              (cfg_kernel_h_i > K_MAX[15:0]) ||
+                              (cfg_kernel_w_i > K_MAX[15:0]) ||
+                              (cfg_pad_h_i > K_MAX[15:0]) ||
+                              (cfg_input_w_i > MAX_INPUT_W[15:0]) ||
+                              (cfg_stride_h_i == 16'd0) ||
+                              (cfg_stride_w_i == 16'd0) ||
+                              (cfg_stride_h_i > STRIDE_MAX[15:0]) ||
+                              (cfg_stride_w_i > STRIDE_MAX[15:0]) ||
+                              (cfg_coalesce_i && !cfg_kgen_i &&
+                               (coalesce_k_bytes > 32'(ARRAY_DIM)));
+            bypass_start = (state_q == CH_IDLE) && start_i &&
+                           bypass_active && !config_rejected;
         end
     endtask
 
@@ -627,9 +613,9 @@ module conv_linebuf_stream_packer #(
         begin
             last_kernel_vector = ((kh_q + 16'd1) == cfg_kernel_h_i) &&
                                  ((kw_q + 16'd1) == cfg_kernel_w_i);
-            output_fire = row_valid_out_q && row_ready_i;
             stg1_fire = stg1_valid_q && stg2_ready;
-            emit_fire = bypass_active ? output_fire : stg1_fire;
+            emit_fire = bypass_active ?
+                        (bypass_row_valid && row_ready_i) : stg1_fire;
 
             vector_last_for_spatial = cfg_coalesce_i || last_kernel_vector;
             last_spatial = (spatial_rows_q + 32'd1) == dim_m_i;
@@ -718,11 +704,9 @@ module conv_linebuf_stream_packer #(
 
     task automatic drive_obi_request_mux;
         begin
-            bypass_obi_req = (state_q == CH_BYPASS_REQ0) ||
-                             (state_q == CH_BYPASS_REQ1);
             fetch_obi_gnt = !bypass_obi_req && obi_gnt_i;
             obi_req_o = bypass_obi_req || fetch_obi_req;
-            obi_addr_o = bypass_obi_req ? pending_beat_addr_q : fetch_obi_addr;
+            obi_addr_o = bypass_obi_req ? bypass_obi_addr : fetch_obi_addr;
         end
     endtask
 
@@ -747,17 +731,10 @@ module conv_linebuf_stream_packer #(
             kw_q <= '0;
             spatial_rows_q <= '0;
             emitted_vectors_q <= '0;
-            bypass_fetch_beats_q <= '0;
-            bypass_vectors_q <= '0;
             k_tile_idx_q <= '0;
             fill_kh_q <= '0;
-            pending_beat_addr_q <= '0;
             bg_started_for_row_q <= 1'b0;
             window_kw_q <= '0;
-            bypass_addr_q <= '0;
-            bypass_beat0_q <= '0;
-            bypass_valid_bytes_q <= '0;
-            bypass_crosses_beat_q <= 1'b0;
             row_data_q <= '0;
             row_valid_out_q <= 1'b0;
             done_q <= 1'b0;
@@ -803,26 +780,12 @@ module conv_linebuf_stream_packer #(
             if (start_i) begin
                 reset_spatial_walk();
                 emitted_vectors_q <= '0;
-                bypass_fetch_beats_q <= '0;
-                bypass_vectors_q <= '0;
                 k_tile_idx_q <= '0;
                 bg_started_for_row_q <= 1'b0;
                 prefetch_active_q <= 1'b0;
                 prefetch_ready_q <= 1'b0;
                 prefetched_c_base_q <= '0;
-                if ((dim_m_i == 32'd0) ||
-                    (cfg_output_w_i == 16'd0) ||
-                    (cfg_kernel_h_i == 16'd0) ||
-                    (cfg_kernel_w_i == 16'd0) ||
-                    (cfg_kernel_h_i > K_MAX[15:0]) ||
-                    (cfg_kernel_w_i > K_MAX[15:0]) ||
-                    (cfg_pad_h_i > K_MAX[15:0]) ||
-                    (cfg_input_w_i > MAX_INPUT_W[15:0]) ||
-                    (cfg_stride_h_i == 16'd0) ||
-                    (cfg_stride_w_i == 16'd0) ||
-                    (cfg_stride_h_i > STRIDE_MAX[15:0]) ||
-                    (cfg_stride_w_i > STRIDE_MAX[15:0]) ||
-                    (cfg_coalesce_i && !cfg_kgen_i && (coalesce_k_bytes > 32'(ARRAY_DIM)))) begin
+                if (config_rejected) begin
                     done_q <= 1'b1;
                     state_q <= CH_IDLE;
                 end else if ((cfg_kernel_h_i == 16'd1) &&
@@ -837,78 +800,19 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    task automatic tick_bypass_states;
+    task automatic tick_bypass_active;
         begin
-            unique case (state_q)
-                CH_BYPASS_PREP: begin
-                    if (!bypass_in_bounds) begin
-                        row_data_q <= '0;
-                        row_valid_out_q <= 1'b1;
-                        state_q <= CH_STREAM_EMIT;
-                    end else begin
-                        bypass_addr_q <= bypass_candidate_addr;
-                        bypass_valid_bytes_q <= block_valid_bytes;
-                        bypass_crosses_beat_q <= bypass_crosses_current;
-                        pending_beat_addr_q <= beat_base(bypass_candidate_addr);
-                        state_q <= CH_BYPASS_REQ0;
-                    end
+            if (emit_fire) begin
+                emitted_vectors_q <= emitted_vectors_q + 32'd1;
+                spatial_rows_q <= spatial_rows_q + 32'd1;
+                if (last_spatial) begin
+                    state_q <= CH_STREAM_DONE;
+                end else if ((ow_q + 16'd1) == cfg_output_w_i) begin
+                    advance_to_next_output_row();
+                end else begin
+                    advance_to_next_output_col();
                 end
-
-                CH_BYPASS_REQ0: begin
-                    if (obi_gnt_i) begin
-                        state_q <= CH_BYPASS_WAIT0;
-                    end
-                end
-
-                CH_BYPASS_WAIT0: begin
-                    if (obi_rvalid_i) begin
-                        bypass_beat0_q <= obi_rdata_i;
-                        bypass_fetch_beats_q <= bypass_fetch_beats_q + 32'd1;
-                        if (bypass_crosses_beat_q) begin
-                            pending_beat_addr_q <= beat_base(bypass_addr_q) + 32'(BEAT_BYTES);
-                            state_q <= CH_BYPASS_REQ1;
-                        end else begin
-                            row_data_q <= (c32_blocked_mode &&
-                                           (bypass_addr_q[BYTE_SEL_BITS-1:0] == '0) &&
-                                           (bypass_valid_bytes_q == 6'(BEAT_BYTES))) ?
-                                          unpack_row(obi_rdata_i, bypass_valid_bytes_q, cfg_lane_base_i) :
-                                          unpack_row(
-                                              merge_beats(obi_rdata_i, '0,
-                                                          bypass_addr_q[BYTE_SEL_BITS-1:0],
-                                                          bypass_valid_bytes_q),
-                                              bypass_valid_bytes_q,
-                                              cfg_lane_base_i
-                                          );
-                            row_valid_out_q <= 1'b1;
-                            state_q <= CH_STREAM_EMIT;
-                        end
-                    end
-                end
-
-                CH_BYPASS_REQ1: begin
-                    if (obi_gnt_i) begin
-                        state_q <= CH_BYPASS_WAIT1;
-                    end
-                end
-
-                CH_BYPASS_WAIT1: begin
-                    if (obi_rvalid_i) begin
-                        bypass_fetch_beats_q <= bypass_fetch_beats_q + 32'd1;
-                        row_data_q <= unpack_row(
-                            merge_beats(bypass_beat0_q, obi_rdata_i,
-                                        bypass_addr_q[BYTE_SEL_BITS-1:0],
-                                        bypass_valid_bytes_q),
-                            bypass_valid_bytes_q,
-                            cfg_lane_base_i
-                        );
-                        row_valid_out_q <= 1'b1;
-                        state_q <= CH_STREAM_EMIT;
-                    end
-                end
-
-                default: begin
-                end
-            endcase
+            end
         end
     endtask
 
@@ -1021,10 +925,6 @@ module conv_linebuf_stream_packer #(
                 CH_STREAM_EMIT: begin
                     if (emit_fire) begin
                         emitted_vectors_q <= emitted_vectors_q + 32'd1;
-                        if (bypass_active) begin
-                            bypass_vectors_q <= bypass_vectors_q + 32'd1;
-                            row_valid_out_q <= 1'b0;
-                        end
 
                         if (!vector_last_for_spatial) begin
                             kh_q <= next_kh;
@@ -1038,14 +938,6 @@ module conv_linebuf_stream_packer #(
                             if (last_spatial) begin
                                 stg1_valid_q <= 1'b0;
                                 state_q <= CH_STREAM_DONE;
-                            end else if (bypass_active) begin
-                                stg1_valid_q <= 1'b0;
-                                if ((ow_q + 16'd1) == cfg_output_w_i) begin
-                                    advance_to_next_output_row();
-                                end else begin
-                                    advance_to_next_output_col();
-                                end
-                                state_q <= CH_BYPASS_PREP;
                             end else if ((ow_q + 16'd1) == cfg_output_w_i) begin
                                 stg1_valid_q <= 1'b0;
                                 advance_to_next_output_row();
@@ -1102,11 +994,7 @@ module conv_linebuf_stream_packer #(
         begin
             unique case (state_q)
                 CH_IDLE: tick_idle_state();
-                CH_BYPASS_PREP,
-                CH_BYPASS_REQ0,
-                CH_BYPASS_WAIT0,
-                CH_BYPASS_REQ1,
-                CH_BYPASS_WAIT1: tick_bypass_states();
+                CH_BYPASS_PREP: tick_bypass_active();
                 CH_ENSURE,
                 CH_FILL_REQ0,
                 CH_FILL_REQ1,

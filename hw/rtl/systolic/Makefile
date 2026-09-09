@@ -67,6 +67,11 @@ TOPLEVEL = conv_linebuf_window_engine
 VERILOG_SOURCES = $(PWD)/conv_linebuf_window_engine.sv
 endif
 
+ifeq ($(MODULE),test_conv_linebuf_bypass_engine)
+TOPLEVEL = conv_linebuf_bypass_engine
+VERILOG_SOURCES = $(PWD)/conv_linebuf_bypass_engine.sv
+endif
+
 ifeq ($(MODULE),test_systolic_maxpool_engine)
 TOPLEVEL = systolic_maxpool_engine
 VERILOG_SOURCES = $(PWD)/systolic_maxpool_engine.sv
@@ -88,6 +93,7 @@ VERILOG_SOURCES = \
 	$(PWD)/binary_operand_stream.sv \
 	$(PWD)/npu_systolic_array.sv \
 	$(PWD)/conv_linebuf_config_decoder.sv \
+	$(PWD)/conv_linebuf_bypass_engine.sv \
 	$(PWD)/conv_linebuf_fetch_engine.sv \
 	$(PWD)/conv_linebuf_row_store.sv \
 	$(PWD)/conv_linebuf_window_engine.sv \
@@ -117,6 +123,7 @@ VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
 	$(PWD)/conv_linebuf_config_decoder.sv \
+	$(PWD)/conv_linebuf_bypass_engine.sv \
 	$(PWD)/conv_linebuf_fetch_engine.sv \
 	$(PWD)/conv_linebuf_row_store.sv \
 	$(PWD)/conv_linebuf_window_engine.sv \

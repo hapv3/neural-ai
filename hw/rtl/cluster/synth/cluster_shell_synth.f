@@ -73,6 +73,7 @@
 ../../../../hw/rtl/systolic/binary_requant_pipeline.sv
 ../../../../hw/rtl/systolic/binary_operand_stream.sv
 ../../../../hw/rtl/systolic/conv_linebuf_config_decoder.sv
+../../../../hw/rtl/systolic/conv_linebuf_bypass_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_fetch_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_row_store.sv
 ../../../../hw/rtl/systolic/conv_linebuf_window_engine.sv
