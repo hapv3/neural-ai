@@ -286,7 +286,51 @@ module conv_linebuf_stream_packer #(
     assign bypass_vectors_o = bypass_vectors_q;
     assign debug_state_o = state_q;
     assign bank_be = '1;
-    assign pad_vector = cfg_pool_i ? {BEAT_BYTES{8'h80}} : DATA_WIDTH'(0);
+
+    conv_linebuf_config_decoder #(
+        .DATA_WIDTH (DATA_WIDTH),
+        .ARRAY_DIM  (ARRAY_DIM)
+    ) i_config_decoder (
+        .cfg_k_tiles_i,
+        .cfg_row_stride_bytes_i,
+        .cfg_input_h_i,
+        .cfg_input_c_i,
+        .cfg_kernel_h_i,
+        .cfg_kernel_w_i,
+        .cfg_stride_h_i,
+        .cfg_stride_w_i,
+        .cfg_pad_h_i,
+        .cfg_c_base_i,
+        .cfg_lane_base_i,
+        .cfg_coalesce_i,
+        .cfg_kgen_i,
+        .cfg_pool_i,
+        .cfg_c32_fast_i,
+        .cfg_depthwise_i,
+        .cfg_block_valid_bytes_i,
+        .cfg_channel_addr_offset_i,
+        .cfg_coalesce_k_bytes_i,
+        .cfg_k_seed_kh_i,
+        .cfg_k_seed_kw_i,
+        .cfg_k_seed_ic_i,
+        .row_cache_full_i       (row_cache_full_q),
+        .cached_c_base_i        (cached_c_base_q),
+        .block_valid_bytes_o    (block_valid_bytes),
+        .coalesce_k_bytes_o     (coalesce_k_bytes),
+        .lane_kh_o              (lane_kh),
+        .lane_kw_o              (lane_kw),
+        .lane_ic_o              (lane_ic),
+        .effective_c_base_o     (effective_c_base),
+        .channel_addr_offset_o  (channel_addr_offset),
+        .c32_blocked_mode_o     (c32_blocked_mode),
+        .c32_kgen_fast_o        (c32_kgen_fast),
+        .row_cache_full_mode_o  (row_cache_full_mode),
+        .row_cache_reuse_o      (row_cache_reuse),
+        .row_ring_mode_o        (row_ring_mode),
+        .fill_done_rows_o       (fill_done_rows),
+        .pad_vector_o           (pad_vector),
+        .pad_row_offset_o       (pad_row_offset)
+    );
 
     for (genvar bank = 0; bank < BANKS; bank++) begin : gen_line_banks
         tc_sram #(
@@ -342,26 +386,6 @@ module conv_linebuf_stream_packer #(
 
     function automatic logic [31:0] beat_base(input logic [31:0] addr);
         beat_base = {addr[31:BYTE_SEL_BITS], {BYTE_SEL_BITS{1'b0}}};
-    endfunction
-
-    function automatic logic [5:0] valid_c_bytes(
-        input logic [15:0] input_c,
-        input logic [15:0] c_base,
-        input logic [5:0]  lane_base
-    );
-        logic [15:0] rem;
-        logic [6:0] lane_room;
-        begin
-            lane_room = (lane_base >= 6'(ARRAY_DIM)) ? 7'd0 : (7'(ARRAY_DIM) - {1'b0, lane_base});
-            rem = input_c - c_base;
-            if ((c_base >= input_c) || (lane_room == 7'd0)) begin
-                valid_c_bytes = 6'd0;
-            end else if (rem >= {9'd0, lane_room}) begin
-                valid_c_bytes = lane_room[5:0];
-            end else begin
-                valid_c_bytes = {1'b0, rem[4:0]};
-            end
-        end
     endfunction
 
     function automatic logic [DATA_WIDTH-1:0] merge_beats(
@@ -444,27 +468,6 @@ module conv_linebuf_stream_packer #(
         cache_row_slot = {13'd0, mod7_u16(ih)};
     endfunction
 
-    function automatic logic [31:0] scale_u32_by_0_to_5(
-        input logic [31:0] value,
-        input logic [15:0] factor
-    );
-        logic [31:0] value_x2;
-        logic [31:0] value_x4;
-        begin
-            value_x2 = value << 1;
-            value_x4 = value << 2;
-            unique case (factor[2:0])
-                3'd0: scale_u32_by_0_to_5 = 32'd0;
-                3'd1: scale_u32_by_0_to_5 = value;
-                3'd2: scale_u32_by_0_to_5 = value_x2;
-                3'd3: scale_u32_by_0_to_5 = value_x2 + value;
-                3'd4: scale_u32_by_0_to_5 = value_x4;
-                3'd5: scale_u32_by_0_to_5 = value_x4 + value;
-                default: scale_u32_by_0_to_5 = 32'd0;
-            endcase
-        end
-    endfunction
-
     function automatic logic [31:0] row_stride_offset(input logic [15:0] kh);
         logic [31:0] stride_x2;
         logic [31:0] stride_x4;
@@ -488,137 +491,6 @@ module conv_linebuf_stream_packer #(
     );
         row_tap_addr = row_base + row_stride_offset(kh) + channel_addr_offset;
     endfunction
-
-    function automatic logic [31:0] coalesce_kernel_bytes(
-        input logic [15:0] kernel_h,
-        input logic [15:0] kernel_w,
-        input logic [5:0] valid_bytes
-    );
-        logic [31:0] row_bytes;
-        begin
-            row_bytes = scale_u32_by_0_to_5({26'd0, valid_bytes}, kernel_w);
-            coalesce_kernel_bytes = scale_u32_by_0_to_5(row_bytes, kernel_h);
-        end
-    endfunction
-
-    task automatic divmod_small_q6(
-        input  logic [21:0] value_i,
-        input  logic [15:0] divisor_i,
-        output logic [5:0]  quotient_o,
-        output logic [21:0] remainder_o
-    );
-        logic [21:0] divisor;
-        logic [21:0] remainder;
-        logic [5:0]  quotient;
-        begin
-            divisor = (divisor_i == 16'd0) ? 22'd1 : {6'd0, divisor_i};
-            remainder = value_i;
-            quotient = '0;
-
-            if (remainder >= (divisor << 5)) begin
-                remainder = remainder - (divisor << 5);
-                quotient = quotient | 6'd32;
-            end
-            if (remainder >= (divisor << 4)) begin
-                remainder = remainder - (divisor << 4);
-                quotient = quotient | 6'd16;
-            end
-            if (remainder >= (divisor << 3)) begin
-                remainder = remainder - (divisor << 3);
-                quotient = quotient | 6'd8;
-            end
-            if (remainder >= (divisor << 2)) begin
-                remainder = remainder - (divisor << 2);
-                quotient = quotient | 6'd4;
-            end
-            if (remainder >= (divisor << 1)) begin
-                remainder = remainder - (divisor << 1);
-                quotient = quotient | 6'd2;
-            end
-            if (remainder >= divisor) begin
-                remainder = remainder - divisor;
-                quotient = quotient | 6'd1;
-            end
-
-            quotient_o = quotient;
-            remainder_o = remainder;
-        end
-    endtask
-
-    task automatic derive_format_config;
-        logic [21:0] ic_index;
-        logic [21:0] ic_remainder;
-        logic [21:0] kw_index;
-        logic [21:0] kw_remainder;
-        logic [5:0]  ic_wrap_count;
-        logic [5:0]  kw_wrap_count;
-        begin
-            effective_c_base = (cfg_c32_fast_i && cfg_kgen_i) ? cfg_k_seed_ic_i : cfg_c_base_i;
-            block_valid_bytes = (cfg_block_valid_bytes_i != 6'd0) ?
-                                cfg_block_valid_bytes_i :
-                                ((cfg_c32_fast_i && cfg_kgen_i) ?
-                                 valid_c_bytes(cfg_input_c_i, cfg_k_seed_ic_i, cfg_lane_base_i) :
-                                 valid_c_bytes(cfg_input_c_i, cfg_c_base_i, cfg_lane_base_i));
-            coalesce_k_bytes = (cfg_coalesce_k_bytes_i != 32'd0) ?
-                               cfg_coalesce_k_bytes_i :
-                               coalesce_kernel_bytes(cfg_kernel_h_i,
-                                                     cfg_kernel_w_i,
-                                                     block_valid_bytes);
-
-            if (cfg_c32_fast_i && cfg_kgen_i) begin
-                channel_addr_offset = cfg_channel_addr_offset_i;
-            end else begin
-                channel_addr_offset = (cfg_channel_addr_offset_i != 32'd0) ?
-                                      cfg_channel_addr_offset_i :
-                                      {16'd0, cfg_c_base_i};
-            end
-            c32_blocked_mode = cfg_c32_fast_i &&
-                               (cfg_block_valid_bytes_i == 6'(BEAT_BYTES)) &&
-                               (channel_addr_offset[BYTE_SEL_BITS-1:0] == '0);
-            c32_kgen_fast = c32_blocked_mode && cfg_coalesce_i && cfg_kgen_i &&
-                             (cfg_lane_base_i == 6'd0) &&
-                             (cfg_c_base_i[4:0] == 5'd0) &&
-                             (cfg_k_seed_ic_i[4:0] == 5'd0);
-
-            if (c32_kgen_fast) begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    lane_kh[lane] = cfg_k_seed_kh_i;
-                    lane_kw[lane] = cfg_k_seed_kw_i;
-                    lane_ic[lane] = cfg_k_seed_ic_i + 16'(lane);
-                end
-            end else begin
-                for (int unsigned lane = 0; lane < ARRAY_DIM; lane++) begin
-                    ic_index = {6'd0, cfg_k_seed_ic_i} + 22'(lane);
-                    divmod_small_q6(ic_index, cfg_input_c_i, ic_wrap_count, ic_remainder);
-
-                    kw_index = {14'd0, cfg_k_seed_kw_i} + {16'd0, ic_wrap_count};
-                    divmod_small_q6(kw_index, cfg_kernel_w_i, kw_wrap_count, kw_remainder);
-
-                    lane_kh[lane] = cfg_k_seed_kh_i + 8'(kw_wrap_count);
-                    lane_kw[lane] = kw_remainder[7:0];
-                    lane_ic[lane] = ic_remainder[15:0];
-                end
-            end
-        end
-    endtask
-
-    task automatic derive_cache_mode;
-        begin
-            row_cache_full_mode = cfg_coalesce_i && cfg_kgen_i &&
-                                  (cfg_k_tiles_i > 32'd1) &&
-                                  (cfg_input_h_i <= K_MAX[15:0]);
-            row_cache_reuse = row_cache_full_q && (effective_c_base == cached_c_base_q);
-            row_ring_mode = (cfg_depthwise_i || (cfg_coalesce_i && cfg_kgen_i)) &&
-                            !row_cache_full_q &&
-                            (cfg_kernel_h_i <= K_MAX[15:0]) &&
-                            (cfg_kernel_w_i <= K_MAX[15:0]) &&
-                            (cfg_stride_h_i != 16'd0) &&
-                            (cfg_stride_h_i <= STRIDE_MAX[15:0]) &&
-                            (cfg_stride_w_i != 16'd0) &&
-                            (cfg_stride_w_i <= STRIDE_MAX[15:0]);
-            fill_done_rows = row_cache_full_q ? cfg_input_h_i : cfg_kernel_h_i;
-        end
-    endtask
 
     task automatic derive_fill_status;
         begin
@@ -981,8 +853,6 @@ module conv_linebuf_stream_packer #(
     endtask
 
     always_comb begin
-        derive_format_config();
-        derive_cache_mode();
         derive_fill_status();
         derive_background_status();
         derive_bypass_status();
@@ -993,8 +863,6 @@ module conv_linebuf_stream_packer #(
         drive_obi_request_mux();
         build_slide_window_next();
     end
-
-    assign pad_row_offset = scale_u32_by_0_to_5(cfg_row_stride_bytes_i, cfg_pad_h_i);
 
     task automatic reset_sequential_state;
         begin
