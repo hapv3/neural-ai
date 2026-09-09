@@ -91,46 +91,10 @@ module conv_linebuf_stream_packer #(
         CH_STREAM_DONE
     } state_e;
 
-    typedef enum logic [2:0] {
-        BG_IDLE,
-        BG_SCAN,
-        BG_REQ0,
-        BG_REQ1,
-        BG_DRAIN
-    } bg_state_e;
-
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
     typedef logic [K_MAX-1:0][K_MAX-1:0][DATA_WIDTH-1:0] window_t;
 
     state_e state_q;
-    bg_state_e bg_state_q;
-
-    // --- Pipelined OBI fetch: beat-level tracking FIFO ---
-    localparam int unsigned BEAT_FIFO_DEPTH = 4;
-    typedef struct packed {
-        logic [BYTE_SEL_BITS-1:0] addr_lsb;
-        logic [5:0]  valid_bytes;
-        logic [15:0] kh;
-        logic [15:0] x;
-        logic        is_beat0_of_cross; // first beat of crossing pixel
-        logic        is_solo;           // non-crossing pixel (single beat)
-    } beat_meta_t;
-
-    beat_meta_t [BEAT_FIFO_DEPTH-1:0] beat_fifo_q;
-    logic [$clog2(BEAT_FIFO_DEPTH)-1:0] bf_wptr_q, bf_rptr_q;
-    logic [$clog2(BEAT_FIFO_DEPTH):0] bf_count_q;
-    logic bf_full, bf_empty;
-    assign bf_full  = bf_count_q >= ($clog2(BEAT_FIFO_DEPTH)+1)'(BEAT_FIFO_DEPTH - 1);
-    assign bf_empty = bf_count_q == '0;
-
-    // Response engine state
-    logic [DATA_WIDTH-1:0] resp_beat0_q; // saved beat0 for crossing pixels
-    logic resp_write_bank;  // combinational: response engine wants to write bank
-    logic [$clog2(BANKS)-1:0] resp_bank_idx;
-    logic [BANK_ADDR_WIDTH-1:0] resp_bank_addr;
-    logic [DATA_WIDTH-1:0] resp_bank_wdata;
-    beat_meta_t resp_meta;
-    assign resp_meta = beat_fifo_q[bf_rptr_q];
 
     logic [BANKS-1:0] bank_w_req;
     logic [BANKS-1:0][BANK_ADDR_WIDTH-1:0] bank_w_addr;
@@ -151,28 +115,19 @@ module conv_linebuf_stream_packer #(
     logic [15:0] kw_q;
     logic [31:0] spatial_rows_q;
     logic [31:0] emitted_vectors_q;
-    logic [31:0] fetch_beats_q;
+    logic [31:0] fetch_engine_beats;
+    logic [31:0] bypass_fetch_beats_q;
     logic [31:0] bypass_vectors_q;
     logic [31:0] k_tile_idx_q;
     logic row_cache_full;
     logic [15:0] cached_c_base;
 
     logic [15:0] fill_kh_q;
-    logic [15:0] fill_x_q;
-    logic [31:0] fill_addr_q;
     logic [31:0] pending_beat_addr_q;
-    logic [5:0] fill_valid_bytes_q;
 
     logic [15:0] window_kw_q;
     logic [15:0] window_req_kw;
 
-    logic signed [31:0] bg_base_ih_q;
-    logic [31:0] bg_row_base_addr_q;
-    logic [15:0] bg_kh_q;
-    logic [15:0] bg_x_q;
-    logic [31:0] bg_addr_q;
-    logic [31:0] bg_pending_beat_addr_q;
-    logic [5:0] bg_valid_bytes_q;
     logic bg_started_for_row_q;
 
     logic [31:0] bypass_addr_q;
@@ -196,7 +151,6 @@ module conv_linebuf_stream_packer #(
 
     logic signed [31:0] fill_ih;
     logic fill_row_in_bounds;
-    logic fill_crosses_current;
     logic bypass_in_bounds;
     logic bypass_crosses_current;
     logic bypass_active;
@@ -221,19 +175,24 @@ module conv_linebuf_stream_packer #(
     logic fill_row_pending;
     logic fill_row_ready;
     logic [15:0] fill_done_rows;
-    logic signed [31:0] bg_ih;
-    logic bg_row_in_bounds;
-    logic [15:0] bg_row_slot;
-    logic bg_row_cached;
-    logic bg_row_pending;
-    logic bg_row_ready;
-    logic bg_crosses_current;
     logic bg_can_start;
-    logic bg_obi_req;
-    logic bg_obi_gnt;
-    logic main_obi_req;
-    logic main_fill_beat_push;
-    logic bg_fill_beat_push;
+    logic fetch_main_start;
+    logic fetch_main_request_accepted;
+    logic [1:0] fetch_main_next_phase;
+    logic fetch_main_done;
+    logic fetch_background_start;
+    logic fetch_background_idle;
+    logic fetch_background_reset;
+    logic [$clog2(ROW_SLOTS)-1:0] fetch_background_query_slot;
+    logic [15:0] fetch_background_query_ih;
+    logic [$clog2(ROW_SLOTS)-1:0] fetch_main_alloc_slot;
+    logic [15:0] fetch_main_alloc_ih;
+    logic [$clog2(ROW_SLOTS)-1:0] fetch_background_alloc_slot;
+    logic [15:0] fetch_background_alloc_ih;
+    logic fetch_obi_req;
+    logic fetch_obi_gnt;
+    logic [ADDR_WIDTH-1:0] fetch_obi_addr;
+    logic bypass_obi_req;
     logic beat_push;
     logic [$clog2(ROW_SLOTS)-1:0] beat_push_slot;
     logic beat_push_last_for_row;
@@ -284,7 +243,7 @@ module conv_linebuf_stream_packer #(
     assign done_o = done_q;
     assign prefetch_busy_o = prefetch_active_q;
     assign emitted_vectors_o = emitted_vectors_q;
-    assign fetch_beats_o = fetch_beats_q;
+    assign fetch_beats_o = fetch_engine_beats + bypass_fetch_beats_q;
     assign bypass_vectors_o = bypass_vectors_q;
     assign debug_state_o = state_q;
 
@@ -333,6 +292,73 @@ module conv_linebuf_stream_packer #(
         .pad_row_offset_o       (pad_row_offset)
     );
 
+    conv_linebuf_fetch_engine #(
+        .ADDR_WIDTH       (ADDR_WIDTH),
+        .DATA_WIDTH       (DATA_WIDTH),
+        .ARRAY_DIM        (ARRAY_DIM),
+        .ROW_SLOTS        (ROW_SLOTS),
+        .BANKS            (BANKS),
+        .BANK_ADDR_WIDTH  (BANK_ADDR_WIDTH)
+    ) i_fetch_engine (
+        .clk_i,
+        .rst_ni,
+        .clear_count_i                  (row_store_job_start),
+        .reset_background_i             (fetch_background_reset),
+        .row_ring_mode_i                (row_ring_mode),
+        .c32_blocked_mode_i             (c32_blocked_mode),
+        .input_h_i                      (cfg_input_h_i),
+        .input_w_i                      (cfg_input_w_i),
+        .kernel_h_i                     (cfg_kernel_h_i),
+        .pixel_stride_bytes_i           (cfg_pixel_stride_bytes_i),
+        .row_stride_bytes_i             (cfg_row_stride_bytes_i),
+        .channel_addr_offset_i          (channel_addr_offset),
+        .main_start_i                   (fetch_main_start),
+        .main_base_addr_i               (
+            row_cache_full ?
+            row_tap_addr(cfg_origin_base_i + pad_row_offset, fill_kh_q) :
+            row_tap_addr(output_row_base_addr_q, fill_kh_q)
+        ),
+        .main_row_slot_i                (row_ring_mode ? fill_row_slot : fill_kh_q),
+        .main_row_ih_i                  (fill_ih[15:0]),
+        .main_valid_bytes_i             (block_valid_bytes),
+        .main_row_ready_i               (fill_row_ready),
+        .main_request_accepted_o        (fetch_main_request_accepted),
+        .main_next_phase_o              (fetch_main_next_phase),
+        .main_done_o                    (fetch_main_done),
+        .main_alloc_valid_o             (row_store_main_alloc),
+        .main_alloc_slot_o              (fetch_main_alloc_slot),
+        .main_alloc_ih_o                (fetch_main_alloc_ih),
+        .background_start_i             (fetch_background_start),
+        .background_base_ih_i           (
+            output_base_ih_q + $signed({16'd0, cfg_stride_h_i})
+        ),
+        .background_row_base_addr_i     (
+            output_row_base_addr_q + cfg_oh_step_bytes_i
+        ),
+        .background_idle_o              (fetch_background_idle),
+        .background_query_slot_o        (fetch_background_query_slot),
+        .background_query_ih_o          (fetch_background_query_ih),
+        .background_row_cached_i        (row_store_background_cached),
+        .background_row_pending_i       (row_store_background_pending),
+        .background_alloc_valid_o       (row_store_background_alloc),
+        .background_alloc_slot_o        (fetch_background_alloc_slot),
+        .background_alloc_ih_o          (fetch_background_alloc_ih),
+        .obi_req_o                      (fetch_obi_req),
+        .obi_gnt_i                      (fetch_obi_gnt),
+        .obi_addr_o                     (fetch_obi_addr),
+        .obi_rvalid_i,
+        .obi_rdata_i,
+        .fetch_beats_o                  (fetch_engine_beats),
+        .beat_push_o                    (beat_push),
+        .beat_push_slot_o               (beat_push_slot),
+        .beat_push_last_for_row_o       (beat_push_last_for_row),
+        .beat_pop_o                     (beat_pop),
+        .beat_pop_slot_o                (beat_pop_slot),
+        .bank_write_req_o               (bank_w_req),
+        .bank_write_addr_o              (bank_w_addr),
+        .bank_write_data_o              (bank_w_data)
+    );
+
     conv_linebuf_row_store #(
         .DATA_WIDTH        (DATA_WIDTH),
         .ROW_SLOTS        (ROW_SLOTS),
@@ -350,11 +376,11 @@ module conv_linebuf_stream_packer #(
         .cached_c_base_set_i         (row_store_cached_c_base_set),
         .cached_c_base_i             (effective_c_base),
         .alloc_main_valid_i          (row_store_main_alloc),
-        .alloc_main_slot_i           (fill_row_slot[$clog2(ROW_SLOTS)-1:0]),
-        .alloc_main_ih_i             (fill_ih[15:0]),
+        .alloc_main_slot_i           (fetch_main_alloc_slot),
+        .alloc_main_ih_i             (fetch_main_alloc_ih),
         .alloc_background_valid_i    (row_store_background_alloc),
-        .alloc_background_slot_i     (bg_row_slot[$clog2(ROW_SLOTS)-1:0]),
-        .alloc_background_ih_i       (bg_ih[15:0]),
+        .alloc_background_slot_i     (fetch_background_alloc_slot),
+        .alloc_background_ih_i       (fetch_background_alloc_ih),
         .beat_push_i                 (beat_push),
         .beat_push_slot_i            (beat_push_slot),
         .beat_push_last_for_row_i    (beat_push_last_for_row),
@@ -370,8 +396,8 @@ module conv_linebuf_stream_packer #(
         .query_main_ih_i             (fill_ih[15:0]),
         .query_main_cached_o         (row_store_main_cached),
         .query_main_pending_o        (row_store_main_pending),
-        .query_background_slot_i     (bg_row_slot[$clog2(ROW_SLOTS)-1:0]),
-        .query_background_ih_i       (bg_ih[15:0]),
+        .query_background_slot_i     (fetch_background_query_slot),
+        .query_background_ih_i       (fetch_background_query_ih),
         .query_background_cached_o   (row_store_background_cached),
         .query_background_pending_o  (row_store_background_pending),
         .row_cache_full_o            (row_cache_full),
@@ -527,9 +553,6 @@ module conv_linebuf_stream_packer #(
                                  ((fill_ih >= 32'sd0) &&
                                   (fill_ih < $signed({16'd0, cfg_input_h_i})));
             fill_row_slot = fill_row_in_bounds ? cache_row_slot(fill_ih[15:0]) : 16'd0;
-            fill_crosses_current = ({2'b00, fill_addr_q[BYTE_SEL_BITS-1:0]} +
-                                    {1'b0, fill_valid_bytes_q}) >
-                                   (BYTE_SEL_BITS+2)'(BEAT_BYTES);
         end
     endtask
 
@@ -543,18 +566,10 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    task automatic derive_background_coordinates;
+    task automatic derive_background_start;
         begin
-            bg_ih = bg_base_ih_q + $signed({16'd0, bg_kh_q});
-            bg_row_in_bounds = (bg_kh_q < cfg_kernel_h_i) &&
-                               (bg_ih >= 32'sd0) &&
-                               (bg_ih < $signed({16'd0, cfg_input_h_i}));
-            bg_row_slot = bg_row_in_bounds ? cache_row_slot(bg_ih[15:0]) : 16'd0;
-            bg_crosses_current = ({2'b00, bg_addr_q[BYTE_SEL_BITS-1:0]} +
-                                  {1'b0, bg_valid_bytes_q}) >
-                                 (BYTE_SEL_BITS+2)'(BEAT_BYTES);
             bg_can_start = row_ring_mode &&
-                           (bg_state_q == BG_IDLE) &&
+                           fetch_background_idle &&
                            !bg_started_for_row_q &&
                            ((state_q == CH_WINDOW_REQ) ||
                             (state_q == CH_WINDOW_WAIT) ||
@@ -562,16 +577,7 @@ module conv_linebuf_stream_packer #(
                             (state_q == CH_STREAM_EMIT)) &&
                            (block_valid_bytes != 6'd0) &&
                            ((spatial_rows_q + 32'(cfg_output_w_i)) < dim_m_i);
-        end
-    endtask
-
-    task automatic derive_background_cache_status;
-        begin
-            bg_row_cached = row_ring_mode && bg_row_in_bounds &&
-                            row_store_background_cached;
-            bg_row_pending = row_ring_mode && bg_row_in_bounds &&
-                             row_store_background_pending;
-            bg_row_ready = bg_row_cached;
+            fetch_background_start = bg_can_start;
         end
     endtask
 
@@ -636,20 +642,12 @@ module conv_linebuf_stream_packer #(
     task automatic derive_row_store_events;
         begin
             row_store_job_start = (state_q == CH_IDLE) && start_i;
-            row_store_main_alloc = (state_q == CH_ENSURE) &&
-                                   (fill_kh_q != fill_done_rows) &&
-                                   fill_row_in_bounds &&
-                                   !fill_row_ready &&
-                                   !fill_row_pending &&
-                                   (block_valid_bytes != 6'd0) &&
-                                   row_ring_mode;
-            row_store_background_alloc = (bg_state_q == BG_SCAN) &&
-                                         (bg_kh_q != cfg_kernel_h_i) &&
-                                         bg_row_in_bounds &&
-                                         !bg_row_ready &&
-                                         !bg_row_pending &&
-                                         (block_valid_bytes != 6'd0) &&
-                                         row_ring_mode;
+            fetch_main_start = (state_q == CH_ENSURE) &&
+                               (fill_kh_q != fill_done_rows) &&
+                               fill_row_in_bounds &&
+                               !fill_row_ready &&
+                               !fill_row_pending &&
+                               (block_valid_bytes != 6'd0);
 
             tile_advance_event = (state_q == CH_STREAM_DONE) &&
                                  formatter_stream_drained &&
@@ -668,74 +666,9 @@ module conv_linebuf_stream_packer #(
                    (prefetch_ready_q &&
                     (prefetched_c_base_q == effective_c_base)))) ||
                 prefetch_start_event;
-        end
-    endtask
-
-    task automatic derive_beat_accounting;
-        begin
-            main_fill_beat_push = ((state_q == CH_FILL_REQ0) || (state_q == CH_FILL_REQ1)) &&
-                                  obi_gnt_i && !bf_full;
-            bg_fill_beat_push = ((bg_state_q == BG_REQ0) || (bg_state_q == BG_REQ1)) &&
-                                obi_gnt_i && !bf_full &&
-                                !((state_q == CH_FILL_REQ0) || (state_q == CH_FILL_REQ1) ||
-                                  (state_q == CH_BYPASS_REQ0) || (state_q == CH_BYPASS_REQ1));
-            beat_push = row_ring_mode && (main_fill_beat_push || bg_fill_beat_push);
-            beat_push_slot = main_fill_beat_push ?
-                             fill_row_slot[$clog2(ROW_SLOTS)-1:0] :
-                             bg_row_slot[$clog2(ROW_SLOTS)-1:0];
-            beat_push_last_for_row = main_fill_beat_push ?
-                                     (((state_q == CH_FILL_REQ0) && !fill_crosses_current &&
-                                       ((fill_x_q + 16'd1) == cfg_input_w_i)) ||
-                                      ((state_q == CH_FILL_REQ1) &&
-                                       ((fill_x_q + 16'd1) == cfg_input_w_i))) :
-                                     (((bg_state_q == BG_REQ0) && !bg_crosses_current &&
-                                       ((bg_x_q + 16'd1) == cfg_input_w_i)) ||
-                                      ((bg_state_q == BG_REQ1) &&
-                                       ((bg_x_q + 16'd1) == cfg_input_w_i)));
-            beat_pop = obi_rvalid_i && !bf_empty;
-            beat_pop_slot = resp_meta.kh[$clog2(ROW_SLOTS)-1:0];
-        end
-    endtask
-
-    task automatic drive_response_writeback;
-        begin
-            bank_w_req = '0;
-            bank_w_addr = '0;
-            bank_w_data = '0;
-            resp_write_bank = 1'b0;
-            resp_bank_idx = '0;
-            resp_bank_addr = '0;
-            resp_bank_wdata = '0;
-
-            if (obi_rvalid_i && !bf_empty) begin
-                if (resp_meta.is_beat0_of_cross) begin
-                    resp_write_bank = 1'b0;
-                end else if (resp_meta.is_solo) begin
-                    resp_write_bank = 1'b1;
-                    resp_bank_idx = bank_index(resp_meta.kh, resp_meta.x);
-                    resp_bank_addr = bank_word_addr(resp_meta.x);
-                    resp_bank_wdata = (c32_blocked_mode &&
-                                       (resp_meta.addr_lsb == '0) &&
-                                       (resp_meta.valid_bytes == 6'(BEAT_BYTES))) ?
-                                      obi_rdata_i :
-                                      merge_beats(obi_rdata_i, '0,
-                                                  resp_meta.addr_lsb,
-                                                  resp_meta.valid_bytes);
-                end else begin
-                    resp_write_bank = 1'b1;
-                    resp_bank_idx = bank_index(resp_meta.kh, resp_meta.x);
-                    resp_bank_addr = bank_word_addr(resp_meta.x);
-                    resp_bank_wdata = merge_beats(resp_beat0_q, obi_rdata_i,
-                                                  resp_meta.addr_lsb,
-                                                  resp_meta.valid_bytes);
-                end
-            end
-
-            if (resp_write_bank) begin
-                bank_w_req[resp_bank_idx] = 1'b1;
-                bank_w_addr[resp_bank_idx] = resp_bank_addr;
-                bank_w_data[resp_bank_idx] = resp_bank_wdata;
-            end
+            fetch_background_reset = row_store_job_start ||
+                                     tile_advance_event ||
+                                     prefetch_start_event;
         end
     endtask
 
@@ -815,19 +748,11 @@ module conv_linebuf_stream_packer #(
 
     task automatic drive_obi_request_mux;
         begin
-            main_obi_req = 1'b0;
-            if ((state_q == CH_FILL_REQ0 || state_q == CH_FILL_REQ1) && !bf_full) begin
-                main_obi_req = 1'b1;
-            end else if (state_q == CH_BYPASS_REQ0 || state_q == CH_BYPASS_REQ1) begin
-                main_obi_req = 1'b1;
-            end
-
-            bg_obi_req = ((bg_state_q == BG_REQ0) || (bg_state_q == BG_REQ1)) &&
-                         !bf_full && !main_obi_req;
-            bg_obi_gnt = bg_obi_req && obi_gnt_i;
-
-            obi_req_o = main_obi_req || bg_obi_req;
-            obi_addr_o = main_obi_req ? pending_beat_addr_q : bg_pending_beat_addr_q;
+            bypass_obi_req = (state_q == CH_BYPASS_REQ0) ||
+                             (state_q == CH_BYPASS_REQ1);
+            fetch_obi_gnt = !bypass_obi_req && obi_gnt_i;
+            obi_req_o = bypass_obi_req || fetch_obi_req;
+            obi_addr_o = bypass_obi_req ? pending_beat_addr_q : fetch_obi_addr;
         end
     endtask
 
@@ -906,13 +831,10 @@ module conv_linebuf_stream_packer #(
 
     always_comb derive_fill_coordinates();
     always_comb derive_fill_cache_status();
-    always_comb derive_background_coordinates();
-    always_comb derive_background_cache_status();
+    always_comb derive_background_start();
     always_comb derive_bypass_status();
     always_comb derive_stream_status();
     always_comb derive_row_store_events();
-    always_comb derive_beat_accounting();
-    always_comb drive_response_writeback();
     always_comb drive_window_read_requests();
     always_comb drive_obi_request_mux();
     always_comb build_slide_window_next();
@@ -920,7 +842,6 @@ module conv_linebuf_stream_packer #(
     task automatic reset_sequential_state;
         begin
             state_q <= CH_IDLE;
-            bg_state_q <= BG_IDLE;
             window_q <= '0;
             output_row_base_addr_q <= '0;
             output_spatial_addr_q <= '0;
@@ -931,27 +852,12 @@ module conv_linebuf_stream_packer #(
             kw_q <= '0;
             spatial_rows_q <= '0;
             emitted_vectors_q <= '0;
-            fetch_beats_q <= '0;
+            bypass_fetch_beats_q <= '0;
             bypass_vectors_q <= '0;
             k_tile_idx_q <= '0;
             fill_kh_q <= '0;
-            fill_x_q <= '0;
-            fill_addr_q <= '0;
             pending_beat_addr_q <= '0;
-            fill_valid_bytes_q <= '0;
-            bg_base_ih_q <= '0;
-            bg_row_base_addr_q <= '0;
-            bg_kh_q <= '0;
-            bg_x_q <= '0;
-            bg_addr_q <= '0;
-            bg_pending_beat_addr_q <= '0;
-            bg_valid_bytes_q <= '0;
             bg_started_for_row_q <= 1'b0;
-            beat_fifo_q <= '0;
-            bf_wptr_q <= '0;
-            bf_rptr_q <= '0;
-            bf_count_q <= '0;
-            resp_beat0_q <= '0;
             window_kw_q <= '0;
             bypass_addr_q <= '0;
             bypass_beat0_q <= '0;
@@ -969,19 +875,6 @@ module conv_linebuf_stream_packer #(
             stg1_lane_ic_q <= '0;
             stg1_tap_kh_q <= '0;
             stg1_tap_kw_q <= '0;
-        end
-    endtask
-
-    task automatic tick_response_engine;
-        begin
-            if (obi_rvalid_i && !bf_empty) begin
-                fetch_beats_q <= fetch_beats_q + 32'd1;
-                if (resp_meta.is_beat0_of_cross) begin
-                    resp_beat0_q <= obi_rdata_i;
-                end
-                bf_rptr_q <= bf_rptr_q + 1;
-                bf_count_q <= bf_count_q - 1;
-            end
         end
     endtask
 
@@ -1005,32 +898,7 @@ module conv_linebuf_stream_packer #(
             kw_q <= '0;
             spatial_rows_q <= '0;
             fill_kh_q <= '0;
-            fill_x_q <= '0;
             window_kw_q <= '0;
-        end
-    endtask
-
-    task automatic push_beat_metadata(
-        input logic [BYTE_SEL_BITS-1:0] addr_lsb,
-        input logic [5:0] valid_bytes,
-        input logic [15:0] kh,
-        input logic [15:0] x,
-        input logic is_beat0_of_cross,
-        input logic is_solo
-    );
-        begin
-            beat_fifo_q[bf_wptr_q].addr_lsb <= addr_lsb;
-            beat_fifo_q[bf_wptr_q].valid_bytes <= valid_bytes;
-            beat_fifo_q[bf_wptr_q].kh <= kh;
-            beat_fifo_q[bf_wptr_q].x <= x;
-            beat_fifo_q[bf_wptr_q].is_beat0_of_cross <= is_beat0_of_cross;
-            beat_fifo_q[bf_wptr_q].is_solo <= is_solo;
-            bf_wptr_q <= bf_wptr_q + 1;
-            if (obi_rvalid_i && !bf_empty) begin
-                bf_count_q <= bf_count_q;
-            end else begin
-                bf_count_q <= bf_count_q + 1;
-            end
         end
     endtask
 
@@ -1041,10 +909,9 @@ module conv_linebuf_stream_packer #(
             if (start_i) begin
                 reset_spatial_walk();
                 emitted_vectors_q <= '0;
-                fetch_beats_q <= '0;
+                bypass_fetch_beats_q <= '0;
                 bypass_vectors_q <= '0;
                 k_tile_idx_q <= '0;
-                bg_state_q <= BG_IDLE;
                 bg_started_for_row_q <= 1'b0;
                 prefetch_active_q <= 1'b0;
                 prefetch_ready_q <= 1'b0;
@@ -1102,7 +969,7 @@ module conv_linebuf_stream_packer #(
                 CH_BYPASS_WAIT0: begin
                     if (obi_rvalid_i) begin
                         bypass_beat0_q <= obi_rdata_i;
-                        fetch_beats_q <= fetch_beats_q + 32'd1;
+                        bypass_fetch_beats_q <= bypass_fetch_beats_q + 32'd1;
                         if (bypass_crosses_beat_q) begin
                             pending_beat_addr_q <= beat_base(bypass_addr_q) + 32'(BEAT_BYTES);
                             state_q <= CH_BYPASS_REQ1;
@@ -1132,7 +999,7 @@ module conv_linebuf_stream_packer #(
 
                 CH_BYPASS_WAIT1: begin
                     if (obi_rvalid_i) begin
-                        fetch_beats_q <= fetch_beats_q + 32'd1;
+                        bypass_fetch_beats_q <= bypass_fetch_beats_q + 32'd1;
                         row_data_q <= unpack_row(
                             merge_beats(bypass_beat0_q, obi_rdata_i,
                                         bypass_addr_q[BYTE_SEL_BITS-1:0],
@@ -1171,65 +1038,29 @@ module conv_linebuf_stream_packer #(
                     end else if (fill_row_pending) begin
                         state_q <= CH_ENSURE;
                     end else begin
-                        fill_x_q <= '0;
-                        fill_valid_bytes_q <= block_valid_bytes;
-                        fill_addr_q <= row_cache_full ?
-                                       row_tap_addr(cfg_origin_base_i + pad_row_offset,
-                                                    fill_kh_q) :
-                                       row_tap_addr(output_row_base_addr_q, fill_kh_q);
-                        pending_beat_addr_q <= beat_base(
-                            row_cache_full ?
-                            row_tap_addr(cfg_origin_base_i + pad_row_offset,
-                                         fill_kh_q) :
-                            row_tap_addr(output_row_base_addr_q, fill_kh_q)
-                        );
                         state_q <= CH_FILL_REQ0;
                     end
                 end
 
                 CH_FILL_REQ0: begin
-                    if (obi_gnt_i && !bf_full) begin
-                        push_beat_metadata(fill_addr_q[BYTE_SEL_BITS-1:0],
-                                           fill_valid_bytes_q,
-                                           row_ring_mode ? fill_row_slot : fill_kh_q,
-                                           fill_x_q,
-                                           fill_crosses_current,
-                                           !fill_crosses_current);
-                        if (fill_crosses_current) begin
-                            pending_beat_addr_q <= beat_base(fill_addr_q) + 32'(BEAT_BYTES);
-                            state_q <= CH_FILL_REQ1;
-                        end else if ((fill_x_q + 16'd1) == cfg_input_w_i) begin
-                            state_q <= CH_FILL_DRAIN;
-                        end else begin
-                            fill_x_q <= fill_x_q + 16'd1;
-                            fill_addr_q <= fill_addr_q + cfg_pixel_stride_bytes_i;
-                            pending_beat_addr_q <= beat_base(fill_addr_q + cfg_pixel_stride_bytes_i);
-                        end
+                    if (fetch_main_request_accepted) begin
+                        unique case (fetch_main_next_phase)
+                            2'd1: state_q <= CH_FILL_REQ1;
+                            2'd2: state_q <= CH_FILL_DRAIN;
+                            default: state_q <= CH_FILL_REQ0;
+                        endcase
                     end
                 end
 
                 CH_FILL_REQ1: begin
-                    if (obi_gnt_i && !bf_full) begin
-                        push_beat_metadata(fill_addr_q[BYTE_SEL_BITS-1:0],
-                                           fill_valid_bytes_q,
-                                           row_ring_mode ? fill_row_slot : fill_kh_q,
-                                           fill_x_q,
-                                           1'b0,
-                                           1'b0);
-                        if ((fill_x_q + 16'd1) == cfg_input_w_i) begin
-                            state_q <= CH_FILL_DRAIN;
-                        end else begin
-                            fill_x_q <= fill_x_q + 16'd1;
-                            fill_addr_q <= fill_addr_q + cfg_pixel_stride_bytes_i;
-                            pending_beat_addr_q <= beat_base(fill_addr_q + cfg_pixel_stride_bytes_i);
-                            state_q <= CH_FILL_REQ0;
-                        end
+                    if (fetch_main_request_accepted) begin
+                        state_q <= (fetch_main_next_phase == 2'd2) ?
+                                   CH_FILL_DRAIN : CH_FILL_REQ0;
                     end
                 end
 
                 CH_FILL_DRAIN: begin
-                    if ((row_ring_mode && fill_row_ready) ||
-                        (!row_ring_mode && bf_empty)) begin
+                    if (fetch_main_done) begin
                         fill_kh_q <= fill_kh_q + 16'd1;
                         state_q <= CH_ENSURE;
                     end
@@ -1366,7 +1197,6 @@ module conv_linebuf_stream_packer #(
                             if (next_tile_i) begin
                                 k_tile_idx_q <= k_tile_idx_q + 32'd1;
                                 reset_spatial_walk();
-                                bg_state_q <= BG_IDLE;
                                 bg_started_for_row_q <= 1'b0;
                                 prefetch_active_q <= 1'b0;
                                 prefetch_ready_q <= 1'b0;
@@ -1379,7 +1209,6 @@ module conv_linebuf_stream_packer #(
                             end else if (prefetch_i && !prefetch_active_q && !prefetch_ready_q &&
                                          !row_cache_reuse) begin
                                 reset_spatial_walk();
-                                bg_state_q <= BG_IDLE;
                                 bg_started_for_row_q <= 1'b0;
                                 prefetch_active_q <= 1'b1;
                                 state_q <= CH_ENSURE;
@@ -1423,91 +1252,6 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    task automatic tick_background_fsm;
-        begin
-            unique case (bg_state_q)
-                BG_IDLE: begin
-                    if (bg_can_start) begin
-                        bg_base_ih_q <= output_base_ih_q + $signed({16'd0, cfg_stride_h_i});
-                        bg_row_base_addr_q <= output_row_base_addr_q + cfg_oh_step_bytes_i;
-                        bg_kh_q <= '0;
-                        bg_x_q <= '0;
-                        bg_started_for_row_q <= 1'b1;
-                        bg_state_q <= BG_SCAN;
-                    end
-                end
-
-                BG_SCAN: begin
-                    if (bg_kh_q == cfg_kernel_h_i) begin
-                        bg_state_q <= BG_IDLE;
-                    end else if (!bg_row_in_bounds || bg_row_ready || bg_row_pending ||
-                                 (block_valid_bytes == 6'd0)) begin
-                        bg_kh_q <= bg_kh_q + 16'd1;
-                    end else begin
-                        bg_x_q <= '0;
-                        bg_valid_bytes_q <= block_valid_bytes;
-                        bg_addr_q <= row_tap_addr(bg_row_base_addr_q, bg_kh_q);
-                        bg_pending_beat_addr_q <= beat_base(
-                            row_tap_addr(bg_row_base_addr_q, bg_kh_q)
-                        );
-                        bg_state_q <= BG_REQ0;
-                    end
-                end
-
-                BG_REQ0: begin
-                    if (bg_obi_gnt && !bf_full) begin
-                        push_beat_metadata(bg_addr_q[BYTE_SEL_BITS-1:0],
-                                           bg_valid_bytes_q,
-                                           bg_row_slot,
-                                           bg_x_q,
-                                           bg_crosses_current,
-                                           !bg_crosses_current);
-                        if (bg_crosses_current) begin
-                            bg_pending_beat_addr_q <= beat_base(bg_addr_q) + 32'(BEAT_BYTES);
-                            bg_state_q <= BG_REQ1;
-                        end else if ((bg_x_q + 16'd1) == cfg_input_w_i) begin
-                            bg_state_q <= BG_DRAIN;
-                        end else begin
-                            bg_x_q <= bg_x_q + 16'd1;
-                            bg_addr_q <= bg_addr_q + cfg_pixel_stride_bytes_i;
-                            bg_pending_beat_addr_q <= beat_base(bg_addr_q + cfg_pixel_stride_bytes_i);
-                        end
-                    end
-                end
-
-                BG_REQ1: begin
-                    if (bg_obi_gnt && !bf_full) begin
-                        push_beat_metadata(bg_addr_q[BYTE_SEL_BITS-1:0],
-                                           bg_valid_bytes_q,
-                                           bg_row_slot,
-                                           bg_x_q,
-                                           1'b0,
-                                           1'b0);
-                        if ((bg_x_q + 16'd1) == cfg_input_w_i) begin
-                            bg_state_q <= BG_DRAIN;
-                        end else begin
-                            bg_x_q <= bg_x_q + 16'd1;
-                            bg_addr_q <= bg_addr_q + cfg_pixel_stride_bytes_i;
-                            bg_pending_beat_addr_q <= beat_base(bg_addr_q + cfg_pixel_stride_bytes_i);
-                            bg_state_q <= BG_REQ0;
-                        end
-                    end
-                end
-
-                BG_DRAIN: begin
-                    if (bg_row_ready) begin
-                        bg_kh_q <= bg_kh_q + 16'd1;
-                        bg_state_q <= BG_SCAN;
-                    end
-                end
-
-                default: begin
-                    bg_state_q <= BG_IDLE;
-                end
-            endcase
-        end
-    endtask
-
     task automatic tick_output_stage;
         begin
             if (formatter_pipe_ready && !bypass_active) begin
@@ -1522,11 +1266,12 @@ module conv_linebuf_stream_packer #(
             reset_sequential_state();
         end else begin
             done_q <= 1'b0;
-            tick_response_engine();
             tick_lane_pipeline();
             tick_main_fsm();
-            tick_background_fsm();
             tick_output_stage();
+            if (fetch_background_start) begin
+                bg_started_for_row_q <= 1'b1;
+            end
         end
     end
 
