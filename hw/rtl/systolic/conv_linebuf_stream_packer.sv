@@ -138,8 +138,6 @@ module conv_linebuf_stream_packer #(
     logic [BANKS-1:0] bank_r_req;
     logic [BANKS-1:0][BANK_ADDR_WIDTH-1:0] bank_r_addr;
     logic [BANKS-1:0][DATA_WIDTH-1:0] bank_rdata;
-    logic [BANKS-1:0][DATA_WIDTH-1:0] bank_w_rdata_unused;
-    logic [DATA_WIDTH/8-1:0] bank_be;
 
     window_t window_q;
     window_t slide_window;
@@ -156,13 +154,8 @@ module conv_linebuf_stream_packer #(
     logic [31:0] fetch_beats_q;
     logic [31:0] bypass_vectors_q;
     logic [31:0] k_tile_idx_q;
-    logic row_cache_full_q;
-    logic [15:0] cached_c_base_q;
-    logic [ROW_SLOTS-1:0] row_slot_valid_q;
-    logic [ROW_SLOTS-1:0] row_fetch_active_q;
-    logic [ROW_SLOTS-1:0] row_fetch_done_q;
-    logic [ROW_SLOTS-1:0][15:0] row_slot_ih_q;
-    logic [ROW_SLOTS-1:0][ROW_PENDING_WIDTH-1:0] row_pending_q;
+    logic row_cache_full;
+    logic [15:0] cached_c_base;
 
     logic [15:0] fill_kh_q;
     logic [15:0] fill_x_q;
@@ -246,8 +239,17 @@ module conv_linebuf_stream_packer #(
     logic beat_push_last_for_row;
     logic beat_pop;
     logic [$clog2(ROW_SLOTS)-1:0] beat_pop_slot;
-    logic [ROW_SLOTS-1:0][ROW_PENDING_WIDTH-1:0] row_pending_next;
-    logic [ROW_SLOTS-1:0] row_ready_next;
+    logic row_store_job_start;
+    logic row_store_invalidate;
+    logic row_store_cached_c_base_set;
+    logic row_store_main_alloc;
+    logic row_store_background_alloc;
+    logic row_store_main_cached;
+    logic row_store_main_pending;
+    logic row_store_background_cached;
+    logic row_store_background_pending;
+    logic tile_advance_event;
+    logic prefetch_start_event;
     logic [15:0] next_kh;
     logic [15:0] next_kw;
     logic signed [31:0] slide_from_iw;
@@ -285,7 +287,6 @@ module conv_linebuf_stream_packer #(
     assign fetch_beats_o = fetch_beats_q;
     assign bypass_vectors_o = bypass_vectors_q;
     assign debug_state_o = state_q;
-    assign bank_be = '1;
 
     conv_linebuf_config_decoder #(
         .DATA_WIDTH (DATA_WIDTH),
@@ -313,8 +314,8 @@ module conv_linebuf_stream_packer #(
         .cfg_k_seed_kh_i,
         .cfg_k_seed_kw_i,
         .cfg_k_seed_ic_i,
-        .row_cache_full_i       (row_cache_full_q),
-        .cached_c_base_i        (cached_c_base_q),
+        .row_cache_full_i       (row_cache_full),
+        .cached_c_base_i        (cached_c_base),
         .block_valid_bytes_o    (block_valid_bytes),
         .coalesce_k_bytes_o     (coalesce_k_bytes),
         .lane_kh_o              (lane_kh),
@@ -332,26 +333,50 @@ module conv_linebuf_stream_packer #(
         .pad_row_offset_o       (pad_row_offset)
     );
 
-    for (genvar bank = 0; bank < BANKS; bank++) begin : gen_line_banks
-        tc_sram #(
-            .NumWords    (BANK_DEPTH),
-            .DataWidth   (DATA_WIDTH),
-            .ByteWidth   (8),
-            .NumPorts    (2),
-            .Latency     (1),
-            .SimInit     ("none"),
-            .PrintSimCfg (1'b0)
-        ) i_bank_sram (
-            .clk_i   (clk_i),
-            .rst_ni  (rst_ni),
-            .req_i   ({bank_r_req[bank],  bank_w_req[bank]}),
-            .we_i    ({1'b0,              1'b1}),
-            .addr_i  ({bank_r_addr[bank], bank_w_addr[bank]}),
-            .wdata_i ({DATA_WIDTH'(0),    bank_w_data[bank]}),
-            .be_i    ({bank_be,           bank_be}),
-            .rdata_o ({bank_rdata[bank],  bank_w_rdata_unused[bank]})
-        );
-    end
+    conv_linebuf_row_store #(
+        .DATA_WIDTH        (DATA_WIDTH),
+        .ROW_SLOTS        (ROW_SLOTS),
+        .BANKS            (BANKS),
+        .BANK_DEPTH       (BANK_DEPTH),
+        .BANK_ADDR_WIDTH  (BANK_ADDR_WIDTH),
+        .ROW_PENDING_WIDTH(ROW_PENDING_WIDTH)
+    ) i_row_store (
+        .clk_i,
+        .rst_ni,
+        .job_start_i                 (row_store_job_start),
+        .job_full_mode_i             (row_cache_full_mode),
+        .job_c_base_i                (effective_c_base),
+        .invalidate_i                (row_store_invalidate),
+        .cached_c_base_set_i         (row_store_cached_c_base_set),
+        .cached_c_base_i             (effective_c_base),
+        .alloc_main_valid_i          (row_store_main_alloc),
+        .alloc_main_slot_i           (fill_row_slot[$clog2(ROW_SLOTS)-1:0]),
+        .alloc_main_ih_i             (fill_ih[15:0]),
+        .alloc_background_valid_i    (row_store_background_alloc),
+        .alloc_background_slot_i     (bg_row_slot[$clog2(ROW_SLOTS)-1:0]),
+        .alloc_background_ih_i       (bg_ih[15:0]),
+        .beat_push_i                 (beat_push),
+        .beat_push_slot_i            (beat_push_slot),
+        .beat_push_last_for_row_i    (beat_push_last_for_row),
+        .beat_pop_i                  (beat_pop),
+        .beat_pop_slot_i             (beat_pop_slot),
+        .bank_write_req_i            (bank_w_req),
+        .bank_write_addr_i           (bank_w_addr),
+        .bank_write_data_i           (bank_w_data),
+        .bank_read_req_i             (bank_r_req),
+        .bank_read_addr_i            (bank_r_addr),
+        .bank_read_data_o            (bank_rdata),
+        .query_main_slot_i           (fill_row_slot[$clog2(ROW_SLOTS)-1:0]),
+        .query_main_ih_i             (fill_ih[15:0]),
+        .query_main_cached_o         (row_store_main_cached),
+        .query_main_pending_o        (row_store_main_pending),
+        .query_background_slot_i     (bg_row_slot[$clog2(ROW_SLOTS)-1:0]),
+        .query_background_ih_i       (bg_ih[15:0]),
+        .query_background_cached_o   (row_store_background_cached),
+        .query_background_pending_o  (row_store_background_pending),
+        .row_cache_full_o            (row_cache_full),
+        .cached_c_base_o             (cached_c_base)
+    );
 
     conv_linebuf_formatter_pipeline #(
         .DATA_WIDTH       (DATA_WIDTH),
@@ -492,43 +517,39 @@ module conv_linebuf_stream_packer #(
         row_tap_addr = row_base + row_stride_offset(kh) + channel_addr_offset;
     endfunction
 
-    task automatic derive_fill_status;
+    task automatic derive_fill_coordinates;
         begin
-            fill_ih = row_cache_full_q ?
+            fill_ih = row_cache_full ?
                       $signed({16'd0, fill_kh_q}) :
                       (output_base_ih_q + $signed({16'd0, fill_kh_q}));
-            fill_row_in_bounds = row_cache_full_q ?
+            fill_row_in_bounds = row_cache_full ?
                                  (fill_kh_q < cfg_input_h_i) :
                                  ((fill_ih >= 32'sd0) &&
                                   (fill_ih < $signed({16'd0, cfg_input_h_i})));
             fill_row_slot = fill_row_in_bounds ? cache_row_slot(fill_ih[15:0]) : 16'd0;
-            fill_row_cached = row_ring_mode && fill_row_in_bounds &&
-                              row_slot_valid_q[fill_row_slot[$clog2(ROW_SLOTS)-1:0]] &&
-                              (row_slot_ih_q[fill_row_slot[$clog2(ROW_SLOTS)-1:0]] == fill_ih[15:0]);
-            fill_row_pending = row_ring_mode && fill_row_in_bounds &&
-                               row_fetch_active_q[fill_row_slot[$clog2(ROW_SLOTS)-1:0]] &&
-                               (row_slot_ih_q[fill_row_slot[$clog2(ROW_SLOTS)-1:0]] == fill_ih[15:0]);
-            fill_row_ready = fill_row_cached;
             fill_crosses_current = ({2'b00, fill_addr_q[BYTE_SEL_BITS-1:0]} +
                                     {1'b0, fill_valid_bytes_q}) >
                                    (BYTE_SEL_BITS+2)'(BEAT_BYTES);
         end
     endtask
 
-    task automatic derive_background_status;
+    task automatic derive_fill_cache_status;
+        begin
+            fill_row_cached = row_ring_mode && fill_row_in_bounds &&
+                              row_store_main_cached;
+            fill_row_pending = row_ring_mode && fill_row_in_bounds &&
+                               row_store_main_pending;
+            fill_row_ready = fill_row_cached;
+        end
+    endtask
+
+    task automatic derive_background_coordinates;
         begin
             bg_ih = bg_base_ih_q + $signed({16'd0, bg_kh_q});
             bg_row_in_bounds = (bg_kh_q < cfg_kernel_h_i) &&
                                (bg_ih >= 32'sd0) &&
                                (bg_ih < $signed({16'd0, cfg_input_h_i}));
             bg_row_slot = bg_row_in_bounds ? cache_row_slot(bg_ih[15:0]) : 16'd0;
-            bg_row_cached = row_ring_mode && bg_row_in_bounds &&
-                            row_slot_valid_q[bg_row_slot[$clog2(ROW_SLOTS)-1:0]] &&
-                            (row_slot_ih_q[bg_row_slot[$clog2(ROW_SLOTS)-1:0]] == bg_ih[15:0]);
-            bg_row_pending = row_ring_mode && bg_row_in_bounds &&
-                             row_fetch_active_q[bg_row_slot[$clog2(ROW_SLOTS)-1:0]] &&
-                             (row_slot_ih_q[bg_row_slot[$clog2(ROW_SLOTS)-1:0]] == bg_ih[15:0]);
-            bg_row_ready = bg_row_cached;
             bg_crosses_current = ({2'b00, bg_addr_q[BYTE_SEL_BITS-1:0]} +
                                   {1'b0, bg_valid_bytes_q}) >
                                  (BYTE_SEL_BITS+2)'(BEAT_BYTES);
@@ -541,6 +562,16 @@ module conv_linebuf_stream_packer #(
                             (state_q == CH_STREAM_EMIT)) &&
                            (block_valid_bytes != 6'd0) &&
                            ((spatial_rows_q + 32'(cfg_output_w_i)) < dim_m_i);
+        end
+    endtask
+
+    task automatic derive_background_cache_status;
+        begin
+            bg_row_cached = row_ring_mode && bg_row_in_bounds &&
+                            row_store_background_cached;
+            bg_row_pending = row_ring_mode && bg_row_in_bounds &&
+                             row_store_background_pending;
+            bg_row_ready = bg_row_cached;
         end
     endtask
 
@@ -602,6 +633,44 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
+    task automatic derive_row_store_events;
+        begin
+            row_store_job_start = (state_q == CH_IDLE) && start_i;
+            row_store_main_alloc = (state_q == CH_ENSURE) &&
+                                   (fill_kh_q != fill_done_rows) &&
+                                   fill_row_in_bounds &&
+                                   !fill_row_ready &&
+                                   !fill_row_pending &&
+                                   (block_valid_bytes != 6'd0) &&
+                                   row_ring_mode;
+            row_store_background_alloc = (bg_state_q == BG_SCAN) &&
+                                         (bg_kh_q != cfg_kernel_h_i) &&
+                                         bg_row_in_bounds &&
+                                         !bg_row_ready &&
+                                         !bg_row_pending &&
+                                         (block_valid_bytes != 6'd0) &&
+                                         row_ring_mode;
+
+            tile_advance_event = (state_q == CH_STREAM_DONE) &&
+                                 formatter_stream_drained &&
+                                 more_k_tiles && next_tile_i;
+            prefetch_start_event = (state_q == CH_STREAM_DONE) &&
+                                   formatter_stream_drained &&
+                                   more_k_tiles && !next_tile_i &&
+                                   prefetch_i && !prefetch_active_q &&
+                                   !prefetch_ready_q && !row_cache_reuse;
+            row_store_invalidate = (tile_advance_event || prefetch_start_event) &&
+                                   !(row_ring_mode &&
+                                     (effective_c_base == cached_c_base));
+            row_store_cached_c_base_set =
+                (tile_advance_event &&
+                 !(row_cache_reuse ||
+                   (prefetch_ready_q &&
+                    (prefetched_c_base_q == effective_c_base)))) ||
+                prefetch_start_event;
+        end
+    endtask
+
     task automatic derive_beat_accounting;
         begin
             main_fill_beat_push = ((state_q == CH_FILL_REQ0) || (state_q == CH_FILL_REQ1)) &&
@@ -625,23 +694,6 @@ module conv_linebuf_stream_packer #(
                                        ((bg_x_q + 16'd1) == cfg_input_w_i)));
             beat_pop = obi_rvalid_i && !bf_empty;
             beat_pop_slot = resp_meta.kh[$clog2(ROW_SLOTS)-1:0];
-
-            row_pending_next = row_pending_q;
-            if (beat_push) begin
-                row_pending_next[beat_push_slot] =
-                    row_pending_next[beat_push_slot] + ROW_PENDING_WIDTH'(1);
-            end
-            if (beat_pop && row_fetch_active_q[beat_pop_slot]) begin
-                row_pending_next[beat_pop_slot] =
-                    row_pending_next[beat_pop_slot] - ROW_PENDING_WIDTH'(1);
-            end
-
-            row_ready_next = '0;
-            for (int unsigned slot = 0; slot < ROW_SLOTS; slot++) begin
-                row_ready_next[slot] = row_fetch_active_q[slot] &&
-                                       row_fetch_done_q[slot] &&
-                                       (row_pending_next[slot] == '0);
-            end
         end
     endtask
 
@@ -705,7 +757,7 @@ module conv_linebuf_stream_packer #(
                         (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
                         (slide_iw < $signed({16'd0, cfg_input_w_i}))) begin
                         idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
-                                         (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
+                                         (row_cache_full ? cell_ih[15:0] : 16'(kh)),
                                          slide_iw[15:0]);
                         bank_r_req[idx] = 1'b1;
                         bank_r_addr[idx] = bank_word_addr(slide_iw[15:0]);
@@ -737,7 +789,7 @@ module conv_linebuf_stream_packer #(
                         (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
                         (cell_iw < $signed({16'd0, cfg_input_w_i}))) begin
                         idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
-                                         (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
+                                         (row_cache_full ? cell_ih[15:0] : 16'(kh)),
                                          cell_iw[15:0]);
                         bank_r_req[idx] = 1'b1;
                         bank_r_addr[idx] = bank_word_addr(cell_iw[15:0]);
@@ -796,7 +848,7 @@ module conv_linebuf_stream_packer #(
                         (cell_ih < $signed({16'd0, cfg_input_h_i})) &&
                         (slide_iw < $signed({16'd0, cfg_input_w_i}))) begin
                         idx = bank_index(row_ring_mode ? cache_row_slot(cell_ih[15:0]) :
-                                         (row_cache_full_q ? cell_ih[15:0] : 16'(kh)),
+                                         (row_cache_full ? cell_ih[15:0] : 16'(kh)),
                                          slide_iw[15:0]);
                         slide_window[kh][target_kw[2:0]] = bank_rdata[idx];
                     end else begin
@@ -852,17 +904,18 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    always_comb begin
-        derive_fill_status();
-        derive_background_status();
-        derive_bypass_status();
-        derive_stream_status();
-        derive_beat_accounting();
-        drive_response_writeback();
-        drive_window_read_requests();
-        drive_obi_request_mux();
-        build_slide_window_next();
-    end
+    always_comb derive_fill_coordinates();
+    always_comb derive_fill_cache_status();
+    always_comb derive_background_coordinates();
+    always_comb derive_background_cache_status();
+    always_comb derive_bypass_status();
+    always_comb derive_stream_status();
+    always_comb derive_row_store_events();
+    always_comb derive_beat_accounting();
+    always_comb drive_response_writeback();
+    always_comb drive_window_read_requests();
+    always_comb drive_obi_request_mux();
+    always_comb build_slide_window_next();
 
     task automatic reset_sequential_state;
         begin
@@ -881,13 +934,6 @@ module conv_linebuf_stream_packer #(
             fetch_beats_q <= '0;
             bypass_vectors_q <= '0;
             k_tile_idx_q <= '0;
-            row_cache_full_q <= 1'b0;
-            cached_c_base_q <= '0;
-            row_slot_valid_q <= '0;
-            row_fetch_active_q <= '0;
-            row_fetch_done_q <= '0;
-            row_slot_ih_q <= '0;
-            row_pending_q <= '0;
             fill_kh_q <= '0;
             fill_x_q <= '0;
             fill_addr_q <= '0;
@@ -947,22 +993,6 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    task automatic tick_row_fetch_accounting;
-        begin
-            row_pending_q <= row_pending_next;
-            if (beat_push && beat_push_last_for_row) begin
-                row_fetch_done_q[beat_push_slot] <= 1'b1;
-            end
-            for (int unsigned slot = 0; slot < ROW_SLOTS; slot++) begin
-                if (row_ready_next[slot]) begin
-                    row_slot_valid_q[slot] <= 1'b1;
-                    row_fetch_active_q[slot] <= 1'b0;
-                    row_fetch_done_q[slot] <= 1'b0;
-                end
-            end
-        end
-    endtask
-
     task automatic reset_spatial_walk;
         begin
             window_q <= '0;
@@ -977,17 +1007,6 @@ module conv_linebuf_stream_packer #(
             fill_kh_q <= '0;
             fill_x_q <= '0;
             window_kw_q <= '0;
-        end
-    endtask
-
-    task automatic invalidate_row_tracking_if_needed;
-        begin
-            if (!(row_ring_mode && (effective_c_base == cached_c_base_q))) begin
-                row_slot_valid_q <= '0;
-                row_fetch_active_q <= '0;
-                row_fetch_done_q <= '0;
-                row_pending_q <= '0;
-            end
         end
     endtask
 
@@ -1015,19 +1034,6 @@ module conv_linebuf_stream_packer #(
         end
     endtask
 
-    task automatic start_row_fetch(
-        input logic [15:0] row_slot,
-        input logic [15:0] row_ih
-    );
-        begin
-            row_slot_valid_q[row_slot[$clog2(ROW_SLOTS)-1:0]] <= 1'b0;
-            row_fetch_active_q[row_slot[$clog2(ROW_SLOTS)-1:0]] <= 1'b1;
-            row_fetch_done_q[row_slot[$clog2(ROW_SLOTS)-1:0]] <= 1'b0;
-            row_pending_q[row_slot[$clog2(ROW_SLOTS)-1:0]] <= '0;
-            row_slot_ih_q[row_slot[$clog2(ROW_SLOTS)-1:0]] <= row_ih;
-        end
-    endtask
-
     task automatic tick_idle_state;
         begin
             stg1_valid_q <= 1'b0;
@@ -1038,12 +1044,6 @@ module conv_linebuf_stream_packer #(
                 fetch_beats_q <= '0;
                 bypass_vectors_q <= '0;
                 k_tile_idx_q <= '0;
-                row_cache_full_q <= row_cache_full_mode;
-                cached_c_base_q <= effective_c_base;
-                row_slot_valid_q <= '0;
-                row_fetch_active_q <= '0;
-                row_fetch_done_q <= '0;
-                row_pending_q <= '0;
                 bg_state_q <= BG_IDLE;
                 bg_started_for_row_q <= 1'b0;
                 prefetch_active_q <= 1'b0;
@@ -1173,19 +1173,16 @@ module conv_linebuf_stream_packer #(
                     end else begin
                         fill_x_q <= '0;
                         fill_valid_bytes_q <= block_valid_bytes;
-                        fill_addr_q <= row_cache_full_q ?
+                        fill_addr_q <= row_cache_full ?
                                        row_tap_addr(cfg_origin_base_i + pad_row_offset,
                                                     fill_kh_q) :
                                        row_tap_addr(output_row_base_addr_q, fill_kh_q);
                         pending_beat_addr_q <= beat_base(
-                            row_cache_full_q ?
+                            row_cache_full ?
                             row_tap_addr(cfg_origin_base_i + pad_row_offset,
                                          fill_kh_q) :
                             row_tap_addr(output_row_base_addr_q, fill_kh_q)
                         );
-                        if (row_ring_mode && fill_row_in_bounds) begin
-                            start_row_fetch(fill_row_slot, fill_ih[15:0]);
-                        end
                         state_q <= CH_FILL_REQ0;
                     end
                 end
@@ -1265,7 +1262,7 @@ module conv_linebuf_stream_packer #(
                             (cell_ih_ff < $signed({16'd0, cfg_input_h_i})) &&
                             (cell_iw_ff < $signed({16'd0, cfg_input_w_i}))) begin
                             idx_ff = bank_index(row_ring_mode ? cache_row_slot(cell_ih_ff[15:0]) :
-                                                (row_cache_full_q ? cell_ih_ff[15:0] : 16'(kh)),
+                                                (row_cache_full ? cell_ih_ff[15:0] : 16'(kh)),
                                                 cell_iw_ff[15:0]);
                             window_q[kh][window_kw_q[2:0]] <= bank_rdata[idx_ff];
                         end else if (kh < K_MAX) begin
@@ -1351,7 +1348,7 @@ module conv_linebuf_stream_packer #(
                                 fill_kh_q <= '0;
                                 window_kw_q <= '0;
                                 window_q <= '0;
-                                state_q <= row_cache_full_q ? CH_WINDOW_REQ : CH_ENSURE;
+                                state_q <= row_cache_full ? CH_WINDOW_REQ : CH_ENSURE;
                             end else if (has_next_same_row) begin
                                 window_q <= slide_window;
                                 stg1_tap_kh_q <= '0;
@@ -1369,7 +1366,6 @@ module conv_linebuf_stream_packer #(
                             if (next_tile_i) begin
                                 k_tile_idx_q <= k_tile_idx_q + 32'd1;
                                 reset_spatial_walk();
-                                invalidate_row_tracking_if_needed();
                                 bg_state_q <= BG_IDLE;
                                 bg_started_for_row_q <= 1'b0;
                                 prefetch_active_q <= 1'b0;
@@ -1378,16 +1374,13 @@ module conv_linebuf_stream_packer #(
                                     (prefetch_ready_q && (prefetched_c_base_q == effective_c_base))) begin
                                     state_q <= CH_WINDOW_REQ;
                                 end else begin
-                                    cached_c_base_q <= effective_c_base;
                                     state_q <= CH_ENSURE;
                                 end
                             end else if (prefetch_i && !prefetch_active_q && !prefetch_ready_q &&
                                          !row_cache_reuse) begin
                                 reset_spatial_walk();
-                                invalidate_row_tracking_if_needed();
                                 bg_state_q <= BG_IDLE;
                                 bg_started_for_row_q <= 1'b0;
-                                cached_c_base_q <= effective_c_base;
                                 prefetch_active_q <= 1'b1;
                                 state_q <= CH_ENSURE;
                             end
@@ -1457,9 +1450,6 @@ module conv_linebuf_stream_packer #(
                         bg_pending_beat_addr_q <= beat_base(
                             row_tap_addr(bg_row_base_addr_q, bg_kh_q)
                         );
-                        if (row_ring_mode && bg_row_in_bounds) begin
-                            start_row_fetch(bg_row_slot, bg_ih[15:0]);
-                        end
                         bg_state_q <= BG_REQ0;
                     end
                 end
@@ -1534,7 +1524,6 @@ module conv_linebuf_stream_packer #(
             done_q <= 1'b0;
             tick_response_engine();
             tick_lane_pipeline();
-            tick_row_fetch_accounting();
             tick_main_fsm();
             tick_background_fsm();
             tick_output_stage();
