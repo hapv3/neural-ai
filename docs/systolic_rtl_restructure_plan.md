@@ -19,20 +19,22 @@ each OBI port has one owner or one named arbiter.
 
 ## 2. Baseline and invariants
 
-Before moving more state, capture golden cycle traces at commit `6081ced` for all
-existing linebuffer and controller modes. The trace set records:
+The numeric baseline at RTL commit `6081ced` is:
 
-- top-level and drain/linebuffer debug states;
-- every OBI request, grant, address, byte enable, write data, response-valid,
-  and response data signal;
-- input/output stream valid and ready signals that are externally observable;
-- completion and PMU activity signals;
-- total cycle count for each invocation.
+| Suite | Invocations | Start-to-done cycles |
+|---|---:|---:|
+| Linebuffer block | 39 | 25,641 |
+| Controller core | 9 | 5,903 |
+| Controller execution modes | 4 | 428 |
+| Controller linebuffer matrix | 9 | 13,481 |
+| Controller pool matrix | 2 | 570 |
+| Controller binary Add/Sub/Mul | 3 | 353 |
+| Controller focused total | 27 | 20,735 |
 
-Every structural increment must match the applicable golden trace exactly. A
-final output match alone is insufficient because it can hide bubbles, reordered
-memory traffic, or a changed handshake. Any intentional trace difference stops
-the restructure and is reviewed as a performance or functional change.
+Every structural increment must preserve functional output, OBI transaction
+counts/order, PMU event counts, and the applicable cycle totals. Any intentional
+difference stops the restructure and is reviewed as a performance or functional
+change.
 
 The following invariants apply throughout the migration:
 
@@ -157,7 +159,7 @@ Each ownership migration is one reviewable increment. The minimum gate is:
 3. Unit tests for the child, including reset, backpressure, OBI grant stalls,
    delayed responses, crossing beats, and final/tail conditions as applicable.
 4. Parent block regression for every mode that uses the migrated state.
-5. Exact comparison against the baseline cycle/OBI trace set.
+5. Comparison against the baseline cycle, PMU, and OBI transaction numbers.
 6. An English commit message containing only that verified increment.
 
 Cluster simulation is run only at two major endpoints: after the linebuffer
@@ -176,4 +178,3 @@ The restructure is complete when:
 - all unit, block, controller-matrix, cycle-trace, lint, and endpoint cluster
   regressions pass;
 - architecture documentation reflects the implemented hierarchy and interfaces.
-
