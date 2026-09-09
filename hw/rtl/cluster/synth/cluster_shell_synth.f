@@ -75,6 +75,7 @@
 ../../../../hw/rtl/systolic/conv_linebuf_config_decoder.sv
 ../../../../hw/rtl/systolic/conv_linebuf_fetch_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_row_store.sv
+../../../../hw/rtl/systolic/conv_linebuf_window_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_formatter_pipeline.sv
 ../../../../hw/rtl/systolic/conv_linebuf_stream_packer.sv
 ../../../../hw/rtl/systolic/npu_systolic_array.sv

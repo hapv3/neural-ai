@@ -62,6 +62,11 @@ TOPLEVEL = conv_linebuf_fetch_engine
 VERILOG_SOURCES = $(PWD)/conv_linebuf_fetch_engine.sv
 endif
 
+ifeq ($(MODULE),test_conv_linebuf_window_engine)
+TOPLEVEL = conv_linebuf_window_engine
+VERILOG_SOURCES = $(PWD)/conv_linebuf_window_engine.sv
+endif
+
 ifeq ($(MODULE),test_systolic_maxpool_engine)
 TOPLEVEL = systolic_maxpool_engine
 VERILOG_SOURCES = $(PWD)/systolic_maxpool_engine.sv
@@ -85,6 +90,7 @@ VERILOG_SOURCES = \
 	$(PWD)/conv_linebuf_config_decoder.sv \
 	$(PWD)/conv_linebuf_fetch_engine.sv \
 	$(PWD)/conv_linebuf_row_store.sv \
+	$(PWD)/conv_linebuf_window_engine.sv \
 	$(PWD)/conv_linebuf_formatter_pipeline.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv \
 	$(PWD)/depthwise_mac_engine.sv \
@@ -113,6 +119,7 @@ VERILOG_SOURCES = \
 	$(PWD)/conv_linebuf_config_decoder.sv \
 	$(PWD)/conv_linebuf_fetch_engine.sv \
 	$(PWD)/conv_linebuf_row_store.sv \
+	$(PWD)/conv_linebuf_window_engine.sv \
 	$(PWD)/conv_linebuf_formatter_pipeline.sv \
 	$(PWD)/conv_linebuf_stream_packer.sv
 endif
