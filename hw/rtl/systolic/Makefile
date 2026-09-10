@@ -64,6 +64,25 @@ VERILOG_SOURCES = \
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
 endif
 
+ifeq ($(MODULE),test_systolic_input_engine)
+TOPLEVEL = systolic_input_engine
+VERILOG_SOURCES = \
+	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_clk.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
+	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
+	$(PWD)/conv_linebuf_config_decoder.sv \
+	$(PWD)/conv_linebuf_bypass_engine.sv \
+	$(PWD)/conv_linebuf_fetch_engine.sv \
+	$(PWD)/conv_linebuf_row_store.sv \
+	$(PWD)/conv_linebuf_window_engine.sv \
+	$(PWD)/conv_linebuf_formatter_pipeline.sv \
+	$(PWD)/conv_linebuf_spatial_scheduler.sv \
+	$(PWD)/conv_linebuf_stream_packer.sv \
+	$(PWD)/systolic_input_engine.sv
+EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
+endif
+
 ifeq ($(MODULE),test_systolic_ctrl_regs)
 TOPLEVEL = systolic_ctrl_regs
 VERILOG_SOURCES = $(PWD)/systolic_ctrl_regs.sv
@@ -130,6 +149,7 @@ VERILOG_SOURCES = \
 	$(PWD)/systolic_output_postprocess.sv \
 	$(PWD)/systolic_output_drain.sv \
 	$(PWD)/systolic_weight_engine.sv \
+	$(PWD)/systolic_input_engine.sv \
 	$(PWD)/npu_systolic_array.sv \
 	$(PWD)/conv_linebuf_config_decoder.sv \
 	$(PWD)/conv_linebuf_bypass_engine.sv \

@@ -90,9 +90,6 @@ module systolic_controller #(
     state_e state_q;
     state_e state_d;
 
-    logic [31:0] i_ptr_q, i_ptr_d;
-    logic [31:0] req_cnt_q, req_cnt_d; // Counter for requests
-    logic [31:0] rsp_cnt_q, rsp_cnt_d; // Counter for responses
     logic [31:0] drain_cnt_q;
 
     localparam int unsigned ARRAY_FLUSH_CYCLES = (2 * ARRAY_DIM) - 1;
@@ -102,18 +99,14 @@ module systolic_controller #(
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
     typedef logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   ofm_row_t;
 
-    input_row_t    ifm_fifo_data;
-    input_row_t    ifm_fifo_out;
-    logic          ifm_fifo_push;
-    logic          ifm_fifo_pop;
-    logic          ifm_fifo_full;
-    logic          ifm_fifo_empty;
-
     logic          ofm_fifo_empty;
     logic          psum_fifo_empty;
     logic          array_pipe_ready;
 
     logic          fifo_flush;
+    logic          input_feed_start;
+    logic          input_feed_done;
+    logic          input_side_ready;
     logic          weight_load_en;
     logic          weight_load_done;
     logic          weight_preload_done;
@@ -242,19 +235,10 @@ module systolic_controller #(
 
     logic          linebuf_start;
     logic          linebuf_next_tile;
-    logic          linebuf_prefetch;
-    logic          linebuf_prefetch_req_q, linebuf_prefetch_req_d;
-    logic          linebuf_obi_req;
-    logic [ADDR_WIDTH-1:0] linebuf_obi_addr;
     input_row_t    linebuf_row_data;
     logic          linebuf_row_valid;
-    logic          linebuf_row_ready;
-    logic          linebuf_done;
     logic          linebuf_busy;
     logic          linebuf_prefetch_busy;
-    logic [31:0]   linebuf_emitted_vectors;
-    logic [31:0]   linebuf_fetch_beats;
-    logic [31:0]   linebuf_bypass_vectors;
     logic [4:0]    linebuf_debug_state;
     input_row_t    pool_out_data;
     logic          pool_in_ready;
@@ -302,7 +286,6 @@ module systolic_controller #(
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
-    assign ifm_fifo_data    = obi_i_rdata_i;
     assign array_pipe_ready = !ofm_valid || ofm_ready;
     assign psum_data = '0;
     assign perf_weight_load_en_o = weight_load_en;
@@ -493,79 +476,15 @@ module systolic_controller #(
             k_seed_ic_d = k_seed_ic_next;
             k_channel_offset_d = k_channel_offset_next;
             k_tile_idx_d = k_tile_idx_q + 32'd1;
-            i_ptr_d = cfg_sys_ifm_ptr_i;
             drain_tile_advance = 1'b1;
             drain_tile_advance_overlap = launch_direct_compute;
             if (launch_direct_compute) begin
-                req_cnt_d = cfg_sys_dim_m_i;
-                rsp_cnt_d = cfg_sys_dim_m_i;
+                input_feed_start = 1'b1;
                 weight_preload_consume = 1'b1;
                 linebuf_next_tile = 1'b1;
                 state_d = COMPUTE;
             end else begin
                 state_d = LOAD_WEIGHTS;
-            end
-        end
-    endtask
-
-    task automatic service_linebuf_prefetch_engine();
-        begin
-            if (linebuf_has_next_k_tile) begin
-                linebuf_prefetch_req_d = linebuf_prefetch_busy ||
-                                         (array_flush_cnt_q != '0) ||
-                                         (drain_cnt_q != 0) ||
-                                         !ofm_fifo_empty;
-            end else begin
-                linebuf_prefetch_req_d = 1'b0;
-            end
-
-            if (linebuf_prefetch_req_q) begin
-                obi_i_req_o = linebuf_obi_req;
-                obi_i_addr_o = linebuf_obi_addr;
-            end
-        end
-    endtask
-
-    task automatic launch_linebuf_compute_engine();
-        begin
-            obi_i_req_o = linebuf_obi_req;
-            obi_i_addr_o = linebuf_obi_addr;
-            if (linebuf_row_valid && array_pipe_ready) begin
-                compute_en = 1'b1;
-                clear_acc = 1'b0;
-                ifm_data = linebuf_row_data;
-                linebuf_row_ready = 1'b1;
-                req_cnt_d = req_cnt_q - 1;
-            end
-            if (req_cnt_q == 1 && linebuf_row_valid && array_pipe_ready) begin
-                rsp_cnt_d = '0;
-                array_flush_cnt_d = ARRAY_FLUSH_COUNT_W'(ARRAY_FLUSH_CYCLES);
-                state_d = WAIT_DRAIN;
-            end
-        end
-    endtask
-
-    task automatic launch_fifo_compute_engine();
-        begin
-            if (req_cnt_q > 0) begin
-                obi_i_req_o = !ifm_fifo_full && array_pipe_ready;
-                obi_i_addr_o = i_ptr_q;
-                if (obi_i_req_o && obi_i_gnt_i) begin
-                    i_ptr_d = i_ptr_q + 32;
-                    req_cnt_d = req_cnt_q - 1;
-                end
-            end
-            ifm_fifo_push = obi_i_rvalid_i && !ifm_fifo_full;
-            if (!ifm_fifo_empty && array_pipe_ready) begin
-                compute_en = 1'b1;
-                clear_acc = 1'b0;
-                ifm_fifo_pop = 1'b1;
-                ifm_data = ifm_fifo_out;
-                rsp_cnt_d = rsp_cnt_q - 1;
-            end
-            if (req_cnt_q == 0 && rsp_cnt_q == 1 && ifm_fifo_pop) begin
-                array_flush_cnt_d = ARRAY_FLUSH_COUNT_W'(ARRAY_FLUSH_CYCLES);
-                state_d = WAIT_DRAIN;
             end
         end
     endtask
@@ -761,24 +680,6 @@ module systolic_controller #(
         .preload_done_o              (weight_preload_done)
     );
 
-    fifo_v3 #(
-        .FALL_THROUGH (1'b1),
-        .DEPTH        (INPUT_FIFO_DEPTH),
-        .dtype        (input_row_t)
-    ) i_ifm_fifo (
-        .clk_i      (clk_i),
-        .rst_ni     (rst_ni),
-        .flush_i    (fifo_flush),
-        .testmode_i (1'b0),
-        .full_o     (ifm_fifo_full),
-        .empty_o    (ifm_fifo_empty),
-        .usage_o    (),
-        .data_i     (ifm_fifo_data),
-        .push_i     (ifm_fifo_push),
-        .data_o     (ifm_fifo_out),
-        .pop_i      (ifm_fifo_pop)
-    );
-
     systolic_ctrl_regs #(
         .ADDR_WIDTH(ADDR_WIDTH)
     ) i_systolic_ctrl_regs (
@@ -862,19 +763,33 @@ module systolic_controller #(
         .cfg_sys_done_i     (cfg_sys_done_o)
     );
 
-    conv_linebuf_stream_packer #(
+    systolic_input_engine #(
         .ADDR_WIDTH       (ADDR_WIDTH),
         .DATA_WIDTH       (DATA_WIDTH),
         .ARRAY_DIM        (ARRAY_DIM),
         .INPUT_ELEM_WIDTH (INPUT_ELEM_WIDTH),
+        .FIFO_DEPTH       (INPUT_FIFO_DEPTH),
         .MAX_INPUT_W      (640)
-    ) i_conv_channel_linebuf_packer (
-        .clk_i                   (clk_i),
-        .rst_ni                  (rst_ni),
-        .start_i                 (linebuf_start),
-        .next_tile_i             (linebuf_next_tile),
-        .prefetch_i              (linebuf_prefetch),
-        .dim_m_i                 (linebuf_spatial_m),
+    ) i_input_engine (
+        .clk_i,
+        .rst_ni,
+        .job_start_i             (fifo_flush),
+        .feed_start_i            (input_feed_start),
+        .feed_service_i          (state_q == COMPUTE),
+        .drain_service_i         (state_q == WAIT_DRAIN),
+        .linebuf_start_i         (linebuf_start),
+        .linebuf_next_tile_i     (linebuf_next_tile),
+        .preload_service_i       (state_q == WAIT_DRAIN),
+        .preload_has_next_i      (linebuf_has_next_k_tile),
+        .preload_hold_i          ((array_flush_cnt_q != '0) ||
+                                  (drain_cnt_q != 0) || !ofm_fifo_empty),
+        .linebuf_enable_i        (cfg_linebuf_en_i),
+        .side_stream_mode_i      (linebuf_pool_mode || linebuf_depthwise_mode),
+        .array_pipe_ready_i      (array_pipe_ready),
+        .side_ready_i            (input_side_ready),
+        .ifm_base_ptr_i          (cfg_sys_ifm_ptr_i),
+        .row_count_i             (cfg_sys_dim_m_i),
+        .cfg_spatial_m_i         (linebuf_spatial_m),
         .cfg_k_tiles_i           (cfg_linebuf_k_tiles_i),
         .cfg_origin_base_i       (cfg_linebuf_input_base_i),
         .cfg_row_stride_bytes_i  (cfg_linebuf_row_stride_bytes_i),
@@ -904,26 +819,30 @@ module systolic_controller #(
         .cfg_k_seed_kh_i         (linebuf_seed_kh_eff),
         .cfg_k_seed_kw_i         (linebuf_seed_kw_eff),
         .cfg_k_seed_ic_i         (linebuf_seed_ic_eff),
-        .obi_req_o               (linebuf_obi_req),
+        .obi_req_o               (obi_i_req_o),
         .obi_gnt_i               (obi_i_gnt_i),
-        .obi_addr_o              (linebuf_obi_addr),
+        .obi_addr_o              (obi_i_addr_o),
+        .obi_we_o                (obi_i_we_o),
+        .obi_be_o                (obi_i_be_o),
+        .obi_wdata_o             (obi_i_wdata_o),
         .obi_rvalid_i            (obi_i_rvalid_i),
         .obi_rdata_i             (obi_i_rdata_i),
-        .row_data_o              (linebuf_row_data),
-        .row_valid_o             (linebuf_row_valid),
-        .row_ready_i             (linebuf_row_ready),
-        .busy_o                  (linebuf_busy),
-        .done_o                  (linebuf_done),
+        .compute_en_o            (compute_en),
+        .compute_data_o          (ifm_data),
+        .feed_done_o             (input_feed_done),
+        .side_data_o             (linebuf_row_data),
+        .side_valid_o            (linebuf_row_valid),
+        .linebuf_row_ready_o     (),
+        .linebuf_busy_o          (linebuf_busy),
+        .linebuf_done_o          (),
         .prefetch_busy_o         (linebuf_prefetch_busy),
-        .emitted_vectors_o       (linebuf_emitted_vectors),
-        .fetch_beats_o           (linebuf_fetch_beats),
-        .bypass_vectors_o        (linebuf_bypass_vectors),
+        .request_count_o         (),
+        .response_count_o        (),
+        .emitted_vectors_o       (),
+        .fetch_beats_o           (),
+        .bypass_vectors_o        (),
         .debug_state_o           (linebuf_debug_state)
     );
-
-    assign obi_i_we_o = 1'b0;
-    assign obi_i_be_o = '1;
-    assign obi_i_wdata_o = '0;
 
     // FSM
     // The engine helper tasks below are side-effecting but are only invoked from
@@ -933,9 +852,6 @@ module systolic_controller #(
     /* verilator lint_off MULTIDRIVEN */
     always_comb begin
         state_d = state_q;
-        i_ptr_d = i_ptr_q;
-        req_cnt_d = req_cnt_q;
-        rsp_cnt_d = rsp_cnt_q;
         k_tile_idx_d = k_tile_idx_q;
         k_seed_ic_d = k_seed_ic_q;
         k_seed_kw_d = k_seed_kw_q;
@@ -955,31 +871,20 @@ module systolic_controller #(
         drain_depthwise_group_output_ptr = cfg_sys_ofm_ptr_i;
         linebuf_start = 1'b0;
         linebuf_next_tile = 1'b0;
-        linebuf_prefetch_req_d = (state_q == WAIT_DRAIN) ? linebuf_prefetch_req_q : 1'b0;
-        linebuf_prefetch = linebuf_prefetch_req_q && (state_q == WAIT_DRAIN);
-        linebuf_row_ready = 1'b0;
+        input_feed_start = 1'b0;
+        input_side_ready = 1'b0;
         weight_preload_consume = 1'b0;
         weight_depthwise_group_start = 1'b0;
         weight_depthwise_group_ptr = cfg_sys_weight_ptr_i;
 
         cfg_sys_done_o = 1'b0;
 
-        obi_i_req_o = 1'b0;
-        obi_i_addr_o = '0;
-
-        compute_en = 1'b0;
         clear_acc = 1'b0;
-        ifm_data = '0;
-        ifm_fifo_push = 1'b0;
-        ifm_fifo_pop = 1'b0;
         dw_engine_in_valid = 1'b0;
 
         case (state_q)
             IDLE: begin
                 if (cfg_sys_start_i) begin
-                    i_ptr_d = cfg_sys_ifm_ptr_i;
-                    req_cnt_d = '0;
-                    rsp_cnt_d = '0;
                     array_flush_cnt_d = '0;
                     k_tile_idx_d = '0;
                     k_seed_ic_d = cfg_linebuf_k_seed_ic_i;
@@ -994,8 +899,6 @@ module systolic_controller #(
                     state_d = LOAD_WEIGHTS;
 
                     if (linebuf_pool_mode) begin
-                        req_cnt_d = '0;
-                        rsp_cnt_d = '0;
                         linebuf_start = 1'b1;
                         state_d = COMPUTE;
                     end
@@ -1006,8 +909,6 @@ module systolic_controller #(
 
                     if ((cfg_requant_en_i && requant_config_invalid) ||
                         binary_config_invalid) begin
-                        req_cnt_d = '0;
-                        rsp_cnt_d = '0;
                         state_d = DONE;
                     end
                 end
@@ -1021,8 +922,7 @@ module systolic_controller #(
                         state_d = COMPUTE;
                     end
                 end else if (weight_preload_done) begin
-                    req_cnt_d = cfg_sys_dim_m_i;
-                    rsp_cnt_d = cfg_sys_dim_m_i;
+                    input_feed_start = 1'b1;
                     drain_tile_start = 1'b1;
                     drain_tile_start_add_rows = psum_buf_overlap_active &&
                                                 (k_tile_idx_q != 32'd0);
@@ -1033,8 +933,7 @@ module systolic_controller #(
                     end
                     state_d = COMPUTE;
                 end else if (weight_load_done) begin
-                    req_cnt_d = cfg_sys_dim_m_i;
-                    rsp_cnt_d = cfg_sys_dim_m_i;
+                    input_feed_start = 1'b1;
                     drain_tile_start = 1'b1;
                     drain_tile_start_add_rows = psum_buf_overlap_active &&
                                                 (k_tile_idx_q != 32'd0);
@@ -1051,12 +950,9 @@ module systolic_controller #(
 
             COMPUTE: begin
                 if (linebuf_depthwise_mode) begin
-                    obi_i_req_o = linebuf_obi_req;
-                    obi_i_addr_o = linebuf_obi_addr;
-
                     if (linebuf_row_valid && !requant_config_invalid && dw_engine_in_ready) begin
                         dw_engine_in_valid = 1'b1;
-                        linebuf_row_ready = 1'b1;
+                        input_side_ready = 1'b1;
                         if (dw_tap_is_last) begin
                             dw_tap_count_d = '0;
                         end else begin
@@ -1084,18 +980,14 @@ module systolic_controller #(
                         end
                     end
                 end else if (linebuf_pool_mode) begin
-                    obi_i_req_o = linebuf_obi_req;
-                    obi_i_addr_o = linebuf_obi_addr;
-
-                    linebuf_row_ready = linebuf_row_valid && pool_in_ready;
+                    input_side_ready = linebuf_row_valid && pool_in_ready;
 
                     if ((drain_cnt_q == 32'd0) && !pool_out_valid && !linebuf_busy) begin
                         state_d = DONE;
                     end
-                end else if (cfg_linebuf_en_i) begin
-                    launch_linebuf_compute_engine();
-                end else begin
-                    launch_fifo_compute_engine();
+                end else if (input_feed_done) begin
+                    array_flush_cnt_d = ARRAY_FLUSH_COUNT_W'(ARRAY_FLUSH_CYCLES);
+                    state_d = WAIT_DRAIN;
                 end
             end
 
@@ -1103,17 +995,6 @@ module systolic_controller #(
                 if ((array_flush_cnt_q != '0) && array_pipe_ready) begin
                     array_flush_cnt_d = array_flush_cnt_q - 1'b1;
                 end
-
-                // The line-buffer formatter may still hold its final row after
-                // the last compute input was accepted.  Keep the output
-                // handshake open until that pipeline is empty; otherwise a
-                // following one-cycle START can arrive while the line-buffer
-                // is still in CH_STREAM_DONE and be lost.
-                if (cfg_linebuf_en_i) begin
-                    linebuf_row_ready = 1'b1;
-                end
-
-                service_linebuf_prefetch_engine();
 
                 if (accum_active) begin
                     if (psum_buf_overlap_next_safe) begin
@@ -1146,7 +1027,6 @@ module systolic_controller #(
 
             DONE: begin
                 cfg_sys_done_o = 1'b1;
-                linebuf_prefetch_req_d = 1'b0;
                 state_d = IDLE;
             end
 
@@ -1160,15 +1040,11 @@ module systolic_controller #(
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             state_q         <= IDLE;
-            i_ptr_q         <= '0;
-            req_cnt_q       <= '0;
-            rsp_cnt_q       <= '0;
             k_tile_idx_q    <= '0;
             k_seed_ic_q     <= '0;
             k_seed_kw_q     <= '0;
             k_seed_kh_q     <= '0;
             k_channel_offset_q <= '0;
-            linebuf_prefetch_req_q <= 1'b0;
             array_flush_cnt_q <= '0;
             dw_tap_count_q <= '0;
             dw_group_idx_q <= '0;
@@ -1177,15 +1053,11 @@ module systolic_controller #(
             dw_group_weight_offset_q <= '0;
         end else begin
             state_q     <= state_d;
-            i_ptr_q     <= i_ptr_d;
-            req_cnt_q   <= req_cnt_d;
-            rsp_cnt_q   <= rsp_cnt_d;
             k_tile_idx_q <= k_tile_idx_d;
             k_seed_ic_q <= k_seed_ic_d;
             k_seed_kw_q <= k_seed_kw_d;
             k_seed_kh_q <= k_seed_kh_d;
             k_channel_offset_q <= k_channel_offset_d;
-            linebuf_prefetch_req_q <= linebuf_prefetch_req_d;
             array_flush_cnt_q <= array_flush_cnt_d;
             dw_tap_count_q <= dw_tap_count_d;
             dw_group_idx_q <= dw_group_idx_d;
