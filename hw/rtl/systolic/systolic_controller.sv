@@ -223,22 +223,9 @@ module systolic_controller #(
     logic          requant_in_ready;
     logic          requant_out_valid;
     logic          requant_out_ready;
-    logic [255:0]  requant_packed_data;
-    logic          requant_invalid;
     logic          requant_config_invalid;
-    logic          binary_in_valid;
-    logic          binary_in_ready;
-    logic          binary_out_valid;
-    logic          binary_out_ready;
-    logic [255:0]  binary_packed_data;
-    logic          binary_invalid;
     logic          binary_config_invalid;
-    logic          binary_operand_start;
-    logic          binary_operand_valid;
-    logic          binary_operand_ready;
-    logic [255:0]  binary_operand_data;
     logic          binary_operand_busy;
-    logic          binary_operand_done;
     logic          quantized_out_valid;
     logic          quantized_out_ready;
     logic [255:0]  quantized_packed_data;
@@ -562,16 +549,6 @@ module systolic_controller #(
                                                   k_channel_offset_next :
                                                   k_channel_offset_q) :
                                                  cfg_linebuf_channel_addr_offset_i;
-    assign binary_operand_start = fifo_flush && cfg_binary_en_i && !binary_config_invalid;
-    assign binary_in_valid = binary_active && requant_out_valid && binary_operand_valid;
-    assign requant_out_ready = binary_active ?
-                               (binary_in_ready && binary_operand_valid) :
-                               quantized_out_ready;
-    assign binary_operand_ready = binary_active && binary_in_ready && requant_out_valid;
-    assign binary_out_ready = binary_active && quantized_out_ready;
-    assign quantized_out_valid = binary_active ? binary_out_valid : requant_out_valid;
-    assign quantized_packed_data = binary_active ? binary_packed_data : requant_packed_data;
-    assign quantized_invalid = binary_active ? binary_invalid : requant_invalid;
     assign quantized_packed_write_data = linebuf_depthwise_mode ?
                                          mask_packed_lanes(quantized_packed_data,
                                                            dw_group_valid_bytes) :
@@ -1019,31 +996,6 @@ module systolic_controller #(
         end
     endtask
 
-    always_comb begin
-        requant_config_invalid = ($signed(cfg_requant_clamp_min_i) > $signed(cfg_requant_clamp_max_i));
-        for (int unsigned ch = 0; ch < ARRAY_DIM; ch++) begin
-            if (cfg_requant_shift_i[ch] > 8'd31) begin
-                requant_config_invalid = 1'b1;
-            end
-        end
-    end
-
-    always_comb begin
-        binary_config_invalid = cfg_binary_en_i && (
-            !cfg_requant_en_i || cfg_binary_mode_i > 2'd2 ||
-            $signed(cfg_binary_output_multiplier_i) <= 0 ||
-            (cfg_binary_mode_i != 2'd2 &&
-                ($signed(cfg_binary_lhs_multiplier_i) <= 0 ||
-                 $signed(cfg_binary_rhs_multiplier_i) <= 0)) ||
-            cfg_binary_lhs_shift_i > 7'd63 ||
-            cfg_binary_rhs_shift_i > 7'd63 ||
-            cfg_binary_output_shift_i > 7'd63 ||
-            cfg_binary_double_round_shift_i > 6'd30 ||
-            cfg_binary_clamp_min_i > cfg_binary_clamp_max_i ||
-            cfg_binary_rhs_ptr_i[4:0] != 5'd0 ||
-            linebuf_pool_mode || linebuf_depthwise_mode);
-    end
-
     systolic_maxpool_engine #(
         .LANES           (ARRAY_DIM),
         .ELEM_WIDTH      (INPUT_ELEM_WIDTH),
@@ -1081,81 +1033,65 @@ module systolic_controller #(
         .acc_o        (dw_engine_out_acc)
     );
 
-    requant_pipeline #(
-        .ARRAY_DIM(ARRAY_DIM)
-    ) i_requant_pipeline (
-        .clk_i         (clk_i),
-        .rst_ni        (rst_ni),
-        .in_valid_i    (requant_in_valid),
-        .in_ready_o    (requant_in_ready),
-        .acc_i         (requant_acc),
-        .bias_i        (cfg_requant_bias_i),
-        .multiplier_i  (cfg_requant_multiplier_i),
-        .shift_i       (cfg_requant_shift_i),
-        .zero_point_i  (cfg_requant_zero_point_i),
-        .clamp_min_i   (cfg_requant_clamp_min_i),
-        .clamp_max_i   (cfg_requant_clamp_max_i),
-        .out_valid_o   (requant_out_valid),
-        .out_ready_i   (requant_out_ready),
-        .packed_o      (requant_packed_data),
-        .invalid_o     (requant_invalid)
+    systolic_output_postprocess #(
+        .ADDR_WIDTH       (ADDR_WIDTH),
+        .DATA_WIDTH       (DATA_WIDTH),
+        .LANES            (ARRAY_DIM),
+        .BINARY_FIFO_DEPTH(INPUT_FIFO_DEPTH * 2)
+    ) i_output_postprocess (
+        .clk_i,
+        .rst_ni,
+        .flush_i                         (fifo_flush),
+        .job_start_i                     (fifo_flush),
+        .requant_enable_i                (cfg_requant_en_i),
+        .acc_i                           (requant_acc),
+        .acc_valid_i                     (requant_in_valid),
+        .acc_ready_o                     (requant_in_ready),
+        .bias_i                          (cfg_requant_bias_i),
+        .multiplier_i                    (cfg_requant_multiplier_i),
+        .shift_i                         (cfg_requant_shift_i),
+        .zero_point_i                    (cfg_requant_zero_point_i),
+        .clamp_min_i                     (cfg_requant_clamp_min_i),
+        .clamp_max_i                     (cfg_requant_clamp_max_i),
+        .binary_enable_i                 (cfg_binary_en_i),
+        .binary_active_i                 (binary_active),
+        .binary_mode_i                   (cfg_binary_mode_i),
+        .binary_rhs_ptr_i                (cfg_binary_rhs_ptr_i),
+        .binary_rhs_row_stride_bytes_i   (cfg_binary_rhs_row_stride_bytes_i),
+        .binary_rhs_tile_cols_i          (cfg_binary_rhs_tile_cols_i),
+        .row_count_i                     (cfg_sys_dim_m_i),
+        .binary_lhs_multiplier_i         (cfg_binary_lhs_multiplier_i),
+        .binary_lhs_shift_i              (cfg_binary_lhs_shift_i),
+        .binary_rhs_multiplier_i         (cfg_binary_rhs_multiplier_i),
+        .binary_rhs_shift_i              (cfg_binary_rhs_shift_i),
+        .binary_output_multiplier_i      (cfg_binary_output_multiplier_i),
+        .binary_output_shift_i           (cfg_binary_output_shift_i),
+        .binary_lhs_zero_point_i         (cfg_binary_lhs_zero_point_i),
+        .binary_rhs_zero_point_i         (cfg_binary_rhs_zero_point_i),
+        .binary_output_zero_point_i      (cfg_binary_output_zero_point_i),
+        .binary_clamp_min_i              (cfg_binary_clamp_min_i),
+        .binary_clamp_max_i              (cfg_binary_clamp_max_i),
+        .binary_double_round_shift_i     (cfg_binary_double_round_shift_i),
+        .binary_forbidden_i              (linebuf_pool_mode || linebuf_depthwise_mode),
+        .obi_req_o                       (obi_b_req_o),
+        .obi_gnt_i                       (obi_b_gnt_i),
+        .obi_addr_o                      (obi_b_addr_o),
+        .obi_we_o                        (obi_b_we_o),
+        .obi_be_o                        (obi_b_be_o),
+        .obi_wdata_o                     (obi_b_wdata_o),
+        .obi_rvalid_i                    (obi_b_rvalid_i),
+        .obi_rdata_i                     (obi_b_rdata_i),
+        .out_valid_o                     (quantized_out_valid),
+        .out_ready_i                     (quantized_out_ready),
+        .packed_o                        (quantized_packed_data),
+        .invalid_o                       (quantized_invalid),
+        .requant_config_invalid_o        (requant_config_invalid),
+        .binary_config_invalid_o         (binary_config_invalid),
+        .binary_busy_o                   (binary_operand_busy),
+        .debug_requant_out_valid_o       (requant_out_valid),
+        .debug_requant_out_ready_o       (requant_out_ready)
     );
 
-    binary_operand_stream #(
-        .ADDR_WIDTH(ADDR_WIDTH),
-        .DATA_WIDTH(DATA_WIDTH),
-        .FIFO_DEPTH(INPUT_FIFO_DEPTH * 2)
-    ) i_binary_operand_stream (
-        .clk_i                  (clk_i),
-        .rst_ni                 (rst_ni),
-        .start_i                (binary_operand_start),
-        .base_addr_i            (cfg_binary_rhs_ptr_i),
-        .row_count_i            (cfg_sys_dim_m_i),
-        .row_stride_bytes_i     (cfg_binary_rhs_row_stride_bytes_i),
-        .tile_cols_i            (cfg_binary_rhs_tile_cols_i),
-        .obi_req_o              (obi_b_req_o),
-        .obi_gnt_i              (obi_b_gnt_i),
-        .obi_addr_o             (obi_b_addr_o),
-        .obi_we_o               (obi_b_we_o),
-        .obi_be_o               (obi_b_be_o),
-        .obi_wdata_o            (obi_b_wdata_o),
-        .obi_rvalid_i           (obi_b_rvalid_i),
-        .obi_rdata_i            (obi_b_rdata_i),
-        .out_valid_o            (binary_operand_valid),
-        .out_ready_i            (binary_operand_ready),
-        .out_data_o             (binary_operand_data),
-        .busy_o                 (binary_operand_busy),
-        .done_o                 (binary_operand_done)
-    );
-
-    binary_requant_pipeline #(
-        .LANES(ARRAY_DIM)
-    ) i_binary_requant_pipeline (
-        .clk_i                  (clk_i),
-        .rst_ni                 (rst_ni),
-        .flush_i                (fifo_flush),
-        .in_valid_i             (binary_in_valid),
-        .in_ready_o             (binary_in_ready),
-        .lhs_i                  (requant_packed_data),
-        .rhs_i                  (binary_operand_data),
-        .mode_i                 (cfg_binary_mode_i),
-        .lhs_multiplier_i       (cfg_binary_lhs_multiplier_i),
-        .lhs_shift_i            (cfg_binary_lhs_shift_i),
-        .rhs_multiplier_i       (cfg_binary_rhs_multiplier_i),
-        .rhs_shift_i            (cfg_binary_rhs_shift_i),
-        .output_multiplier_i    (cfg_binary_output_multiplier_i),
-        .output_shift_i         (cfg_binary_output_shift_i),
-        .lhs_zero_point_i       (cfg_binary_lhs_zero_point_i),
-        .rhs_zero_point_i       (cfg_binary_rhs_zero_point_i),
-        .output_zero_point_i    (cfg_binary_output_zero_point_i),
-        .clamp_min_i            (cfg_binary_clamp_min_i),
-        .clamp_max_i            (cfg_binary_clamp_max_i),
-        .double_round_shift_i   (cfg_binary_double_round_shift_i),
-        .out_valid_o            (binary_out_valid),
-        .out_ready_i            (binary_out_ready),
-        .packed_o               (binary_packed_data),
-        .invalid_o              (binary_invalid)
-    );
 
     npu_systolic_array #(
         .ARRAY_DIM(ARRAY_DIM)
@@ -1393,15 +1329,6 @@ module systolic_controller #(
     assign obi_w_we_o = 1'b0;
     assign obi_w_be_o = '1;
     assign obi_w_wdata_o = '0;
-
-`ifndef SYNTHESIS
-    always_ff @(posedge clk_i) begin
-        if (binary_operand_done) begin
-            assert (!binary_operand_busy)
-                else $error("binary operand stream done while busy");
-        end
-    end
-`endif
 
     // FSM
     // The engine helper tasks below are side-effecting but are only invoked from

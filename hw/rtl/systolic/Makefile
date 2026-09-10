@@ -33,6 +33,17 @@ VERILOG_SOURCES = \
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
 endif
 
+ifeq ($(MODULE),test_systolic_output_postprocess)
+TOPLEVEL = systolic_output_postprocess
+VERILOG_SOURCES = \
+	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
+	$(PWD)/requant_pipeline.sv \
+	$(PWD)/binary_requant_pipeline.sv \
+	$(PWD)/binary_operand_stream.sv \
+	$(PWD)/systolic_output_postprocess.sv
+EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
+endif
+
 ifeq ($(MODULE),test_systolic_ctrl_regs)
 TOPLEVEL = systolic_ctrl_regs
 VERILOG_SOURCES = $(PWD)/systolic_ctrl_regs.sv
@@ -96,6 +107,7 @@ VERILOG_SOURCES = \
 	$(PWD)/requant_pipeline.sv \
 	$(PWD)/binary_requant_pipeline.sv \
 	$(PWD)/binary_operand_stream.sv \
+	$(PWD)/systolic_output_postprocess.sv \
 	$(PWD)/npu_systolic_array.sv \
 	$(PWD)/conv_linebuf_config_decoder.sv \
 	$(PWD)/conv_linebuf_bypass_engine.sv \

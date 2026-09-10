@@ -1,7 +1,7 @@
 # Systolic Array Architecture Specification
 
 **Version**: Current implemented cluster baseline
-**Last Updated**: 2026-09-08
+**Last Updated**: 2026-09-10
 
 This document describes the RTL/software behavior that is currently implemented
 in the Neural AI repository. It is not a wishlist architecture. When a feature
@@ -14,6 +14,7 @@ Primary source references:
 - MMIO/shadow registers: `hw/rtl/systolic/systolic_ctrl_regs.sv`
 - Array datapath: `hw/rtl/systolic/npu_systolic_array.sv`
 - Linebuffer/window packer: `hw/rtl/systolic/conv_linebuf_stream_packer.sv`
+- Output postprocess shell: `hw/rtl/systolic/systolic_output_postprocess.sv`
 - Requant pipeline: `hw/rtl/systolic/requant_pipeline.sv`
 - General binary post-op pipeline: `hw/rtl/systolic/binary_requant_pipeline.sv`
 - Binary operand prefetch: `hw/rtl/systolic/binary_operand_stream.sv`
@@ -53,9 +54,11 @@ graph TD
         LB["conv_linebuf_stream_packer<br/>banked row-ring/window"]
         DW["depthwise_mac_engine"]
         Array["32x32 npu_systolic_array"]
-        RQ["requant_pipeline"]
-        BRQ["binary_requant_pipeline<br/>optional Add/Sub/Mul"]
-        BFetch["binary_operand_stream<br/>credit + response FIFO"]
+        subgraph Post["systolic_output_postprocess"]
+            RQ["requant_pipeline"]
+            BRQ["binary_requant_pipeline<br/>optional Add/Sub/Mul"]
+            BFetch["binary_operand_stream<br/>credit + response FIFO"]
+        end
         PSum["2-bank on-chip PSum buffer<br/>256 rows x 128B x 2"]
         TCDM["Shared TCDM"]
     end
@@ -181,6 +184,12 @@ The drain side is decoupled from the main FSM by:
 - an 8-entry 256-bit binary-operand response FIFO in the default controller
   configuration (`2 * INPUT_FIFO_DEPTH`).
 
+`systolic_output_postprocess` owns the complete postprocess sub-path: requant
+configuration validation, the INT32-to-INT8 requant pipeline, binary
+configuration validation, operand-B OBI fetch, the optional Add/Sub/Mul
+pipeline, and the final ready/valid merge. The controller supplies the selected
+INT32 result stream and owns the subsequent output-address/write machinery.
+
 The implemented drain states are:
 
 ```systemverilog
@@ -263,7 +272,9 @@ Limits:
 
 ### 2.6 General Binary Post-Op
 
-The optional binary path is placed after the existing Conv/GEMM requant stage:
+The optional binary path is placed after the existing Conv/GEMM requant stage.
+Both paths and their handshake routing are encapsulated by
+`systolic_output_postprocess`:
 
 ```text
 INT32 accumulator
