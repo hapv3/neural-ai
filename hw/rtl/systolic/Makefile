@@ -83,6 +83,11 @@ VERILOG_SOURCES = \
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
 endif
 
+ifeq ($(MODULE),test_systolic_k_tile_scheduler)
+TOPLEVEL = systolic_k_tile_scheduler
+VERILOG_SOURCES = $(PWD)/systolic_k_tile_scheduler.sv
+endif
+
 ifeq ($(MODULE),test_systolic_ctrl_regs)
 TOPLEVEL = systolic_ctrl_regs
 VERILOG_SOURCES = $(PWD)/systolic_ctrl_regs.sv
@@ -150,6 +155,7 @@ VERILOG_SOURCES = \
 	$(PWD)/systolic_output_drain.sv \
 	$(PWD)/systolic_weight_engine.sv \
 	$(PWD)/systolic_input_engine.sv \
+	$(PWD)/systolic_k_tile_scheduler.sv \
 	$(PWD)/npu_systolic_array.sv \
 	$(PWD)/conv_linebuf_config_decoder.sv \
 	$(PWD)/conv_linebuf_bypass_engine.sv \

@@ -173,6 +173,10 @@ Implementation notes:
 
 - Direct GEMM without linebuffer uses the IFM FIFO and weight FIFO.
 - Linebuffer Conv uses `conv_linebuf_stream_packer` to produce IFM/tap vectors.
+- `systolic_k_tile_scheduler` owns the current tile index, K seed walk,
+  channel-group address offset, and combinational next-tile metadata. The main
+  FSM only issues a one-cycle advance request after drain/prefetch dependencies
+  are satisfied.
 - Pool and depthwise modes bypass the systolic array proper and use linebuffer
   output vectors directly.
 - `WAIT_DRAIN` is not a pure idle state. It runs background weight preload and

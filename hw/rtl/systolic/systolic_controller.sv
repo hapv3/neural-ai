@@ -214,15 +214,16 @@ module systolic_controller #(
     logic          drain_depthwise_group_start;
     logic [31:0]   drain_depthwise_group_output_ptr;
     logic          linebuf_use_next_cfg;
-    logic [31:0]   k_tile_idx_q, k_tile_idx_d;
-    logic [15:0]   k_seed_ic_q, k_seed_ic_d;
-    logic [7:0]    k_seed_kw_q, k_seed_kw_d;
-    logic [7:0]    k_seed_kh_q, k_seed_kh_d;
+    logic [31:0]   k_tile_idx_q;
+    logic [15:0]   k_seed_ic_q;
+    logic [7:0]    k_seed_kw_q;
+    logic [7:0]    k_seed_kh_q;
     logic [15:0]   k_seed_ic_next;
     logic [7:0]    k_seed_kw_next;
     logic [7:0]    k_seed_kh_next;
-    logic [31:0]   k_channel_offset_q, k_channel_offset_d;
+    logic [31:0]   k_channel_offset_q;
     logic [31:0]   k_channel_offset_next;
+    logic          k_tile_advance;
     logic [ARRAY_FLUSH_COUNT_W-1:0] array_flush_cnt_q, array_flush_cnt_d;
     logic          linebuf_has_next_k_tile;
     logic          psum_buf_active;
@@ -304,7 +305,6 @@ module systolic_controller #(
     assign linebuf_pool_mode = cfg_linebuf_en_i && cfg_linebuf_pool_i;
     assign linebuf_depthwise_mode = cfg_linebuf_en_i && cfg_linebuf_depthwise_i;
     assign dw_tap_is_last = (({27'd0, dw_tap_count_q} + 32'd1) == pool_kernel_vectors);
-    assign linebuf_has_next_k_tile = linebuf_kgen_multi && ((k_tile_idx_q + 32'd1) < cfg_linebuf_k_tiles_i);
     assign accum_active = cfg_sys_accum_en_i || (linebuf_kgen_multi && (k_tile_idx_q != 32'd0));
     assign requant_active = cfg_requant_en_i && (!linebuf_kgen_multi || !linebuf_has_next_k_tile);
     assign psum_buf_active = linebuf_kgen_multi && (cfg_sys_dim_m_i <= 32'(PSUM_BUF_M));
@@ -367,127 +367,35 @@ module systolic_controller #(
                                                   k_channel_offset_q) :
                                                  cfg_linebuf_channel_addr_offset_i;
 
-    function automatic void advance_k_seed32_c32_group_stationary(
-        input  logic [7:0]  kh_i,
-        input  logic [7:0]  kw_i,
-        input  logic [15:0] ic_i,
-        input  logic [15:0] input_c_i,
-        input  logic [15:0] kernel_h_i,
-        input  logic [15:0] kernel_w_i,
-        output logic [7:0]  kh_o,
-        output logic [7:0]  kw_o,
-        output logic [15:0] ic_o
+    systolic_k_tile_scheduler #(
+        .ARRAY_DIM (ARRAY_DIM)
+    ) i_k_tile_scheduler (
+        .clk_i,
+        .rst_ni,
+        .job_start_i          (fifo_flush),
+        .advance_i            (k_tile_advance),
+        .kgen_multi_i         (linebuf_kgen_multi),
+        .c32_group_stationary_i(linebuf_c32_group_stationary),
+        .generic_linear_k32_i (cfg_linebuf_generic_linear_k32_i),
+        .k_tiles_i            (cfg_linebuf_k_tiles_i),
+        .input_c_i            (cfg_linebuf_input_c_i),
+        .kernel_h_i           (cfg_linebuf_kernel_h_i),
+        .kernel_w_i           (cfg_linebuf_kernel_w_i),
+        .initial_seed_ic_i    (cfg_linebuf_k_seed_ic_i),
+        .initial_seed_kw_i    (cfg_linebuf_k_seed_kw_i),
+        .initial_seed_kh_i    (cfg_linebuf_k_seed_kh_i),
+        .channel_addr_offset_i(cfg_linebuf_channel_addr_offset_i),
+        .has_next_o           (linebuf_has_next_k_tile),
+        .tile_index_o         (k_tile_idx_q),
+        .seed_ic_o            (k_seed_ic_q),
+        .seed_kw_o            (k_seed_kw_q),
+        .seed_kh_o            (k_seed_kh_q),
+        .channel_offset_o     (k_channel_offset_q),
+        .next_seed_ic_o       (k_seed_ic_next),
+        .next_seed_kw_o       (k_seed_kw_next),
+        .next_seed_kh_o       (k_seed_kh_next),
+        .next_channel_offset_o(k_channel_offset_next)
     );
-        logic [7:0]  kh;
-        logic [7:0]  kw;
-        logic [15:0] ic;
-        begin
-            kh = kh_i;
-            kw = kw_i;
-            ic = {ic_i[15:5], 5'b0};
-            if ((kw + 8'd1) == kernel_w_i[7:0]) begin
-                kw = '0;
-                if ((kh + 8'd1) == kernel_h_i[7:0]) begin
-                    kh = '0;
-                    if ((ic + 16'(ARRAY_DIM)) >= input_c_i) begin
-                        ic = '0;
-                    end else begin
-                        ic = ic + 16'(ARRAY_DIM);
-                    end
-                end else begin
-                    kh = kh + 8'd1;
-                end
-            end else begin
-                kw = kw + 8'd1;
-            end
-            kh_o = kh;
-            kw_o = kw;
-            ic_o = ic;
-        end
-    endfunction
-
-    function automatic void advance_k_seed32_generic_linear_k32(
-        input  logic [7:0]  kh_i,
-        input  logic [7:0]  kw_i,
-        input  logic [15:0] ic_i,
-        input  logic [15:0] kernel_h_i,
-        input  logic [15:0] kernel_w_i,
-        output logic [7:0]  kh_o,
-        output logic [7:0]  kw_o,
-        output logic [15:0] ic_o
-    );
-        begin
-            kh_o = kh_i;
-            kw_o = kw_i;
-            ic_o = ic_i;
-            if ((kw_i + 8'd1) == kernel_w_i[7:0]) begin
-                kw_o = '0;
-                if ((kh_i + 8'd1) == kernel_h_i[7:0]) begin
-                    kh_o = '0;
-                end else begin
-                    kh_o = kh_i + 8'd1;
-                end
-            end else begin
-                kw_o = kw_i + 8'd1;
-            end
-        end
-    endfunction
-
-    always_comb begin
-        if (linebuf_c32_group_stationary) begin
-            advance_k_seed32_c32_group_stationary(k_seed_kh_q,
-                                                  k_seed_kw_q,
-                                                  k_seed_ic_q,
-                                                  cfg_linebuf_input_c_i,
-                                                  cfg_linebuf_kernel_h_i,
-                                                  cfg_linebuf_kernel_w_i,
-                                                  k_seed_kh_next,
-                                                  k_seed_kw_next,
-                                                  k_seed_ic_next);
-        end else if (linebuf_kgen_multi && cfg_linebuf_generic_linear_k32_i) begin
-            advance_k_seed32_generic_linear_k32(k_seed_kh_q,
-                                                k_seed_kw_q,
-                                                k_seed_ic_q,
-                                                cfg_linebuf_kernel_h_i,
-                                                cfg_linebuf_kernel_w_i,
-                                                k_seed_kh_next,
-                                                k_seed_kw_next,
-                                                k_seed_ic_next);
-        end else begin
-            k_seed_kh_next = cfg_linebuf_k_seed_kh_i;
-            k_seed_kw_next = cfg_linebuf_k_seed_kw_i;
-            k_seed_ic_next = cfg_linebuf_k_seed_ic_i;
-        end
-
-        k_channel_offset_next = k_channel_offset_q;
-        if (linebuf_c32_group_stationary && (k_seed_ic_next[15:5] != k_seed_ic_q[15:5])) begin
-            if (k_seed_ic_next[15:5] == 11'd0) begin
-                k_channel_offset_next = 32'd0;
-            end else begin
-                k_channel_offset_next = k_channel_offset_q + cfg_linebuf_channel_addr_offset_i;
-            end
-        end
-    end
-
-    task automatic advance_to_next_k_tile(input logic launch_direct_compute);
-        begin
-            k_seed_kh_d = k_seed_kh_next;
-            k_seed_kw_d = k_seed_kw_next;
-            k_seed_ic_d = k_seed_ic_next;
-            k_channel_offset_d = k_channel_offset_next;
-            k_tile_idx_d = k_tile_idx_q + 32'd1;
-            drain_tile_advance = 1'b1;
-            drain_tile_advance_overlap = launch_direct_compute;
-            if (launch_direct_compute) begin
-                input_feed_start = 1'b1;
-                weight_preload_consume = 1'b1;
-                linebuf_next_tile = 1'b1;
-                state_d = COMPUTE;
-            end else begin
-                state_d = LOAD_WEIGHTS;
-            end
-        end
-    endtask
 
     systolic_maxpool_engine #(
         .LANES           (ARRAY_DIM),
@@ -845,18 +753,8 @@ module systolic_controller #(
     );
 
     // FSM
-    // The engine helper tasks below are side-effecting but are only invoked from
-    // this single next-state block. Verilator reports their writes as separate
-    // procedural writers, so keep this suppression scoped to the controller
-    // next-state logic.
-    /* verilator lint_off MULTIDRIVEN */
     always_comb begin
         state_d = state_q;
-        k_tile_idx_d = k_tile_idx_q;
-        k_seed_ic_d = k_seed_ic_q;
-        k_seed_kw_d = k_seed_kw_q;
-        k_seed_kh_d = k_seed_kh_q;
-        k_channel_offset_d = k_channel_offset_q;
         array_flush_cnt_d = array_flush_cnt_q;
         dw_tap_count_d = dw_tap_count_q;
         dw_group_idx_d = dw_group_idx_q;
@@ -865,6 +763,7 @@ module systolic_controller #(
         dw_group_weight_offset_d = dw_group_weight_offset_q;
         drain_tile_advance = 1'b0;
         drain_tile_advance_overlap = 1'b0;
+        k_tile_advance = 1'b0;
         drain_tile_start = 1'b0;
         drain_tile_start_add_rows = 1'b0;
         drain_depthwise_group_start = 1'b0;
@@ -886,11 +785,6 @@ module systolic_controller #(
             IDLE: begin
                 if (cfg_sys_start_i) begin
                     array_flush_cnt_d = '0;
-                    k_tile_idx_d = '0;
-                    k_seed_ic_d = cfg_linebuf_k_seed_ic_i;
-                    k_seed_kw_d = cfg_linebuf_k_seed_kw_i;
-                    k_seed_kh_d = cfg_linebuf_k_seed_kh_i;
-                    k_channel_offset_d = '0;
                     dw_tap_count_d = '0;
                     dw_group_idx_d = '0;
                     dw_group_input_offset_d = '0;
@@ -996,31 +890,24 @@ module systolic_controller #(
                     array_flush_cnt_d = array_flush_cnt_q - 1'b1;
                 end
 
-                if (accum_active) begin
-                    if (psum_buf_overlap_next_safe) begin
-                        advance_to_next_k_tile(1'b1);
-                    end else if (drain_cnt_q == 0 && ofm_fifo_empty &&
-                                 (!cfg_binary_en_i || !binary_operand_busy)) begin
-                        if (linebuf_has_next_k_tile && weight_preload_done && !linebuf_prefetch_busy) begin
-                            advance_to_next_k_tile(1'b0);
-                        end else if (linebuf_has_next_k_tile) begin
-                            state_d = WAIT_DRAIN;
-                        end else if (!cfg_linebuf_en_i || !linebuf_busy) begin
-                            state_d = DONE;
-                        end
-                    end
-                end else begin
-                    if (psum_buf_overlap_next_safe) begin
-                        advance_to_next_k_tile(1'b1);
-                    end else if (drain_cnt_q == 0 && ofm_fifo_empty &&
-                                 (!cfg_binary_en_i || !binary_operand_busy)) begin
-                        if (linebuf_has_next_k_tile && weight_preload_done && !linebuf_prefetch_busy) begin
-                            advance_to_next_k_tile(1'b0);
-                        end else if (linebuf_has_next_k_tile) begin
-                            state_d = WAIT_DRAIN;
-                        end else if (!cfg_linebuf_en_i || !linebuf_busy) begin
-                            state_d = DONE;
-                        end
+                if (psum_buf_overlap_next_safe) begin
+                    k_tile_advance = 1'b1;
+                    drain_tile_advance = 1'b1;
+                    drain_tile_advance_overlap = 1'b1;
+                    input_feed_start = 1'b1;
+                    weight_preload_consume = 1'b1;
+                    linebuf_next_tile = 1'b1;
+                    state_d = COMPUTE;
+                end else if (drain_cnt_q == 0 && ofm_fifo_empty &&
+                             (!cfg_binary_en_i || !binary_operand_busy)) begin
+                    if (linebuf_has_next_k_tile && weight_preload_done && !linebuf_prefetch_busy) begin
+                        k_tile_advance = 1'b1;
+                        drain_tile_advance = 1'b1;
+                        state_d = LOAD_WEIGHTS;
+                    end else if (linebuf_has_next_k_tile) begin
+                        state_d = WAIT_DRAIN;
+                    end else if (!cfg_linebuf_en_i || !linebuf_busy) begin
+                        state_d = DONE;
                     end
                 end
             end
@@ -1035,16 +922,10 @@ module systolic_controller #(
             end
         endcase
     end
-    /* verilator lint_on MULTIDRIVEN */
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             state_q         <= IDLE;
-            k_tile_idx_q    <= '0;
-            k_seed_ic_q     <= '0;
-            k_seed_kw_q     <= '0;
-            k_seed_kh_q     <= '0;
-            k_channel_offset_q <= '0;
             array_flush_cnt_q <= '0;
             dw_tap_count_q <= '0;
             dw_group_idx_q <= '0;
@@ -1053,11 +934,6 @@ module systolic_controller #(
             dw_group_weight_offset_q <= '0;
         end else begin
             state_q     <= state_d;
-            k_tile_idx_q <= k_tile_idx_d;
-            k_seed_ic_q <= k_seed_ic_d;
-            k_seed_kw_q <= k_seed_kw_d;
-            k_seed_kh_q <= k_seed_kh_d;
-            k_channel_offset_q <= k_channel_offset_d;
             array_flush_cnt_q <= array_flush_cnt_d;
             dw_tap_count_q <= dw_tap_count_d;
             dw_group_idx_q <= dw_group_idx_d;
