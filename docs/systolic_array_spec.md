@@ -14,6 +14,7 @@ Primary source references:
 - MMIO/shadow registers: `hw/rtl/systolic/systolic_ctrl_regs.sv`
 - Array datapath: `hw/rtl/systolic/npu_systolic_array.sv`
 - Linebuffer/window packer: `hw/rtl/systolic/conv_linebuf_stream_packer.sv`
+- Output drain: `hw/rtl/systolic/systolic_output_drain.sv`
 - Output postprocess shell: `hw/rtl/systolic/systolic_output_postprocess.sv`
 - Requant pipeline: `hw/rtl/systolic/requant_pipeline.sv`
 - General binary post-op pipeline: `hw/rtl/systolic/binary_requant_pipeline.sv`
@@ -53,13 +54,16 @@ graph TD
         Ctrl["systolic_controller"]
         LB["conv_linebuf_stream_packer<br/>banked row-ring/window"]
         DW["depthwise_mac_engine"]
+        Pool["systolic_maxpool_engine"]
         Array["32x32 npu_systolic_array"]
-        subgraph Post["systolic_output_postprocess"]
-            RQ["requant_pipeline"]
-            BRQ["binary_requant_pipeline<br/>optional Add/Sub/Mul"]
-            BFetch["binary_operand_stream<br/>credit + response FIFO"]
+        subgraph Drain["systolic_output_drain"]
+            PSum["OFM/PSum FIFOs + 2-bank PSum buffer"]
+            subgraph Post["systolic_output_postprocess"]
+                RQ["requant_pipeline"]
+                BRQ["binary_requant_pipeline<br/>optional Add/Sub/Mul"]
+                BFetch["binary_operand_stream<br/>credit + response FIFO"]
+            end
         end
-        PSum["2-bank on-chip PSum buffer<br/>256 rows x 128B x 2"]
         TCDM["Shared TCDM"]
     end
 
@@ -71,18 +75,19 @@ graph TD
     LB -->|C32 vectors / tap vectors| Ctrl
     Ctrl -->|weights + IFM| Array
     LB -->|depthwise taps| DW
-    Array -->|INT32 rows| Ctrl
-    DW -->|INT32 rows| Ctrl
-    Ctrl <--> PSum
-    Ctrl -->|INT32 rows| RQ
+    LB -->|pool taps| Pool
+    Ctrl -->|lifecycle + tile metadata| Drain
+    Array -->|INT32 rows| Drain
+    DW -->|INT32 rows| Drain
+    Pool -->|INT8 rows| Drain
+    PSum -->|selected INT32 rows| RQ
     RQ -->|lhs INT8 rows| BRQ
-    Ctrl -->|start + active binary config| BFetch
     BFetch -->|obi_b: rhs read| TCDM
     TCDM -->|rhs INT8 rows| BFetch
     BFetch -->|ready/valid rhs| BRQ
-    BRQ -->|final INT8 rows| Ctrl
-    RQ -->|bypass when binary disabled| Ctrl
-    Ctrl -->|obi_o[3:0]: psum read / output write| TCDM
+    BRQ -->|final INT8 rows| Drain
+    RQ -->|bypass when binary disabled| Drain
+    Drain -->|obi_o[3:0]: psum read / output write| TCDM
 ```
 
 Important mismatch with older notes: the updated controller interface has
@@ -184,11 +189,16 @@ The drain side is decoupled from the main FSM by:
 - an 8-entry 256-bit binary-operand response FIFO in the default controller
   configuration (`2 * INPUT_FIFO_DEPTH`).
 
-`systolic_output_postprocess` owns the complete postprocess sub-path: requant
+`systolic_output_drain` owns the drain FSM, OFM and PSum FIFOs, ping-pong PSum
+SRAM, output and external-PSum address walkers, OBI-B/OBI-O transactions, and
+pool/depthwise writeback routing. The parent controller supplies lifecycle
+events plus normalized result streams and consumes only ready/busy/done-style
+status.
+
+Nested `systolic_output_postprocess` owns the complete postprocess sub-path: requant
 configuration validation, the INT32-to-INT8 requant pipeline, binary
 configuration validation, operand-B OBI fetch, the optional Add/Sub/Mul
-pipeline, and the final ready/valid merge. The controller supplies the selected
-INT32 result stream and owns the subsequent output-address/write machinery.
+pipeline, and the final ready/valid merge.
 
 The implemented drain states are:
 

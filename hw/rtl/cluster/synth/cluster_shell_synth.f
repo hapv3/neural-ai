@@ -73,6 +73,7 @@
 ../../../../hw/rtl/systolic/binary_requant_pipeline.sv
 ../../../../hw/rtl/systolic/binary_operand_stream.sv
 ../../../../hw/rtl/systolic/systolic_output_postprocess.sv
+../../../../hw/rtl/systolic/systolic_output_drain.sv
 ../../../../hw/rtl/systolic/conv_linebuf_config_decoder.sv
 ../../../../hw/rtl/systolic/conv_linebuf_bypass_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_fetch_engine.sv
@@ -82,6 +83,7 @@
 ../../../../hw/rtl/systolic/conv_linebuf_spatial_scheduler.sv
 ../../../../hw/rtl/systolic/conv_linebuf_stream_packer.sv
 ../../../../hw/rtl/systolic/npu_systolic_array.sv
+../../../../hw/rtl/systolic/depthwise_mac_engine.sv
 ../../../../hw/rtl/systolic/systolic_maxpool_engine.sv
 ../../../../hw/rtl/systolic/systolic_controller.sv
 
