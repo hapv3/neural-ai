@@ -88,6 +88,11 @@ TOPLEVEL = systolic_k_tile_scheduler
 VERILOG_SOURCES = $(PWD)/systolic_k_tile_scheduler.sv
 endif
 
+ifeq ($(MODULE),test_systolic_job_sequencer)
+TOPLEVEL = systolic_job_sequencer
+VERILOG_SOURCES = $(PWD)/systolic_job_sequencer.sv
+endif
+
 ifeq ($(MODULE),test_systolic_ctrl_regs)
 TOPLEVEL = systolic_ctrl_regs
 VERILOG_SOURCES = $(PWD)/systolic_ctrl_regs.sv
@@ -156,6 +161,7 @@ VERILOG_SOURCES = \
 	$(PWD)/systolic_weight_engine.sv \
 	$(PWD)/systolic_input_engine.sv \
 	$(PWD)/systolic_k_tile_scheduler.sv \
+	$(PWD)/systolic_job_sequencer.sv \
 	$(PWD)/npu_systolic_array.sv \
 	$(PWD)/conv_linebuf_config_decoder.sv \
 	$(PWD)/conv_linebuf_bypass_engine.sv \

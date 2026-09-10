@@ -129,9 +129,9 @@ this corresponds to roughly `2 * ARRAY_DIM` cycles of array propagation/drain
 around the terminal input row. Documentation or PMU analysis that uses exactly
 64 cycles is a rounded architectural estimate; the RTL counter constant is 63.
 
-### 2.2 Main Controller FSM
+### 2.2 Job Sequencer FSM
 
-The implemented main FSM is:
+The main job FSM resides in `systolic_job_sequencer`:
 
 ```systemverilog
 typedef enum logic [2:0] {
@@ -171,6 +171,9 @@ stateDiagram-v2
 
 Implementation notes:
 
+- `systolic_job_sequencer` owns the job state, array-flush countdown, depthwise
+  tap/group progression, and all one-cycle start/advance events. The parent
+  controller contains only configuration derivation and block interconnect.
 - Direct GEMM without linebuffer uses the IFM FIFO and weight FIFO.
 - Linebuffer Conv uses `conv_linebuf_stream_packer` to produce IFM/tap vectors.
 - `systolic_k_tile_scheduler` owns the current tile index, K seed walk,

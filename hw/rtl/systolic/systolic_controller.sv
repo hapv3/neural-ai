@@ -79,21 +79,10 @@ module systolic_controller #(
     output logic [4:0]                debug_linebuf_state_o
 );
 
-    typedef enum logic [2:0] {
-        IDLE,
-        LOAD_WEIGHTS,
-        COMPUTE,
-        WAIT_DRAIN,
-        DONE
-    } state_e;
-
-    state_e state_q;
-    state_e state_d;
+    logic [2:0] state_q;
 
     logic [31:0] drain_cnt_q;
 
-    localparam int unsigned ARRAY_FLUSH_CYCLES = (2 * ARRAY_DIM) - 1;
-    localparam int unsigned ARRAY_FLUSH_COUNT_W = $clog2(ARRAY_FLUSH_CYCLES + 1);
     localparam int unsigned PSUM_BUF_M = 256;
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
@@ -111,6 +100,8 @@ module systolic_controller #(
     logic          weight_load_done;
     logic          weight_preload_done;
     logic          weight_preload_consume;
+    logic          weight_load_service;
+    logic          weight_preload_allow;
     logic          weight_depthwise_group_start;
     logic [31:0]   weight_depthwise_group_ptr;
     logic          clear_acc;
@@ -214,6 +205,9 @@ module systolic_controller #(
     logic          drain_depthwise_group_start;
     logic [31:0]   drain_depthwise_group_output_ptr;
     logic          linebuf_use_next_cfg;
+    logic          compute_service;
+    logic          drain_service;
+    logic          input_preload_hold;
     logic [31:0]   k_tile_idx_q;
     logic [15:0]   k_seed_ic_q;
     logic [7:0]    k_seed_kw_q;
@@ -224,14 +218,11 @@ module systolic_controller #(
     logic [31:0]   k_channel_offset_q;
     logic [31:0]   k_channel_offset_next;
     logic          k_tile_advance;
-    logic [ARRAY_FLUSH_COUNT_W-1:0] array_flush_cnt_q, array_flush_cnt_d;
     logic          linebuf_has_next_k_tile;
     logic          psum_buf_active;
     logic          psum_buf_needs_external;
     logic          psum_buf_final_tile;
     logic          psum_buf_overlap_active;
-    logic          psum_buf_overlap_next_ready;
-    logic          psum_buf_overlap_next_safe;
     logic          psum_buf_drain_entry;
 
     logic          linebuf_start;
@@ -249,16 +240,9 @@ module systolic_controller #(
     localparam int unsigned DW_MAX_TAPS = 25;
     localparam int unsigned DW_TAP_COUNT_W = $clog2(DW_MAX_TAPS + 1);
     input_row_t    dw_weight;
-    logic [DW_TAP_COUNT_W-1:0] dw_tap_count_q, dw_tap_count_d;
-    logic [31:0]   dw_group_idx_q, dw_group_idx_d;
-    logic [31:0]   dw_group_count;
-    logic [31:0]   dw_group_span_bytes;
-    logic [31:0]   dw_group_output_bytes;
-    logic [31:0]   dw_weight_group_bytes;
-    logic [31:0]   dw_group_input_offset_q, dw_group_input_offset_d;
-    logic [31:0]   dw_group_output_offset_q, dw_group_output_offset_d;
-    logic [31:0]   dw_group_weight_offset_q, dw_group_weight_offset_d;
-    logic          dw_last_group;
+    logic [DW_TAP_COUNT_W-1:0] dw_tap_count_q;
+    logic [31:0]   dw_group_idx_q;
+    logic [31:0]   dw_group_input_offset_q;
     logic [5:0]    dw_group_valid_bytes;
     logic          dw_tap_is_last;
     logic          dw_engine_in_valid;
@@ -268,27 +252,9 @@ module systolic_controller #(
     ofm_row_t      dw_engine_out_acc;
     logic [5:0]    cfg_linebuf_block_valid_bytes_eff;
 
-    function automatic logic [5:0] depthwise_group_valid_bytes(
-        input logic [15:0] input_c,
-        input logic [31:0] group_idx
-    );
-        logic [31:0] group_base;
-        logic [31:0] remaining;
-        begin
-            group_base = group_idx << 5;
-            if (group_base >= {16'd0, input_c}) begin
-                depthwise_group_valid_bytes = 6'd0;
-            end else begin
-                remaining = {16'd0, input_c} - group_base;
-                depthwise_group_valid_bytes = (remaining >= 32'd32) ? 6'd32 : remaining[5:0];
-            end
-        end
-    endfunction
-
-    assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
-
     assign array_pipe_ready = !ofm_valid || ofm_ready;
     assign psum_data = '0;
+    assign clear_acc = 1'b0;
     assign perf_weight_load_en_o = weight_load_en;
     assign perf_compute_en_o = compute_en;
     assign perf_ofm_valid_o = ofm_valid;
@@ -304,24 +270,12 @@ module systolic_controller #(
                                           cfg_linebuf_c32_group_stationary_i;
     assign linebuf_pool_mode = cfg_linebuf_en_i && cfg_linebuf_pool_i;
     assign linebuf_depthwise_mode = cfg_linebuf_en_i && cfg_linebuf_depthwise_i;
-    assign dw_tap_is_last = (({27'd0, dw_tap_count_q} + 32'd1) == pool_kernel_vectors);
     assign accum_active = cfg_sys_accum_en_i || (linebuf_kgen_multi && (k_tile_idx_q != 32'd0));
     assign requant_active = cfg_requant_en_i && (!linebuf_kgen_multi || !linebuf_has_next_k_tile);
     assign psum_buf_active = linebuf_kgen_multi && (cfg_sys_dim_m_i <= 32'(PSUM_BUF_M));
     assign psum_buf_needs_external = psum_buf_active && cfg_sys_accum_en_i && (k_tile_idx_q == 32'd0);
     assign psum_buf_final_tile = psum_buf_active && !linebuf_has_next_k_tile;
     assign psum_buf_overlap_active = psum_buf_active && linebuf_kgen_multi && linebuf_has_next_k_tile;
-    assign psum_buf_overlap_next_ready = psum_buf_overlap_active && linebuf_has_next_k_tile &&
-                                         weight_preload_done && !linebuf_prefetch_busy &&
-                                         (array_flush_cnt_q == '0);
-    // Direct WAIT_DRAIN->COMPUTE overlap preserves the current drain/prefetch
-    // state. OFM FIFO ordering keeps an external-psum first tile ahead of later
-    // on-chip psum-buffer tiles, so the next tile cannot consume a row before
-    // the external accumulation wrote that row into the psum buffer.
-    assign psum_buf_overlap_next_safe = psum_buf_overlap_next_ready;
-    assign drain_enabled = !linebuf_pool_mode && !linebuf_depthwise_mode &&
-                           ((state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN));
-    assign linebuf_use_next_cfg = (state_q == WAIT_DRAIN) && linebuf_has_next_k_tile;
     assign linebuf_c_base_eff = linebuf_depthwise_mode ? (cfg_linebuf_c_base_i + 16'(dw_group_idx_q << 5)) :
                                 cfg_linebuf_kgen_i ? {linebuf_seed_ic_eff[15:5], 5'b0} : cfg_linebuf_c_base_i;
     assign linebuf_seed_ic_eff = cfg_linebuf_kgen_i ? (linebuf_use_next_cfg ? k_seed_ic_next : k_seed_ic_q) :
@@ -350,12 +304,6 @@ module systolic_controller #(
     endfunction
 
     assign pool_kernel_vectors = kernel_tap_count(cfg_linebuf_kernel_h_i, cfg_linebuf_kernel_w_i);
-    assign dw_group_count = ({16'd0, cfg_linebuf_input_c_i} + 32'd31) >> 5;
-    assign dw_group_span_bytes = {16'd0, cfg_linebuf_input_h_i} * cfg_linebuf_row_stride_bytes_i;
-    assign dw_group_output_bytes = linebuf_spatial_m << 5;
-    assign dw_weight_group_bytes = pool_kernel_vectors << 5;
-    assign dw_last_group = (dw_group_idx_q + 32'd1) >= dw_group_count;
-    assign dw_group_valid_bytes = depthwise_group_valid_bytes(cfg_linebuf_input_c_i, dw_group_idx_q);
     assign cfg_linebuf_block_valid_bytes_eff = linebuf_depthwise_mode ?
                                                dw_group_valid_bytes :
                                                cfg_linebuf_block_valid_bytes_i;
@@ -366,6 +314,79 @@ module systolic_controller #(
                                                   k_channel_offset_next :
                                                   k_channel_offset_q) :
                                                  cfg_linebuf_channel_addr_offset_i;
+
+    systolic_job_sequencer #(
+        .ARRAY_DIM        (ARRAY_DIM),
+        .DW_MAX_TAPS      (DW_MAX_TAPS),
+        .DW_TAP_COUNT_W   (DW_TAP_COUNT_W)
+    ) i_job_sequencer (
+        .clk_i,
+        .rst_ni,
+        .start_i                         (cfg_sys_start_i),
+        .linebuf_enable_i                (cfg_linebuf_en_i),
+        .pool_mode_i                     (linebuf_pool_mode),
+        .depthwise_mode_i                (linebuf_depthwise_mode),
+        .kgen_multi_i                    (linebuf_kgen_multi),
+        .tile_index_i                    (k_tile_idx_q),
+        .has_next_tile_i                 (linebuf_has_next_k_tile),
+        .psum_overlap_active_i           (psum_buf_overlap_active),
+        .requant_enable_i                (cfg_requant_en_i),
+        .requant_config_invalid_i        (requant_config_invalid),
+        .binary_config_invalid_i         (binary_config_invalid),
+        .binary_enable_i                 (cfg_binary_en_i),
+        .weight_load_done_i              (weight_load_done),
+        .weight_preload_done_i           (weight_preload_done),
+        .input_feed_done_i               (input_feed_done),
+        .array_pipe_ready_i              (array_pipe_ready),
+        .linebuf_row_valid_i             (linebuf_row_valid),
+        .linebuf_busy_i                  (linebuf_busy),
+        .linebuf_prefetch_busy_i         (linebuf_prefetch_busy),
+        .drain_remaining_i               (drain_cnt_q),
+        .ofm_empty_i                     (ofm_fifo_empty),
+        .binary_operand_busy_i           (binary_operand_busy),
+        .depthwise_input_ready_i         (dw_engine_in_ready),
+        .depthwise_output_valid_i        (dw_engine_out_valid),
+        .quantized_output_valid_i        (quantized_out_valid),
+        .pool_input_ready_i              (pool_in_ready),
+        .pool_output_valid_i             (pool_out_valid),
+        .weight_base_ptr_i               (cfg_sys_weight_ptr_i),
+        .output_base_ptr_i               (cfg_sys_ofm_ptr_i),
+        .input_c_i                       (cfg_linebuf_input_c_i),
+        .input_h_i                       (cfg_linebuf_input_h_i),
+        .input_row_stride_bytes_i        (cfg_linebuf_row_stride_bytes_i),
+        .spatial_row_count_i             (linebuf_spatial_m),
+        .kernel_vectors_i                (pool_kernel_vectors),
+        .job_start_o                     (fifo_flush),
+        .done_o                          (cfg_sys_done_o),
+        .state_o                         (state_q),
+        .load_service_o                  (weight_load_service),
+        .compute_service_o               (compute_service),
+        .drain_service_o                 (drain_service),
+        .drain_active_o                  (drain_enabled),
+        .weight_preload_allow_o          (weight_preload_allow),
+        .input_preload_hold_o            (input_preload_hold),
+        .use_next_tile_config_o          (linebuf_use_next_cfg),
+        .input_feed_start_o              (input_feed_start),
+        .input_side_ready_o              (input_side_ready),
+        .weight_preload_consume_o        (weight_preload_consume),
+        .weight_depthwise_group_start_o  (weight_depthwise_group_start),
+        .weight_depthwise_group_ptr_o    (weight_depthwise_group_ptr),
+        .drain_tile_advance_o            (drain_tile_advance),
+        .drain_tile_advance_overlap_o    (drain_tile_advance_overlap),
+        .drain_tile_start_o              (drain_tile_start),
+        .drain_tile_start_add_rows_o     (drain_tile_start_add_rows),
+        .drain_depthwise_group_start_o   (drain_depthwise_group_start),
+        .drain_depthwise_group_output_ptr_o(drain_depthwise_group_output_ptr),
+        .linebuf_start_o                 (linebuf_start),
+        .linebuf_next_tile_o             (linebuf_next_tile),
+        .k_tile_advance_o                (k_tile_advance),
+        .depthwise_input_valid_o         (dw_engine_in_valid),
+        .depthwise_tap_index_o           (dw_tap_count_q),
+        .depthwise_tap_is_last_o         (dw_tap_is_last),
+        .depthwise_group_index_o         (dw_group_idx_q),
+        .depthwise_group_input_offset_o  (dw_group_input_offset_q),
+        .depthwise_group_valid_bytes_o   (dw_group_valid_bytes)
+    );
 
     systolic_k_tile_scheduler #(
         .ARRAY_DIM (ARRAY_DIM)
@@ -407,7 +428,7 @@ module systolic_controller #(
         .flush_i          (fifo_flush),
         .kernel_vectors_i (pool_kernel_vectors),
         .in_data_i        (linebuf_row_data),
-        .in_valid_i       (linebuf_pool_mode && (state_q == COMPUTE) && linebuf_row_valid),
+        .in_valid_i       (linebuf_pool_mode && compute_service && linebuf_row_valid),
         .in_ready_o       (pool_in_ready),
         .out_data_o       (pool_out_data),
         .out_valid_o      (pool_out_valid),
@@ -452,7 +473,7 @@ module systolic_controller #(
         .depthwise_group_start_i         (drain_depthwise_group_start),
         .depthwise_group_output_ptr_i    (drain_depthwise_group_output_ptr),
         .drain_active_i                  (drain_enabled),
-        .compute_phase_i                 (state_q == COMPUTE),
+        .compute_phase_i                 (compute_service),
         .pool_mode_i                     (linebuf_pool_mode),
         .depthwise_mode_i                (linebuf_depthwise_mode),
         .external_accum_enable_i         (cfg_sys_accum_en_i),
@@ -559,11 +580,9 @@ module systolic_controller #(
         .clk_i,
         .rst_ni,
         .job_start_i                 (fifo_flush),
-        .load_service_i              (state_q == LOAD_WEIGHTS),
-        .preload_service_i           (state_q == WAIT_DRAIN),
-        .preload_allow_i             (linebuf_has_next_k_tile &&
-                                      (array_flush_cnt_q == '0) &&
-                                      !linebuf_prefetch_busy),
+        .load_service_i              (weight_load_service),
+        .preload_service_i           (drain_service),
+        .preload_allow_i             (weight_preload_allow),
         .preload_consume_i           (weight_preload_consume),
         .depthwise_group_start_i     (weight_depthwise_group_start),
         .depthwise_mode_i            (linebuf_depthwise_mode),
@@ -683,14 +702,13 @@ module systolic_controller #(
         .rst_ni,
         .job_start_i             (fifo_flush),
         .feed_start_i            (input_feed_start),
-        .feed_service_i          (state_q == COMPUTE),
-        .drain_service_i         (state_q == WAIT_DRAIN),
+        .feed_service_i          (compute_service),
+        .drain_service_i         (drain_service),
         .linebuf_start_i         (linebuf_start),
         .linebuf_next_tile_i     (linebuf_next_tile),
-        .preload_service_i       (state_q == WAIT_DRAIN),
+        .preload_service_i       (drain_service),
         .preload_has_next_i      (linebuf_has_next_k_tile),
-        .preload_hold_i          ((array_flush_cnt_q != '0) ||
-                                  (drain_cnt_q != 0) || !ofm_fifo_empty),
+        .preload_hold_i          (input_preload_hold),
         .linebuf_enable_i        (cfg_linebuf_en_i),
         .side_stream_mode_i      (linebuf_pool_mode || linebuf_depthwise_mode),
         .array_pipe_ready_i      (array_pipe_ready),
@@ -751,196 +769,5 @@ module systolic_controller #(
         .bypass_vectors_o        (),
         .debug_state_o           (linebuf_debug_state)
     );
-
-    // FSM
-    always_comb begin
-        state_d = state_q;
-        array_flush_cnt_d = array_flush_cnt_q;
-        dw_tap_count_d = dw_tap_count_q;
-        dw_group_idx_d = dw_group_idx_q;
-        dw_group_input_offset_d = dw_group_input_offset_q;
-        dw_group_output_offset_d = dw_group_output_offset_q;
-        dw_group_weight_offset_d = dw_group_weight_offset_q;
-        drain_tile_advance = 1'b0;
-        drain_tile_advance_overlap = 1'b0;
-        k_tile_advance = 1'b0;
-        drain_tile_start = 1'b0;
-        drain_tile_start_add_rows = 1'b0;
-        drain_depthwise_group_start = 1'b0;
-        drain_depthwise_group_output_ptr = cfg_sys_ofm_ptr_i;
-        linebuf_start = 1'b0;
-        linebuf_next_tile = 1'b0;
-        input_feed_start = 1'b0;
-        input_side_ready = 1'b0;
-        weight_preload_consume = 1'b0;
-        weight_depthwise_group_start = 1'b0;
-        weight_depthwise_group_ptr = cfg_sys_weight_ptr_i;
-
-        cfg_sys_done_o = 1'b0;
-
-        clear_acc = 1'b0;
-        dw_engine_in_valid = 1'b0;
-
-        case (state_q)
-            IDLE: begin
-                if (cfg_sys_start_i) begin
-                    array_flush_cnt_d = '0;
-                    dw_tap_count_d = '0;
-                    dw_group_idx_d = '0;
-                    dw_group_input_offset_d = '0;
-                    dw_group_output_offset_d = '0;
-                    dw_group_weight_offset_d = '0;
-                    state_d = LOAD_WEIGHTS;
-
-                    if (linebuf_pool_mode) begin
-                        linebuf_start = 1'b1;
-                        state_d = COMPUTE;
-                    end
-
-                    if (linebuf_depthwise_mode) begin
-                        state_d = LOAD_WEIGHTS;
-                    end
-
-                    if ((cfg_requant_en_i && requant_config_invalid) ||
-                        binary_config_invalid) begin
-                        state_d = DONE;
-                    end
-                end
-            end
-
-            LOAD_WEIGHTS: begin
-                if (linebuf_depthwise_mode) begin
-                    if (weight_load_done) begin
-                        linebuf_start = 1'b1;
-                        dw_tap_count_d = '0;
-                        state_d = COMPUTE;
-                    end
-                end else if (weight_preload_done) begin
-                    input_feed_start = 1'b1;
-                    drain_tile_start = 1'b1;
-                    drain_tile_start_add_rows = psum_buf_overlap_active &&
-                                                (k_tile_idx_q != 32'd0);
-                    array_flush_cnt_d = '0;
-                    weight_preload_consume = 1'b1;
-                    if (cfg_linebuf_en_i) begin
-                        linebuf_next_tile = 1'b1;
-                    end
-                    state_d = COMPUTE;
-                end else if (weight_load_done) begin
-                    input_feed_start = 1'b1;
-                    drain_tile_start = 1'b1;
-                    drain_tile_start_add_rows = psum_buf_overlap_active &&
-                                                (k_tile_idx_q != 32'd0);
-                    if (cfg_linebuf_en_i) begin
-                        if (linebuf_kgen_multi && (k_tile_idx_q != 32'd0)) begin
-                            linebuf_next_tile = 1'b1;
-                        end else begin
-                            linebuf_start = 1'b1;
-                        end
-                    end
-                    state_d = COMPUTE;
-                end
-            end
-
-            COMPUTE: begin
-                if (linebuf_depthwise_mode) begin
-                    if (linebuf_row_valid && !requant_config_invalid && dw_engine_in_ready) begin
-                        dw_engine_in_valid = 1'b1;
-                        input_side_ready = 1'b1;
-                        if (dw_tap_is_last) begin
-                            dw_tap_count_d = '0;
-                        end else begin
-                            dw_tap_count_d = dw_tap_count_q + 1'b1;
-                        end
-                    end
-
-                    if ((drain_cnt_q == 32'd0) && !linebuf_busy &&
-                        !dw_engine_out_valid && !quantized_out_valid) begin
-                        if (!dw_last_group) begin
-                            dw_group_idx_d = dw_group_idx_q + 32'd1;
-                            dw_group_input_offset_d = dw_group_input_offset_q + dw_group_span_bytes;
-                            dw_group_output_offset_d = dw_group_output_offset_q + dw_group_output_bytes;
-                            dw_group_weight_offset_d = dw_group_weight_offset_q + dw_weight_group_bytes;
-                            weight_depthwise_group_start = 1'b1;
-                            weight_depthwise_group_ptr = cfg_sys_weight_ptr_i +
-                                dw_group_weight_offset_q + dw_weight_group_bytes;
-                            drain_depthwise_group_start = 1'b1;
-                            drain_depthwise_group_output_ptr = cfg_sys_ofm_ptr_i +
-                                dw_group_output_offset_q + dw_group_output_bytes;
-                            dw_tap_count_d = '0;
-                            state_d = LOAD_WEIGHTS;
-                        end else begin
-                            state_d = DONE;
-                        end
-                    end
-                end else if (linebuf_pool_mode) begin
-                    input_side_ready = linebuf_row_valid && pool_in_ready;
-
-                    if ((drain_cnt_q == 32'd0) && !pool_out_valid && !linebuf_busy) begin
-                        state_d = DONE;
-                    end
-                end else if (input_feed_done) begin
-                    array_flush_cnt_d = ARRAY_FLUSH_COUNT_W'(ARRAY_FLUSH_CYCLES);
-                    state_d = WAIT_DRAIN;
-                end
-            end
-
-            WAIT_DRAIN: begin
-                if ((array_flush_cnt_q != '0) && array_pipe_ready) begin
-                    array_flush_cnt_d = array_flush_cnt_q - 1'b1;
-                end
-
-                if (psum_buf_overlap_next_safe) begin
-                    k_tile_advance = 1'b1;
-                    drain_tile_advance = 1'b1;
-                    drain_tile_advance_overlap = 1'b1;
-                    input_feed_start = 1'b1;
-                    weight_preload_consume = 1'b1;
-                    linebuf_next_tile = 1'b1;
-                    state_d = COMPUTE;
-                end else if (drain_cnt_q == 0 && ofm_fifo_empty &&
-                             (!cfg_binary_en_i || !binary_operand_busy)) begin
-                    if (linebuf_has_next_k_tile && weight_preload_done && !linebuf_prefetch_busy) begin
-                        k_tile_advance = 1'b1;
-                        drain_tile_advance = 1'b1;
-                        state_d = LOAD_WEIGHTS;
-                    end else if (linebuf_has_next_k_tile) begin
-                        state_d = WAIT_DRAIN;
-                    end else if (!cfg_linebuf_en_i || !linebuf_busy) begin
-                        state_d = DONE;
-                    end
-                end
-            end
-
-            DONE: begin
-                cfg_sys_done_o = 1'b1;
-                state_d = IDLE;
-            end
-
-            default: begin
-                state_d = IDLE;
-            end
-        endcase
-    end
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-            state_q         <= IDLE;
-            array_flush_cnt_q <= '0;
-            dw_tap_count_q <= '0;
-            dw_group_idx_q <= '0;
-            dw_group_input_offset_q <= '0;
-            dw_group_output_offset_q <= '0;
-            dw_group_weight_offset_q <= '0;
-        end else begin
-            state_q     <= state_d;
-            array_flush_cnt_q <= array_flush_cnt_d;
-            dw_tap_count_q <= dw_tap_count_d;
-            dw_group_idx_q <= dw_group_idx_d;
-            dw_group_input_offset_q <= dw_group_input_offset_d;
-            dw_group_output_offset_q <= dw_group_output_offset_d;
-            dw_group_weight_offset_q <= dw_group_weight_offset_d;
-        end
-    end
 
 endmodule

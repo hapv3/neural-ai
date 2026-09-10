@@ -109,6 +109,7 @@
 ../../../../hw/rtl/systolic/systolic_weight_engine.sv
 ../../../../hw/rtl/systolic/systolic_input_engine.sv
 ../../../../hw/rtl/systolic/systolic_k_tile_scheduler.sv
+../../../../hw/rtl/systolic/systolic_job_sequencer.sv
 ../../../../hw/rtl/systolic/conv_linebuf_config_decoder.sv
 ../../../../hw/rtl/systolic/conv_linebuf_bypass_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_fetch_engine.sv
