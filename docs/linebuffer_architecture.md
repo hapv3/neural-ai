@@ -452,88 +452,29 @@ Current implementation details:
 
 ### 8.1 Current Pipeline
 
-`conv_linebuf_stream_packer` is currently a sequential main FSM with several
-side pipelines: beat FIFO/response writeback, banked SRAM read/write, output
-stage, and a lightweight background fill FSM. It is not yet a fully decoupled
-producer/consumer design.
+`conv_linebuf_stream_packer` is an integration shell. It contains no sequential
+state and owns only the priority arbiter between the bypass and fetch OBI
+requests. Functional state is isolated in child modules:
 
 ```text
-                  cfg/start/next_tile/prefetch
-                             |
-                             v
-+----------------------+  main control FSM  +----------------------+
-| CH_IDLE              |------------------->| CH_ENSURE            |
-| setup spatial walk   |                    | check needed rows    |
-+----------------------+                    +----------+-----------+
-                                                       |
-                                                       | row miss
-                                                       v
-                                            +----------+-----------+
-                                            | CH_FILL_REQ0/REQ1    |
-                                            | issue OBI beat reads |
-                                            +----------+-----------+
-                                                       |
-                                                       v
-                                            +----------+-----------+
-                                            | beat metadata FIFO   |
-                                            | addr_lsb, bytes,     |
-                                            | row slot, x, cross   |
-                                            +----------+-----------+
-                                                       |
-                                  OBI rvalid           v
-+----------------------+                    +----------+-----------+
-| OBI/TCDM read port   |------------------->| response writeback   |
-| 256-bit beat         |                    | merge/full-beat mux  |
-+----------------------+                    +----------+-----------+
-                                                       |
-                                                       v
-                                            +----------+-----------+
-                                            | banked row SRAM      |
-                                            | ROW_SLOTS=7          |
-                                            | BANKS=14             |
-                                            | 256b dual-port banks |
-                                            +----------+-----------+
-                                                       |
-                                                       | row ready
-                                                       v
-+----------------------+                    +----------+-----------+
-| BG fill FSM          |<------------------>| CH_WINDOW_REQ/WAIT   |
-| BG_SCAN/REQ/DRAIN    |                    | read window columns  |
-| prefetch next row    |                    +----------+-----------+
-| during window/emit   |                               |
-+----------------------+                               v
-                                            +----------+-----------+
-                                            | window_q 5x5x256b    |
-                                            | pad zero injection   |
-                                            +----------+-----------+
-                                                       |
-                                                       v
-                                            +----------+-----------+
-                                            | CH_STREAM_PRIME      |
-                                            | latch tap coords     |
-                                            +----------+-----------+
-                                                       |
-                                                       v
-                                            +----------+-----------+
-                                            | CH_STREAM_EMIT       |
-                                            | build_emit_row mux   |
-                                            | C32/KGEN/coalesce    |
-                                            +----------+-----------+
-                                                       |
-                                                       v
-                                            +----------+-----------+
-                                            | row_valid/row_ready  |
-                                            | to systolic IFM      |
-                                            +----------------------+
+conv_linebuf_stream_packer
+|-- conv_linebuf_config_decoder       derived modes and lane descriptors
+|-- conv_linebuf_spatial_scheduler    spatial/K-tile FSM and stream handshake
+|-- conv_linebuf_fetch_engine         foreground/background OBI and responses
+|-- conv_linebuf_row_store            row SRAM banks, tags and readiness
+|-- conv_linebuf_window_engine        window load/slide and padding
+|-- conv_linebuf_formatter_pipeline   staged lane selection and packing
+`-- conv_linebuf_bypass_engine        direct 1x1 request/stream path
 ```
 
 Existing stages:
 
-- **Control/setup**: `CH_IDLE` accepts `start_i`, resets the spatial walk, and
-  selects bypass or window path.
+- **Spatial scheduling**: `conv_linebuf_spatial_scheduler` owns `CH_IDLE`
+  through `CH_STREAM_DONE`, the spatial/K-tile counters, formatter input
+  metadata, prefetch lifecycle, and the final ready/valid output register.
 - **Row ensure/fill**: `CH_ENSURE` checks rows needed by the current window. If
-  a row misses, `CH_FILL_REQ0/REQ1` issues OBI reads one 256-bit beat at a
-  time; accesses crossing a beat boundary need two requests.
+  a row misses, the scheduler starts `conv_linebuf_fetch_engine`; accesses
+  crossing a beat boundary need two requests.
 - **OBI request tracking**: every request pushes metadata into `beat_fifo_q`
   (`addr_lsb`, `valid_bytes`, row slot, `x`, and cross/single flag). The FIFO
   depth is `4`, so this is a shallow pipeline, not a large burst queue.
@@ -545,15 +486,16 @@ Existing stages:
   `BANKS = ROW_SLOTS * STRIDE_MAX = 14`. Bank index is based on
   `{row_slot, x % STRIDE_MAX}` to support window-column reads and response
   writes.
-- **Window load/slide**: `CH_WINDOW_REQ/WAIT` reads SRAM one `kw` at a time to
-  populate `window_q`. When sliding along the same output row, `slide_window`
-  reuses old columns and reads only the new column(s) required by `stride_w`.
-- **Emit stage**: `CH_STREAM_PRIME` latches tap coordinates, and
-  `CH_STREAM_EMIT` calls `build_emit_row()` and drives `row_valid_o`. The
-  formatter supports `c32_kgen_fast`, `coalesce+kgen`, `coalesce`, and
+- **Window load/slide**: the spatial scheduler issues load/capture/slide events
+  to `conv_linebuf_window_engine`, which owns `window_q`, reuses old columns,
+  and reads only the new column(s) required by `stride_w`.
+- **Emit stage**: `CH_STREAM_PRIME/EMIT` supplies registered tap metadata to
+  `conv_linebuf_formatter_pipeline`. The formatter owns the staged window/lane
+  mux and supports `c32_kgen_fast`, `coalesce+kgen`, `coalesce`, and
   non-coalesce modes.
-- **Background fill**: `BG_IDLE/BG_SCAN/BG_REQ0/BG_REQ1/BG_DRAIN` runs only
-  while the main FSM is in `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`,
+- **Background fill**: `BG_IDLE/BG_SCAN/BG_REQ0/BG_REQ1/BG_DRAIN` is owned by
+  `conv_linebuf_fetch_engine` and runs only while the scheduler is in
+  `CH_WINDOW_REQ`, `CH_WINDOW_WAIT`,
   `CH_STREAM_PRIME`, or `CH_STREAM_EMIT`. It uses OBI only when the main path
   is not issuing a request, and fetches rows for the next output row.
 
@@ -569,8 +511,9 @@ Already overlapped or pipelined:
 
 Not fully pipelined yet:
 
-- `CH_ENSURE`, `CH_FILL_REQ*`, and `CH_FILL_DRAIN` still belong to the main
-  FSM. If a row misses on the critical path, stream emit cannot proceed.
+- `CH_ENSURE`, `CH_FILL_REQ*`, and `CH_FILL_DRAIN` still serialize a critical
+  row miss in the spatial scheduler. Module separation does not yet make the
+  critical fill and stream emit phases concurrent.
 - Initial window load is still serialized by `kw` through `CH_WINDOW_REQ/WAIT`.
 - There is only one OBI read port; main fill/bypass has priority over
   background fill.

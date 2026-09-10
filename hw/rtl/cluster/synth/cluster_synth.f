@@ -110,6 +110,7 @@
 ../../../../hw/rtl/systolic/conv_linebuf_row_store.sv
 ../../../../hw/rtl/systolic/conv_linebuf_window_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_formatter_pipeline.sv
+../../../../hw/rtl/systolic/conv_linebuf_spatial_scheduler.sv
 ../../../../hw/rtl/systolic/conv_linebuf_stream_packer.sv
 ../../../../hw/rtl/systolic/systolic_maxpool_engine.sv
 ../../../../hw/rtl/systolic/systolic_controller.sv
