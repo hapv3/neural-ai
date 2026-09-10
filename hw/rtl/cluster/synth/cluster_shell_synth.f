@@ -74,6 +74,7 @@
 ../../../../hw/rtl/systolic/binary_operand_stream.sv
 ../../../../hw/rtl/systolic/systolic_output_postprocess.sv
 ../../../../hw/rtl/systolic/systolic_output_drain.sv
+../../../../hw/rtl/systolic/systolic_weight_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_config_decoder.sv
 ../../../../hw/rtl/systolic/conv_linebuf_bypass_engine.sv
 ../../../../hw/rtl/systolic/conv_linebuf_fetch_engine.sv

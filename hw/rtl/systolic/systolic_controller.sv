@@ -90,7 +90,6 @@ module systolic_controller #(
     state_e state_q;
     state_e state_d;
 
-    logic [31:0] w_ptr_q, w_ptr_d;
     logic [31:0] i_ptr_q, i_ptr_d;
     logic [31:0] req_cnt_q, req_cnt_d; // Counter for requests
     logic [31:0] rsp_cnt_q, rsp_cnt_d; // Counter for responses
@@ -99,18 +98,9 @@ module systolic_controller #(
     localparam int unsigned ARRAY_FLUSH_CYCLES = (2 * ARRAY_DIM) - 1;
     localparam int unsigned ARRAY_FLUSH_COUNT_W = $clog2(ARRAY_FLUSH_CYCLES + 1);
     localparam int unsigned PSUM_BUF_M = 256;
-    localparam int unsigned WEIGHT_TILE_SHIFT = $clog2(ARRAY_DIM) + 5;
-    localparam int unsigned WEIGHT_TILE_LAST_ROW_BYTES = (ARRAY_DIM - 1) << 5;
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
     typedef logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0]   ofm_row_t;
-
-    input_row_t    weight_fifo_data;
-    input_row_t    weight_fifo_out;
-    logic          weight_fifo_push;
-    logic          weight_fifo_pop;
-    logic          weight_fifo_full;
-    logic          weight_fifo_empty;
 
     input_row_t    ifm_fifo_data;
     input_row_t    ifm_fifo_out;
@@ -125,6 +115,11 @@ module systolic_controller #(
 
     logic          fifo_flush;
     logic          weight_load_en;
+    logic          weight_load_done;
+    logic          weight_preload_done;
+    logic          weight_preload_consume;
+    logic          weight_depthwise_group_start;
+    logic [31:0]   weight_depthwise_group_ptr;
     logic          clear_acc;
     logic          compute_en;
     input_row_t    weight_data;
@@ -236,14 +231,7 @@ module systolic_controller #(
     logic [31:0]   k_channel_offset_q, k_channel_offset_d;
     logic [31:0]   k_channel_offset_next;
     logic [ARRAY_FLUSH_COUNT_W-1:0] array_flush_cnt_q, array_flush_cnt_d;
-    logic          weight_preload_active_q, weight_preload_active_d;
-    logic          weight_preload_done_q, weight_preload_done_d;
-    logic [31:0]   weight_preload_req_cnt_q, weight_preload_req_cnt_d;
-    logic [31:0]   weight_preload_rsp_cnt_q, weight_preload_rsp_cnt_d;
-    logic [31:0]   weight_preload_obi_rsp_cnt_q, weight_preload_obi_rsp_cnt_d;
-    logic [31:0]   weight_preload_ptr_q, weight_preload_ptr_d;
     logic          linebuf_has_next_k_tile;
-    logic          weight_preload_fetch_done;
     logic          psum_buf_active;
     logic          psum_buf_needs_external;
     logic          psum_buf_final_tile;
@@ -275,10 +263,8 @@ module systolic_controller #(
     logic [31:0]   pool_kernel_vectors;
     localparam int unsigned DW_MAX_TAPS = 25;
     localparam int unsigned DW_TAP_COUNT_W = $clog2(DW_MAX_TAPS + 1);
-    input_row_t    dw_weight_q [DW_MAX_TAPS];
-    input_row_t    dw_weight_d [DW_MAX_TAPS];
+    input_row_t    dw_weight;
     logic [DW_TAP_COUNT_W-1:0] dw_tap_count_q, dw_tap_count_d;
-    logic [DW_TAP_COUNT_W-1:0] dw_weight_rsp_idx;
     logic [31:0]   dw_group_idx_q, dw_group_idx_d;
     logic [31:0]   dw_group_count;
     logic [31:0]   dw_group_span_bytes;
@@ -316,7 +302,6 @@ module systolic_controller #(
 
     assign fifo_flush = (state_q == IDLE) && cfg_sys_start_i;
 
-    assign weight_fifo_data = obi_w_rdata_i;
     assign ifm_fifo_data    = obi_i_rdata_i;
     assign array_pipe_ready = !ofm_valid || ofm_ready;
     assign psum_data = '0;
@@ -344,7 +329,7 @@ module systolic_controller #(
     assign psum_buf_final_tile = psum_buf_active && !linebuf_has_next_k_tile;
     assign psum_buf_overlap_active = psum_buf_active && linebuf_kgen_multi && linebuf_has_next_k_tile;
     assign psum_buf_overlap_next_ready = psum_buf_overlap_active && linebuf_has_next_k_tile &&
-                                         weight_preload_done_q && !linebuf_prefetch_busy &&
+                                         weight_preload_done && !linebuf_prefetch_busy &&
                                          (array_flush_cnt_q == '0);
     // Direct WAIT_DRAIN->COMPUTE overlap preserves the current drain/prefetch
     // state. OFM FIFO ordering keeps an external-psum first tile ahead of later
@@ -353,10 +338,6 @@ module systolic_controller #(
     assign psum_buf_overlap_next_safe = psum_buf_overlap_next_ready;
     assign drain_enabled = !linebuf_pool_mode && !linebuf_depthwise_mode &&
                            ((state_q == LOAD_WEIGHTS) || (state_q == COMPUTE) || (state_q == WAIT_DRAIN));
-    assign weight_preload_fetch_done = weight_preload_done_q ||
-                                       (weight_preload_active_q &&
-                                        (weight_preload_req_cnt_q == 32'd0) &&
-                                        (weight_preload_obi_rsp_cnt_q == 32'd0));
     assign linebuf_use_next_cfg = (state_q == WAIT_DRAIN) && linebuf_has_next_k_tile;
     assign linebuf_c_base_eff = linebuf_depthwise_mode ? (cfg_linebuf_c_base_i + 16'(dw_group_idx_q << 5)) :
                                 cfg_linebuf_kgen_i ? {linebuf_seed_ic_eff[15:5], 5'b0} : cfg_linebuf_c_base_i;
@@ -386,7 +367,6 @@ module systolic_controller #(
     endfunction
 
     assign pool_kernel_vectors = kernel_tap_count(cfg_linebuf_kernel_h_i, cfg_linebuf_kernel_w_i);
-    assign dw_weight_rsp_idx = DW_TAP_COUNT_W'(pool_kernel_vectors - rsp_cnt_q);
     assign dw_group_count = ({16'd0, cfg_linebuf_input_c_i} + 32'd31) >> 5;
     assign dw_group_span_bytes = {16'd0, cfg_linebuf_input_h_i} * cfg_linebuf_row_stride_bytes_i;
     assign dw_group_output_bytes = linebuf_spatial_m << 5;
@@ -519,55 +499,11 @@ module systolic_controller #(
             if (launch_direct_compute) begin
                 req_cnt_d = cfg_sys_dim_m_i;
                 rsp_cnt_d = cfg_sys_dim_m_i;
-                weight_preload_done_d = 1'b0;
+                weight_preload_consume = 1'b1;
                 linebuf_next_tile = 1'b1;
                 state_d = COMPUTE;
             end else begin
                 state_d = LOAD_WEIGHTS;
-            end
-        end
-    endtask
-
-    task automatic service_weight_preload_engine();
-        begin
-            if (linebuf_has_next_k_tile && !weight_preload_active_q &&
-                !weight_preload_done_q && (array_flush_cnt_q == '0) &&
-                !linebuf_prefetch_busy) begin
-                weight_preload_active_d = 1'b1;
-                weight_preload_req_cnt_d = ARRAY_DIM;
-                weight_preload_rsp_cnt_d = ARRAY_DIM;
-                weight_preload_obi_rsp_cnt_d = ARRAY_DIM;
-                weight_preload_ptr_d = cfg_sys_weight_ptr_i +
-                                       ((k_tile_idx_q + 32'd1) << WEIGHT_TILE_SHIFT) +
-                                       32'(WEIGHT_TILE_LAST_ROW_BYTES);
-            end
-
-            if (weight_preload_active_q) begin
-                if (weight_preload_req_cnt_q > 0) begin
-                    obi_w_req_o = !weight_fifo_full;
-                    obi_w_addr_o = weight_preload_ptr_q;
-                    if (obi_w_req_o && obi_w_gnt_i) begin
-                        weight_preload_ptr_d = weight_preload_ptr_q - 32;
-                        weight_preload_req_cnt_d = weight_preload_req_cnt_q - 1;
-                    end
-                end
-                weight_fifo_push = (weight_preload_obi_rsp_cnt_q != 32'd0) &&
-                                   obi_w_rvalid_i && !weight_fifo_full;
-                if (weight_fifo_push) begin
-                    weight_preload_obi_rsp_cnt_d = weight_preload_obi_rsp_cnt_q - 1'b1;
-                end
-                if (!weight_fifo_empty && array_pipe_ready) begin
-                    weight_load_en = 1'b1;
-                    weight_fifo_pop = 1'b1;
-                    weight_data = weight_fifo_out;
-                    weight_preload_rsp_cnt_d = weight_preload_rsp_cnt_q - 1;
-                end
-                if (weight_preload_req_cnt_q == 0 &&
-                    weight_preload_rsp_cnt_q == 1 &&
-                    weight_fifo_pop) begin
-                    weight_preload_active_d = 1'b0;
-                    weight_preload_done_d = 1'b1;
-                end
             end
         end
     endtask
@@ -662,7 +598,7 @@ module systolic_controller #(
         .in_valid_i   (dw_engine_in_valid),
         .in_ready_o   (dw_engine_in_ready),
         .ifm_i        (linebuf_row_data),
-        .weight_i     (dw_weight_q[dw_tap_count_q]),
+        .weight_i     (dw_weight),
         .clear_i      (dw_tap_count_q == '0),
         .last_i       (dw_tap_is_last),
         .valid_lanes_i(dw_group_valid_bytes),
@@ -785,22 +721,44 @@ module systolic_controller #(
         .ofm_valid_o      (ofm_valid)
     );
 
-    fifo_v3 #(
-        .FALL_THROUGH (1'b1),
-        .DEPTH        (INPUT_FIFO_DEPTH),
-        .dtype        (input_row_t)
-    ) i_weight_fifo (
-        .clk_i      (clk_i),
-        .rst_ni     (rst_ni),
-        .flush_i    (fifo_flush),
-        .testmode_i (1'b0),
-        .full_o     (weight_fifo_full),
-        .empty_o    (weight_fifo_empty),
-        .usage_o    (),
-        .data_i     (weight_fifo_data),
-        .push_i     (weight_fifo_push),
-        .data_o     (weight_fifo_out),
-        .pop_i      (weight_fifo_pop)
+    systolic_weight_engine #(
+        .ADDR_WIDTH       (ADDR_WIDTH),
+        .DATA_WIDTH       (DATA_WIDTH),
+        .ARRAY_DIM        (ARRAY_DIM),
+        .INPUT_ELEM_WIDTH (INPUT_ELEM_WIDTH),
+        .FIFO_DEPTH       (INPUT_FIFO_DEPTH),
+        .DW_MAX_TAPS      (DW_MAX_TAPS)
+    ) i_weight_engine (
+        .clk_i,
+        .rst_ni,
+        .job_start_i                 (fifo_flush),
+        .load_service_i              (state_q == LOAD_WEIGHTS),
+        .preload_service_i           (state_q == WAIT_DRAIN),
+        .preload_allow_i             (linebuf_has_next_k_tile &&
+                                      (array_flush_cnt_q == '0) &&
+                                      !linebuf_prefetch_busy),
+        .preload_consume_i           (weight_preload_consume),
+        .depthwise_group_start_i     (weight_depthwise_group_start),
+        .depthwise_mode_i            (linebuf_depthwise_mode),
+        .array_pipe_ready_i          (array_pipe_ready),
+        .weight_base_ptr_i           (cfg_sys_weight_ptr_i),
+        .depthwise_group_weight_ptr_i(weight_depthwise_group_ptr),
+        .depthwise_tap_count_i       (pool_kernel_vectors),
+        .depthwise_tap_index_i       (32'(dw_tap_count_q)),
+        .next_tile_index_i           (k_tile_idx_q + 32'd1),
+        .obi_req_o                   (obi_w_req_o),
+        .obi_gnt_i                   (obi_w_gnt_i),
+        .obi_addr_o                  (obi_w_addr_o),
+        .obi_we_o                    (obi_w_we_o),
+        .obi_be_o                    (obi_w_be_o),
+        .obi_wdata_o                 (obi_w_wdata_o),
+        .obi_rvalid_i                (obi_w_rvalid_i),
+        .obi_rdata_i                 (obi_w_rdata_i),
+        .weight_load_en_o            (weight_load_en),
+        .weight_data_o               (weight_data),
+        .depthwise_weight_o          (dw_weight),
+        .load_done_o                 (weight_load_done),
+        .preload_done_o              (weight_preload_done)
     );
 
     fifo_v3 #(
@@ -966,9 +924,6 @@ module systolic_controller #(
     assign obi_i_we_o = 1'b0;
     assign obi_i_be_o = '1;
     assign obi_i_wdata_o = '0;
-    assign obi_w_we_o = 1'b0;
-    assign obi_w_be_o = '1;
-    assign obi_w_wdata_o = '0;
 
     // FSM
     // The engine helper tasks below are side-effecting but are only invoked from
@@ -978,7 +933,6 @@ module systolic_controller #(
     /* verilator lint_off MULTIDRIVEN */
     always_comb begin
         state_d = state_q;
-        w_ptr_d = w_ptr_q;
         i_ptr_d = i_ptr_q;
         req_cnt_d = req_cnt_q;
         rsp_cnt_d = rsp_cnt_q;
@@ -988,20 +942,11 @@ module systolic_controller #(
         k_seed_kh_d = k_seed_kh_q;
         k_channel_offset_d = k_channel_offset_q;
         array_flush_cnt_d = array_flush_cnt_q;
-        weight_preload_active_d = weight_preload_active_q;
-        weight_preload_done_d = weight_preload_done_q;
-        weight_preload_req_cnt_d = weight_preload_req_cnt_q;
-        weight_preload_rsp_cnt_d = weight_preload_rsp_cnt_q;
-        weight_preload_obi_rsp_cnt_d = weight_preload_obi_rsp_cnt_q;
-        weight_preload_ptr_d = weight_preload_ptr_q;
         dw_tap_count_d = dw_tap_count_q;
         dw_group_idx_d = dw_group_idx_q;
         dw_group_input_offset_d = dw_group_input_offset_q;
         dw_group_output_offset_d = dw_group_output_offset_q;
         dw_group_weight_offset_d = dw_group_weight_offset_q;
-        for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
-            dw_weight_d[tap] = dw_weight_q[tap];
-        end
         drain_tile_advance = 1'b0;
         drain_tile_advance_overlap = 1'b0;
         drain_tile_start = 1'b0;
@@ -1013,21 +958,18 @@ module systolic_controller #(
         linebuf_prefetch_req_d = (state_q == WAIT_DRAIN) ? linebuf_prefetch_req_q : 1'b0;
         linebuf_prefetch = linebuf_prefetch_req_q && (state_q == WAIT_DRAIN);
         linebuf_row_ready = 1'b0;
+        weight_preload_consume = 1'b0;
+        weight_depthwise_group_start = 1'b0;
+        weight_depthwise_group_ptr = cfg_sys_weight_ptr_i;
 
         cfg_sys_done_o = 1'b0;
 
         obi_i_req_o = 1'b0;
         obi_i_addr_o = '0;
-        obi_w_req_o = 1'b0;
-        obi_w_addr_o = '0;
 
-        weight_load_en = 1'b0;
         compute_en = 1'b0;
         clear_acc = 1'b0;
-        weight_data = '0;
         ifm_data = '0;
-        weight_fifo_push = 1'b0;
-        weight_fifo_pop = 1'b0;
         ifm_fifo_push = 1'b0;
         ifm_fifo_pop = 1'b0;
         dw_engine_in_valid = 1'b0;
@@ -1035,17 +977,10 @@ module systolic_controller #(
         case (state_q)
             IDLE: begin
                 if (cfg_sys_start_i) begin
-                    w_ptr_d = cfg_sys_weight_ptr_i + 32'(WEIGHT_TILE_LAST_ROW_BYTES);
                     i_ptr_d = cfg_sys_ifm_ptr_i;
-                    req_cnt_d = ARRAY_DIM;
-                    rsp_cnt_d = ARRAY_DIM;
+                    req_cnt_d = '0;
+                    rsp_cnt_d = '0;
                     array_flush_cnt_d = '0;
-                    weight_preload_active_d = 1'b0;
-                    weight_preload_done_d = 1'b0;
-                    weight_preload_req_cnt_d = '0;
-                    weight_preload_rsp_cnt_d = '0;
-                    weight_preload_obi_rsp_cnt_d = '0;
-                    weight_preload_ptr_d = '0;
                     k_tile_idx_d = '0;
                     k_seed_ic_d = cfg_linebuf_k_seed_ic_i;
                     k_seed_kw_d = cfg_linebuf_k_seed_kw_i;
@@ -1066,15 +1001,11 @@ module systolic_controller #(
                     end
 
                     if (linebuf_depthwise_mode) begin
-                        w_ptr_d = cfg_sys_weight_ptr_i;
-                        req_cnt_d = pool_kernel_vectors;
-                        rsp_cnt_d = pool_kernel_vectors;
                         state_d = LOAD_WEIGHTS;
                     end
 
                     if ((cfg_requant_en_i && requant_config_invalid) ||
                         binary_config_invalid) begin
-                        w_ptr_d = cfg_sys_weight_ptr_i;
                         req_cnt_d = '0;
                         rsp_cnt_d = '0;
                         state_d = DONE;
@@ -1084,68 +1015,37 @@ module systolic_controller #(
 
             LOAD_WEIGHTS: begin
                 if (linebuf_depthwise_mode) begin
-                    if (req_cnt_q > 0) begin
-                        obi_w_req_o = 1'b1;
-                        obi_w_addr_o = w_ptr_q;
-                        if (obi_w_req_o && obi_w_gnt_i) begin
-                            w_ptr_d = w_ptr_q + 32;
-                            req_cnt_d = req_cnt_q - 1;
-                        end
-                    end
-                    if (obi_w_rvalid_i) begin
-                        if (dw_weight_rsp_idx < DW_TAP_COUNT_W'(DW_MAX_TAPS)) begin
-                            dw_weight_d[dw_weight_rsp_idx] = obi_w_rdata_i;
-                        end
-                        rsp_cnt_d = rsp_cnt_q - 1;
-                    end
-                    if ((req_cnt_q == 0) && (rsp_cnt_q == 1) && obi_w_rvalid_i) begin
+                    if (weight_load_done) begin
                         linebuf_start = 1'b1;
                         dw_tap_count_d = '0;
                         state_d = COMPUTE;
                     end
-                end else if (weight_preload_done_q) begin
+                end else if (weight_preload_done) begin
                     req_cnt_d = cfg_sys_dim_m_i;
                     rsp_cnt_d = cfg_sys_dim_m_i;
                     drain_tile_start = 1'b1;
                     drain_tile_start_add_rows = psum_buf_overlap_active &&
                                                 (k_tile_idx_q != 32'd0);
                     array_flush_cnt_d = '0;
-                    weight_preload_done_d = 1'b0;
+                    weight_preload_consume = 1'b1;
                     if (cfg_linebuf_en_i) begin
                         linebuf_next_tile = 1'b1;
                     end
                     state_d = COMPUTE;
-                end else if (req_cnt_q > 0) begin
-                    obi_w_req_o = !weight_fifo_full;
-                    obi_w_addr_o = w_ptr_q;
-                    if (obi_w_req_o && obi_w_gnt_i) begin
-                        w_ptr_d = w_ptr_q - 32;
-                        req_cnt_d   = req_cnt_q - 1;
-                    end
-                end
-                if (!linebuf_depthwise_mode) begin
-                    weight_fifo_push = obi_w_rvalid_i && !weight_fifo_full;
-                    if (!weight_fifo_empty) begin
-                        weight_load_en = 1'b1;
-                        weight_fifo_pop  = 1'b1;
-                        weight_data    = weight_fifo_out;
-                        rsp_cnt_d = rsp_cnt_q - 1;
-                    end
-                    if (req_cnt_q == 0 && rsp_cnt_q == 1 && weight_fifo_pop) begin
-                        req_cnt_d = cfg_sys_dim_m_i;
-                        rsp_cnt_d = cfg_sys_dim_m_i;
-                        drain_tile_start = 1'b1;
-                        drain_tile_start_add_rows = psum_buf_overlap_active &&
-                                                    (k_tile_idx_q != 32'd0);
-                        if (cfg_linebuf_en_i) begin
-                            if (linebuf_kgen_multi && (k_tile_idx_q != 32'd0)) begin
-                                linebuf_next_tile = 1'b1;
-                            end else begin
-                                linebuf_start = 1'b1;
-                            end
+                end else if (weight_load_done) begin
+                    req_cnt_d = cfg_sys_dim_m_i;
+                    rsp_cnt_d = cfg_sys_dim_m_i;
+                    drain_tile_start = 1'b1;
+                    drain_tile_start_add_rows = psum_buf_overlap_active &&
+                                                (k_tile_idx_q != 32'd0);
+                    if (cfg_linebuf_en_i) begin
+                        if (linebuf_kgen_multi && (k_tile_idx_q != 32'd0)) begin
+                            linebuf_next_tile = 1'b1;
+                        end else begin
+                            linebuf_start = 1'b1;
                         end
-                        state_d = COMPUTE;
                     end
+                    state_d = COMPUTE;
                 end
             end
 
@@ -1171,12 +1071,12 @@ module systolic_controller #(
                             dw_group_input_offset_d = dw_group_input_offset_q + dw_group_span_bytes;
                             dw_group_output_offset_d = dw_group_output_offset_q + dw_group_output_bytes;
                             dw_group_weight_offset_d = dw_group_weight_offset_q + dw_weight_group_bytes;
-                            w_ptr_d = cfg_sys_weight_ptr_i + dw_group_weight_offset_q + dw_weight_group_bytes;
+                            weight_depthwise_group_start = 1'b1;
+                            weight_depthwise_group_ptr = cfg_sys_weight_ptr_i +
+                                dw_group_weight_offset_q + dw_weight_group_bytes;
                             drain_depthwise_group_start = 1'b1;
                             drain_depthwise_group_output_ptr = cfg_sys_ofm_ptr_i +
                                 dw_group_output_offset_q + dw_group_output_bytes;
-                            req_cnt_d = pool_kernel_vectors;
-                            rsp_cnt_d = pool_kernel_vectors;
                             dw_tap_count_d = '0;
                             state_d = LOAD_WEIGHTS;
                         end else begin
@@ -1213,7 +1113,6 @@ module systolic_controller #(
                     linebuf_row_ready = 1'b1;
                 end
 
-                service_weight_preload_engine();
                 service_linebuf_prefetch_engine();
 
                 if (accum_active) begin
@@ -1221,7 +1120,7 @@ module systolic_controller #(
                         advance_to_next_k_tile(1'b1);
                     end else if (drain_cnt_q == 0 && ofm_fifo_empty &&
                                  (!cfg_binary_en_i || !binary_operand_busy)) begin
-                        if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
+                        if (linebuf_has_next_k_tile && weight_preload_done && !linebuf_prefetch_busy) begin
                             advance_to_next_k_tile(1'b0);
                         end else if (linebuf_has_next_k_tile) begin
                             state_d = WAIT_DRAIN;
@@ -1234,7 +1133,7 @@ module systolic_controller #(
                         advance_to_next_k_tile(1'b1);
                     end else if (drain_cnt_q == 0 && ofm_fifo_empty &&
                                  (!cfg_binary_en_i || !binary_operand_busy)) begin
-                        if (linebuf_has_next_k_tile && weight_preload_done_q && !linebuf_prefetch_busy) begin
+                        if (linebuf_has_next_k_tile && weight_preload_done && !linebuf_prefetch_busy) begin
                             advance_to_next_k_tile(1'b0);
                         end else if (linebuf_has_next_k_tile) begin
                             state_d = WAIT_DRAIN;
@@ -1261,7 +1160,6 @@ module systolic_controller #(
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
             state_q         <= IDLE;
-            w_ptr_q         <= '0;
             i_ptr_q         <= '0;
             req_cnt_q       <= '0;
             rsp_cnt_q       <= '0;
@@ -1272,23 +1170,13 @@ module systolic_controller #(
             k_channel_offset_q <= '0;
             linebuf_prefetch_req_q <= 1'b0;
             array_flush_cnt_q <= '0;
-            weight_preload_active_q <= 1'b0;
-            weight_preload_done_q <= 1'b0;
-            weight_preload_req_cnt_q <= '0;
-            weight_preload_rsp_cnt_q <= '0;
-            weight_preload_obi_rsp_cnt_q <= '0;
-            weight_preload_ptr_q <= '0;
             dw_tap_count_q <= '0;
             dw_group_idx_q <= '0;
             dw_group_input_offset_q <= '0;
             dw_group_output_offset_q <= '0;
             dw_group_weight_offset_q <= '0;
-            for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
-                dw_weight_q[tap] <= '0;
-            end
         end else begin
             state_q     <= state_d;
-            w_ptr_q     <= w_ptr_d;
             i_ptr_q     <= i_ptr_d;
             req_cnt_q   <= req_cnt_d;
             rsp_cnt_q   <= rsp_cnt_d;
@@ -1299,20 +1187,11 @@ module systolic_controller #(
             k_channel_offset_q <= k_channel_offset_d;
             linebuf_prefetch_req_q <= linebuf_prefetch_req_d;
             array_flush_cnt_q <= array_flush_cnt_d;
-            weight_preload_active_q <= weight_preload_active_d;
-            weight_preload_done_q <= weight_preload_done_d;
-            weight_preload_req_cnt_q <= weight_preload_req_cnt_d;
-            weight_preload_rsp_cnt_q <= weight_preload_rsp_cnt_d;
-            weight_preload_obi_rsp_cnt_q <= weight_preload_obi_rsp_cnt_d;
-            weight_preload_ptr_q <= weight_preload_ptr_d;
             dw_tap_count_q <= dw_tap_count_d;
             dw_group_idx_q <= dw_group_idx_d;
             dw_group_input_offset_q <= dw_group_input_offset_d;
             dw_group_output_offset_q <= dw_group_output_offset_d;
             dw_group_weight_offset_q <= dw_group_weight_offset_d;
-            for (int unsigned tap = 0; tap < DW_MAX_TAPS; tap++) begin
-                dw_weight_q[tap] <= dw_weight_d[tap];
-            end
         end
     end
 
