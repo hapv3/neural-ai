@@ -352,186 +352,6 @@ module systolic_output_drain #(
         .pop_i(psum_fifo_pop)
     );
 
-    task automatic reset_engine(input logic [31:0] psum_prefetch_rows);
-        begin
-            drain_state_d = DRAIN_IDLE;
-            accum_requant_sent_d = 1'b0;
-            psum_read_row_d = '0;
-            psum_read_active_d = 1'b0;
-            psum_read_resp_mask_d = '0;
-            psum_prefetch_rows_d = psum_prefetch_rows;
-        end
-    endtask
-
-    task automatic capture_psum_read_responses();
-        begin
-            drain_state_d = DRAIN_ACCUM_READ;
-            for (int unsigned port = 0; port < 4; port++) begin
-                if (obi_o_rvalid_i[port]) begin
-                    for (int unsigned elem = 0; elem < OFM_ELEMS_PER_OBI; elem++) begin
-                        psum_read_row_d[(port * OFM_ELEMS_PER_OBI) + elem] =
-                            obi_o_rdata_i[port][elem * OFM_ELEM_WIDTH +: OFM_ELEM_WIDTH];
-                    end
-                    psum_read_resp_mask_d[port] = 1'b1;
-                end
-            end
-            if ((psum_read_resp_mask_q | obi_o_rvalid_i) == 4'b1111) begin
-                psum_fifo_data = psum_read_row_d;
-                psum_fifo_push = 1'b1;
-                psum_read_active_d = 1'b0;
-                psum_read_resp_mask_d = '0;
-            end
-        end
-    endtask
-
-    task automatic issue_psum_prefetch_read(input logic use_psum_buffer_gate);
-        begin
-            if ((!use_psum_buffer_gate || psum_buf_needs_external_i) &&
-                (psum_prefetch_rows_q != 0) && !psum_read_active_q && !psum_fifo_full &&
-                !(|obi_o_req_o)) begin
-                drain_state_d = DRAIN_ACCUM_READ;
-                obi_o_req_o = 4'b1111;
-                obi_o_we_o = '0;
-                obi_o_addr_o[0] = a_ptr_q;
-                obi_o_addr_o[1] = a_ptr_q + OFM_BEAT_BYTES;
-                obi_o_addr_o[2] = a_ptr_q + (2 * OFM_BEAT_BYTES);
-                obi_o_addr_o[3] = a_ptr_q + (3 * OFM_BEAT_BYTES);
-                if (obi_o_gnt_i == 4'b1111) begin
-                    a_ptr_d = next_strided_ptr(a_ptr_q, a_col_q, 32'(OFM_ROW_BYTES),
-                                               psum_row_stride_bytes_i, ofm_tile_cols_i);
-                    a_col_d = next_strided_col(a_col_q, ofm_tile_cols_i);
-                    psum_prefetch_rows_d = psum_prefetch_rows_q - 1'b1;
-                    psum_read_active_d = 1'b1;
-                    psum_read_resp_mask_d = '0;
-                    psum_read_row_d = '0;
-                end
-            end
-        end
-    endtask
-
-    task automatic write_quantized_output(input logic [DATA_WIDTH-1:0] packed_data);
-        begin
-            obi_o_req_o[0] = 1'b1;
-            obi_o_wdata_o[0] = packed_data;
-            if (obi_o_gnt_i[0] || quantized_invalid) begin
-                quantized_out_ready = 1'b1;
-                o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
-                                           ofm_row_stride_bytes_i, ofm_tile_cols_i);
-                o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
-                drain_cnt_d = drain_cnt_q - 1'b1;
-                accum_requant_sent_d = 1'b0;
-            end
-            if (quantized_invalid) begin
-                obi_o_req_o[0] = 1'b0;
-            end
-        end
-    endtask
-
-    task automatic service_normal_drain();
-        begin
-            if (psum_buf_active_i || psum_buf_drain_entry) begin
-                drain_state_d = DRAIN_IDLE;
-                if (psum_read_active_q) capture_psum_read_responses();
-
-                if (accum_requant_sent_q && quantized_out_valid) begin
-                    drain_state_d = DRAIN_ACCUM_REQUANT;
-                    write_quantized_output(quantized_packed_data);
-                end
-
-                if (!ofm_fifo_empty &&
-                    (!ofm_fifo_out.needs_external_psum || !psum_fifo_empty)) begin
-                    drain_state_d = DRAIN_ACCUM_WRITE;
-                    if (ofm_fifo_out.final_tile && requant_active_i) begin
-                        drain_state_d = DRAIN_ACCUM_REQUANT;
-                        if (!accum_requant_sent_q && requant_in_ready &&
-                            !requant_config_invalid_o) begin
-                            requant_in_valid = 1'b1;
-                            ofm_fifo_pop = 1'b1;
-                            psum_fifo_pop = ofm_fifo_out.needs_external_psum;
-                            accum_requant_sent_d = 1'b1;
-                        end
-                        if (quantized_out_valid)
-                            write_quantized_output(quantized_packed_data);
-                    end else if (ofm_fifo_out.final_tile) begin
-                        obi_o_we_o = '1;
-                        obi_o_wdata_o[0] = psum_buf_sum[OFM_ELEMS_PER_OBI-1:0];
-                        obi_o_wdata_o[1] = psum_buf_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
-                        obi_o_wdata_o[2] = psum_buf_sum[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
-                        obi_o_wdata_o[3] = psum_buf_sum[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
-                        obi_o_req_o = 4'b1111;
-                        if (obi_o_gnt_i == 4'b1111) begin
-                            ofm_fifo_pop = 1'b1;
-                            psum_fifo_pop = ofm_fifo_out.needs_external_psum;
-                            o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
-                                                       ofm_row_stride_bytes_i, ofm_tile_cols_i);
-                            o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
-                            drain_cnt_d = drain_cnt_q - 1'b1;
-                        end
-                    end else begin
-                        psum_buf_we = 1'b1;
-                        psum_buf_wdata = psum_buf_sum;
-                        ofm_fifo_pop = 1'b1;
-                        psum_fifo_pop = ofm_fifo_out.needs_external_psum;
-                        drain_cnt_d = drain_cnt_q - 1'b1;
-                    end
-                end
-                issue_psum_prefetch_read(1'b1);
-            end else if (!accum_active_i && requant_active_i) begin
-                if (quantized_out_valid)
-                    write_quantized_output(quantized_packed_data);
-                if (!ofm_fifo_empty && requant_in_ready && !requant_config_invalid_o) begin
-                    requant_in_valid = 1'b1;
-                    ofm_fifo_pop = 1'b1;
-                end
-            end else if (!accum_active_i && !ofm_fifo_empty) begin
-                obi_o_req_o = 4'b1111;
-                if (obi_o_gnt_i == 4'b1111) begin
-                    ofm_fifo_pop = 1'b1;
-                    o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
-                                               ofm_row_stride_bytes_i, ofm_tile_cols_i);
-                    o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
-                    drain_cnt_d = drain_cnt_q - 1'b1;
-                end
-            end else if (accum_active_i) begin
-                drain_state_d = DRAIN_IDLE;
-                if (psum_read_active_q) capture_psum_read_responses();
-
-                if (!requant_active_i && !ofm_fifo_empty && !psum_fifo_empty) begin
-                    drain_state_d = DRAIN_ACCUM_WRITE;
-                    obi_o_we_o = '1;
-                    obi_o_wdata_o[0] = accum_sum[OFM_ELEMS_PER_OBI-1:0];
-                    obi_o_wdata_o[1] = accum_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
-                    obi_o_wdata_o[2] = accum_sum[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
-                    obi_o_wdata_o[3] = accum_sum[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
-                    obi_o_req_o = 4'b1111;
-                    if (obi_o_gnt_i == 4'b1111) begin
-                        ofm_fifo_pop = 1'b1;
-                        psum_fifo_pop = 1'b1;
-                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
-                                                   ofm_row_stride_bytes_i, ofm_tile_cols_i);
-                        o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
-                        drain_cnt_d = drain_cnt_q - 1'b1;
-                    end
-                end else if (requant_active_i) begin
-                    if (!accum_requant_sent_q && !ofm_fifo_empty && !psum_fifo_empty &&
-                        requant_in_ready && !requant_config_invalid_o) begin
-                        drain_state_d = DRAIN_ACCUM_REQUANT;
-                        requant_in_valid = 1'b1;
-                        ofm_fifo_pop = 1'b1;
-                        psum_fifo_pop = 1'b1;
-                        accum_requant_sent_d = 1'b1;
-                    end
-                    if (quantized_out_valid) begin
-                        drain_state_d = DRAIN_ACCUM_REQUANT;
-                        write_quantized_output(quantized_packed_data);
-                    end
-                end
-                issue_psum_prefetch_read(1'b0);
-            end
-        end
-    endtask
-
-    /* verilator lint_off MULTIDRIVEN */
     always_comb begin
         drain_state_d = drain_state_q;
         o_ptr_d = o_ptr_q;
@@ -599,12 +419,256 @@ module systolic_output_drain #(
         obi_o_wdata_o[2] = ofm_fifo_out.row[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
         obi_o_wdata_o[3] = ofm_fifo_out.row[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
 
-        if (drain_active_i)
-            service_normal_drain();
+        // Normal drain owns PSum capture/prefetch, accumulation and writeback.
+        if (drain_active_i) begin : service_active_drain
+                if (psum_buf_active_i || psum_buf_drain_entry) begin
+                    drain_state_d = DRAIN_IDLE;
+                    if (psum_read_active_q) begin
+                        drain_state_d = DRAIN_ACCUM_READ;
+                        for (int unsigned port = 0; port < 4; port++) begin
+                            if (obi_o_rvalid_i[port]) begin
+                                for (int unsigned elem = 0; elem < OFM_ELEMS_PER_OBI; elem++) begin
+                                    psum_read_row_d[(port * OFM_ELEMS_PER_OBI) + elem] =
+                                        obi_o_rdata_i[port][elem * OFM_ELEM_WIDTH +: OFM_ELEM_WIDTH];
+                                end
+                                psum_read_resp_mask_d[port] = 1'b1;
+                            end
+                        end
+                        if ((psum_read_resp_mask_q | obi_o_rvalid_i) == 4'b1111) begin
+                            psum_fifo_data = psum_read_row_d;
+                            psum_fifo_push = 1'b1;
+                            psum_read_active_d = 1'b0;
+                            psum_read_resp_mask_d = '0;
+                        end
+                    end
+
+                    if (accum_requant_sent_q && quantized_out_valid) begin
+                        drain_state_d = DRAIN_ACCUM_REQUANT;
+                        begin
+                            obi_o_req_o[0] = 1'b1;
+                            obi_o_wdata_o[0] = quantized_packed_data;
+                            if (obi_o_gnt_i[0] || quantized_invalid) begin
+                                quantized_out_ready = 1'b1;
+                                o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                           ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                                drain_cnt_d = drain_cnt_q - 1'b1;
+                                accum_requant_sent_d = 1'b0;
+                            end
+                            if (quantized_invalid) begin
+                                obi_o_req_o[0] = 1'b0;
+                            end
+                        end
+                    end
+
+                    if (!ofm_fifo_empty &&
+                        (!ofm_fifo_out.needs_external_psum || !psum_fifo_empty)) begin
+                        drain_state_d = DRAIN_ACCUM_WRITE;
+                        if (ofm_fifo_out.final_tile && requant_active_i) begin
+                            drain_state_d = DRAIN_ACCUM_REQUANT;
+                            if (!accum_requant_sent_q && requant_in_ready &&
+                                !requant_config_invalid_o) begin
+                                requant_in_valid = 1'b1;
+                                ofm_fifo_pop = 1'b1;
+                                psum_fifo_pop = ofm_fifo_out.needs_external_psum;
+                                accum_requant_sent_d = 1'b1;
+                            end
+                            if (quantized_out_valid) begin
+                                    obi_o_req_o[0] = 1'b1;
+                                    obi_o_wdata_o[0] = quantized_packed_data;
+                                    if (obi_o_gnt_i[0] || quantized_invalid) begin
+                                        quantized_out_ready = 1'b1;
+                                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                                   ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                        o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                                        drain_cnt_d = drain_cnt_q - 1'b1;
+                                        accum_requant_sent_d = 1'b0;
+                                    end
+                                    if (quantized_invalid) begin
+                                        obi_o_req_o[0] = 1'b0;
+                                    end
+                                end
+                        end else if (ofm_fifo_out.final_tile) begin
+                            obi_o_we_o = '1;
+                            obi_o_wdata_o[0] = psum_buf_sum[OFM_ELEMS_PER_OBI-1:0];
+                            obi_o_wdata_o[1] = psum_buf_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
+                            obi_o_wdata_o[2] = psum_buf_sum[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
+                            obi_o_wdata_o[3] = psum_buf_sum[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
+                            obi_o_req_o = 4'b1111;
+                            if (obi_o_gnt_i == 4'b1111) begin
+                                ofm_fifo_pop = 1'b1;
+                                psum_fifo_pop = ofm_fifo_out.needs_external_psum;
+                                o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
+                                                           ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                                drain_cnt_d = drain_cnt_q - 1'b1;
+                            end
+                        end else begin
+                            psum_buf_we = 1'b1;
+                            psum_buf_wdata = psum_buf_sum;
+                            ofm_fifo_pop = 1'b1;
+                            psum_fifo_pop = ofm_fifo_out.needs_external_psum;
+                            drain_cnt_d = drain_cnt_q - 1'b1;
+                        end
+                    end
+                    begin
+                        if ((!1'b1 || psum_buf_needs_external_i) &&
+                            (psum_prefetch_rows_q != 0) && !psum_read_active_q && !psum_fifo_full &&
+                            !(|obi_o_req_o)) begin
+                            drain_state_d = DRAIN_ACCUM_READ;
+                            obi_o_req_o = 4'b1111;
+                            obi_o_we_o = '0;
+                            obi_o_addr_o[0] = a_ptr_q;
+                            obi_o_addr_o[1] = a_ptr_q + OFM_BEAT_BYTES;
+                            obi_o_addr_o[2] = a_ptr_q + (2 * OFM_BEAT_BYTES);
+                            obi_o_addr_o[3] = a_ptr_q + (3 * OFM_BEAT_BYTES);
+                            if (obi_o_gnt_i == 4'b1111) begin
+                                a_ptr_d = next_strided_ptr(a_ptr_q, a_col_q, 32'(OFM_ROW_BYTES),
+                                                           psum_row_stride_bytes_i, ofm_tile_cols_i);
+                                a_col_d = next_strided_col(a_col_q, ofm_tile_cols_i);
+                                psum_prefetch_rows_d = psum_prefetch_rows_q - 1'b1;
+                                psum_read_active_d = 1'b1;
+                                psum_read_resp_mask_d = '0;
+                                psum_read_row_d = '0;
+                            end
+                        end
+                    end
+                end else if (!accum_active_i && requant_active_i) begin
+                    if (quantized_out_valid) begin
+                            obi_o_req_o[0] = 1'b1;
+                            obi_o_wdata_o[0] = quantized_packed_data;
+                            if (obi_o_gnt_i[0] || quantized_invalid) begin
+                                quantized_out_ready = 1'b1;
+                                o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                           ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                                drain_cnt_d = drain_cnt_q - 1'b1;
+                                accum_requant_sent_d = 1'b0;
+                            end
+                            if (quantized_invalid) begin
+                                obi_o_req_o[0] = 1'b0;
+                            end
+                        end
+                    if (!ofm_fifo_empty && requant_in_ready && !requant_config_invalid_o) begin
+                        requant_in_valid = 1'b1;
+                        ofm_fifo_pop = 1'b1;
+                    end
+                end else if (!accum_active_i && !ofm_fifo_empty) begin
+                    obi_o_req_o = 4'b1111;
+                    if (obi_o_gnt_i == 4'b1111) begin
+                        ofm_fifo_pop = 1'b1;
+                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
+                                                   ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                        o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                        drain_cnt_d = drain_cnt_q - 1'b1;
+                    end
+                end else if (accum_active_i) begin
+                    drain_state_d = DRAIN_IDLE;
+                    if (psum_read_active_q) begin
+                        drain_state_d = DRAIN_ACCUM_READ;
+                        for (int unsigned port = 0; port < 4; port++) begin
+                            if (obi_o_rvalid_i[port]) begin
+                                for (int unsigned elem = 0; elem < OFM_ELEMS_PER_OBI; elem++) begin
+                                    psum_read_row_d[(port * OFM_ELEMS_PER_OBI) + elem] =
+                                        obi_o_rdata_i[port][elem * OFM_ELEM_WIDTH +: OFM_ELEM_WIDTH];
+                                end
+                                psum_read_resp_mask_d[port] = 1'b1;
+                            end
+                        end
+                        if ((psum_read_resp_mask_q | obi_o_rvalid_i) == 4'b1111) begin
+                            psum_fifo_data = psum_read_row_d;
+                            psum_fifo_push = 1'b1;
+                            psum_read_active_d = 1'b0;
+                            psum_read_resp_mask_d = '0;
+                        end
+                    end
+
+                    if (!requant_active_i && !ofm_fifo_empty && !psum_fifo_empty) begin
+                        drain_state_d = DRAIN_ACCUM_WRITE;
+                        obi_o_we_o = '1;
+                        obi_o_wdata_o[0] = accum_sum[OFM_ELEMS_PER_OBI-1:0];
+                        obi_o_wdata_o[1] = accum_sum[(2*OFM_ELEMS_PER_OBI)-1:OFM_ELEMS_PER_OBI];
+                        obi_o_wdata_o[2] = accum_sum[(3*OFM_ELEMS_PER_OBI)-1:(2*OFM_ELEMS_PER_OBI)];
+                        obi_o_wdata_o[3] = accum_sum[(4*OFM_ELEMS_PER_OBI)-1:(3*OFM_ELEMS_PER_OBI)];
+                        obi_o_req_o = 4'b1111;
+                        if (obi_o_gnt_i == 4'b1111) begin
+                            ofm_fifo_pop = 1'b1;
+                            psum_fifo_pop = 1'b1;
+                            o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
+                                                       ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                            o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                            drain_cnt_d = drain_cnt_q - 1'b1;
+                        end
+                    end else if (requant_active_i) begin
+                        if (!accum_requant_sent_q && !ofm_fifo_empty && !psum_fifo_empty &&
+                            requant_in_ready && !requant_config_invalid_o) begin
+                            drain_state_d = DRAIN_ACCUM_REQUANT;
+                            requant_in_valid = 1'b1;
+                            ofm_fifo_pop = 1'b1;
+                            psum_fifo_pop = 1'b1;
+                            accum_requant_sent_d = 1'b1;
+                        end
+                        if (quantized_out_valid) begin
+                            drain_state_d = DRAIN_ACCUM_REQUANT;
+                            begin
+                                obi_o_req_o[0] = 1'b1;
+                                obi_o_wdata_o[0] = quantized_packed_data;
+                                if (obi_o_gnt_i[0] || quantized_invalid) begin
+                                    quantized_out_ready = 1'b1;
+                                    o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                               ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                    o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                                    drain_cnt_d = drain_cnt_q - 1'b1;
+                                    accum_requant_sent_d = 1'b0;
+                                end
+                                if (quantized_invalid) begin
+                                    obi_o_req_o[0] = 1'b0;
+                                end
+                            end
+                        end
+                    end
+                    begin
+                        if ((!1'b0 || psum_buf_needs_external_i) &&
+                            (psum_prefetch_rows_q != 0) && !psum_read_active_q && !psum_fifo_full &&
+                            !(|obi_o_req_o)) begin
+                            drain_state_d = DRAIN_ACCUM_READ;
+                            obi_o_req_o = 4'b1111;
+                            obi_o_we_o = '0;
+                            obi_o_addr_o[0] = a_ptr_q;
+                            obi_o_addr_o[1] = a_ptr_q + OFM_BEAT_BYTES;
+                            obi_o_addr_o[2] = a_ptr_q + (2 * OFM_BEAT_BYTES);
+                            obi_o_addr_o[3] = a_ptr_q + (3 * OFM_BEAT_BYTES);
+                            if (obi_o_gnt_i == 4'b1111) begin
+                                a_ptr_d = next_strided_ptr(a_ptr_q, a_col_q, 32'(OFM_ROW_BYTES),
+                                                           psum_row_stride_bytes_i, ofm_tile_cols_i);
+                                a_col_d = next_strided_col(a_col_q, ofm_tile_cols_i);
+                                psum_prefetch_rows_d = psum_prefetch_rows_q - 1'b1;
+                                psum_read_active_d = 1'b1;
+                                psum_read_resp_mask_d = '0;
+                                psum_read_row_d = '0;
+                            end
+                        end
+                    end
+                end
+            end
 
         if (compute_phase_i && depthwise_mode_i) begin
             if (quantized_out_valid)
-                write_quantized_output(quantized_packed_data);
+                begin
+                    obi_o_req_o[0] = 1'b1;
+                    obi_o_wdata_o[0] = quantized_packed_data;
+                    if (obi_o_gnt_i[0] || quantized_invalid) begin
+                        quantized_out_ready = 1'b1;
+                        o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(REQUANT_ROW_BYTES),
+                                                   ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                        o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
+                        drain_cnt_d = drain_cnt_q - 1'b1;
+                        accum_requant_sent_d = 1'b0;
+                    end
+                    if (quantized_invalid) begin
+                        obi_o_req_o[0] = 1'b0;
+                    end
+                end
             if (depthwise_result_valid_i && !requant_config_invalid_o) begin
                 requant_in_valid = requant_enable_i;
                 depthwise_result_ready_o = requant_enable_i && requant_in_ready;
@@ -635,7 +699,12 @@ module systolic_output_drain #(
             a_col_d = '0;
             ofm_push_row_idx_d = '0;
             drain_cnt_d = (pool_mode_i || depthwise_mode_i) ? spatial_row_count_i : row_count_i;
-            reset_engine(external_accum_enable_i ? row_count_i : 32'd0);
+            drain_state_d = DRAIN_IDLE;
+            accum_requant_sent_d = 1'b0;
+            psum_read_row_d = '0;
+            psum_read_active_d = 1'b0;
+            psum_read_resp_mask_d = '0;
+            psum_prefetch_rows_d = external_accum_enable_i ? row_count_i : 32'd0;
             if (psum_buf_active_i)
                 psum_buf_sel_d = ~psum_buf_sel_q;
             if ((requant_enable_i && requant_config_invalid_o) || binary_config_invalid_o) begin
@@ -654,9 +723,14 @@ module systolic_output_drain #(
                 end
             end
             if (tile_start_i) begin
-                reset_engine((accum_active_i &&
-                              (!psum_buf_active_i || psum_buf_needs_external_i)) ?
-                             row_count_i : 32'd0);
+                drain_state_d = DRAIN_IDLE;
+                accum_requant_sent_d = 1'b0;
+                psum_read_row_d = '0;
+                psum_read_active_d = 1'b0;
+                psum_read_resp_mask_d = '0;
+                psum_prefetch_rows_d =
+                    (accum_active_i && (!psum_buf_active_i || psum_buf_needs_external_i)) ?
+                    row_count_i : 32'd0;
                 drain_cnt_d = tile_start_add_rows_i ?
                               (drain_cnt_q + row_count_i) : row_count_i;
                 ofm_push_row_idx_d = '0;
@@ -668,7 +742,6 @@ module systolic_output_drain #(
             end
         end
     end
-    /* verilator lint_on MULTIDRIVEN */
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
