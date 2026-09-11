@@ -1,4 +1,5 @@
 import base64
+import csv
 import logging
 import math
 import os
@@ -25,6 +26,7 @@ from npu_test_utils import (
     format_pmu_report,
     hold_reset,
     load_firmware_elf_axi,
+    monitor_command_buffer_pmu,
     program_command_queue,
     read_dtcm_word,
     read_l2_bytes,
@@ -1291,6 +1293,75 @@ def _extract_selected_yolo320_command_range(model, first_command, end_command):
     return bytes(package)
 
 
+def _selected_command_trace_records(model, first_command, end_command):
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    section_count = struct.unpack_from("<I", model, 20)[0]
+    commands_offset = next(
+        struct.unpack_from("<I", model, section_table_offset + index * 32 + 8)[0]
+        for index in range(section_count)
+        if struct.unpack_from("<I", model, section_table_offset + index * 32)[0] == 1
+    )
+    total_commands = struct.unpack_from("<I", model, 32)[0]
+    assert 0 <= first_command < end_command <= total_commands
+
+    records = []
+    offset = commands_offset
+    for command_index in range(total_commands):
+        command_type, command_size, flags, layer_id, tile_id = struct.unpack_from(
+            "<HHIII", model, offset
+        )
+        if first_command <= command_index < end_command:
+            records.append(
+                {
+                    "command": command_index + 1,
+                    "type": command_type,
+                    "size": command_size,
+                    "flags": flags,
+                    "layer_id": layer_id,
+                    "tile_id": tile_id,
+                    "header": bytes(model[offset : offset + 16]),
+                }
+            )
+        offset += command_size
+    records.append(
+        {
+            "command": end_command + 1,
+            "type": 0,
+            "size": 32,
+            "flags": 0,
+            "layer_id": 0,
+            "tile_id": 0,
+            "header": _command_header(0, 32),
+        }
+    )
+    return records
+
+
+def _write_command_pmu_csv(path, records, counters, append):
+    fieldnames = [
+        "command",
+        "type",
+        "size",
+        "flags",
+        "layer_id",
+        "tile_id",
+        *counters[0].keys(),
+    ]
+    mode = "a" if append else "w"
+    with Path(path).open(mode, newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        if not append:
+            writer.writeheader()
+        for record, command_counters in zip(records, counters):
+            writer.writerow(
+                {
+                    key: value
+                    for key, value in {**record, **command_counters}.items()
+                    if key != "header"
+                }
+            )
+
+
 _YOLO320_SNAPSHOT_MAGIC = b"NAISNP01"
 _YOLO320_SNAPSHOT_HEADER = struct.Struct("<8s6I")
 
@@ -1669,6 +1740,8 @@ async def _load_and_run(
     measure_pmu=False,
     invocation_base=INVOCATION_BASE,
     model=None,
+    command_trace_records=None,
+    command_trace_callback=None,
 ):
     await load_firmware_elf_axi(
         dut,
@@ -1676,10 +1749,20 @@ async def _load_and_run(
         Path(__file__).resolve().parents[3] / "sw/runtime/neural_ai/neural_ai.elf",
     )
     await program_command_queue(axi_master, invocation_base, len(invocation))
-    await release_fetch(dut, axi_master=axi_master)
     command_buffer_address = (
         _firmware_symbol_address("g_command_buffer") if model is not None else None
     )
+    command_trace_task = None
+    if command_trace_records is not None:
+        command_trace_task = cocotb.start_soon(
+            monitor_command_buffer_pmu(
+                dut,
+                command_buffer_address,
+                [record["header"] for record in command_trace_records],
+                sample_callback=command_trace_callback,
+            )
+        )
+    await release_fetch(dut, axi_master=axi_master)
     progress_callback = lambda: "; ".join(
         detail
         for detail in (
@@ -1699,6 +1782,8 @@ async def _load_and_run(
             progress_callback=progress_callback,
         )
     except AssertionError as error:
+        if command_trace_task is not None:
+            command_trace_task.cancel()
         status = await _axi_read32(axi_master, NPU_CMD_STATUS)
         fail_code = await _axi_read32(axi_master, NPU_CMD_FAIL_CODE)
         fail_pointer = await _axi_read32(axi_master, NPU_CMD_FAIL_PTR)
@@ -1718,6 +1803,8 @@ async def _load_and_run(
             f"pointer=0x{fail_pointer:08x} done={done_count} "
             f"pc=0x{program_counter:08x}; {command_progress}; {systolic_progress}"
         ) from error
+    if command_trace_task is not None:
+        return counters, await command_trace_task
     if measure_pmu:
         return counters
     return None
@@ -4146,6 +4233,8 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
     ]
     assert segment_ends
     timeout_cycles = int(os.environ.get("YOLO320_SEGMENT_TIMEOUT_CYCLES", "1000000"))
+    command_pmu_csv = os.environ.get("YOLO320_COMMAND_PMU_CSV", "")
+    command_pmu_csv_written = False
 
     input_base = 0x80000000
     output_base = 0x80100000
@@ -4207,14 +4296,43 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
         await write_l2_bytes(dut, binding_table_base, binding_addresses)
         await write_l2_bytes(dut, invocation_base, invocation)
 
-        await _load_and_run(
+        command_trace_records = (
+            _selected_command_trace_records(full_model, first_command, end_command)
+            if command_pmu_csv
+            else None
+        )
+        command_trace_callback = None
+        if command_trace_records is not None:
+
+            def command_trace_callback(command_index, command_counters):
+                nonlocal command_pmu_csv_written
+                _write_command_pmu_csv(
+                    command_pmu_csv,
+                    [command_trace_records[command_index]],
+                    [command_counters],
+                    append=command_pmu_csv_written,
+                )
+                command_pmu_csv_written = True
+
+        run_result = await _load_and_run(
             dut,
             axi_master,
             invocation,
             timeout_cycles=timeout_cycles,
             invocation_base=invocation_base,
             model=model,
+            command_trace_records=command_trace_records,
+            command_trace_callback=command_trace_callback,
         )
+        if command_trace_records is not None:
+            _segment_pmu, command_pmu = run_result
+            assert len(command_pmu) == len(command_trace_records) - 1
+            dut._log.info(
+                "YOLO320 wrote per-command PMU for commands %d-%d to %s",
+                first_command + 1,
+                end_command,
+                command_pmu_csv,
+            )
         segment_commands = end_command - first_command
         assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
         assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0

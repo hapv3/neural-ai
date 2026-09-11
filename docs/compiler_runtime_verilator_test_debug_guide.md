@@ -394,7 +394,31 @@ using a large checkpoint. The verified restore run executes only command 6 and
 reports 52,081 PMU cycles, exactly matching command 6 after in-process segmented
 continuation; its systolic, DMA, and TCDM event counts also match.
 
-### 5.5 Full selected graph
+### 5.5 Per-command PMU trace
+
+Set `YOLO320_COMMAND_PMU_CSV` on a segmented run to persist one PMU row for
+every completed ABI command:
+
+```bash
+YOLO320_SNAPSHOT_IN=/tmp/yolo320-command-1464.snapshot \
+YOLO320_SEGMENT_ENDS=1571 \
+YOLO320_COMMAND_PMU_CSV=/tmp/yolo320-command-pmu.csv \
+make -j10 sim \
+  COCOTB_TEST_MODULES=test_compiled_model \
+  COCOTB_TEST_FILTER=test_compiler_generated_selected_yolo320_segmented_prefix \
+  CLUSTER_SIM_NAME=test_compiled_model
+```
+
+The CSV records the global command index, ABI header metadata, and deltas for
+all hardware PMU counters. Rows are flushed as soon as the following command
+header is loaded, so completed rows survive a later timeout or interruption.
+The tracer watches the streamed D-TCM command buffer through cocotb and adds no
+firmware instructions or host AXI transactions. Each delta spans one command
+header becoming available through the following header becoming available; it
+therefore includes dispatch transition and fetch cost at the boundary, as seen
+by the real ABI runtime.
+
+### 5.6 Full selected graph
 
 ```bash
 env PYTHONPATH=/home/dev01/neural-ai/sw/test/compiler_runtime \
@@ -408,7 +432,7 @@ The full test compiles all 3,910 commands and compares the public output with
 TensorFlow Lite `BUILTIN_REF`. Use it only after focused and segmented gates
 are green.
 
-### 5.6 Parallel broad regression
+### 5.7 Parallel broad regression
 
 ```bash
 cd /home/dev01/neural-ai

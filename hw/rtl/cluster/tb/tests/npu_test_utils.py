@@ -3,9 +3,12 @@ import struct
 
 from cocotb.triggers import (
     ClockCycles,
+    First,
+    ReadOnly,
     RisingEdge,
     SimTimeoutError,
     Timer,
+    ValueChange,
     with_timeout,
 )
 
@@ -289,6 +292,74 @@ def format_pmu_report(counters):
     if counters.get("overflow_status", 0):
         lines.append(f"  overflow_status=0x{counters['overflow_status']:08x}")
     return "\n".join(lines)
+
+
+def pmu_direct_snapshot(dut):
+    """Read live PMU counters without perturbing simulated software."""
+    pmu = dut.u_npu_cluster.u_pmu
+    counters = {}
+    for counter_id, name in enumerate(PMU_COUNTER_NAMES):
+        counter = getattr(getattr(pmu, f"gen_counters[{counter_id}]"), "u_counter")
+        value = counter.counter_q.value
+        counters[name] = value.to_unsigned() if value.is_resolvable else 0
+    return counters
+
+
+def pmu_counter_delta(end, start):
+    return {
+        name: end.get(name, 0) - start.get(name, 0)
+        for name in PMU_COUNTER_NAMES
+    }
+
+
+def _dtcm_word_handle(dut, addr):
+    index = (addr - NPU_DTCM_BASE) >> 2
+    return dut.u_npu_cluster.u_sram_d_tcm.mem[index]
+
+
+def _dtcm_header(dut, addr):
+    return b"".join(
+        read_dtcm_word(dut, addr + offset).to_bytes(4, "little")
+        for offset in range(0, 16, 4)
+    )
+
+
+async def monitor_command_buffer_pmu(
+    dut,
+    command_buffer_address,
+    command_headers,
+    sample_callback=None,
+):
+    """Return PMU deltas between successive streamed ABI command headers.
+
+    The streaming runtime loads every command through the same D-TCM buffer.
+    Watching only that buffer's four header words is event-driven and does not
+    add firmware instructions or host AXI traffic to the measured interval.
+    The caller includes the END header so the final command gets a closing
+    sample; the returned list contains one delta per non-END header.
+    """
+    headers = [bytes(header) for header in command_headers]
+    if len(headers) < 2 or any(len(header) != 16 for header in headers):
+        raise ValueError("command PMU tracing requires command headers plus END")
+
+    header_words = [
+        _dtcm_word_handle(dut, command_buffer_address + offset)
+        for offset in range(0, 16, 4)
+    ]
+    samples = []
+    deltas = []
+    for expected in headers:
+        while _dtcm_header(dut, command_buffer_address) != expected:
+            await First(*(ValueChange(word) for word in header_words))
+            await ReadOnly()
+        samples.append(pmu_direct_snapshot(dut))
+        if len(samples) > 1:
+            delta = pmu_counter_delta(samples[-1], samples[-2])
+            deltas.append(delta)
+            if sample_callback is not None:
+                sample_callback(len(deltas) - 1, delta)
+
+    return deltas
 
 
 async def release_fetch(dut, axi_master=None, enable_pmu=True):
