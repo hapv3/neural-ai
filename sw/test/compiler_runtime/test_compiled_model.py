@@ -1258,57 +1258,97 @@ def _extract_selected_yolo320_command_prefix(model, command_count):
     return package
 
 
-def _extract_selected_yolo320_command_range(model, first_command, end_command):
-    package = bytearray(model)
-    section_table_offset = struct.unpack_from("<I", package, 24)[0]
-    section_count = struct.unpack_from("<I", package, 20)[0]
-    commands_descriptor = None
+def _command_section(model):
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    section_count = struct.unpack_from("<I", model, 20)[0]
     for index in range(section_count):
         descriptor = section_table_offset + index * 32
-        if struct.unpack_from("<I", package, descriptor)[0] == 1:
-            commands_descriptor = descriptor
-            break
-    assert commands_descriptor is not None
+        if struct.unpack_from("<I", model, descriptor)[0] == 1:
+            offset, size = struct.unpack_from("<2I", model, descriptor + 8)
+            return descriptor, offset, size
+    raise ValueError("commands section is missing")
 
-    commands_offset = struct.unpack_from("<I", package, commands_descriptor + 8)[0]
-    total_commands = struct.unpack_from("<I", package, 32)[0]
-    assert 0 <= first_command < end_command <= total_commands
-    offset = commands_offset
-    command_offsets = [commands_offset]
-    for _ in range(total_commands):
-        command_type, command_size = struct.unpack_from("<HH", package, offset)
-        assert command_type != 0
-        assert command_size >= 32
-        offset += command_size
-        command_offsets.append(offset)
 
-    selected = bytes(package[command_offsets[first_command] : command_offsets[end_command]])
-    selected_end = commands_offset + len(selected)
-    package[commands_offset:selected_end] = selected
-    package[selected_end:selected_end + 32] = _command_header(0, 32) + bytes(16)
-    command_count = end_command - first_command
-    struct.pack_into("<I", package, 32, command_count)
-    struct.pack_into("<I", package, commands_descriptor + 12, len(selected) + 32)
-    struct.pack_into("<I", package, commands_descriptor + 20, command_count)
+def _logical_command_records(model):
+    _descriptor, commands_offset, commands_size = _command_section(model)
+    encoded = memoryview(model)[commands_offset : commands_offset + commands_size]
+    records = []
+    offset = 0
+    while offset < len(encoded):
+        command_type, command_size = struct.unpack_from("<HH", encoded, offset)
+        assert command_size >= 32 and command_size % 32 == 0
+        if command_type != 33:
+            record = bytes(encoded[offset : offset + command_size])
+            if command_type == 0:
+                assert offset + command_size == len(encoded)
+                return records, record
+            records.append(record)
+            offset += command_size
+            continue
+
+        iterations, body_count, body_bytes, patch_count = struct.unpack_from(
+            "<4I", encoded, offset + 16
+        )
+        assert 2 <= iterations and 1 <= body_count <= 16 and patch_count <= 24
+        assert command_size == ((32 + patch_count * 8 + 31) & ~31)
+        body = bytearray(encoded[offset + command_size : offset + command_size + body_bytes])
+        patches = [
+            struct.unpack_from("<2I", encoded, offset + 32 + patch * 8)
+            for patch in range(patch_count)
+        ]
+        for _iteration in range(iterations):
+            body_offset = 0
+            for _child in range(body_count):
+                child_type, child_size = struct.unpack_from("<HH", body, body_offset)
+                assert child_type not in (0, 33) and child_size >= 32
+                records.append(bytes(body[body_offset : body_offset + child_size]))
+                body_offset += child_size
+            assert body_offset == body_bytes
+            for word_offset, delta in patches:
+                byte_offset = word_offset * 4
+                value = struct.unpack_from("<I", body, byte_offset)[0]
+                struct.pack_into("<I", body, byte_offset, (value + delta) & 0xFFFFFFFF)
+        offset += command_size + body_bytes
+    raise ValueError("commands section has no END record")
+
+
+def _replace_command_section(model, commands, end):
+    package = bytearray(model)
+    descriptor, commands_offset, commands_size = _command_section(package)
+    replacement = b"".join(commands) + end
+    assert len(replacement) % 32 == 0
+    delta = len(replacement) - commands_size
+    package[commands_offset : commands_offset + commands_size] = replacement
+    section_table_offset = struct.unpack_from("<I", package, 24)[0]
+    section_count = struct.unpack_from("<I", package, 20)[0]
+    for index in range(section_count):
+        section = section_table_offset + index * 32
+        section_offset = struct.unpack_from("<I", package, section + 8)[0]
+        if section_offset > commands_offset:
+            struct.pack_into("<I", package, section + 8, section_offset + delta)
+    struct.pack_into("<I", package, 16, len(package))
+    struct.pack_into("<I", package, descriptor + 12, len(replacement))
+    struct.pack_into("<I", package, descriptor + 20, len(commands))
+    struct.pack_into("<I", package, 32, len(commands))
     return bytes(package)
 
 
+def _extract_selected_yolo320_command_range(model, first_command, end_command):
+    commands, end = _logical_command_records(model)
+    total_commands = len(commands)
+    assert 0 <= first_command < end_command <= total_commands
+    return _replace_command_section(model, commands[first_command:end_command], end)
+
+
 def _selected_command_trace_records(model, first_command, end_command):
-    section_table_offset = struct.unpack_from("<I", model, 24)[0]
-    section_count = struct.unpack_from("<I", model, 20)[0]
-    commands_offset = next(
-        struct.unpack_from("<I", model, section_table_offset + index * 32 + 8)[0]
-        for index in range(section_count)
-        if struct.unpack_from("<I", model, section_table_offset + index * 32)[0] == 1
-    )
-    total_commands = struct.unpack_from("<I", model, 32)[0]
+    commands, _end = _logical_command_records(model)
+    total_commands = len(commands)
     assert 0 <= first_command < end_command <= total_commands
 
     records = []
-    offset = commands_offset
-    for command_index in range(total_commands):
+    for command_index, command in enumerate(commands):
         command_type, command_size, flags, layer_id, tile_id = struct.unpack_from(
-            "<HHIII", model, offset
+            "<HHIII", command
         )
         if first_command <= command_index < end_command:
             records.append(
@@ -1319,10 +1359,9 @@ def _selected_command_trace_records(model, first_command, end_command):
                     "flags": flags,
                     "layer_id": layer_id,
                     "tile_id": tile_id,
-                    "header": bytes(model[offset : offset + 16]),
+                    "header": command[:16],
                 }
             )
-        offset += command_size
     records.append(
         {
             "command": end_command + 1,
@@ -1635,25 +1674,16 @@ def _describe_model_command(model, descriptor_header):
     command_type, command_size, _flags, layer_id, tile_id = struct.unpack(
         "<HHIII", descriptor_header
     )
-    section_table_offset = struct.unpack_from("<I", model, 24)[0]
-    section_count = struct.unpack_from("<I", model, 20)[0]
-    commands_offset = None
-    for section_index in range(section_count):
-        descriptor_offset = section_table_offset + section_index * 32
-        if struct.unpack_from("<I", model, descriptor_offset)[0] == 1:
-            commands_offset = struct.unpack_from("<I", model, descriptor_offset + 8)[0]
-            break
-    if commands_offset is None:
+    try:
+        commands, _end = _logical_command_records(model)
+    except ValueError:
         return "command=unknown (commands section missing)"
 
-    command_count = struct.unpack_from("<I", model, 32)[0]
-    offset = commands_offset
+    command_count = len(commands)
     matches = []
-    for command_index in range(command_count):
-        if model[offset : offset + 16] == descriptor_header:
+    for command_index, command_record in enumerate(commands):
+        if command_record[:16] == descriptor_header:
             matches.append(command_index)
-        _, size = struct.unpack_from("<HH", model, offset)
-        offset += size
     if len(matches) == 1:
         command = f"command={matches[0] + 1}/{command_count} (index={matches[0]})"
     elif matches:
@@ -4403,7 +4433,9 @@ async def test_compiler_generated_selected_yolo320_full_graph(dut):
     expected = interpreter.get_tensor(output_detail["index"]).tobytes()
     assert len(expected) == output_bytes
 
-    assert struct.unpack_from("<I", model, 32)[0] == 3910
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    logical_commands, _end = _logical_command_records(model)
+    assert command_count == len(logical_commands)
     assert struct.unpack_from("<I", model, 36)[0] <= 520192
     runtime_bindings = [
         (1, 0, input_base, input_bytes),
@@ -4434,7 +4466,7 @@ async def test_compiler_generated_selected_yolo320_full_graph(dut):
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
-    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 3910
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, output_base, output_bytes)) == expected
 
 

@@ -1529,5 +1529,74 @@ int main(void)
     dfl16->exp_lut.offset = 0xfffffc00u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    {
+        uint8_t affine_model[288] = {0};
+        uint8_t affine_buffer[NAI_AFFINE_LOOP_MAX_RECORD_BYTES];
+        nai_model_header_v1_t affine_header = {0};
+        nai_section_v1_t affine_commands = {
+            NAI_SECTION_COMMANDS, 0, 0, 160, 32, 4, {0, 0}};
+        nai_section_v1_t affine_constants = {
+            NAI_SECTION_CONSTANTS, 0, 160, 128, 32, 1, {0, 0}};
+        nai_model_view_v1_t affine_view = {0};
+        nai_resolver_v1_t affine_resolver = {
+            0x80030000u, sizeof(affine_model), 0, 0,
+            0x10100000u, 0x7f000u, 0, 0};
+        nai_cmd_affine_loop_v2_t *loop =
+            (nai_cmd_affine_loop_v2_t *)affine_model;
+        nai_cmd_affine_patch_v2_t *patches =
+            (nai_cmd_affine_patch_v2_t *)(affine_model + sizeof(*loop));
+        nai_cmd_dma_1d_v2_t *body =
+            (nai_cmd_dma_1d_v2_t *)(affine_model + 64);
+        nai_cmd_control_v2_t *end =
+            (nai_cmd_control_v2_t *)(affine_model + 128);
+        memory_reader_t affine_memory = {
+            affine_model, sizeof(affine_model), 0, 0};
+        nai_model_reader_v1_t affine_reader = {
+            &affine_memory, memory_read};
+
+        affine_header.command_count = 4;
+        affine_view.model = affine_model;
+        affine_view.model_bytes = sizeof(affine_model);
+        affine_view.header = &affine_header;
+        affine_view.commands = &affine_commands;
+        affine_view.constants = &affine_constants;
+
+        loop->header.type = NAI_CMD_AFFINE_LOOP;
+        loop->header.size_bytes = 64;
+        loop->iteration_count = 4;
+        loop->body_command_count = 1;
+        loop->body_bytes = sizeof(*body);
+        loop->patch_count = 2;
+        patches[0] = (nai_cmd_affine_patch_v2_t){3, 1};
+        patches[1] = (nai_cmd_affine_patch_v2_t){5, 32};
+        body->header.type = NAI_CMD_DMA_1D;
+        body->header.size_bytes = sizeof(*body);
+        body->source.region = NAI_REGION_MODEL_CONSTANTS;
+        body->destination.region = NAI_REGION_TCDM_SCRATCH;
+        body->length = 32;
+        body->direction = NAI_DMA_EXTERNAL_TO_LOCAL;
+        end->header.type = NAI_CMD_END;
+        end->header.size_bytes = sizeof(*end);
+
+        state = (mock_state_t){0};
+        ops.context = &state;
+        assert(nai_cmd_dispatch_v2(&affine_view, &affine_resolver, &ops,
+            &completed, &failure) == NAI_DISPATCH_OK);
+        assert(completed == 4u && state.calls == 4u);
+        assert(state.source == 0x80030100u);
+
+        state = (mock_state_t){0};
+        assert(nai_cmd_dispatch_stream_v2(&affine_view, &affine_resolver, &ops,
+            &affine_reader, affine_buffer, sizeof(affine_buffer),
+            &completed, &failure) == NAI_DISPATCH_OK);
+        assert(completed == 4u && state.calls == 4u);
+        assert(state.source == 0x80030100u);
+        assert(affine_memory.reads == 2u);
+
+        patches[0].body_word_offset = 0;
+        assert(nai_cmd_dispatch_v2(&affine_view, &affine_resolver, &ops,
+            &completed, &failure) == NAI_DISPATCH_BAD_STREAM);
+    }
     return 0;
 }

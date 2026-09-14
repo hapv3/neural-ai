@@ -23,8 +23,8 @@ typedef struct {
 
 static nai_model_stream_storage_v1_t g_model_storage;
 static nai_binding_address_v1_t g_binding_addresses[NAI_MAX_BINDINGS_V1];
-/* The stream reader must accommodate the largest v2 record. */
-static uint8_t g_command_buffer[sizeof(nai_cmd_linebuf_binary_v2_t)];
+/* Affine loop bodies are fetched once and expanded in DTCM. */
+static uint8_t g_command_buffer[NAI_AFFINE_LOOP_MAX_RECORD_BYTES];
 
 static uint32_t l2_read(void *context_pointer, uint32_t offset, void *destination, uint32_t bytes)
 {

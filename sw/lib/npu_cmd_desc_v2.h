@@ -41,7 +41,8 @@ typedef enum {
     NAI_CMD_LINEBUF_SUBMIT = 29,
     NAI_CMD_SYSTOLIC_WAIT = 30,
     NAI_CMD_LINEBUF_BINARY = 31,
-    NAI_CMD_LINEBUF_BINARY_SUBMIT = 32
+    NAI_CMD_LINEBUF_BINARY_SUBMIT = 32,
+    NAI_CMD_AFFINE_LOOP = 33
 } nai_cmd_type_v2_t;
 
 typedef struct {
@@ -51,6 +52,23 @@ typedef struct {
     uint32_t layer_id;
     uint32_t tile_id;
 } nai_cmd_header_v2_t;
+
+#define NAI_AFFINE_LOOP_MAX_PATCHES      24u
+#define NAI_AFFINE_LOOP_MAX_BODY_COMMANDS 16u
+#define NAI_AFFINE_LOOP_MAX_RECORD_BYTES 2048u
+
+typedef struct {
+    nai_cmd_header_v2_t header;
+    uint32_t iteration_count;
+    uint32_t body_command_count;
+    uint32_t body_bytes;
+    uint32_t patch_count;
+} nai_cmd_affine_loop_v2_t;
+
+typedef struct {
+    uint32_t body_word_offset;
+    uint32_t delta;
+} nai_cmd_affine_patch_v2_t;
 
 typedef struct {
     nai_cmd_header_v2_t header;
@@ -319,6 +337,10 @@ typedef struct {
 } nai_cmd_afu_dfl16_v2_t;
 
 _Static_assert(sizeof(nai_cmd_header_v2_t) == 16, "nai_cmd_header_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_affine_loop_v2_t) == 32,
+               "nai_cmd_affine_loop_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_affine_patch_v2_t) == 8,
+               "nai_cmd_affine_patch_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_control_v2_t) == 32, "nai_cmd_control_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_rq_load_v2_t) == 32, "nai_cmd_rq_load_v2_t ABI size");
 _Static_assert(offsetof(nai_cmd_rq_load_v2_t, qparam_index) == 16, "RQ load index offset");
