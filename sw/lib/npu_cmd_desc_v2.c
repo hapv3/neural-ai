@@ -936,7 +936,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
         header = (const nai_cmd_header_v2_t *)(view->model + view->commands->offset + offset);
         if (header->size_bytes < 32u || (header->size_bytes & 31u) != 0u ||
             !valid_range(offset, header->size_bytes, view->commands->size) ||
-            (header->flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u) {
+            (header->flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE |
+                               NAI_CMD_FLAG_AFU_LUT_REUSE)) != 0u ||
+            ((header->flags & NAI_CMD_FLAG_AFU_LUT_REUSE) != 0u &&
+             header->type != NAI_CMD_AFU_LUT)) {
             status = NAI_DISPATCH_BAD_COMMAND;
         } else if (header->type == NAI_CMD_END) {
             if (header->size_bytes != sizeof(nai_cmd_control_v2_t) ||
@@ -1066,7 +1069,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
         if (header.size_bytes < 32u || (header.size_bytes & 31u) != 0u ||
             !valid_range(offset, header.size_bytes, view->commands->size) ||
             NAI_TRUSTED_INVALID(
-                (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE)) != 0u)) {
+                (header.flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE |
+                                  NAI_CMD_FLAG_AFU_LUT_REUSE)) != 0u ||
+                ((header.flags & NAI_CMD_FLAG_AFU_LUT_REUSE) != 0u &&
+                 header.type != NAI_CMD_AFU_LUT))) {
             status = NAI_DISPATCH_BAD_COMMAND;
         } else if (header.type == NAI_CMD_END || header.type == NAI_CMD_BARRIER ||
                    header.type == NAI_CMD_RQ_LOAD ||

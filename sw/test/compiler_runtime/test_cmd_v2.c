@@ -197,6 +197,7 @@ static uint32_t mock_afu_lut(void *context, const nai_cmd_afu_lut_v2_t *command,
     state->destination = ofm;
     state->source2 = lut;
     state->length = command->length;
+    state->mode = command->header.flags;
     return 0u;
 }
 
@@ -409,6 +410,11 @@ int main(void)
     assert(state.direction == NAI_DMA_EXTERNAL_TO_LOCAL);
 
     dma = (nai_cmd_dma_1d_v2_t *)(model + 224);
+    dma->header.flags = NAI_CMD_FLAG_AFU_LUT_REUSE;
+    assert(nai_cmd_dispatch_v2(&view, &resolver, &ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    dma->header.flags = 0u;
+
     dma->header.type = NAI_CMD_DMA_SUBMIT_1D;
     ops.dma_submit_1d = mock_dma_1d;
     state = (mock_state_t){0};
@@ -682,6 +688,13 @@ int main(void)
     assert(completed == 1u && state.calls == 1u);
     assert(state.source == 0x10100000u && state.destination == 0x10100100u);
     assert(state.source2 == 0x80020060u && state.length == 64u);
+    afu_lut->header.flags = NAI_CMD_FLAG_AFU_LUT_REUSE;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.mode == NAI_CMD_FLAG_AFU_LUT_REUSE);
+    afu_lut->header.flags = 0u;
     state = (mock_state_t){0};
     assert(nai_cmd_dispatch_stream_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &gemm_reader, command_buffer, sizeof(command_buffer), &completed, &failure) ==

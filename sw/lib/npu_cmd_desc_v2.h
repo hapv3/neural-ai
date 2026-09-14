@@ -6,6 +6,7 @@
 
 #define NAI_CMD_FLAG_OPTIONAL  (1u << 0)
 #define NAI_CMD_FLAG_SKIPPABLE (1u << 1)
+#define NAI_CMD_FLAG_AFU_LUT_REUSE (1u << 2)
 
 typedef enum {
     NAI_CMD_END = 0,

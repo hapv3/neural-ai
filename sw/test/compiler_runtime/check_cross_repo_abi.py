@@ -14,6 +14,12 @@ COMPILER_CONSTANTS = {
     "Alignment": "NAI_ALIGNMENT_BYTES",
 }
 
+COMMAND_FLAGS = {
+    "CommandFlagOptional": "NAI_CMD_FLAG_OPTIONAL",
+    "CommandFlagSkippable": "NAI_CMD_FLAG_SKIPPABLE",
+    "CommandFlagAFULutReuse": "NAI_CMD_FLAG_AFU_LUT_REUSE",
+}
+
 ENUMS = {
     "Commands": "NAI_SECTION_COMMANDS",
     "Constants": "NAI_SECTION_CONSTANTS",
@@ -117,13 +123,16 @@ STRUCTS = {
 
 def integer(text, name):
     patterns = (
-        rf"\b{name}\s*=\s*(0x[0-9A-Fa-f]+|\d+)[uUlL]*",
-        rf"#define\s+{name}\s+(0x[0-9A-Fa-f]+|\d+)[uUlL]*",
+        rf"\b{name}\s*=\s*\(?\s*(0x[0-9A-Fa-f]+|\d+)[uUlL]*"
+        rf"(?:\s*<<\s*(\d+))?\s*\)?",
+        rf"#define\s+{name}\s+\(?\s*(0x[0-9A-Fa-f]+|\d+)[uUlL]*"
+        rf"(?:\s*<<\s*(\d+))?\s*\)?",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
-            return int(match.group(1), 0)
+            value = int(match.group(1), 0)
+            return value << int(match.group(2) or 0)
     raise AssertionError(f"missing ABI integer {name}")
 
 
@@ -160,6 +169,10 @@ def main():
         assert integer(compiler_abi, compiler_name) == integer(
             runtime_abi, runtime_name
         ), f"ABI constant mismatch: {compiler_name}/{runtime_name}"
+    for compiler_name, runtime_name in COMMAND_FLAGS.items():
+        assert integer(compiler_abi, compiler_name) == integer(
+            runtime_abi, runtime_name
+        ), f"ABI command flag mismatch: {compiler_name}/{runtime_name}"
     for compiler_name, runtime_name in ENUMS.items():
         assert integer(compiler_abi, compiler_name) == integer(
             runtime_abi, runtime_name
@@ -171,7 +184,8 @@ def main():
 
     print(
         "cross-repository ABI manifest matches: "
-        f"{len(COMPILER_CONSTANTS)} constants, {len(ENUMS)} enums, "
+        f"{len(COMPILER_CONSTANTS)} constants, {len(COMMAND_FLAGS)} flags, "
+        f"{len(ENUMS)} enums, "
         f"{len(STRUCTS)} structure sizes"
     )
 
