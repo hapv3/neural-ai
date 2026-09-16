@@ -9,8 +9,9 @@ HEXOBJCOPY = $(GCC_BIN)/riscv32-unknown-elf-objcopy
 CONV_PERF_SPATZ_RECT ?= 1
 
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
-         -O2 -fno-builtin -fno-jump-tables -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
-         -I../../lib -T link.ld -Wl,--no-relax \
+         -O2 -ffunction-sections -fdata-sections -fno-builtin -fno-jump-tables \
+         -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
+         -I../../lib -T link.ld -Wl,--no-relax,--gc-sections \
          -DNPU_CONV2D_ENABLE_SPATZ_RECT=$(CONV_PERF_SPATZ_RECT)
 
 SRCS = start.S main.c ../../lib/conv2d_packed.c ../../lib/hal_systolic.c ../../lib/spatz_ops.S ../../lib/spatz_rt.c
