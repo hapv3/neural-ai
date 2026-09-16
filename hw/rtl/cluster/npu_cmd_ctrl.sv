@@ -26,7 +26,13 @@ module npu_cmd_ctrl #(
     input  logic [(DATA_WIDTH/8)-1:0] snitch_be_i,
     input  logic [DATA_WIDTH-1:0]     snitch_wdata_i,
     output logic                      snitch_rvalid_o,
-    output logic [DATA_WIDTH-1:0]     snitch_rdata_o
+    output logic [DATA_WIDTH-1:0]     snitch_rdata_o,
+
+    output logic [31:0]               pmu_context_id_o,
+    output logic                      pmu_context_active_o,
+    output logic                      pmu_context_begin_o,
+    output logic                      pmu_context_end_o,
+    output logic [3:0]                pmu_phase_o
 );
 
     localparam int unsigned DATA_BYTES = DATA_WIDTH / 8;
@@ -39,6 +45,9 @@ module npu_cmd_ctrl #(
     localparam logic [ADDR_WIDTH-1:0] REG_FAIL_CODE   = 32'h0018;
     localparam logic [ADDR_WIDTH-1:0] REG_FAIL_PTR    = 32'h001C;
     localparam logic [ADDR_WIDTH-1:0] REG_DONE_COUNT  = 32'h0020;
+    localparam logic [ADDR_WIDTH-1:0] REG_PMU_BEGIN   = 32'h0024;
+    localparam logic [ADDR_WIDTH-1:0] REG_PMU_END     = 32'h0028;
+    localparam logic [ADDR_WIDTH-1:0] REG_PMU_PHASE   = 32'h002C;
 
     logic [31:0] l2_base_q;
     logic [31:0] total_bytes_q;
@@ -74,6 +83,9 @@ module npu_cmd_ctrl #(
                 REG_FAIL_CODE:   reg_read = fail_code_q;
                 REG_FAIL_PTR:    reg_read = fail_ptr_q;
                 REG_DONE_COUNT:  reg_read = done_count_q;
+                REG_PMU_BEGIN:   reg_read = pmu_context_id_o;
+                REG_PMU_END:     reg_read = {31'd0, pmu_context_active_o};
+                REG_PMU_PHASE:   reg_read = {28'd0, pmu_phase_o};
                 default:         reg_read = 32'h0;
             endcase
         end
@@ -100,6 +112,19 @@ module npu_cmd_ctrl #(
                     REG_FAIL_CODE:   fail_code_q <= wdata_word;
                     REG_FAIL_PTR:    fail_ptr_q <= wdata_word;
                     REG_DONE_COUNT:  done_count_q <= wdata_word;
+                    REG_PMU_BEGIN: begin
+                        pmu_context_id_o <= wdata_word;
+                        pmu_context_active_o <= 1'b1;
+                        pmu_context_begin_o <= 1'b1;
+                        pmu_phase_o <= 4'd6;
+                    end
+                    REG_PMU_END: begin
+                        pmu_context_id_o <= wdata_word;
+                        pmu_context_active_o <= 1'b0;
+                        pmu_context_end_o <= 1'b1;
+                        pmu_phase_o <= 4'd5;
+                    end
+                    REG_PMU_PHASE: pmu_phase_o <= wdata_word[3:0];
                     default: begin
                     end
                 endcase
@@ -118,6 +143,11 @@ module npu_cmd_ctrl #(
             fail_code_q     <= 32'h0;
             fail_ptr_q      <= 32'h0;
             done_count_q    <= 32'h0;
+            pmu_context_id_o <= 32'h0;
+            pmu_context_active_o <= 1'b0;
+            pmu_context_begin_o <= 1'b0;
+            pmu_context_end_o <= 1'b0;
+            pmu_phase_o <= 4'h0;
             host_raddr_q    <= '0;
             snitch_raddr_q  <= '0;
             host_rvalid_o   <= 1'b0;
@@ -125,6 +155,8 @@ module npu_cmd_ctrl #(
         end else begin
             host_rvalid_o <= 1'b0;
             snitch_rvalid_o <= 1'b0;
+            pmu_context_begin_o <= 1'b0;
+            pmu_context_end_o <= 1'b0;
 
             if (host_req_i && host_gnt_o) begin
                 if (host_we_i) begin

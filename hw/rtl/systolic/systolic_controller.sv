@@ -74,9 +74,16 @@ module systolic_controller #(
     output logic                      perf_compute_en_o,
     output logic                      perf_ofm_valid_o,
     output logic                      perf_ofm_ready_o,
+    output logic                      perf_start_o,
+    output logic                      perf_linebuf_busy_o,
+    output logic                      perf_linebuf_prefetch_busy_o,
+    output logic                      perf_binary_busy_o,
     output logic [2:0]                debug_state_o,
     output logic [1:0]                debug_drain_state_o,
-    output logic [4:0]                debug_linebuf_state_o
+    output logic [4:0]                debug_linebuf_state_o,
+    output logic [1:0]                debug_linebuf_fetch_main_state_o,
+    output logic [2:0]                debug_linebuf_fetch_background_state_o,
+    output logic [2:0]                debug_linebuf_bypass_state_o
 );
 
     logic [2:0] state_q;
@@ -259,6 +266,10 @@ module systolic_controller #(
     assign perf_compute_en_o = compute_en;
     assign perf_ofm_valid_o = ofm_valid;
     assign perf_ofm_ready_o = ofm_ready;
+    assign perf_start_o = cfg_sys_start_i;
+    assign perf_linebuf_busy_o = linebuf_busy;
+    assign perf_linebuf_prefetch_busy_o = linebuf_prefetch_busy;
+    assign perf_binary_busy_o = binary_operand_busy;
     assign debug_state_o = state_q;
     assign debug_linebuf_state_o = linebuf_debug_state;
     assign linebuf_spatial_m = (cfg_linebuf_spatial_m_i != 32'd0) ? cfg_linebuf_spatial_m_i : cfg_sys_dim_m_i;
@@ -767,7 +778,10 @@ module systolic_controller #(
         .emitted_vectors_o       (),
         .fetch_beats_o           (),
         .bypass_vectors_o        (),
-        .debug_state_o           (linebuf_debug_state)
+        .debug_state_o           (linebuf_debug_state),
+        .debug_fetch_main_state_o(debug_linebuf_fetch_main_state_o),
+        .debug_fetch_background_state_o(debug_linebuf_fetch_background_state_o),
+        .debug_bypass_state_o    (debug_linebuf_bypass_state_o)
     );
 
 endmodule

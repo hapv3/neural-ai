@@ -32,7 +32,8 @@ module conv_linebuf_bypass_engine #(
     input  logic row_ready_i,
     output logic [31:0] fetch_beats_o,
     output logic [31:0] emitted_vectors_o,
-    output logic [4:0] debug_state_o
+    output logic [4:0] debug_state_o,
+    output logic [2:0] debug_raw_state_o
 );
 
     localparam int unsigned BEAT_BYTES = DATA_WIDTH / 8;
@@ -84,6 +85,7 @@ module conv_linebuf_bypass_engine #(
 
     // Preserve the legacy parent debug-state encoding cycle-for-cycle.
     always_comb begin
+        debug_raw_state_o = state_q;
         unique case (state_q)
             BYPASS_PREP:  debug_state_o = 5'd9;
             BYPASS_REQ0:  debug_state_o = 5'd10;

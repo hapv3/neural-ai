@@ -70,7 +70,9 @@ module npu_pulp_idma_ctrl_mm #(
     output logic                      irq_o2a_busy_o,
     output logic                      irq_o2a_start_o,
     output logic                      irq_o2a_done_o,
-    output logic                      irq_o2a_error_o
+    output logic                      irq_o2a_error_o,
+    output logic [31:0]               perf_a2o_queue_usage_o,
+    output logic [31:0]               perf_o2a_queue_usage_o
 );
 
     localparam int unsigned STRB_WIDTH = DATA_WIDTH / 8;
@@ -184,6 +186,8 @@ module npu_pulp_idma_ctrl_mm #(
     idma_pkg::idma_busy_t [0:0] o2a_busy_arr;
     logic [0:0][31:0] o2a_done_id_arr;
     logic [0:0]       o2a_me_busy_arr;
+    logic [$clog2(IDMA_JOB_FIFO_DEPTH)-1:0] a2o_queue_usage;
+    logic [$clog2(IDMA_JOB_FIFO_DEPTH)-1:0] o2a_queue_usage;
 
     logic [31:0]                       mmio_word_addr;
     logic [31:0]                       mmio_local_addr;
@@ -261,6 +265,8 @@ module npu_pulp_idma_ctrl_mm #(
     assign irq_o2a_start_o = o2a_front_valid && o2a_front_ready;
     assign irq_o2a_done_o = o2a_fe_rsp_valid;
     assign irq_o2a_error_o = o2a_fe_rsp_valid && o2a_be_rsp.error;
+    assign perf_a2o_queue_usage_o = 32'(a2o_queue_usage);
+    assign perf_o2a_queue_usage_o = 32'(o2a_queue_usage);
 
     idma_reg32_3d #(
         .NumRegs        (1),
@@ -306,7 +312,7 @@ module npu_pulp_idma_ctrl_mm #(
         .rst_ni,
         .testmode_i (1'b0),
         .flush_i    (1'b0),
-        .usage_o    (),
+        .usage_o    (a2o_queue_usage),
         .data_i     (a2o_front_req),
         .valid_i    (a2o_front_valid),
         .ready_o    (a2o_front_ready),
@@ -488,7 +494,7 @@ module npu_pulp_idma_ctrl_mm #(
         .rst_ni,
         .testmode_i (1'b0),
         .flush_i    (1'b0),
-        .usage_o    (),
+        .usage_o    (o2a_queue_usage),
         .data_i     (o2a_front_req),
         .valid_i    (o2a_front_valid),
         .ready_o    (o2a_front_ready),

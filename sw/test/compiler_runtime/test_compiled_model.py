@@ -22,11 +22,13 @@ from npu_test_utils import (
     NPU_CMD_STATUS,
     NPU_CMD_STATUS_FAIL,
     NPU_CMD_STATUS_PASS,
+    TCDM_TOTAL_BYTES,
     _axi_read32,
     format_pmu_report,
     hold_reset,
     load_firmware_elf_axi,
     monitor_command_buffer_pmu,
+    pmu_direct_snapshot,
     program_command_queue,
     read_dtcm_word,
     read_l2_bytes,
@@ -1444,6 +1446,50 @@ def _decode_yolo320_snapshot(model, snapshot):
     )
 
 
+def _verify_yolo320_snapshot(
+    model,
+    snapshot,
+    *,
+    expected_boundary=None,
+    expected_tcdm=None,
+    expected_temporary=None,
+    expected_output=None,
+):
+    """Validate snapshot integrity and optionally compare its complete memory image."""
+    boundary, tcdm, temporary, output = _decode_yolo320_snapshot(model, snapshot)
+    if expected_boundary is not None and boundary != expected_boundary:
+        raise ValueError(
+            f"YOLO320 snapshot boundary is {boundary}, expected {expected_boundary}"
+        )
+
+    for name, actual, expected in (
+        ("TCDM", tcdm, expected_tcdm),
+        ("L2 temporary", temporary, expected_temporary),
+        ("output", output, expected_output),
+    ):
+        if expected is None:
+            continue
+        if isinstance(expected, int):
+            if len(actual) != expected:
+                raise ValueError(
+                    f"YOLO320 snapshot {name} has {len(actual)} bytes, expected {expected}"
+                )
+        elif actual != bytes(expected):
+            raise ValueError(
+                f"YOLO320 snapshot {name} differs from live memory: "
+                f"snapshot_crc=0x{zlib.crc32(actual) & 0xFFFFFFFF:08x} "
+                f"live_crc=0x{zlib.crc32(bytes(expected)) & 0xFFFFFFFF:08x}"
+            )
+    return boundary, tcdm, temporary, output
+
+
+def _yolo320_snapshot_path_boundary(path):
+    marker = "command-"
+    marker_offset = path.stem.rfind(marker)
+    suffix = path.stem[marker_offset + len(marker) :] if marker_offset >= 0 else ""
+    return int(suffix) if suffix.isdigit() else None
+
+
 def _yolo320_snapshot_output_path(path_spec, command_boundary, multiple_boundaries):
     if "{command}" in path_spec:
         return Path(path_spec.replace("{command}", str(command_boundary)))
@@ -1724,6 +1770,9 @@ def _systolic_debug_state(dut):
         "BYPASS_WAIT1",
         "STREAM_DONE",
     )
+    linebuf_fetch_main_states = ("REQ0", "REQ1", "DRAIN", "IDLE")
+    linebuf_fetch_background_states = ("IDLE", "SCAN", "REQ0", "REQ1", "DRAIN")
+    linebuf_bypass_states = ("IDLE", "PREP", "REQ0", "WAIT0", "REQ1", "WAIT1", "EMIT")
 
     def state_name(signal, names):
         value = int(signal.value) if signal.value.is_resolvable else -1
@@ -1733,6 +1782,9 @@ def _systolic_debug_state(dut):
         f"sys={state_name(dut.debug_sys_state_o, systolic_states)}",
         f"drain={state_name(dut.debug_sys_drain_state_o, drain_states)}",
         f"linebuf={state_name(dut.debug_linebuf_state_o, linebuf_states)}",
+        f"lb_fetch={state_name(dut.debug_linebuf_fetch_main_state_o, linebuf_fetch_main_states)}",
+        f"lb_bg={state_name(dut.debug_linebuf_fetch_background_state_o, linebuf_fetch_background_states)}",
+        f"lb_bypass={state_name(dut.debug_linebuf_bypass_state_o, linebuf_bypass_states)}",
     ]
     controller = getattr(dut.u_npu_cluster, "u_sys_ctrl", None)
     if controller is None:
@@ -1749,16 +1801,65 @@ def _systolic_debug_state(dut):
         signal = getattr(controller, signal_name, None)
         if signal is not None and signal.value.is_resolvable:
             details.append(f"{label}={int(signal.value)}")
-    linebuffer = getattr(controller, "i_conv_channel_linebuf_packer", None)
+    input_engine = getattr(controller, "i_input_engine", None)
+    linebuffer = getattr(input_engine, "i_linebuf", None) if input_engine is not None else None
     if linebuffer is not None:
-        for label, signal_name in (
-            ("bg", "bg_state_q"),
-            ("beat_fifo", "bf_count_q"),
-            ("emitted", "emitted_vectors_q"),
+        fetch_engine = getattr(linebuffer, "i_fetch_engine", None)
+        scheduler = getattr(linebuffer, "i_spatial_scheduler", None)
+        for label, owner, signal_name in (
+            ("beat_fifo", fetch_engine, "count_q"),
+            ("emitted", scheduler, "emitted_vectors_q"),
         ):
-            signal = getattr(linebuffer, signal_name, None)
+            if owner is None:
+                continue
+            signal = getattr(owner, signal_name, None)
             if signal is not None and signal.value.is_resolvable:
                 details.append(f"{label}={int(signal.value)}")
+    return ", ".join(details)
+
+
+def _dma_debug_state(dut):
+    cluster = dut.u_npu_cluster
+    controller = cluster.u_idma_ctrl_mm
+    details = []
+
+    def add(label, owner, signal_name):
+        signal = getattr(owner, signal_name, None)
+        if signal is not None and signal.value.is_resolvable:
+            details.append(f"{label}={int(signal.value)}")
+
+    for label, signal_name in (
+        ("dma_busy", "idma_irq_a2o_busy"),
+        ("dma_start", "idma_irq_a2o_start"),
+        ("dma_done", "idma_irq_a2o_done"),
+        ("dma_queue", "idma_a2o_queue_usage"),
+        ("pmu_context", "pmu_context_id"),
+        ("pmu_active", "pmu_context_active"),
+        ("pmu_phase", "pmu_phase"),
+    ):
+        add(label, cluster, signal_name)
+    for label, signal_name in (
+        ("dma_next_id", "a2o_next_id"),
+        ("dma_done_id", "a2o_done_id"),
+        ("front_valid", "a2o_front_valid"),
+        ("front_ready", "a2o_front_ready"),
+        ("fifo_valid", "a2o_fe_valid"),
+        ("fifo_ready", "a2o_fe_ready"),
+        ("backend_valid", "a2o_be_req_valid"),
+        ("backend_ready", "a2o_be_req_ready"),
+        ("backend_rsp", "a2o_be_rsp_valid"),
+        ("midend_busy", "a2o_me_busy"),
+    ):
+        add(label, controller, signal_name)
+    for label, signal_name in (
+        ("axi_ar_v", "axi_ar_valid_o"),
+        ("axi_ar_r", "axi_ar_ready_i"),
+        ("axi_r_v", "axi_r_valid_i"),
+        ("axi_r_r", "axi_r_ready_o"),
+        ("obi_w_req", "idma_obi_write_req"),
+        ("obi_w_gnt", "idma_obi_write_gnt"),
+    ):
+        add(label, cluster, signal_name)
     return ", ".join(details)
 
 
@@ -1792,7 +1893,12 @@ async def _load_and_run(
                 sample_callback=command_trace_callback,
             )
         )
-    await release_fetch(dut, axi_master=axi_master)
+    pmu_filter = os.environ.get("NAI_PMU_COMMAND_FILTER")
+    await release_fetch(
+        dut,
+        axi_master=axi_master,
+        pmu_command_id=int(pmu_filter, 0) if pmu_filter is not None else None,
+    )
     progress_callback = lambda: "; ".join(
         detail
         for detail in (
@@ -1800,6 +1906,7 @@ async def _load_and_run(
             if model is not None
             else "",
             _systolic_debug_state(dut),
+            _dma_debug_state(dut),
         )
         if detail
     )
@@ -1828,10 +1935,13 @@ async def _load_and_run(
             else "command=unavailable"
         )
         systolic_progress = _systolic_debug_state(dut)
+        dma_progress = _dma_debug_state(dut)
+        dut._log.error("timeout PMU snapshot:\n%s", format_pmu_report(pmu_direct_snapshot(dut)))
         raise AssertionError(
             f"{error}; status={status} fail=0x{fail_code:08x} "
             f"pointer=0x{fail_pointer:08x} done={done_count} "
-            f"pc=0x{program_counter:08x}; {command_progress}; {systolic_progress}"
+            f"pc=0x{program_counter:08x}; {command_progress}; {systolic_progress}; "
+            f"{dma_progress}"
         ) from error
     if command_trace_task is not None:
         return counters, await command_trace_task
@@ -4251,7 +4361,7 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
     )
     await reset_dut(dut)
 
-    _, full_model = _compile_selected_yolo320_model()
+    model_path, full_model = _compile_selected_yolo320_model()
     total_commands = struct.unpack_from("<I", full_model, 32)[0]
     snapshot_input_path = os.environ.get("YOLO320_SNAPSHOT_IN", "")
     snapshot_output_path = os.environ.get("YOLO320_SNAPSHOT_OUT", "")
@@ -4276,6 +4386,25 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
     output_bytes = 84 * 2100
     l2_temporary_bytes = 307200
     input_data = bytes(((index * 37 + 11) & 0xFF) for index in range(input_bytes))
+    expected_output = None
+    if segment_ends[-1] == total_commands:
+        import numpy as np
+        import tensorflow as tf
+
+        interpreter = tf.lite.Interpreter(
+            model_path=str(model_path),
+            experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+        )
+        interpreter.allocate_tensors()
+        input_detail = interpreter.get_input_details()[0]
+        output_detail = interpreter.get_output_details()[0]
+        input_tensor = np.frombuffer(input_data, dtype=np.uint8).view(np.int8).reshape(
+            1, 320, 320, 3
+        )
+        interpreter.set_tensor(input_detail["index"], input_tensor)
+        interpreter.invoke()
+        expected_output = interpreter.get_tensor(output_detail["index"]).tobytes()
+        assert len(expected_output) == output_bytes
     runtime_bindings = [
         (1, 0, input_base, input_bytes),
         (2, 0, output_base, output_bytes),
@@ -4283,8 +4412,14 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
     ]
     await write_l2_bytes(dut, input_base, input_data)
     if snapshot_input_path:
-        boundary, tcdm, l2_temporary, output = _decode_yolo320_snapshot(
-            full_model, Path(snapshot_input_path).read_bytes()
+        snapshot_input = Path(snapshot_input_path)
+        boundary, tcdm, l2_temporary, output = _verify_yolo320_snapshot(
+            full_model,
+            snapshot_input.read_bytes(),
+            expected_boundary=_yolo320_snapshot_path_boundary(snapshot_input),
+            expected_tcdm=TCDM_TOTAL_BYTES,
+            expected_temporary=l2_temporary_bytes,
+            expected_output=output_bytes,
         )
         assert len(l2_temporary) == l2_temporary_bytes
         assert len(output) == output_bytes
@@ -4293,9 +4428,16 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
         write_tcdm_bytes(dut, tcdm)
         await write_l2_bytes(dut, l2_temporary_base, l2_temporary)
         await write_l2_bytes(dut, output_base, output)
+        if read_tcdm_bytes(dut) != tcdm:
+            raise AssertionError("YOLO320 snapshot TCDM restore verification failed")
+        if bytes(await read_l2_bytes(dut, l2_temporary_base, l2_temporary_bytes)) != l2_temporary:
+            raise AssertionError("YOLO320 snapshot L2 temporary restore verification failed")
+        if bytes(await read_l2_bytes(dut, output_base, output_bytes)) != output:
+            raise AssertionError("YOLO320 snapshot output restore verification failed")
         await release_reset(dut)
         dut._log.info(
-            "YOLO320 restored snapshot after command %d from %s",
+            "YOLO320 SNAPSHOT INTEGRITY OK: restored command %d from %s; "
+            "model/payload CRC, sizes and memory readback match",
             first_command,
             snapshot_input_path,
         )
@@ -4374,23 +4516,51 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
             end_command,
         )
         first_command = end_command
+        if expected_output is not None and first_command == total_commands:
+            actual_output = bytes(await read_l2_bytes(dut, output_base, output_bytes))
+            assert actual_output == expected_output, (
+                "YOLO320 final output differs from TensorFlow Lite reference: "
+                f"actual_crc=0x{zlib.crc32(actual_output) & 0xFFFFFFFF:08x} "
+                f"expected_crc=0x{zlib.crc32(expected_output) & 0xFFFFFFFF:08x}"
+            )
+            dut._log.info(
+                "YOLO320 OUTPUT DATA PASS: %d bytes match TensorFlow Lite reference "
+                "(crc32=0x%08x)",
+                output_bytes,
+                zlib.crc32(actual_output) & 0xFFFFFFFF,
+            )
         if snapshot_output_path:
             output_path = _yolo320_snapshot_output_path(
                 snapshot_output_path, first_command, multiple_snapshot_boundaries
             )
+            snapshot_tcdm = read_tcdm_bytes(dut)
+            snapshot_temporary = bytes(
+                await read_l2_bytes(dut, l2_temporary_base, l2_temporary_bytes)
+            )
+            snapshot_output = bytes(await read_l2_bytes(dut, output_base, output_bytes))
             snapshot = _encode_yolo320_snapshot(
                 full_model,
                 first_command,
-                read_tcdm_bytes(dut),
-                await read_l2_bytes(dut, l2_temporary_base, l2_temporary_bytes),
-                await read_l2_bytes(dut, output_base, output_bytes),
+                snapshot_tcdm,
+                snapshot_temporary,
+                snapshot_output,
             )
             output_path.write_bytes(snapshot)
+            stored_snapshot = output_path.read_bytes()
+            _verify_yolo320_snapshot(
+                full_model,
+                stored_snapshot,
+                expected_boundary=first_command,
+                expected_tcdm=snapshot_tcdm,
+                expected_temporary=snapshot_temporary,
+                expected_output=snapshot_output,
+            )
             dut._log.info(
-                "YOLO320 wrote snapshot after command %d to %s (%d bytes)",
+                "YOLO320 SNAPSHOT INTEGRITY OK: command %d written to %s (%d bytes); "
+                "model/payload CRC, sizes and live memory match",
                 first_command,
                 output_path,
-                len(snapshot),
+                len(stored_snapshot),
             )
 
 

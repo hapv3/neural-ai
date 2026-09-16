@@ -6,14 +6,15 @@ COCOTB_TESTCASE ?=
 
 .PHONY: all check check_cross_repo_abi firmware sim clean
 
-all: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer test_dma_async_state
+all: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_copy_layout test_quant_buffer test_dma_async_state
 
 test_model_abi: test_model_abi.c ../../lib/npu_model_abi.h ../../lib/npu_cmd_desc_v2.h ../../lib/npu_model_loader.h ../../lib/npu_model_loader.c ../../lib/npu_memory_map.h
 	$(CC) $(CFLAGS) -I../../lib test_model_abi.c ../../lib/npu_model_loader.c -o $@
 
-check: test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer test_dma_async_state check_cross_repo_abi
+check: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_copy_layout test_quant_buffer test_dma_async_state check_cross_repo_abi
 	./test_model_abi
 	./test_cmd_v2
+	./test_cmd_v2_pmu
 	./test_copy_layout
 	./test_quant_buffer
 	./test_dma_async_state
@@ -35,6 +36,9 @@ sim: firmware
 test_cmd_v2: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
 	$(CC) $(CFLAGS) -I../../lib test_cmd_v2.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@
 
+test_cmd_v2_pmu: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
+	$(CC) $(CFLAGS) -DNAI_PMU_PROFILE=1 -I../../lib test_cmd_v2.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@
+
 test_copy_layout: test_copy_layout.c ../../lib/npu_layout_ops.h ../../lib/npu_layout_ops.c
 	$(CC) $(CFLAGS) -I../../lib test_copy_layout.c ../../lib/npu_layout_ops.c -o $@
 
@@ -45,4 +49,4 @@ test_dma_async_state: test_dma_async_state.c ../../lib/npu_dma_async_state.h ../
 	$(CC) $(CFLAGS) -I../../lib test_dma_async_state.c -o $@
 
 clean:
-	rm -f test_model_abi test_cmd_v2 test_copy_layout test_quant_buffer test_dma_async_state
+	rm -f test_model_abi test_cmd_v2 test_cmd_v2_pmu test_copy_layout test_quant_buffer test_dma_async_state

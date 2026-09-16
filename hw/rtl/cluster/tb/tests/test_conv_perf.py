@@ -127,6 +127,50 @@ LINEBUF_STATE_NAMES = {
     14: "CH_STREAM_DONE",
 }
 
+LINEBUF_FETCH_MAIN_STATE_NAMES = {0: "MAIN_REQ0", 1: "MAIN_REQ1", 2: "MAIN_DRAIN", 3: "MAIN_IDLE"}
+LINEBUF_FETCH_BACKGROUND_STATE_NAMES = {
+    0: "BG_IDLE",
+    1: "BG_SCAN",
+    2: "BG_REQ0",
+    3: "BG_REQ1",
+    4: "BG_DRAIN",
+}
+LINEBUF_BYPASS_STATE_NAMES = {
+    0: "BYPASS_IDLE",
+    1: "BYPASS_PREP",
+    2: "BYPASS_REQ0",
+    3: "BYPASS_WAIT0",
+    4: "BYPASS_REQ1",
+    5: "BYPASS_WAIT1",
+    6: "BYPASS_EMIT",
+}
+
+PMU_DRAIN_STATE_COUNTERS = (
+    "drain_idle_state_cycles",
+    "drain_accum_read_state_cycles",
+    "drain_accum_write_state_cycles",
+    "drain_accum_requant_state_cycles",
+)
+PMU_LINEBUF_STATE_COUNTERS = tuple(
+    f"linebuf_{state}_state_cycles"
+    for state in (
+        "idle", "ensure", "fill_req0", "fill_req1", "fill_drain",
+        "window_req", "window_wait", "stream_prime", "stream_emit",
+        "bypass_prep", "bypass_req0", "bypass_wait0", "bypass_req1",
+        "bypass_wait1", "stream_done",
+    )
+)
+PMU_LINEBUF_FETCH_MAIN_STATE_COUNTERS = tuple(
+    f"linebuf_fetch_main_{state}_state_cycles" for state in ("req0", "req1", "drain", "idle")
+)
+PMU_LINEBUF_FETCH_BACKGROUND_STATE_COUNTERS = tuple(
+    f"linebuf_fetch_bg_{state}_state_cycles" for state in ("idle", "scan", "req0", "req1", "drain")
+)
+PMU_LINEBUF_BYPASS_STATE_COUNTERS = tuple(
+    f"linebuf_bypass_{state}_engine_state_cycles"
+    for state in ("idle", "prep", "req0", "wait0", "req1", "wait1", "emit")
+)
+
 P3_CASES = {
     P3_CASE_IC1: ("conv1x1 IC1", 4, 4, 1, 4, 4, 1, 1, 1, 1, 0, 0, 32, 1, 1, 0, False),
     P3_CASE_IC3: ("conv1x1 IC3", 4, 4, 3, 4, 4, 1, 1, 1, 1, 0, 0, 32, 1, 1, 0, False),
@@ -263,6 +307,7 @@ P3_CASES = {
 
 CONV_PERF_GROUP = int(os.environ.get("CONV_PERF_GROUP", "0"))
 CONV_PERF_CASE = int(os.environ.get("CONV_PERF_CASE", "-1"))
+CONV_PERF_TIMEOUT_CYCLES = int(os.environ.get("CONV_PERF_TIMEOUT_CYCLES", "1600000"))
 CONV_PERF_GROUP_ALL = 0
 CONV_PERF_GROUP_POINTWISE = 1
 CONV_PERF_GROUP_KERNELS = 2
@@ -750,7 +795,7 @@ def format_state_counts(title, counts, total, idle_name=None, limit=None):
 
 async def monitor_conv_perf_states(dut, stats):
     ctrl = dut.u_npu_cluster.u_sys_ctrl
-    linebuf = ctrl.i_conv_channel_linebuf_packer
+    linebuf = ctrl.i_input_engine.i_linebuf
     cluster = dut.u_npu_cluster
 
     while not stats["done"]:
@@ -768,6 +813,9 @@ async def monitor_conv_perf_states(dut, stats):
             lambda: ctrl.debug_linebuf_state_o,
             lambda: cluster.sys_debug_linebuf_state,
         )
+        fetch_main_state = safe_signal_to_int(lambda: dut.debug_linebuf_fetch_main_state_o)
+        fetch_background_state = safe_signal_to_int(lambda: dut.debug_linebuf_fetch_background_state_o)
+        bypass_state = safe_signal_to_int(lambda: dut.debug_linebuf_bypass_state_o)
 
         if systolic_state is not None:
             bump_counter(stats["systolic"], SYSTOLIC_STATE_NAMES, systolic_state)
@@ -775,6 +823,16 @@ async def monitor_conv_perf_states(dut, stats):
             bump_counter(stats["drain"], DRAIN_STATE_NAMES, drain_state)
         if linebuf_state is not None:
             bump_counter(stats["linebuf"], LINEBUF_STATE_NAMES, linebuf_state)
+        if fetch_main_state is not None:
+            bump_counter(stats["linebuf_fetch_main"], LINEBUF_FETCH_MAIN_STATE_NAMES, fetch_main_state)
+        if fetch_background_state is not None:
+            bump_counter(
+                stats["linebuf_fetch_background"],
+                LINEBUF_FETCH_BACKGROUND_STATE_NAMES,
+                fetch_background_state,
+            )
+        if bypass_state is not None:
+            bump_counter(stats["linebuf_bypass"], LINEBUF_BYPASS_STATE_NAMES, bypass_state)
 
         if safe_signal_to_int(lambda: cluster.sys_compute_en) == 1:
             stats["events"]["compute"] += 1
@@ -797,6 +855,40 @@ async def monitor_conv_perf_states(dut, stats):
 
 
 def log_conv_perf_state_report(dut, stats):
+    ctrl = dut.u_npu_cluster.u_sys_ctrl
+    linebuf = ctrl.i_input_engine.i_linebuf
+    scheduler = linebuf.i_spatial_scheduler
+    weight = ctrl.i_weight_engine
+    terminal_signals = (
+        ("sys_state", lambda: ctrl.state_q),
+        ("drain_remaining", lambda: ctrl.drain_cnt_q),
+        ("ofm_empty", lambda: ctrl.ofm_fifo_empty),
+        ("input_done", lambda: ctrl.input_feed_done),
+        ("has_next_tile", lambda: ctrl.linebuf_has_next_k_tile),
+        ("k_tile", lambda: ctrl.k_tile_idx_q),
+        ("weight_load_done", lambda: ctrl.weight_load_done),
+        ("weight_preload_done", lambda: ctrl.weight_preload_done),
+        ("linebuf_busy", lambda: ctrl.linebuf_busy),
+        ("linebuf_prefetch_busy", lambda: ctrl.linebuf_prefetch_busy),
+        ("linebuf_tile", lambda: scheduler.k_tile_idx_q),
+        ("linebuf_more_tiles", lambda: scheduler.more_k_tiles),
+        ("linebuf_stream_drained", lambda: scheduler.formatter_stream_drained),
+        ("linebuf_prefetch_active", lambda: scheduler.prefetch_active_q),
+        ("linebuf_prefetch_ready", lambda: scheduler.prefetch_ready_q),
+        ("weight_req_remaining", lambda: weight.req_cnt_q),
+        ("weight_rsp_remaining", lambda: weight.rsp_cnt_q),
+        ("weight_obi_rsp_remaining", lambda: weight.obi_rsp_cnt_q),
+        ("weight_preload_active", lambda: weight.preload_active_q),
+        ("weight_fifo_empty", lambda: weight.fifo_empty),
+        ("weight_fifo_full", lambda: weight.fifo_full),
+    )
+    dut._log.info(
+        "conv_perf terminal handshake snapshot: %s",
+        " ".join(
+            f"{name}={safe_signal_to_int(reader)}"
+            for name, reader in terminal_signals
+        ),
+    )
     dut._log.info(
         "conv_perf state monitor events: cycles=%d compute=%d weight_load=%d ofm_valid=%d "
         "linebuf_row_valid=%d linebuf_row_ready=%d linebuf_obi_req=%d linebuf_obi_stall=%d "
@@ -815,6 +907,42 @@ def log_conv_perf_state_report(dut, stats):
     dut._log.info("%s", format_state_counts("systolic state cycles", stats["systolic"], stats["cycles"], "IDLE"))
     dut._log.info("%s", format_state_counts("drain state cycles", stats["drain"], stats["cycles"], None))
     dut._log.info("%s", format_state_counts("linebuffer state cycles", stats["linebuf"], stats["cycles"], "CH_IDLE"))
+    dut._log.info(
+        "%s",
+        format_state_counts(
+            "linebuffer main-fetch state cycles", stats["linebuf_fetch_main"], stats["cycles"], "MAIN_IDLE"
+        ),
+    )
+    dut._log.info(
+        "%s",
+        format_state_counts(
+            "linebuffer background state cycles",
+            stats["linebuf_fetch_background"],
+            stats["cycles"],
+            "BG_IDLE",
+        ),
+    )
+    dut._log.info(
+        "%s",
+        format_state_counts(
+            "linebuffer bypass state cycles", stats["linebuf_bypass"], stats["cycles"], "BYPASS_IDLE"
+        ),
+    )
+
+
+def check_pmu_fsm_partitions(report):
+    scope_cycles = sum(report[name] for name in PMU_DRAIN_STATE_COUNTERS)
+    assert scope_cycles > 0, "systolic job state scope was never active"
+    for label, names in (
+        ("linebuffer scheduler", PMU_LINEBUF_STATE_COUNTERS),
+        ("linebuffer main fetch", PMU_LINEBUF_FETCH_MAIN_STATE_COUNTERS),
+        ("linebuffer background fetch", PMU_LINEBUF_FETCH_BACKGROUND_STATE_COUNTERS),
+        ("linebuffer bypass", PMU_LINEBUF_BYPASS_STATE_COUNTERS),
+    ):
+        state_cycles = sum(report[name] for name in names)
+        assert state_cycles == scope_cycles, (
+            f"{label} state partition mismatch: states={state_cycles} scope={scope_cycles}"
+        )
 
 
 async def boot_and_run(dut, test_file):
@@ -871,6 +999,9 @@ async def boot_and_run(dut, test_file):
         "systolic": {},
         "drain": {},
         "linebuf": {},
+        "linebuf_fetch_main": {},
+        "linebuf_fetch_background": {},
+        "linebuf_bypass": {},
         "events": {
             "compute": 0,
             "weight_load": 0,
@@ -886,8 +1017,14 @@ async def boot_and_run(dut, test_file):
     monitor_task = cocotb.start_soon(monitor_conv_perf_states(dut, monitor_stats))
     await release_fetch(dut, axi_master=axi_master)
     try:
-        timeout_cycles = 1600000
-        await wait_for_host_irq(dut, timeout_cycles=timeout_cycles, axi_master=axi_master, report_name="test_conv_perf")
+        timeout_cycles = CONV_PERF_TIMEOUT_CYCLES
+        report = await wait_for_host_irq(
+            dut,
+            timeout_cycles=timeout_cycles,
+            axi_master=axi_master,
+            report_name="test_conv_perf",
+        )
+        check_pmu_fsm_partitions(report)
     except AssertionError as exc:
         status = read_dtcm_word(dut, STATUS_BASE + 0x00)
         pass_count = read_dtcm_word(dut, STATUS_BASE + 0x04)

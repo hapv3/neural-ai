@@ -26,6 +26,28 @@ static nai_binding_address_v1_t g_binding_addresses[NAI_MAX_BINDINGS_V1];
 /* Affine loop bodies are fetched once and expanded in DTCM. */
 static uint8_t g_command_buffer[NAI_AFFINE_LOOP_MAX_RECORD_BYTES];
 
+#if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
+void nai_pmu_command_begin(uint32_t command_id)
+{
+    REG_WRITE(NPU_CMD_PMU_BEGIN, command_id);
+}
+
+void nai_pmu_command_end(uint32_t command_id)
+{
+    REG_WRITE(NPU_CMD_PMU_END, command_id);
+}
+
+static inline void pmu_phase(uint32_t phase)
+{
+    REG_WRITE(NPU_CMD_PMU_PHASE, phase);
+}
+#else
+static inline void pmu_phase(uint32_t phase)
+{
+    (void)phase;
+}
+#endif
+
 static uint32_t l2_read(void *context_pointer, uint32_t offset, void *destination, uint32_t bytes)
 {
     l2_reader_context_t *context = (l2_reader_context_t *)context_pointer;
@@ -58,6 +80,7 @@ static uint32_t all_zero(const uint32_t *words, uint32_t count)
 
 static uint32_t fail(uint32_t code, uint32_t pointer, uint32_t completed)
 {
+    pmu_phase(NPU_PMU_PHASE_FAIL);
     REG_WRITE(NPU_CMD_FAIL_CODE, code);
     REG_WRITE(NPU_CMD_FAIL_PTR, pointer);
     REG_WRITE(NPU_CMD_DONE_COUNT, completed);
@@ -153,11 +176,13 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
     uint32_t completed = 0u;
     uint32_t failure_offset = 0u;
 
+    pmu_phase(NPU_PMU_PHASE_INVOCATION);
     if (staging_base != NPU_CMD_TCDM_BASE || staging_bytes < NPU_CMD_TCDM_SIZE ||
         invocation_reader.read(invocation_reader.context, 0u, &invocation, sizeof(invocation)) != 0u ||
         !validate_invocation(&invocation, invocation_bytes))
         return fail(NPU_CMD_FAIL_BAD_INVOCATION, invocation_base, 0u);
 
+    pmu_phase(NPU_PMU_PHASE_MODEL);
     model_context = (l2_reader_context_t){invocation.model_base, invocation.model_bytes,
         staging_base, NPU_CMD_TCDM_SIZE};
     model_reader = (nai_model_reader_v1_t){&model_context, l2_read};
@@ -166,6 +191,7 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
         return fail(NPU_CMD_FAIL_BAD_MODEL, invocation.model_base, 0u);
 
     if (invocation.binding_count != 0u) {
+        pmu_phase(NPU_PMU_PHASE_BINDINGS);
         l2_reader_context_t binding_context = {invocation.binding_table_base,
             invocation.binding_count * sizeof(nai_binding_address_v1_t), staging_base, NPU_CMD_TCDM_SIZE};
         nai_model_reader_v1_t binding_reader = {&binding_context, l2_read};
@@ -173,6 +199,7 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
             binding_context.bytes) != 0u) return fail(NPU_CMD_FAIL_BAD_BINDING,
                 invocation.binding_table_base, 0u);
     }
+    pmu_phase(NPU_PMU_PHASE_VALIDATE);
     if (!validate_runtime_bindings(&view, &invocation))
         return fail(NPU_CMD_FAIL_BAD_BINDING, invocation.binding_table_base, 0u);
 
@@ -181,16 +208,19 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
         view.header->required_tcdm_bytes, 0u, 0u};
     nai_quant_buffer_reset_v1();
     REG_WRITE(NPU_CMD_STATUS, NPU_CMD_STATUS_RUNNING);
+    pmu_phase(NPU_PMU_PHASE_FETCH);
     const nai_runtime_ops_v2_t *runtime_ops = nai_default_runtime_ops_v2();
     nai_dispatch_status_v2_t status = nai_cmd_dispatch_stream_v2(&view, &resolver,
         runtime_ops, &model_reader, g_command_buffer, sizeof(g_command_buffer),
         &completed, &failure_offset);
+    pmu_phase(NPU_PMU_PHASE_BARRIER);
     if (runtime_ops->barrier == 0 || runtime_ops->barrier(runtime_ops->context) != 0u) {
         if (status == NAI_DISPATCH_OK) status = NAI_DISPATCH_OPERATION_FAILED;
     }
     if (status != NAI_DISPATCH_OK) return fail(NPU_CMD_FAIL_V2_DISPATCH + (uint32_t)status,
         invocation.model_base + failure_offset, completed);
 
+    pmu_phase(NPU_PMU_PHASE_COMPLETE);
     REG_WRITE(NPU_CMD_DONE_COUNT, completed);
     REG_WRITE(NPU_CMD_FAIL_CODE, NPU_CMD_FAIL_NONE);
     REG_WRITE(NPU_CMD_FAIL_PTR, 0u);

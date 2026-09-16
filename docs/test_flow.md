@@ -18,7 +18,7 @@ firmware.
 | Directory | Binary | Primary RTL test | Target |
 |-----------|--------|------------------|--------|
 | `sw/test/boot` | `boot.bin` | `test_snitch_boot` | Boot, AXI I-TCM load, host IRQ completion, iDMA MMIO smoke |
-| `sw/test/pmu` | `pmu.bin` | `test_pmu_basic` | Host AXI-Lite PMU control, snapshot, fixed counters, Snitch/TCDM event smoke |
+| `sw/test/pmu` | `pmu.bin` | `test_pmu_basic` | Host AXI-Lite PMU v2.1 control, snapshot, 163 counters, complete drain/linebuffer FSM occupancy, Snitch/TCDM event smoke |
 | `sw/test/conv_perf` | `conv_perf.bin` | `test_conv_perf` | Packed Conv2D scheduler, iDMA/RVV backend checks, exact output compare, cycle stats in L2 |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_independent_memory` | L2 fixture, DMA 1D/2D/3D, TCDM bank/boundary decode |
 | `sw/test/independent_memory` | `independent_memory.bin` | `test_dma_tcm` | iDMA MMIO/TCDM smoke for current 1D/2D/3D path |

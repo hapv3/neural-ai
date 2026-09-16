@@ -56,8 +56,18 @@ module conv_linebuf_stream_packer #(
     output logic [31:0]               emitted_vectors_o,
     output logic [31:0]               fetch_beats_o,
     output logic [31:0]               bypass_vectors_o,
-    output logic [4:0]                debug_state_o
+    output logic [4:0]                debug_state_o,
+    output logic [1:0]                debug_fetch_main_state_o,
+    output logic [2:0]                debug_fetch_background_state_o,
+    output logic [2:0]                debug_bypass_state_o
 );
+
+    // The mapped linebuffer macro predates the PMU-only raw state ports.
+    // Functional outputs remain mapped; regenerate the macro to preserve
+    // detailed state telemetry in this optional bottom-up Sky130 flow.
+    assign debug_fetch_main_state_o = '0;
+    assign debug_fetch_background_state_o = '0;
+    assign debug_bypass_state_o = '0;
 
     conv_linebuf_stream_packer_mapped i_mapped (
         .clk_i(clk_i), .rst_ni(rst_ni), .start_i(start_i),

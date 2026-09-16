@@ -22,6 +22,20 @@
 #define NPU_AFU_BASE    (NPU_CTRL_BASE + 0x3000)
 #define NPU_PMU_BASE    (NPU_CTRL_BASE + 0x4000)
 #define NPU_CMD_CTRL_BASE (NPU_CTRL_BASE + 0x5000)
+#define NPU_CMD_PMU_BEGIN (NPU_CMD_CTRL_BASE + 0x24)
+#define NPU_CMD_PMU_END   (NPU_CMD_CTRL_BASE + 0x28)
+#define NPU_CMD_PMU_PHASE (NPU_CMD_CTRL_BASE + 0x2C)
+
+#define NPU_PMU_PHASE_BOOT        0u
+#define NPU_PMU_PHASE_INVOCATION  1u
+#define NPU_PMU_PHASE_MODEL       2u
+#define NPU_PMU_PHASE_BINDINGS    3u
+#define NPU_PMU_PHASE_VALIDATE    4u
+#define NPU_PMU_PHASE_FETCH       5u
+#define NPU_PMU_PHASE_EXECUTE     6u
+#define NPU_PMU_PHASE_BARRIER     7u
+#define NPU_PMU_PHASE_COMPLETE    8u
+#define NPU_PMU_PHASE_FAIL        9u
 
 // 5. External L2 / simulation memory window
 #define NPU_L2_BASE     0x80000000

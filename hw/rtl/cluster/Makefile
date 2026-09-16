@@ -68,7 +68,7 @@ endif
 # Include Cocotb's make rules
 include $(shell cocotb-config --makefiles)/Makefile.sim
 
-.PHONY: FORCE gen_f
+.PHONY: FORCE gen_f pmu_unit pmu_unit_build
 FORCE:
 
 # Generate expanded .F and a content stamp over the file list plus each listed
@@ -92,6 +92,14 @@ $(SNITCH_F_STAMP): $(SNITCH_F_TEMPLATE) FORCE | $(SIM_BUILD)
 # Keep the old explicit target and ensure sim has generated dependencies before
 # Cocotb evaluates the Verilator compile rule.
 sim: gen_f
+
+pmu_unit_build:
+	verilator --binary --timing -sv -j $(VERILATOR_JOBS) \
+		-Wno-fatal -Wno-DECLFILENAME -Wno-TIMESCALEMOD --top-module tb_npu_pmu \
+		--Mdir tb/sim/pmu_unit npu_pmu.sv tb/tb_npu_pmu.sv
+
+pmu_unit: pmu_unit_build
+	tb/sim/pmu_unit/Vtb_npu_pmu
 
 # Clean output dir
 clean::

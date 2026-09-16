@@ -60,7 +60,10 @@ module conv_linebuf_stream_packer #(
     output logic [31:0]               emitted_vectors_o,
     output logic [31:0]               fetch_beats_o,
     output logic [31:0]               bypass_vectors_o,
-    output logic [4:0]                debug_state_o
+    output logic [4:0]                debug_state_o,
+    output logic [1:0]                debug_fetch_main_state_o,
+    output logic [2:0]                debug_fetch_background_state_o,
+    output logic [2:0]                debug_bypass_state_o
 );
 
     localparam int unsigned K_MAX = 5;
@@ -378,7 +381,9 @@ module conv_linebuf_stream_packer #(
         .beat_pop_slot_o                (beat_pop_slot),
         .bank_write_req_o               (bank_w_req),
         .bank_write_addr_o              (bank_w_addr),
-        .bank_write_data_o              (bank_w_data)
+        .bank_write_data_o              (bank_w_data),
+        .debug_main_state_o             (debug_fetch_main_state_o),
+        .debug_background_state_o       (debug_fetch_background_state_o)
     );
 
     conv_linebuf_bypass_engine #(
@@ -410,7 +415,8 @@ module conv_linebuf_stream_packer #(
         .row_ready_i,
         .fetch_beats_o           (bypass_fetch_beats),
         .emitted_vectors_o       (bypass_emitted_vectors),
-        .debug_state_o           (bypass_debug_state)
+        .debug_state_o           (bypass_debug_state),
+        .debug_raw_state_o       (debug_bypass_state_o)
     );
 
     conv_linebuf_row_store #(

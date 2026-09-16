@@ -595,24 +595,21 @@ it with scalar division.
 
 ## 8. PMU Observability
 
-Current cluster PMU events include AFU counters:
+The cluster keeps the three P0 AFU counters for historical comparisons:
 
 | Counter index | Meaning |
 |---:|---|
-| 16 | AFU done pulse count |
+| 16 | AFU done level cycles (legacy semantics) |
 | 17 | AFU TCDM requests, primary + RHS |
 | 18 | AFU TCDM stalls, primary + RHS |
 
-The PMU does not yet split AFU read/write requests, primary/RHS requests, core
-stall cycles, RFIFO empty stalls, or WFIFO full stalls. For deeper tuning, add:
-
-- AFU active cycles.
-- Core wait-for-input cycles.
-- Core wait-for-WFIFO cycles.
-- Primary read requests and stalls.
-- RHS read requests and stalls.
-- Write requests and stalls.
-- Per-mode completion counters.
+PMU v2 counters 96-111 provide authoritative AFU measurements: active/start/
+done-pulse, grouped core FSM states, backend drain, LHS/RHS consumption, result
+production, input/RHS starvation and output backpressure. Accepted and blocked
+primary/RHS TCDM traffic is also included in the exact shared-memory counters.
+Per-mode completion can be derived by combining the command type with command
+ID filtering; it is intentionally not duplicated as one hardware counter per
+mode.
 
 ## 9. Tests and Coverage
 

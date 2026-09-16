@@ -412,11 +412,18 @@ make -j10 sim \
 The CSV records the global command index, ABI header metadata, and deltas for
 all hardware PMU counters. Rows are flushed as soon as the following command
 header is loaded, so completed rows survive a later timeout or interruption.
-The tracer watches the streamed D-TCM command buffer through cocotb and adds no
-firmware instructions or host AXI transactions. Each delta spans one command
+The boundary tracer watches the streamed D-TCM command buffer through cocotb
+and adds no host AXI transactions. PMU profiling firmware separately emits two
+command-tag MMIO writes per command; build with `NAI_PMU_PROFILE=0` when a
+production-overhead comparison is required. Each delta spans one command
 header becoming available through the following header becoming available; it
 therefore includes dispatch transition and fetch cost at the boundary, as seen
 by the real ABI runtime.
+
+For exact engine attribution of one zero-based command ID, set
+`NAI_PMU_COMMAND_FILTER=<id>`. The PMU then follows tags latched by DMA,
+systolic, AFU and Spatz instead of attributing asynchronous work to whichever
+descriptor happens to be in the firmware command buffer later.
 
 ### 5.6 Full selected graph
 
@@ -614,13 +621,13 @@ A successful run prints:
 
 ```text
 PMU performance report:
-  cycles=958417
-  snitch: instr=479076 load=68132 tcdm_req=15912 stall=0
-  systolic: compute=28800 (3.00%) ifm_req=77992 ofm_req=13660 ofm_stall=220
-  spatz: issue=26517 rsp=8917 tcdm_req=88000 stall=17600
-  idma: busy=29242 (3.05%) start=239 done=239 tcdm_stall=0
-  afu: done=759421 tcdm_req=25600 stall=0
-  tcdm: req=240402 gnt=222382 stall=18020 read=150704 write=89698
+  cycles=...
+  systolic: active=... useful=... ifm=... ofm=... blocked=...
+  spatz: active=... issue=... rsp=... tcdm=... blocked=...
+  idma: load_busy=... store_busy=... overlap=... read=...B write=...B
+  afu: active=... start=... done=... input_wait=... output_stall=...
+  tcdm: accept=... blocked=... conflict_cycles=... read=...B write=...B
+  overlap/control: compute_dma=... command_idle=... commands=.../...
 ```
 
 Interpretation:
@@ -629,20 +636,20 @@ Interpretation:
   model/input loading;
 - `snitch instr/load`: firmware control cost and scalar load pressure;
 - `snitch tcdm_req/stall`: scalar-core pressure on shared TCDM;
-- `systolic compute`: cycles with array compute enabled; the percentage is
+- `systolic useful`: cycles with array compute enabled; the percentage is
   utilization relative to total inference cycles, not MAC utilization;
-- `ifm_req`, `ofm_req`, `ofm_stall`: systolic input/output traffic and output
+- `ifm`, `ofm`, `blocked`: accepted systolic input/output traffic and primary
   backpressure;
 - `spatz issue/rsp`: vector instruction requests/responses;
 - `spatz tcdm_req/stall`: vector memory pressure and arbitration loss;
-- `idma busy/start/done`: DMA occupancy and transaction count; `start != done`
+- load/store DMA busy and overlap are independent; start/done counters remain
+  available in the CSV, and `start != done`
   at final completion indicates a synchronization defect;
-- `afu done`: AFU progress event counter; compare deltas between equivalent
-  runs rather than treating it as a universal byte/cycle value;
-- `afu tcdm_req/stall`: AFU memory activity and contention;
-- `tcdm req/gnt/stall`: aggregate arbitration; normally
-  `stall` is close to `req - gnt`;
-- `read/write`: aggregate TCDM traffic split;
+- `afu done`: a rising-edge completion pulse. The legacy ID 16 remains a done
+  level-cycle counter and must not be used as completion count;
+- `tcdm accept/blocked`: exact handshakes and denied cycles. Conflict counters
+  additionally distinguish physical bank collisions;
+- `read/write`: accepted AXI or TCDM bytes, not asserted request cycles;
 - `overflow_status`: nonzero means one or more counters wrapped or overflowed,
   so performance conclusions are unsafe.
 

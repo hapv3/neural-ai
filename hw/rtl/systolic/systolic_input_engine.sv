@@ -81,7 +81,10 @@ module systolic_input_engine #(
     output logic [31:0]                               emitted_vectors_o,
     output logic [31:0]                               fetch_beats_o,
     output logic [31:0]                               bypass_vectors_o,
-    output logic [4:0]                                debug_state_o
+    output logic [4:0]                                debug_state_o,
+    output logic [1:0]                                debug_fetch_main_state_o,
+    output logic [2:0]                                debug_fetch_background_state_o,
+    output logic [2:0]                                debug_bypass_state_o
 );
 
     typedef logic [ARRAY_DIM-1:0][INPUT_ELEM_WIDTH-1:0] input_row_t;
@@ -187,7 +190,10 @@ module systolic_input_engine #(
         .emitted_vectors_o,
         .fetch_beats_o,
         .bypass_vectors_o,
-        .debug_state_o
+        .debug_state_o,
+        .debug_fetch_main_state_o,
+        .debug_fetch_background_state_o,
+        .debug_bypass_state_o
     );
 
     always_comb begin

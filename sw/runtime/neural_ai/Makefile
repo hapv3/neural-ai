@@ -6,11 +6,16 @@ CC = $(LLVM_BIN)/clang
 OBJCOPY = $(LLVM_BIN)/llvm-objcopy
 HEXOBJCOPY = $(GCC_BIN)/riscv32-unknown-elf-objcopy
 SIZE = $(LLVM_BIN)/llvm-size
+NAI_PMU_PROFILE ?= 1
 
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -Os -fno-builtin -fno-jump-tables -ffunction-sections -fdata-sections \
          -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib -I../../lib -T link.ld \
          -Wl,--no-relax -Wl,--gc-sections -DNAI_TRUSTED_FIRMWARE=1
+
+ifeq ($(NAI_PMU_PROFILE),1)
+CFLAGS += -DNAI_PMU_PROFILE=1
+endif
 
 SRCS = start.S main.c \
        ../../lib/npu_cmd_desc.c ../../lib/npu_cmd_desc_v2.c \

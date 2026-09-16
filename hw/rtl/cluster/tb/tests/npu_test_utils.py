@@ -23,6 +23,16 @@ PMU_BASE = 0x20004000
 PMU_CTRL = PMU_BASE + 0x0000
 PMU_STATUS = PMU_BASE + 0x0004
 PMU_NUM_COUNTERS = PMU_BASE + 0x0008
+PMU_STATUS1 = PMU_BASE + 0x000C
+PMU_STATUS2 = PMU_BASE + 0x0010
+PMU_STATUS3 = PMU_BASE + 0x0014
+PMU_VERSION = PMU_BASE + 0x0018
+PMU_FILTER_CTRL = PMU_BASE + 0x001C
+PMU_FILTER_CONTEXT = PMU_BASE + 0x0020
+PMU_CURRENT_CONTEXT = PMU_BASE + 0x0024
+PMU_CURRENT_PHASE = PMU_BASE + 0x0028
+PMU_STATUS4 = PMU_BASE + 0x002C
+PMU_STATUS5 = PMU_BASE + 0x0030
 PMU_COUNTER_BASE = PMU_BASE + 0x0100
 PMU_CTRL_ENABLE = 0x00000001
 PMU_CTRL_CLEAR = 0x00000002
@@ -61,6 +71,137 @@ PMU_COUNTER_NAMES = [
     "tcdm_bank_req",
     "tcdm_read_req",
     "tcdm_write_req",
+    "command_active_cycles",
+    "command_begin",
+    "command_end",
+    "phase_invocation_cycles",
+    "phase_model_cycles",
+    "phase_bindings_cycles",
+    "phase_validate_cycles",
+    "phase_fetch_cycles",
+    "phase_execute_cycles",
+    "phase_barrier_cycles",
+    "phase_complete_cycles",
+    "phase_fail_cycles",
+    "dma_load_busy_cycles",
+    "dma_store_busy_cycles",
+    "dma_both_busy_cycles",
+    "dma_load_start",
+    "dma_load_done",
+    "dma_store_start",
+    "dma_store_done",
+    "dma_load_queue_occupancy",
+    "dma_store_queue_occupancy",
+    "dma_load_queue_peak",
+    "dma_store_queue_peak",
+    "axi_ar_accept",
+    "axi_r_beat",
+    "axi_aw_accept",
+    "axi_w_beat",
+    "axi_b_accept",
+    "axi_read_bytes",
+    "axi_write_bytes",
+    "axi_ar_blocked_cycles",
+    "axi_r_blocked_cycles",
+    "axi_aw_blocked_cycles",
+    "axi_w_blocked_cycles",
+    "axi_read_outstanding_cycles",
+    "axi_write_outstanding_cycles",
+    "axi_read_outstanding_peak",
+    "axi_write_outstanding_peak",
+    "axi_read_latency_sum",
+    "axi_write_latency_sum",
+    "axi_read_latency_max",
+    "axi_write_latency_max",
+    "sys_active_cycles",
+    "sys_load_state_cycles",
+    "sys_compute_state_cycles",
+    "sys_drain_state_cycles",
+    "sys_done_state_cycles",
+    "sys_array_useful_cycles",
+    "sys_weight_useful_cycles",
+    "sys_ofm_fire",
+    "sys_ofm_backpressure_cycles",
+    "sys_ifm_accept",
+    "sys_ifm_blocked_cycles",
+    "sys_weight_accept",
+    "sys_weight_blocked_cycles",
+    "sys_rhs_accept",
+    "sys_rhs_blocked_cycles",
+    "sys_ofm_accept",
+    "sys_ofm_blocked_cycles",
+    "linebuf_active_cycles",
+    "linebuf_prefetch_cycles",
+    "sys_binary_active_cycles",
+    "sys_start",
+    "sys_done",
+    "afu_active_cycles",
+    "afu_start",
+    "afu_done_pulse",
+    "afu_read_state_cycles",
+    "afu_process_state_cycles",
+    "afu_dfl_state_cycles",
+    "afu_class_state_cycles",
+    "afu_gap_state_cycles",
+    "afu_done_state_cycles",
+    "afu_backend_drain_cycles",
+    "afu_lhs_consume",
+    "afu_rhs_consume",
+    "afu_result_produce",
+    "afu_input_wait_cycles",
+    "afu_rhs_wait_cycles",
+    "afu_output_stall_cycles",
+    "spatz_active_cycles",
+    "spatz_issue_accept",
+    "spatz_response_accept",
+    "spatz_tcdm_accept",
+    "spatz_tcdm_blocked_cycles",
+    "tcdm_accept",
+    "tcdm_blocked_cycles",
+    "tcdm_bank_active",
+    "tcdm_bank_conflict_cycles",
+    "tcdm_conflicting_banks",
+    "tcdm_read_accept",
+    "tcdm_write_accept",
+    "tcdm_read_bytes",
+    "tcdm_write_bytes",
+    "compute_dma_overlap_cycles",
+    "command_engine_idle_cycles",
+    "drain_idle_state_cycles",
+    "drain_accum_read_state_cycles",
+    "drain_accum_write_state_cycles",
+    "drain_accum_requant_state_cycles",
+    "linebuf_idle_state_cycles",
+    "linebuf_ensure_state_cycles",
+    "linebuf_fill_req0_state_cycles",
+    "linebuf_fill_req1_state_cycles",
+    "linebuf_fill_drain_state_cycles",
+    "linebuf_window_req_state_cycles",
+    "linebuf_window_wait_state_cycles",
+    "linebuf_stream_prime_state_cycles",
+    "linebuf_stream_emit_state_cycles",
+    "linebuf_bypass_prep_state_cycles",
+    "linebuf_bypass_req0_state_cycles",
+    "linebuf_bypass_wait0_state_cycles",
+    "linebuf_bypass_req1_state_cycles",
+    "linebuf_bypass_wait1_state_cycles",
+    "linebuf_stream_done_state_cycles",
+    "linebuf_fetch_main_req0_state_cycles",
+    "linebuf_fetch_main_req1_state_cycles",
+    "linebuf_fetch_main_drain_state_cycles",
+    "linebuf_fetch_main_idle_state_cycles",
+    "linebuf_fetch_bg_idle_state_cycles",
+    "linebuf_fetch_bg_scan_state_cycles",
+    "linebuf_fetch_bg_req0_state_cycles",
+    "linebuf_fetch_bg_req1_state_cycles",
+    "linebuf_fetch_bg_drain_state_cycles",
+    "linebuf_bypass_idle_engine_state_cycles",
+    "linebuf_bypass_prep_engine_state_cycles",
+    "linebuf_bypass_req0_engine_state_cycles",
+    "linebuf_bypass_wait0_engine_state_cycles",
+    "linebuf_bypass_req1_engine_state_cycles",
+    "linebuf_bypass_wait1_engine_state_cycles",
+    "linebuf_bypass_emit_engine_state_cycles",
 ]
 
 TCDM_NUM_BANKS = 16
@@ -217,8 +358,10 @@ async def program_command_queue(axi_master, l2_base, total_bytes, tcdm_base=NPU_
     await _axi_write32(axi_master, NPU_CMD_START, 1)
 
 
-async def pmu_start(axi_master):
+async def pmu_start(axi_master, command_id=None):
     await _axi_write32(axi_master, PMU_CTRL, PMU_CTRL_CLEAR)
+    await _axi_write32(axi_master, PMU_FILTER_CONTEXT, command_id or 0)
+    await _axi_write32(axi_master, PMU_FILTER_CTRL, int(command_id is not None))
     await _axi_write32(axi_master, PMU_CTRL, PMU_CTRL_ENABLE)
 
 
@@ -226,14 +369,31 @@ async def pmu_snapshot_report(axi_master):
     await _axi_write32(axi_master, PMU_CTRL, PMU_CTRL_ENABLE | PMU_CTRL_SNAPSHOT)
     await _axi_write32(axi_master, PMU_CTRL, 0)
 
-    num_counters = min(await _axi_read32(axi_master, PMU_NUM_COUNTERS), len(PMU_COUNTER_NAMES))
+    hardware_num_counters = await _axi_read32(axi_master, PMU_NUM_COUNTERS)
+    num_counters = min(hardware_num_counters, len(PMU_COUNTER_NAMES))
     counters = {}
     for counter_id in range(num_counters):
         lo = await _axi_read32(axi_master, PMU_COUNTER_BASE + counter_id * 8)
         hi = await _axi_read32(axi_master, PMU_COUNTER_BASE + counter_id * 8 + 4)
         counters[PMU_COUNTER_NAMES[counter_id]] = (hi << 32) | lo
 
-    counters["overflow_status"] = await _axi_read32(axi_master, PMU_STATUS)
+    overflow_words = [
+        await _axi_read32(axi_master, address)
+        for address in (
+            PMU_STATUS,
+            PMU_STATUS1,
+            PMU_STATUS2,
+            PMU_STATUS3,
+            PMU_STATUS4,
+            PMU_STATUS5,
+        )
+    ]
+    counters["overflow_status"] = sum(word << (32 * index) for index, word in enumerate(overflow_words))
+    counters["num_counters"] = hardware_num_counters
+    counters["pmu_version"] = await _axi_read32(axi_master, PMU_VERSION)
+    counters["filter_context"] = await _axi_read32(axi_master, PMU_FILTER_CONTEXT)
+    counters["current_context"] = await _axi_read32(axi_master, PMU_CURRENT_CONTEXT)
+    counters["current_phase"] = await _axi_read32(axi_master, PMU_CURRENT_PHASE)
     return counters
 
 
@@ -242,6 +402,13 @@ def format_pmu_report(counters):
 
     def pct(name):
         return (100.0 * counters.get(name, 0) / cycles) if cycles else 0.0
+
+    def ratio(numerator, denominator):
+        divisor = counters.get(denominator, 0)
+        return (counters.get(numerator, 0) / divisor) if divisor else 0.0
+
+    def states(entries):
+        return " ".join(f"{label}={counters.get(name, 0)}" for label, name in entries)
 
     lines = [
         "PMU performance report:",
@@ -255,38 +422,121 @@ def format_pmu_report(counters):
         ),
         (
             "  systolic: "
-            f"compute={counters.get('sys_compute', 0)} ({pct('sys_compute'):.2f}%) "
-            f"ifm_req={counters.get('sys_ifm_req', 0)} "
-            f"ofm_req={counters.get('sys_ofm_req', 0)} "
-            f"ofm_stall={counters.get('sys_ofm_stall', 0)}"
+            f"active={counters.get('sys_active_cycles', 0)} "
+            f"useful={counters.get('sys_array_useful_cycles', 0)} ({pct('sys_array_useful_cycles'):.2f}%) "
+            f"ifm={counters.get('sys_ifm_accept', 0)} "
+            f"ofm={counters.get('sys_ofm_accept', 0)} "
+            f"blocked={counters.get('sys_ifm_blocked_cycles', 0) + counters.get('sys_ofm_blocked_cycles', 0)}"
+        ),
+        "  systolic states: " + states(
+            (
+                ("load", "sys_load_state_cycles"),
+                ("compute", "sys_compute_state_cycles"),
+                ("drain", "sys_drain_state_cycles"),
+                ("done", "sys_done_state_cycles"),
+            )
+        ),
+        "  drain states: " + states(
+            (
+                ("idle", "drain_idle_state_cycles"),
+                ("read", "drain_accum_read_state_cycles"),
+                ("write", "drain_accum_write_state_cycles"),
+                ("requant", "drain_accum_requant_state_cycles"),
+            )
+        ),
+        "  linebuf states: " + states(
+            (
+                ("idle", "linebuf_idle_state_cycles"),
+                ("ensure", "linebuf_ensure_state_cycles"),
+                ("fill_req0", "linebuf_fill_req0_state_cycles"),
+                ("fill_req1", "linebuf_fill_req1_state_cycles"),
+                ("fill_drain", "linebuf_fill_drain_state_cycles"),
+                ("window_req", "linebuf_window_req_state_cycles"),
+                ("window_wait", "linebuf_window_wait_state_cycles"),
+                ("stream_prime", "linebuf_stream_prime_state_cycles"),
+                ("stream_emit", "linebuf_stream_emit_state_cycles"),
+                ("bypass_prep", "linebuf_bypass_prep_state_cycles"),
+                ("bypass_req0", "linebuf_bypass_req0_state_cycles"),
+                ("bypass_wait0", "linebuf_bypass_wait0_state_cycles"),
+                ("bypass_req1", "linebuf_bypass_req1_state_cycles"),
+                ("bypass_wait1", "linebuf_bypass_wait1_state_cycles"),
+                ("stream_done", "linebuf_stream_done_state_cycles"),
+            )
+        ),
+        "  linebuf fetch-main states: " + states(
+            (
+                ("req0", "linebuf_fetch_main_req0_state_cycles"),
+                ("req1", "linebuf_fetch_main_req1_state_cycles"),
+                ("drain", "linebuf_fetch_main_drain_state_cycles"),
+                ("idle", "linebuf_fetch_main_idle_state_cycles"),
+            )
+        ),
+        "  linebuf background states: " + states(
+            (
+                ("idle", "linebuf_fetch_bg_idle_state_cycles"),
+                ("scan", "linebuf_fetch_bg_scan_state_cycles"),
+                ("req0", "linebuf_fetch_bg_req0_state_cycles"),
+                ("req1", "linebuf_fetch_bg_req1_state_cycles"),
+                ("drain", "linebuf_fetch_bg_drain_state_cycles"),
+            )
+        ),
+        "  linebuf bypass-engine states: " + states(
+            (
+                ("idle", "linebuf_bypass_idle_engine_state_cycles"),
+                ("prep", "linebuf_bypass_prep_engine_state_cycles"),
+                ("req0", "linebuf_bypass_req0_engine_state_cycles"),
+                ("wait0", "linebuf_bypass_wait0_engine_state_cycles"),
+                ("req1", "linebuf_bypass_req1_engine_state_cycles"),
+                ("wait1", "linebuf_bypass_wait1_engine_state_cycles"),
+                ("emit", "linebuf_bypass_emit_engine_state_cycles"),
+            )
         ),
         (
             "  spatz: "
-            f"issue={counters.get('spatz_issue', 0)} "
-            f"rsp={counters.get('spatz_rsp', 0)} "
-            f"tcdm_req={counters.get('spatz_tcdm_req', 0)} "
-            f"stall={counters.get('spatz_tcdm_stall', 0)}"
+            f"active={counters.get('spatz_active_cycles', 0)} "
+            f"issue={counters.get('spatz_issue_accept', 0)} "
+            f"rsp={counters.get('spatz_response_accept', 0)} "
+            f"tcdm={counters.get('spatz_tcdm_accept', 0)} "
+            f"blocked={counters.get('spatz_tcdm_blocked_cycles', 0)}"
         ),
         (
             "  idma: "
-            f"busy={counters.get('idma_busy', 0)} ({pct('idma_busy'):.2f}%) "
-            f"start={counters.get('idma_start', 0)} "
-            f"done={counters.get('idma_done', 0)} "
-            f"tcdm_stall={counters.get('idma_tcdm_stall', 0)}"
+            f"load_busy={counters.get('dma_load_busy_cycles', 0)} "
+            f"store_busy={counters.get('dma_store_busy_cycles', 0)} "
+            f"overlap={counters.get('dma_both_busy_cycles', 0)} "
+            f"read={counters.get('axi_read_bytes', 0)}B "
+            f"write={counters.get('axi_write_bytes', 0)}B"
+        ),
+        (
+            "  axi: "
+            f"read_latency_avg/max={ratio('axi_read_latency_sum', 'axi_ar_accept'):.2f}/"
+            f"{counters.get('axi_read_latency_max', 0)} "
+            f"write_latency_avg/max={ratio('axi_write_latency_sum', 'axi_b_accept'):.2f}/"
+            f"{counters.get('axi_write_latency_max', 0)} "
+            f"outstanding_peak={counters.get('axi_read_outstanding_peak', 0)}/"
+            f"{counters.get('axi_write_outstanding_peak', 0)}"
         ),
         (
             "  afu: "
-            f"done={counters.get('afu_done', 0)} "
-            f"tcdm_req={counters.get('afu_tcdm_req', 0)} "
-            f"stall={counters.get('afu_tcdm_stall', 0)}"
+            f"active={counters.get('afu_active_cycles', 0)} "
+            f"start={counters.get('afu_start', 0)} "
+            f"done={counters.get('afu_done_pulse', 0)} "
+            f"input_wait={counters.get('afu_input_wait_cycles', 0)} "
+            f"output_stall={counters.get('afu_output_stall_cycles', 0)}"
         ),
         (
             "  tcdm: "
-            f"req={counters.get('tcdm_req', 0)} "
-            f"gnt={counters.get('tcdm_gnt', 0)} "
-            f"stall={counters.get('tcdm_stall', 0)} "
-            f"read={counters.get('tcdm_read_req', 0)} "
-            f"write={counters.get('tcdm_write_req', 0)}"
+            f"accept={counters.get('tcdm_accept', 0)} "
+            f"blocked={counters.get('tcdm_blocked_cycles', 0)} "
+            f"conflict_cycles={counters.get('tcdm_bank_conflict_cycles', 0)} "
+            f"read={counters.get('tcdm_read_bytes', 0)}B "
+            f"write={counters.get('tcdm_write_bytes', 0)}B"
+        ),
+        (
+            "  overlap/control: "
+            f"compute_dma={counters.get('compute_dma_overlap_cycles', 0)} "
+            f"command_idle={counters.get('command_engine_idle_cycles', 0)} "
+            f"commands={counters.get('command_begin', 0)}/{counters.get('command_end', 0)}"
         ),
     ]
     if counters.get("overflow_status", 0):
@@ -330,17 +580,49 @@ async def monitor_command_buffer_pmu(
     command_headers,
     sample_callback=None,
 ):
-    """Return PMU deltas between successive streamed ABI command headers.
+    """Return PMU deltas for successive streamed ABI commands.
 
-    The streaming runtime loads every command through the same D-TCM buffer.
-    Watching only that buffer's four header words is event-driven and does not
-    add firmware instructions or host AXI traffic to the measured interval.
-    The caller includes the END header so the final command gets a closing
-    sample; the returned list contains one delta per non-END header.
+    Prefer the explicit firmware PMU context begin/end pulses.  Unlike watching
+    the reused D-TCM command buffer, these pulses cannot skip short commands
+    when all four header words change in one simulator time step.  The callback
+    runs after every command and can therefore flush live CSV output before a
+    segment completes.  Keep the D-TCM watcher as a compatibility fallback for
+    testbenches without command-context signals.
     """
     headers = [bytes(header) for header in command_headers]
     if len(headers) < 2 or any(len(header) != 16 for header in headers):
         raise ValueError("command PMU tracing requires command headers plus END")
+
+    cluster = dut.u_npu_cluster
+    context_begin = getattr(cluster, "pmu_context_begin", None)
+    context_end = getattr(cluster, "pmu_context_end", None)
+    context_id = getattr(cluster, "pmu_context_id", None)
+    if context_begin is not None and context_end is not None and context_id is not None:
+        deltas = []
+        for expected_id in range(len(headers) - 1):
+            await RisingEdge(context_begin)
+            await ReadOnly()
+            actual_id = int(context_id.value)
+            if actual_id != expected_id:
+                raise AssertionError(
+                    f"PMU command begin sequence mismatch: expected {expected_id}, "
+                    f"observed {actual_id}"
+                )
+            begin_sample = pmu_direct_snapshot(dut)
+
+            await RisingEdge(context_end)
+            await ReadOnly()
+            actual_id = int(context_id.value)
+            if actual_id != expected_id:
+                raise AssertionError(
+                    f"PMU command end sequence mismatch: expected {expected_id}, "
+                    f"observed {actual_id}"
+                )
+            delta = pmu_counter_delta(pmu_direct_snapshot(dut), begin_sample)
+            deltas.append(delta)
+            if sample_callback is not None:
+                sample_callback(expected_id, delta)
+        return deltas
 
     header_words = [
         _dtcm_word_handle(dut, command_buffer_address + offset)
@@ -362,9 +644,9 @@ async def monitor_command_buffer_pmu(
     return deltas
 
 
-async def release_fetch(dut, axi_master=None, enable_pmu=True):
+async def release_fetch(dut, axi_master=None, enable_pmu=True, pmu_command_id=None):
     if axi_master is not None and enable_pmu:
-        await pmu_start(axi_master)
+        await pmu_start(axi_master, command_id=pmu_command_id)
     dut.fetch_enable_i.value = 1
     await Timer(1, unit="ns")
 

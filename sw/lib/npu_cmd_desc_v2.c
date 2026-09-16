@@ -998,6 +998,25 @@ static nai_dispatch_status_v2_t run_executable_command(
     return NAI_DISPATCH_UNSUPPORTED;
 }
 
+static nai_dispatch_status_v2_t run_profiled_command(
+    const nai_cmd_header_v2_t *header, const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver, const nai_runtime_ops_v2_t *ops,
+    uint32_t command_id)
+{
+#if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
+    extern void nai_pmu_command_begin(uint32_t command_id);
+    extern void nai_pmu_command_end(uint32_t command_id);
+    nai_pmu_command_begin(command_id);
+#else
+    (void)command_id;
+#endif
+    nai_dispatch_status_v2_t status = run_executable_command(header, view, resolver, ops);
+#if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
+    nai_pmu_command_end(command_id);
+#endif
+    return status;
+}
+
 static uint32_t affine_loop_descriptor_bytes(uint32_t patch_count)
 {
     return (sizeof(nai_cmd_affine_loop_v2_t) +
@@ -1093,7 +1112,8 @@ static nai_dispatch_status_v2_t run_affine_loop_direct(
                 }
             }
             const nai_cmd_header_v2_t *header = (const nai_cmd_header_v2_t *)child_words;
-            nai_dispatch_status_v2_t status = run_executable_command(header, view, resolver, ops);
+            nai_dispatch_status_v2_t status = run_profiled_command(
+                header, view, resolver, ops, *completed);
             if (status != NAI_DISPATCH_OK) {
                 *failure_relative = body_offset + child_offset;
                 return status;
@@ -1134,7 +1154,8 @@ static nai_dispatch_status_v2_t run_affine_loop_buffer(
             nai_cmd_header_v2_t *header = (nai_cmd_header_v2_t *)(record + body_offset +
                 child_offsets[child]);
             __builtin_memcpy(record, header, sizeof(*header));
-            nai_dispatch_status_v2_t status = run_executable_command(header, view, resolver, ops);
+            nai_dispatch_status_v2_t status = run_profiled_command(
+                header, view, resolver, ops, *completed);
             if (status != NAI_DISPATCH_OK) {
                 *failure_relative = body_offset + child_offsets[child];
                 return status;
@@ -1189,7 +1210,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
             if (failure_command_offset != 0)
                 *failure_command_offset = view->commands->offset + offset + failure_relative;
         } else {
-            status = run_executable_command(header, view, resolver, ops);
+            status = run_profiled_command(header, view, resolver, ops, completed);
         }
         if (status != NAI_DISPATCH_OK) {
             if (completed_commands != 0) *completed_commands = completed;
@@ -1282,8 +1303,8 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
             }
         } else {
             if (header.size_bytes > prefetched_bytes) status = NAI_DISPATCH_BAD_STREAM;
-            else status = run_executable_command(
-                (const nai_cmd_header_v2_t *)command_buffer, view, resolver, ops);
+            else status = run_profiled_command(
+                (const nai_cmd_header_v2_t *)command_buffer, view, resolver, ops, completed);
         }
         if (status != NAI_DISPATCH_OK) {
             if (completed_commands != 0) *completed_commands = completed;

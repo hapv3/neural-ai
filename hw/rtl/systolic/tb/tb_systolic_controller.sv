@@ -61,6 +61,9 @@ module tb_systolic_controller;
     logic [2:0]                    debug_state_o;
     logic [1:0]                    debug_drain_state_o;
     logic [4:0]                    debug_linebuf_state_o;
+    logic [1:0]                    debug_linebuf_fetch_main_state_o;
+    logic [2:0]                    debug_linebuf_fetch_background_state_o;
+    logic [2:0]                    debug_linebuf_bypass_state_o;
 
     logic [DATA_WIDTH-1:0]         tcdm_mem [TCDM_WORDS];
 
@@ -121,9 +124,16 @@ module tb_systolic_controller;
         .perf_compute_en_o     (perf_compute_en_o),
         .perf_ofm_valid_o      (perf_ofm_valid_o),
         .perf_ofm_ready_o      (perf_ofm_ready_o),
+        .perf_start_o          (),
+        .perf_linebuf_busy_o   (),
+        .perf_linebuf_prefetch_busy_o(),
+        .perf_binary_busy_o    (),
         .debug_state_o         (debug_state_o),
         .debug_drain_state_o   (debug_drain_state_o),
-        .debug_linebuf_state_o (debug_linebuf_state_o)
+        .debug_linebuf_state_o (debug_linebuf_state_o),
+        .debug_linebuf_fetch_main_state_o(debug_linebuf_fetch_main_state_o),
+        .debug_linebuf_fetch_background_state_o(debug_linebuf_fetch_background_state_o),
+        .debug_linebuf_bypass_state_o(debug_linebuf_bypass_state_o)
     );
 
     initial begin

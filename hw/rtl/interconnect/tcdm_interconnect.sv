@@ -28,7 +28,8 @@ module tcdm_interconnect #(
     output logic [NUM_BANKS-1:0]                        bank_we_o,
     output logic [NUM_BANKS-1:0][(DATA_WIDTH/8)-1:0]    bank_be_o,
     output logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]        bank_wdata_o,
-    input  logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]        bank_rdata_i
+    input  logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]        bank_rdata_i,
+    output logic [NUM_BANKS-1:0]                        perf_bank_conflict_o
 );
 
     localparam int unsigned BANK_SEL_BITS = $clog2(NUM_BANKS);
@@ -161,6 +162,7 @@ module tcdm_interconnect #(
 
         // Bank outputs
         assign bank_req_o[b] = hwpe_req[b] | dma_req[b] | core_req[b];
+        assign perf_bank_conflict_o[b] = $countones(bank_req_matrix[b]) > 1;
 
         logic [NUM_MASTERS-1:0] grant_oh;
         assign grant_oh = bank_gnt_matrix[b];

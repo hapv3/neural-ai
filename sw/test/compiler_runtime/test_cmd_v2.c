@@ -3,6 +3,25 @@
 #include <assert.h>
 #include <string.h>
 
+#if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
+static uint32_t g_pmu_begin_count;
+static uint32_t g_pmu_end_count;
+static uint32_t g_pmu_last_begin;
+static uint32_t g_pmu_last_end;
+
+void nai_pmu_command_begin(uint32_t command_id)
+{
+    g_pmu_begin_count++;
+    g_pmu_last_begin = command_id;
+}
+
+void nai_pmu_command_end(uint32_t command_id)
+{
+    g_pmu_end_count++;
+    g_pmu_last_end = command_id;
+}
+#endif
+
 typedef struct {
     uint32_t calls;
     uint32_t source;
@@ -1598,5 +1617,10 @@ int main(void)
         assert(nai_cmd_dispatch_v2(&affine_view, &affine_resolver, &ops,
             &completed, &failure) == NAI_DISPATCH_BAD_STREAM);
     }
+#if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
+    assert(g_pmu_begin_count != 0u);
+    assert(g_pmu_begin_count == g_pmu_end_count);
+    assert(g_pmu_last_begin == g_pmu_last_end);
+#endif
     return 0;
 }

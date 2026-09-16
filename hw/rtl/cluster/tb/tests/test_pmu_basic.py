@@ -7,6 +7,7 @@ from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 from npu_test_utils import (
     NPU_DTCM_BASE,
     PASS_SIGNATURE,
+    PMU_COUNTER_NAMES,
     firmware_path,
     load_firmware_axi,
     read_dtcm_word,
@@ -57,5 +58,12 @@ async def test_pmu_basic(dut):
     assert report["tcdm_req"] > 0
     assert report["tcdm_read_req"] > 0
     assert report["tcdm_write_req"] > 0
+    assert report["pmu_version"] == 0x00020001
+    assert report["num_counters"] == len(PMU_COUNTER_NAMES) == 163
+    assert report["tcdm_accept"] > 0
+    assert report["tcdm_read_accept"] > 0
+    assert report["tcdm_write_accept"] > 0
+    assert report["tcdm_read_bytes"] > 0
+    assert report["tcdm_write_bytes"] > 0
 
     dut._log.info("TEST PASSED: host AXI-Lite PMU counters are programmable and non-zero")

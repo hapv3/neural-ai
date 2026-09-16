@@ -45,6 +45,9 @@ module tb_npu_cluster #(
     output logic [2:0]  debug_sys_state_o,
     output logic [1:0]  debug_sys_drain_state_o,
     output logic [4:0]  debug_linebuf_state_o,
+    output logic [1:0]  debug_linebuf_fetch_main_state_o,
+    output logic [2:0]  debug_linebuf_fetch_background_state_o,
+    output logic [2:0]  debug_linebuf_bypass_state_o,
     output logic        irq_o
 );
 
@@ -138,6 +141,9 @@ module tb_npu_cluster #(
         .debug_sys_state_o(debug_sys_state_o),
         .debug_sys_drain_state_o(debug_sys_drain_state_o),
         .debug_linebuf_state_o(debug_linebuf_state_o),
+        .debug_linebuf_fetch_main_state_o(debug_linebuf_fetch_main_state_o),
+        .debug_linebuf_fetch_background_state_o(debug_linebuf_fetch_background_state_o),
+        .debug_linebuf_bypass_state_o(debug_linebuf_bypass_state_o),
         .irq_o            (irq_o)
     );
 

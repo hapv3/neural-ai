@@ -89,7 +89,16 @@ module afu #(
     output logic [MEM_DATA_WIDTH-1:0]     obi_rhs_wdata_o,
     input  logic                          obi_rhs_rvalid_i,
     input  logic [MEM_DATA_WIDTH-1:0]     obi_rhs_rdata_i,
-    output logic                          done_o
+    output logic                          done_o,
+    output logic                          perf_start_o,
+    output logic                          perf_active_o,
+    output logic [4:0]                    perf_state_o,
+    output logic                          perf_lhs_consume_o,
+    output logic                          perf_rhs_consume_o,
+    output logic                          perf_result_produce_o,
+    output logic                          perf_input_wait_o,
+    output logic                          perf_rhs_wait_o,
+    output logic                          perf_output_stall_o
 );
 endmodule
 `endif
@@ -120,7 +129,8 @@ module tcdm_interconnect #(
     output logic [NUM_BANKS-1:0]                       bank_we_o,
     output logic [NUM_BANKS-1:0][(DATA_WIDTH/8)-1:0]   bank_be_o,
     output logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]       bank_wdata_o,
-    input  logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]       bank_rdata_i
+    input  logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]       bank_rdata_i,
+    output logic [NUM_BANKS-1:0]                       perf_bank_conflict_o
 );
 endmodule
 `endif
@@ -229,7 +239,9 @@ module npu_pulp_idma_ctrl_mm #(
     output logic                          irq_o2a_busy_o,
     output logic                          irq_o2a_start_o,
     output logic                          irq_o2a_done_o,
-    output logic                          irq_o2a_error_o
+    output logic                          irq_o2a_error_o,
+    output logic [31:0]                   perf_a2o_queue_usage_o,
+    output logic [31:0]                   perf_o2a_queue_usage_o
 );
 endmodule
 
@@ -292,9 +304,16 @@ module systolic_controller #(
     output logic                          perf_compute_en_o,
     output logic                          perf_ofm_valid_o,
     output logic                          perf_ofm_ready_o,
+    output logic                          perf_start_o,
+    output logic                          perf_linebuf_busy_o,
+    output logic                          perf_linebuf_prefetch_busy_o,
+    output logic                          perf_binary_busy_o,
     output logic [2:0]                    debug_state_o,
     output logic [1:0]                    debug_drain_state_o,
-    output logic [4:0]                    debug_linebuf_state_o
+    output logic [4:0]                    debug_linebuf_state_o,
+    output logic [1:0]                    debug_linebuf_fetch_main_state_o,
+    output logic [2:0]                    debug_linebuf_fetch_background_state_o,
+    output logic [2:0]                    debug_linebuf_bypass_state_o
 );
 endmodule
 `endif

@@ -88,16 +88,28 @@ Analysis: conflict rate = `TCDM_BANK_CONFLICTS` / `TCDM_TOTAL_REQ`. If this exce
                                               +-----------------------------------+
 ```
 
-## 4. P0 Implementation Status
+## 4. PMU v2 Implementation
 
-P0 is instantiated in `npu_cluster` with 32 fixed 64-bit counters and 32-bit host AXI4-Lite MMIO:
+PMU v2.1 is instantiated in `npu_cluster` with 163 fixed 64-bit metrics and a
+32-bit host AXI4-Lite MMIO interface. Counters 0-31 retain the original P0 ABI
+for comparisons with saved runs. Counters 32-162 are the authoritative metrics
+for optimization because they distinguish asserted requests from accepted
+transactions and completion levels from completion pulses, and include complete
+systolic-drain and linebuffer FSM occupancy.
 
 - `0x2000_4000` `CTRL`: bit0 enable, bit1 clear, bit2 snapshot.
 - `0x2000_4004` `STATUS`: overflow sticky bits.
 - `0x2000_4008` `NUM_COUNTERS`: number of fixed counters.
+- `0x2000_400c..0x2000_4014`: overflow words for counters 32-127.
+- `0x2000_402c..0x2000_4030`: overflow words for counters 128-162.
+- `0x2000_4018` `VERSION`: `0x0002_0001`.
+- `0x2000_401c` `FILTER_CTRL`: bit 0 enables logical-command filtering.
+- `0x2000_4020` `FILTER_CONTEXT`: selected zero-based command ID.
+- `0x2000_4024` `CONTEXT`: current firmware command ID.
+- `0x2000_4028` `PHASE`: bit 4 is command-active; bits 3:0 are the runtime phase.
 - `0x2000_4100 + id*8`: counter low/high 32-bit.
 
-P0 counter map:
+Counter groups:
 
 | ID | Counter |
 | --- | --- |
@@ -109,15 +121,85 @@ P0 counter map:
 | 16-18 | AFU done/TCDM request/stall |
 | 19-25 | Systolic compute/weight/ofm/IFM/OFM request/stall |
 | 26-31 | Aggregate TCDM request/grant/stall/bank/read/write request |
+| 32-43 | Logical command active/begin/end and invocation/model/binding/validation/fetch/execute/barrier/complete/fail phase cycles |
+| 44-54 | Independent load/store DMA busy, overlap, start/done, queue occupancy sum and peak |
+| 55-73 | AXI request/response handshakes, bytes, blocked cycles, outstanding sum/peak, and completion-latency sum/max |
+| 74-95 | Systolic load/compute/drain/done states, useful work, OFM backpressure, accepted/blocked IFM/weight/RHS/OFM traffic, linebuffer/prefetch/binary activity, start/done |
+| 96-111 | AFU active/start/done pulse, grouped core FSM states, backend drain, core input/output beats and primary stalls |
+| 112-116 | Spatz active/issue/response and accepted/blocked VLSU TCDM traffic |
+| 117-127 | Accepted/blocked TCDM transactions, active/conflicting banks, accepted read/write transactions and bytes, compute-DMA overlap, command time with every engine idle |
+| 128-131 | Output-drain FSM: idle, accumulation read, accumulation write and accumulation requant |
+| 132-146 | Linebuffer spatial scheduler: every state from idle/ensure through fill, window, stream, bypass and done |
+| 147-150 | Linebuffer main-fetch FSM: request beat 0/1, drain and idle |
+| 151-155 | Linebuffer background-prefetch FSM: idle, scan, request beat 0/1 and drain |
+| 156-162 | Linebuffer bypass-engine FSM: idle, prepare, request/wait beat 0/1 and emit |
 
-P0 access model:
+The exact ID-to-name mapping used by reports is `PMU_COUNTER_NAMES` in
+`hw/rtl/cluster/tb/tests/npu_test_utils.py`.
+
+### 4.1 Command and engine attribution
+
+Profiling firmware writes a zero-based logical command ID to `NPU_CMD_PMU_BEGIN`
+immediately before dispatch and to `NPU_CMD_PMU_END` immediately after dispatch.
+These registers live in the existing command-control block, so no new Snitch
+MMIO route is required. The command-control block also records coarse runtime
+phase changes.
+
+Each engine latches the current command ID at its real start/issue event. DMA
+load and store directions each keep a 16-entry tag FIFO matching their hardware
+job queues, while systolic, AFU and Spatz hold their active tag until completion.
+Consequently a command filter continues to count an asynchronous job after
+firmware has begun another command. DMA and AXI response attribution assumes
+the existing in-order response contract; changing the DMA AXI IDs to permit
+out-of-order completion requires propagating tags with those IDs as well.
+
+Set `NAI_PMU_PROFILE=0` when building `sw/runtime/neural_ai` to remove the two
+command-marker MMIO writes from production firmware. Profiling builds default
+to `NAI_PMU_PROFILE=1`. This makes the measurement overhead explicit and
+removable rather than silently charging all production command dispatches.
+
+### 4.2 Counter semantics
+
+- A name ending in `_accept`, `_fire`, `_beat`, `_start`, `_done`, or `_pulse`
+  counts a handshake/event, not time asserted.
+- A name ending in `_cycles` counts clocks for which the condition is true.
+- Queue/outstanding `occupancy` counters integrate occupancy over time; divide
+  by an applicable busy-cycle count for the mean. Their `peak` companions are
+  max-mode counters, not sums.
+- AXI latency sum is measured from accepted AR to accepted final R beat and from
+  accepted AW to accepted B. Divide by the matching completed burst count.
+- TCDM byte metrics use the accepted request byte enables. Conflict cycles mean
+  at least one bank had multiple contenders; `tcdm_conflicting_banks` sums how
+  many banks conflicted in each cycle.
+- P0 IDs 5-31 intentionally preserve asserted-request semantics. Use IDs
+  83-90, 115-125 for transaction and stall analysis.
+- State counters 128-162 are gated by the active systolic job tag. Their IDLE
+  counters therefore measure idle occupancy within a systolic job and do not
+  accumulate between jobs.
+
+### 4.3 Reporting policy
+
+Python/cocotb only configures the PMU, reads a stable snapshot, derives ratios,
+and writes inference/per-command CSV. It does not sample every clock. For a
+specific asynchronous command, call `pmu_start(..., command_id=<id>)`; the RTL
+filter applies the engine tags described above. Per-command CSV remains an
+event-driven command-boundary facility and includes all 163 counters.
+
+There is deliberately no cycle timeline trace tier. It would create very large
+files and is unnecessary for the optimization loop. When finer diagnosis is
+needed, use the command filter and rerun only a snapshot-bounded segment.
+
+Access model:
 
 - Host AXI4-Lite slave port decodes `0x1000_0000` I-TCM for firmware boot and `0x2000_4000` PMU for profiling.
-- Snitch D-bus `0x2000_4000` is intentionally not connected to PMU; that window returns a sink response to avoid firmware hangs.
+- Snitch D-bus `0x2000_4000` remains intentionally disconnected. Firmware emits
+  tags through the command-control window at `0x2000_5024..0x2000_502c`.
 - Cocotb starts PMU before `fetch_enable_i`, snapshots/stops it after `irq_o`, then prints a performance report.
 
-P0 validation:
+Validation gates:
 
 - `make -C sw/test/pmu`
+- `make -C sw/test/compiler_runtime check`
+- `make -C hw/rtl/cluster pmu_unit`
 - `make -C hw/rtl/cluster sim COCOTB_TEST_MODULES=test_snitch_boot`
 - `test_pmu_basic` firmware smoke generates Snitch/TCDM traffic; Python host verifies PMU MMIO, snapshot, and non-zero TCDM counters. If building a dedicated simulator for this module is too heavy, it can reuse any up-to-date `tb_npu_cluster` Verilator binary because the cocotb test module is selected at runtime.

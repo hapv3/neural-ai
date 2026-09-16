@@ -4,7 +4,8 @@ module npu_pmu #(
     parameter int unsigned ADDR_WIDTH = 32,
     parameter int unsigned DATA_WIDTH = 32,
     parameter int unsigned NUM_COUNTERS = 32,
-    parameter int unsigned INC_WIDTH = 16
+    parameter int unsigned INC_WIDTH = 32,
+    parameter logic [NUM_COUNTERS-1:0] MAX_COUNTER_MASK = '0
 )(
     input  logic clk_i,
     input  logic rst_ni,
@@ -18,18 +19,36 @@ module npu_pmu #(
     output logic                      rvalid_o,
     output logic [DATA_WIDTH-1:0]     rdata_o,
 
-    input  logic [NUM_COUNTERS-1:0][INC_WIDTH-1:0] event_inc_i
+    input  logic [NUM_COUNTERS-1:0][INC_WIDTH-1:0] event_inc_i,
+
+    input  logic [31:0] context_id_i,
+    input  logic        context_active_i,
+    input  logic [3:0]  phase_i,
+    output logic        filter_enable_o,
+    output logic [31:0] filter_context_o
 );
 
     localparam int unsigned DATA_BYTES = DATA_WIDTH / 8;
     localparam logic [ADDR_WIDTH-1:0] REG_CTRL        = 32'h0000;
     localparam logic [ADDR_WIDTH-1:0] REG_STATUS      = 32'h0004;
     localparam logic [ADDR_WIDTH-1:0] REG_NUM_COUNTER = 32'h0008;
+    localparam logic [ADDR_WIDTH-1:0] REG_STATUS1      = 32'h000C;
+    localparam logic [ADDR_WIDTH-1:0] REG_STATUS2      = 32'h0010;
+    localparam logic [ADDR_WIDTH-1:0] REG_STATUS3      = 32'h0014;
+    localparam logic [ADDR_WIDTH-1:0] REG_VERSION      = 32'h0018;
+    localparam logic [ADDR_WIDTH-1:0] REG_FILTER_CTRL  = 32'h001C;
+    localparam logic [ADDR_WIDTH-1:0] REG_FILTER_CTX   = 32'h0020;
+    localparam logic [ADDR_WIDTH-1:0] REG_CONTEXT      = 32'h0024;
+    localparam logic [ADDR_WIDTH-1:0] REG_PHASE        = 32'h0028;
+    localparam logic [ADDR_WIDTH-1:0] REG_STATUS4      = 32'h002C;
+    localparam logic [ADDR_WIDTH-1:0] REG_STATUS5      = 32'h0030;
     localparam logic [ADDR_WIDTH-1:0] REG_COUNTER_BASE = 32'h0100;
 
     logic [NUM_COUNTERS-1:0] overflow_q;
     logic [NUM_COUNTERS-1:0][DATA_WIDTH-1:0] counter_read_data;
     logic enable_q;
+    logic filter_enable_q;
+    logic [31:0] filter_context_q;
     logic snapshot_valid_q;
     logic write_resp_q;
     logic read_pending_s0_q;
@@ -52,6 +71,9 @@ module npu_pmu #(
     logic read_ctrl_s2_q;
     logic read_status_s2_q;
     logic read_num_counter_s2_q;
+    logic [ADDR_WIDTH-1:0] read_special_s0_q;
+    logic [ADDR_WIDTH-1:0] read_special_s1_q;
+    logic [ADDR_WIDTH-1:0] read_special_s2_q;
     logic ctrl_write_d;
     logic ctrl_write_q;
     logic [2:0] ctrl_bits_d;
@@ -69,11 +91,14 @@ module npu_pmu #(
     assign ctrl_clear_q = ctrl_write_q && ctrl_bits_q[1];
     assign ctrl_snapshot_q = ctrl_write_q && !ctrl_bits_q[1] && ctrl_bits_q[2];
     assign unused_wdata = wdata_i[DATA_WIDTH-1:3];
+    assign filter_enable_o = filter_enable_q;
+    assign filter_context_o = filter_context_q;
 
     for (genvar idx = 0; idx < NUM_COUNTERS; idx++) begin : gen_counters
         npu_pmu_counter #(
             .INC_WIDTH  (INC_WIDTH),
-            .DATA_WIDTH (DATA_WIDTH)
+            .DATA_WIDTH (DATA_WIDTH),
+            .MODE_MAX   (MAX_COUNTER_MASK[idx])
         ) u_counter (
             .clk_i           (clk_i),
             .rst_ni          (rst_ni),
@@ -129,12 +154,17 @@ module npu_pmu #(
             read_ctrl_s0_q   <= 1'b0;
             read_status_s0_q <= 1'b0;
             read_num_counter_s0_q <= 1'b0;
+            read_special_s0_q <= '0;
             read_ctrl_s1_q   <= 1'b0;
             read_status_s1_q <= 1'b0;
             read_num_counter_s1_q <= 1'b0;
+            read_special_s1_q <= '0;
             read_ctrl_s2_q   <= 1'b0;
             read_status_s2_q <= 1'b0;
             read_num_counter_s2_q <= 1'b0;
+            read_special_s2_q <= '0;
+            filter_enable_q   <= 1'b0;
+            filter_context_q  <= '0;
             rvalid_o         <= 1'b0;
             rdata_o          <= '0;
         end else begin
@@ -148,16 +178,19 @@ module npu_pmu #(
             read_ctrl_s2_q <= read_ctrl_s1_q;
             read_status_s2_q <= read_status_s1_q;
             read_num_counter_s2_q <= read_num_counter_s1_q;
+            read_special_s2_q <= read_special_s1_q;
 
             read_pending_s1_q <= read_pending_s0_q;
             read_ctrl_s1_q <= read_ctrl_s0_q;
             read_status_s1_q <= read_status_s0_q;
             read_num_counter_s1_q <= read_num_counter_s0_q;
+            read_special_s1_q <= read_special_s0_q;
 
             read_pending_s0_q <= 1'b0;
             read_ctrl_s0_q <= 1'b0;
             read_status_s0_q <= 1'b0;
             read_num_counter_s0_q <= 1'b0;
+            read_special_s0_q <= '0;
             read_counter_sel_q <= '0;
             read_counter_high_q <= '0;
             read_snapshot_q <= '0;
@@ -168,11 +201,20 @@ module npu_pmu #(
             if (req_i && gnt_o) begin
                 if (we_i) begin
                     write_resp_q <= 1'b1;
+                    if ((|be_i) && (wr_local_addr == REG_FILTER_CTRL)) begin
+                        filter_enable_q <= wdata_i[0];
+                    end
+                    if ((|be_i) && (wr_local_addr == REG_FILTER_CTX)) begin
+                        filter_context_q <= wdata_i[31:0];
+                    end
                 end else begin
                     read_pending_s0_q <= 1'b1;
                     read_ctrl_s0_q <= (wr_local_addr == REG_CTRL);
                     read_status_s0_q <= (wr_local_addr == REG_STATUS);
                     read_num_counter_s0_q <= (wr_local_addr == REG_NUM_COUNTER);
+                    if (wr_local_addr < REG_COUNTER_BASE) begin
+                        read_special_s0_q <= wr_local_addr;
+                    end
                     read_counter_sel_q <= read_counter_sel_d;
                     for (int idx = 0; idx < NUM_COUNTERS; idx++) begin
                         read_counter_high_q[idx] <= read_counter_sel_d[idx] && wr_local_addr[2];
@@ -197,9 +239,42 @@ module npu_pmu #(
         if (read_ctrl_s2_q) begin
             read_data_d[31:0] = {29'd0, snapshot_valid_q, 1'b0, enable_q};
         end else if (read_status_s2_q) begin
-            read_data_d[31:0] = overflow_q[31:0];
+            for (int idx = 0; idx < 32 && idx < NUM_COUNTERS; idx++) begin
+                read_data_d[idx] = overflow_q[idx];
+            end
         end else if (read_num_counter_s2_q) begin
             read_data_d[31:0] = 32'(NUM_COUNTERS);
+        end else if (read_special_s2_q == REG_STATUS1) begin
+            for (int idx = 32; idx < 64 && idx < NUM_COUNTERS; idx++) begin
+                read_data_d[idx-32] = overflow_q[idx];
+            end
+        end else if (read_special_s2_q == REG_STATUS2) begin
+            for (int idx = 64; idx < 96 && idx < NUM_COUNTERS; idx++) begin
+                read_data_d[idx-64] = overflow_q[idx];
+            end
+        end else if (read_special_s2_q == REG_STATUS3) begin
+            for (int idx = 96; idx < 128 && idx < NUM_COUNTERS; idx++) begin
+                read_data_d[idx-96] = overflow_q[idx];
+            end
+        end else if (read_special_s2_q == REG_STATUS4) begin
+            for (int idx = 128; idx < 160 && idx < NUM_COUNTERS; idx++) begin
+                read_data_d[idx-128] = overflow_q[idx];
+            end
+        end else if (read_special_s2_q == REG_STATUS5) begin
+            for (int idx = 160; idx < 192 && idx < NUM_COUNTERS; idx++) begin
+                read_data_d[idx-160] = overflow_q[idx];
+            end
+        end else if (read_special_s2_q == REG_VERSION) begin
+            read_data_d[31:0] = 32'h0002_0001;
+        end else if (read_special_s2_q == REG_FILTER_CTRL) begin
+            read_data_d[0] = filter_enable_q;
+        end else if (read_special_s2_q == REG_FILTER_CTX) begin
+            read_data_d[31:0] = filter_context_q;
+        end else if (read_special_s2_q == REG_CONTEXT) begin
+            read_data_d[31:0] = context_id_i;
+        end else if (read_special_s2_q == REG_PHASE) begin
+            read_data_d[4] = context_active_i;
+            read_data_d[3:0] = phase_i;
         end else begin
             read_data_d = read_counter_data;
         end
@@ -211,7 +286,8 @@ endmodule
 (* keep_hierarchy = "yes" *)
 module npu_pmu_counter #(
     parameter int unsigned INC_WIDTH = 16,
-    parameter int unsigned DATA_WIDTH = 32
+    parameter int unsigned DATA_WIDTH = 32,
+    parameter bit MODE_MAX = 1'b0
 )(
     input  logic                  clk_i,
     input  logic                  rst_ni,
@@ -238,7 +314,9 @@ module npu_pmu_counter #(
     logic [64:0] next_counter;
     logic [63:0] selected_counter;
 
-    assign next_counter = {1'b0, counter_q} + 65'(event_inc_i);
+    assign next_counter = MODE_MAX ?
+        {1'b0, ((64'(event_inc_i) > counter_q) ? 64'(event_inc_i) : counter_q)} :
+        ({1'b0, counter_q} + 65'(event_inc_i));
     assign selected_counter = read_snapshot_q ? snapshot_q : counter_q;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -271,7 +349,7 @@ module npu_pmu_counter #(
             end else begin
                 if (enable_q) begin
                     counter_q  <= next_counter[63:0];
-                    overflow_o <= overflow_o | next_counter[64];
+                    overflow_o <= overflow_o | (!MODE_MAX && next_counter[64]);
                 end
                 if (snapshot_cmd_q) begin
                     snapshot_q <= counter_q;

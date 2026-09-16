@@ -41,7 +41,17 @@ module afu #(
     input  logic [MEM_DATA_WIDTH-1:0]     obi_rhs_rdata_i,
     
     // Interrupt / Status
-    output logic                          done_o
+    output logic                          done_o,
+
+    output logic                          perf_start_o,
+    output logic                          perf_active_o,
+    output logic [4:0]                    perf_state_o,
+    output logic                          perf_lhs_consume_o,
+    output logic                          perf_rhs_consume_o,
+    output logic                          perf_result_produce_o,
+    output logic                          perf_input_wait_o,
+    output logic                          perf_rhs_wait_o,
+    output logic                          perf_output_stall_o
 );
 
     // CSRs
@@ -82,6 +92,11 @@ module afu #(
     logic afu_error;
 
     assign afu_error = 1'b0;
+    assign perf_start_o = cfg_start;
+    assign perf_active_o = core_busy || !backend_idle;
+    assign perf_lhs_consume_o = rfifo_pop;
+    assign perf_rhs_consume_o = rhs_rfifo_pop;
+    assign perf_result_produce_o = wfifo_push;
     
     afu_frontend #(
         .ADDR_WIDTH (ADDR_WIDTH),
@@ -187,7 +202,11 @@ module afu #(
         .wfifo_push_o   (wfifo_push),
         .wfifo_data_o   (wfifo_wdata),
         .done_o         (core_done),
-        .busy_o         (core_busy)
+        .busy_o         (core_busy),
+        .perf_state_o   (perf_state_o),
+        .perf_input_wait_o(perf_input_wait_o),
+        .perf_rhs_wait_o(perf_rhs_wait_o),
+        .perf_output_stall_o(perf_output_stall_o)
     );
     
     afu_fifo_ff #(

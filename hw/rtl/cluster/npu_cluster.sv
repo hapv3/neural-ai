@@ -83,6 +83,9 @@ module npu_cluster #(
     output logic [2:0]                      debug_sys_state_o,
     output logic [1:0]                      debug_sys_drain_state_o,
     output logic [4:0]                      debug_linebuf_state_o,
+    output logic [1:0]                      debug_linebuf_fetch_main_state_o,
+    output logic [2:0]                      debug_linebuf_fetch_background_state_o,
+    output logic [2:0]                      debug_linebuf_bypass_state_o,
     output logic                            irq_o
 );
 
@@ -500,6 +503,15 @@ module npu_cluster #(
     logic                      afu_rhs_obi_rvalid;
     logic [OBI_DATA_WIDTH-1:0] afu_rhs_obi_rdata;
     logic                      afu_done;
+    logic                      afu_perf_start;
+    logic                      afu_perf_active;
+    logic [4:0]                afu_perf_state;
+    logic                      afu_perf_lhs_consume;
+    logic                      afu_perf_rhs_consume;
+    logic                      afu_perf_result_produce;
+    logic                      afu_perf_input_wait;
+    logic                      afu_perf_rhs_wait;
+    logic                      afu_perf_output_stall;
 
     obi_demux_1to4 #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -672,6 +684,11 @@ module npu_cluster #(
     logic        cfg_dma_done;
 
     logic        cfg_sys_done;
+    logic [31:0] pmu_context_id;
+    logic        pmu_context_active;
+    logic        pmu_context_begin;
+    logic        pmu_context_end;
+    logic [3:0]  pmu_phase;
 
     npu_cmd_ctrl #(
         .ADDR_WIDTH        (OBI_ADDR_WIDTH),
@@ -699,7 +716,12 @@ module npu_cluster #(
         .snitch_be_i      (snitch_cmd_be),
         .snitch_wdata_i   (snitch_cmd_wdata),
         .snitch_rvalid_o  (snitch_cmd_rvalid),
-        .snitch_rdata_o   (snitch_cmd_rdata)
+        .snitch_rdata_o   (snitch_cmd_rdata),
+        .pmu_context_id_o (pmu_context_id),
+        .pmu_context_active_o(pmu_context_active),
+        .pmu_context_begin_o(pmu_context_begin),
+        .pmu_context_end_o(pmu_context_end),
+        .pmu_phase_o      (pmu_phase)
     );
 
     assign ctrl_systolic_sel = ((ctrl_addr & 32'hFFFF) >= 32'h0100) &&
@@ -774,7 +796,16 @@ module npu_cluster #(
         .obi_rhs_wdata_o(afu_rhs_obi_wdata),
         .obi_rhs_rvalid_i(afu_rhs_obi_rvalid),
         .obi_rhs_rdata_i(afu_rhs_obi_rdata),
-        .done_o         (afu_done)
+        .done_o         (afu_done),
+        .perf_start_o   (afu_perf_start),
+        .perf_active_o  (afu_perf_active),
+        .perf_state_o   (afu_perf_state),
+        .perf_lhs_consume_o(afu_perf_lhs_consume),
+        .perf_rhs_consume_o(afu_perf_rhs_consume),
+        .perf_result_produce_o(afu_perf_result_produce),
+        .perf_input_wait_o(afu_perf_input_wait),
+        .perf_rhs_wait_o(afu_perf_rhs_wait),
+        .perf_output_stall_o(afu_perf_output_stall)
     );
 
     //=========================================================
@@ -811,6 +842,7 @@ module npu_cluster #(
     logic [TCDM_NUM_BANKS-1:0][OBI_ADDR_WIDTH-1:0] slv_addr;
     logic [TCDM_NUM_BANKS-1:0][(OBI_DATA_WIDTH/8)-1:0] slv_be;
     logic [TCDM_NUM_BANKS-1:0][OBI_DATA_WIDTH-1:0] slv_wdata, slv_rdata;
+    logic [TCDM_NUM_BANKS-1:0]                   tcdm_bank_conflict;
 
     for (genvar m = 0; m < NUM_MASTERS; m++) begin
         assign mst_req[m]   = master_req[m].req;
@@ -863,7 +895,8 @@ module npu_cluster #(
         .bank_we_o        (slv_we),
         .bank_be_o        (slv_be),
         .bank_wdata_o     (slv_wdata),
-        .bank_rdata_i     (slv_rdata)
+        .bank_rdata_i     (slv_rdata),
+        .perf_bank_conflict_o(tcdm_bank_conflict)
     );
 
     // Shared Data TCDM SRAM Banks (16 x 32KB = 512KB)
@@ -1114,6 +1147,8 @@ module npu_cluster #(
     logic idma_irq_o2a_start;
     logic idma_irq_o2a_done;
     logic idma_irq_o2a_error;
+    logic [31:0] idma_a2o_queue_usage;
+    logic [31:0] idma_o2a_queue_usage;
 
     assign cfg_dma_done = idma_irq_a2o_done | idma_irq_o2a_done;
 
@@ -1185,7 +1220,9 @@ module npu_cluster #(
         .irq_o2a_busy_o     (idma_irq_o2a_busy),
         .irq_o2a_start_o    (idma_irq_o2a_start),
         .irq_o2a_done_o     (idma_irq_o2a_done),
-        .irq_o2a_error_o    (idma_irq_o2a_error)
+        .irq_o2a_error_o    (idma_irq_o2a_error),
+        .perf_a2o_queue_usage_o(idma_a2o_queue_usage),
+        .perf_o2a_queue_usage_o(idma_o2a_queue_usage)
     );
 
     assign master_req[2].req   = idma_obi_write_req;
@@ -1237,6 +1274,10 @@ module npu_cluster #(
     logic                      sys_compute_en;
     logic                      sys_ofm_valid;
     logic                      sys_ofm_ready;
+    logic                      sys_perf_start;
+    logic                      sys_linebuf_busy;
+    logic                      sys_linebuf_prefetch_busy;
+    logic                      sys_binary_busy;
 
     // Systolic Controller OBI signals
     logic                      sys_obi_i_req;
@@ -1278,10 +1319,16 @@ module npu_cluster #(
     logic [2:0]                      sys_debug_state;
     logic [1:0]                      sys_debug_drain_state;
     logic [4:0]                      sys_debug_linebuf_state;
+    logic [1:0]                      sys_debug_linebuf_fetch_main_state;
+    logic [2:0]                      sys_debug_linebuf_fetch_background_state;
+    logic [2:0]                      sys_debug_linebuf_bypass_state;
 
     assign debug_sys_state_o = sys_debug_state;
     assign debug_sys_drain_state_o = sys_debug_drain_state;
     assign debug_linebuf_state_o = sys_debug_linebuf_state;
+    assign debug_linebuf_fetch_main_state_o = sys_debug_linebuf_fetch_main_state;
+    assign debug_linebuf_fetch_background_state_o = sys_debug_linebuf_fetch_background_state;
+    assign debug_linebuf_bypass_state_o = sys_debug_linebuf_bypass_state;
 
     systolic_controller #(
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
@@ -1346,9 +1393,16 @@ module npu_cluster #(
         .perf_compute_en_o  (sys_compute_en),
         .perf_ofm_valid_o   (sys_ofm_valid),
         .perf_ofm_ready_o   (sys_ofm_ready),
+        .perf_start_o       (sys_perf_start),
+        .perf_linebuf_busy_o(sys_linebuf_busy),
+        .perf_linebuf_prefetch_busy_o(sys_linebuf_prefetch_busy),
+        .perf_binary_busy_o (sys_binary_busy),
         .debug_state_o      (sys_debug_state),
         .debug_drain_state_o(sys_debug_drain_state),
-        .debug_linebuf_state_o(sys_debug_linebuf_state)
+        .debug_linebuf_state_o(sys_debug_linebuf_state),
+        .debug_linebuf_fetch_main_state_o(sys_debug_linebuf_fetch_main_state),
+        .debug_linebuf_fetch_background_state_o(sys_debug_linebuf_fetch_background_state),
+        .debug_linebuf_bypass_state_o(sys_debug_linebuf_bypass_state)
     );
 
     // Master 3: Systolic Controller IFM/linebuffer read port (I-TCDM)
@@ -1419,80 +1473,415 @@ module npu_cluster #(
     //=========================================================
     // 8. Performance Management Unit
     //=========================================================
-    localparam int unsigned PMU_NUM_COUNTERS = 32;
-    localparam int unsigned PMU_INC_WIDTH = 16;
+    localparam int unsigned PMU_NUM_COUNTERS = 163;
+    localparam int unsigned PMU_INC_WIDTH = 32;
+    localparam int unsigned PMU_DMA_TAG_DEPTH = 16;
+    localparam logic [PMU_NUM_COUNTERS-1:0] PMU_MAX_COUNTER_MASK =
+        (PMU_NUM_COUNTERS'(1) << 53) | (PMU_NUM_COUNTERS'(1) << 54) |
+        (PMU_NUM_COUNTERS'(1) << 68) | (PMU_NUM_COUNTERS'(1) << 69) |
+        (PMU_NUM_COUNTERS'(1) << 72) | (PMU_NUM_COUNTERS'(1) << 73);
 
     logic [PMU_NUM_COUNTERS-1:0][PMU_INC_WIDTH-1:0] pmu_event_inc;
+    logic pmu_filter_enable;
+    logic [31:0] pmu_filter_context;
+    logic [NUM_MASTERS-1:0] pmu_master_selected;
+    logic pmu_current_selected;
+    logic pmu_sys_selected;
+    logic pmu_afu_selected;
+    logic pmu_spatz_selected;
+    logic pmu_dma_a2o_selected;
+    logic pmu_dma_o2a_selected;
+    logic pmu_any_selected_active;
+    logic pmu_sys_state_scope;
+
+    logic [31:0] pmu_sys_tag_q;
+    logic [31:0] pmu_afu_tag_q;
+    logic [31:0] pmu_spatz_tag_q;
+    logic pmu_sys_job_active_q;
+    logic pmu_sys_tag_valid_q;
+    logic pmu_afu_tag_valid_q;
+    logic pmu_spatz_tag_valid_q;
+    logic afu_done_q;
+
+    logic [31:0] pmu_dma_a2o_tags_q [PMU_DMA_TAG_DEPTH];
+    logic [31:0] pmu_dma_o2a_tags_q [PMU_DMA_TAG_DEPTH];
+    logic pmu_dma_a2o_tag_valid_q [PMU_DMA_TAG_DEPTH];
+    logic pmu_dma_o2a_tag_valid_q [PMU_DMA_TAG_DEPTH];
+    logic [3:0] pmu_dma_a2o_wr_q, pmu_dma_a2o_rd_q;
+    logic [3:0] pmu_dma_o2a_wr_q, pmu_dma_o2a_rd_q;
+    logic [4:0] pmu_dma_a2o_tag_count_q, pmu_dma_o2a_tag_count_q;
+    logic [31:0] pmu_dma_a2o_tag, pmu_dma_o2a_tag;
+
+    logic [63:0] pmu_cycle_q;
+    logic [63:0] pmu_axi_read_time_q [16];
+    logic [63:0] pmu_axi_write_time_q [16];
+    logic [3:0] pmu_axi_read_wr_q, pmu_axi_read_rd_q;
+    logic [3:0] pmu_axi_write_wr_q, pmu_axi_write_rd_q;
+    logic [4:0] pmu_axi_read_outstanding_q, pmu_axi_write_outstanding_q;
+    logic [31:0] pmu_axi_read_latency;
+    logic [31:0] pmu_axi_write_latency;
+
+    function automatic logic pmu_tag_selected(input logic [31:0] tag, input logic valid);
+        pmu_tag_selected = !pmu_filter_enable ||
+                           (valid && (tag == pmu_filter_context));
+    endfunction
+
+    assign pmu_dma_a2o_tag = pmu_dma_a2o_tags_q[pmu_dma_a2o_rd_q];
+    assign pmu_dma_o2a_tag = pmu_dma_o2a_tags_q[pmu_dma_o2a_rd_q];
+    assign pmu_current_selected = pmu_tag_selected(pmu_context_id, pmu_context_active);
+    assign pmu_sys_selected = pmu_tag_selected(pmu_sys_tag_q, pmu_sys_tag_valid_q);
+    assign pmu_afu_selected = pmu_tag_selected(pmu_afu_tag_q, pmu_afu_tag_valid_q);
+    assign pmu_spatz_selected = pmu_tag_selected(pmu_spatz_tag_q, pmu_spatz_tag_valid_q);
+    assign pmu_dma_a2o_selected = pmu_tag_selected(
+        pmu_dma_a2o_tag, (pmu_dma_a2o_tag_count_q != 0) &&
+                          pmu_dma_a2o_tag_valid_q[pmu_dma_a2o_rd_q]);
+    assign pmu_dma_o2a_selected = pmu_tag_selected(
+        pmu_dma_o2a_tag, (pmu_dma_o2a_tag_count_q != 0) &&
+                         pmu_dma_o2a_tag_valid_q[pmu_dma_o2a_rd_q]);
+    assign pmu_sys_state_scope = pmu_sys_job_active_q && pmu_sys_selected;
+    assign pmu_any_selected_active = pmu_current_selected ||
+        (idma_irq_a2o_busy && pmu_dma_a2o_selected) ||
+        (idma_irq_o2a_busy && pmu_dma_o2a_selected) ||
+        (sys_debug_state != 3'd0 && pmu_sys_selected) ||
+        (afu_perf_active && pmu_afu_selected) || pmu_spatz_selected;
+    assign pmu_axi_read_latency = 32'(pmu_cycle_q - pmu_axi_read_time_q[pmu_axi_read_rd_q]);
+    assign pmu_axi_write_latency = 32'(pmu_cycle_q - pmu_axi_write_time_q[pmu_axi_write_rd_q]);
+
+    always_comb begin
+        pmu_master_selected = '0;
+        pmu_master_selected[0] = pmu_current_selected;
+        pmu_master_selected[1] = pmu_spatz_selected;
+        pmu_master_selected[8] = pmu_spatz_selected;
+        pmu_master_selected[2] = pmu_dma_a2o_selected;
+        pmu_master_selected[9] = pmu_dma_o2a_selected;
+        pmu_master_selected[3] = pmu_sys_selected;
+        pmu_master_selected[4] = pmu_sys_selected;
+        pmu_master_selected[5] = pmu_sys_selected;
+        pmu_master_selected[6] = pmu_sys_selected;
+        pmu_master_selected[7] = pmu_sys_selected;
+        pmu_master_selected[11] = pmu_sys_selected;
+        pmu_master_selected[13] = pmu_sys_selected;
+        pmu_master_selected[10] = pmu_afu_selected;
+        pmu_master_selected[12] = pmu_afu_selected;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            pmu_cycle_q <= '0;
+            pmu_sys_tag_q <= '0;
+            pmu_sys_job_active_q <= 1'b0;
+            pmu_afu_tag_q <= '0;
+            pmu_spatz_tag_q <= '0;
+            pmu_sys_tag_valid_q <= 1'b0;
+            pmu_afu_tag_valid_q <= 1'b0;
+            pmu_spatz_tag_valid_q <= 1'b0;
+            afu_done_q <= 1'b0;
+            pmu_dma_a2o_wr_q <= '0;
+            pmu_dma_a2o_rd_q <= '0;
+            pmu_dma_o2a_wr_q <= '0;
+            pmu_dma_o2a_rd_q <= '0;
+            pmu_dma_a2o_tag_count_q <= '0;
+            pmu_dma_o2a_tag_count_q <= '0;
+            pmu_axi_read_wr_q <= '0;
+            pmu_axi_read_rd_q <= '0;
+            pmu_axi_write_wr_q <= '0;
+            pmu_axi_write_rd_q <= '0;
+            pmu_axi_read_outstanding_q <= '0;
+            pmu_axi_write_outstanding_q <= '0;
+            for (int idx = 0; idx < PMU_DMA_TAG_DEPTH; idx++) begin
+                pmu_dma_a2o_tags_q[idx] <= '0;
+                pmu_dma_o2a_tags_q[idx] <= '0;
+                pmu_dma_a2o_tag_valid_q[idx] <= 1'b0;
+                pmu_dma_o2a_tag_valid_q[idx] <= 1'b0;
+                pmu_axi_read_time_q[idx] <= '0;
+                pmu_axi_write_time_q[idx] <= '0;
+            end
+        end else begin
+            pmu_cycle_q <= pmu_cycle_q + 64'd1;
+            afu_done_q <= afu_done;
+
+            if (sys_perf_start) begin
+                pmu_sys_tag_q <= pmu_context_id;
+                pmu_sys_tag_valid_q <= pmu_context_active;
+                pmu_sys_job_active_q <= 1'b1;
+            end else if (cfg_sys_done) begin
+                pmu_sys_tag_valid_q <= 1'b0;
+                pmu_sys_job_active_q <= 1'b0;
+            end
+            if (afu_perf_start) begin
+                pmu_afu_tag_q <= pmu_context_id;
+                pmu_afu_tag_valid_q <= pmu_context_active;
+            end else if (afu_done && !afu_done_q) begin
+                pmu_afu_tag_valid_q <= 1'b0;
+            end
+            if (acc_qvalid && acc_qready) begin
+                pmu_spatz_tag_q <= pmu_context_id;
+                pmu_spatz_tag_valid_q <= pmu_context_active;
+            end else if (acc_pvalid && acc_pready) begin
+                pmu_spatz_tag_valid_q <= 1'b0;
+            end
+
+            if (idma_irq_a2o_start) begin
+                pmu_dma_a2o_tags_q[pmu_dma_a2o_wr_q] <= pmu_context_id;
+                pmu_dma_a2o_tag_valid_q[pmu_dma_a2o_wr_q] <= pmu_context_active;
+                pmu_dma_a2o_wr_q <= pmu_dma_a2o_wr_q + 4'd1;
+            end
+            if (idma_irq_a2o_done) pmu_dma_a2o_rd_q <= pmu_dma_a2o_rd_q + 4'd1;
+            unique case ({idma_irq_a2o_start, idma_irq_a2o_done})
+                2'b10: pmu_dma_a2o_tag_count_q <= pmu_dma_a2o_tag_count_q + 5'd1;
+                2'b01: pmu_dma_a2o_tag_count_q <= pmu_dma_a2o_tag_count_q - 5'd1;
+                default: begin end
+            endcase
+            if (idma_irq_o2a_start) begin
+                pmu_dma_o2a_tags_q[pmu_dma_o2a_wr_q] <= pmu_context_id;
+                pmu_dma_o2a_tag_valid_q[pmu_dma_o2a_wr_q] <= pmu_context_active;
+                pmu_dma_o2a_wr_q <= pmu_dma_o2a_wr_q + 4'd1;
+            end
+            if (idma_irq_o2a_done) pmu_dma_o2a_rd_q <= pmu_dma_o2a_rd_q + 4'd1;
+            unique case ({idma_irq_o2a_start, idma_irq_o2a_done})
+                2'b10: pmu_dma_o2a_tag_count_q <= pmu_dma_o2a_tag_count_q + 5'd1;
+                2'b01: pmu_dma_o2a_tag_count_q <= pmu_dma_o2a_tag_count_q - 5'd1;
+                default: begin end
+            endcase
+
+            if (axi_ar_valid_o && axi_ar_ready_i) begin
+                pmu_axi_read_time_q[pmu_axi_read_wr_q] <= pmu_cycle_q;
+                pmu_axi_read_wr_q <= pmu_axi_read_wr_q + 4'd1;
+            end
+            if (axi_r_valid_i && axi_r_ready_o && axi_r_last_i)
+                pmu_axi_read_rd_q <= pmu_axi_read_rd_q + 4'd1;
+            unique case ({axi_ar_valid_o && axi_ar_ready_i,
+                          axi_r_valid_i && axi_r_ready_o && axi_r_last_i})
+                2'b10: pmu_axi_read_outstanding_q <= pmu_axi_read_outstanding_q + 5'd1;
+                2'b01: pmu_axi_read_outstanding_q <= pmu_axi_read_outstanding_q - 5'd1;
+                default: begin end
+            endcase
+            if (axi_aw_valid_o && axi_aw_ready_i) begin
+                pmu_axi_write_time_q[pmu_axi_write_wr_q] <= pmu_cycle_q;
+                pmu_axi_write_wr_q <= pmu_axi_write_wr_q + 4'd1;
+            end
+            if (axi_b_valid_i && axi_b_ready_o)
+                pmu_axi_write_rd_q <= pmu_axi_write_rd_q + 4'd1;
+            unique case ({axi_aw_valid_o && axi_aw_ready_i,
+                          axi_b_valid_i && axi_b_ready_o})
+                2'b10: pmu_axi_write_outstanding_q <= pmu_axi_write_outstanding_q + 5'd1;
+                2'b01: pmu_axi_write_outstanding_q <= pmu_axi_write_outstanding_q - 5'd1;
+                default: begin end
+            endcase
+        end
+    end
 
     always_comb begin
         pmu_event_inc = '0;
 
-        // 0-4: Global/Snitch core events.
-        pmu_event_inc[0] = PMU_INC_WIDTH'(1);
-        pmu_event_inc[1] = PMU_INC_WIDTH'(snitch_core_events.retired_instr);
-        pmu_event_inc[2] = PMU_INC_WIDTH'(snitch_core_events.retired_load);
-        pmu_event_inc[3] = PMU_INC_WIDTH'(snitch_core_events.retired_i);
-        pmu_event_inc[4] = PMU_INC_WIDTH'(snitch_core_events.retired_acc);
-
-        // 5-6: Snitch shared TCDM traffic.
-        pmu_event_inc[5] = PMU_INC_WIDTH'(master_req[0].req);
-        pmu_event_inc[6] = PMU_INC_WIDTH'(master_req[0].req & ~master_rsp[0].gnt);
-
-        // 7-10: Spatz issue/response and VLSU TCDM traffic.
-        pmu_event_inc[7]  = PMU_INC_WIDTH'(acc_qvalid & acc_qready);
-        pmu_event_inc[8]  = PMU_INC_WIDTH'(acc_pvalid & acc_pready);
-        pmu_event_inc[9]  = PMU_INC_WIDTH'(master_req[1].req) + PMU_INC_WIDTH'(master_req[8].req);
-        pmu_event_inc[10] = PMU_INC_WIDTH'(master_req[1].req & ~master_rsp[1].gnt) +
-                            PMU_INC_WIDTH'(master_req[8].req & ~master_rsp[8].gnt);
-
-        // 11-15: iDMA status and local TCDM traffic.
-        pmu_event_inc[11] = PMU_INC_WIDTH'(idma_irq_a2o_busy | idma_irq_o2a_busy);
-        pmu_event_inc[12] = PMU_INC_WIDTH'(idma_irq_a2o_start) + PMU_INC_WIDTH'(idma_irq_o2a_start);
-        pmu_event_inc[13] = PMU_INC_WIDTH'(idma_irq_a2o_done) + PMU_INC_WIDTH'(idma_irq_o2a_done);
-        pmu_event_inc[14] = PMU_INC_WIDTH'(master_req[2].req) + PMU_INC_WIDTH'(master_req[9].req);
-        pmu_event_inc[15] = PMU_INC_WIDTH'(master_req[2].req & ~master_rsp[2].gnt) +
-                            PMU_INC_WIDTH'(master_req[9].req & ~master_rsp[9].gnt);
-
-        // 16-18: AFU completion and TCDM traffic.
-        pmu_event_inc[16] = PMU_INC_WIDTH'(afu_done);
-        pmu_event_inc[17] = PMU_INC_WIDTH'(master_req[10].req) +
-                            PMU_INC_WIDTH'(master_req[12].req);
-        pmu_event_inc[18] = PMU_INC_WIDTH'(master_req[10].req & ~master_rsp[10].gnt) +
-                            PMU_INC_WIDTH'(master_req[12].req & ~master_rsp[12].gnt);
-
-        // 19-25: Systolic control and TCDM traffic.
-        pmu_event_inc[19] = PMU_INC_WIDTH'(sys_compute_en);
-        pmu_event_inc[20] = PMU_INC_WIDTH'(sys_weight_load_en);
-        pmu_event_inc[21] = PMU_INC_WIDTH'(sys_ofm_valid);
-        pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req) +
-                            PMU_INC_WIDTH'(master_req[11].req) +
-                            PMU_INC_WIDTH'(master_req[13].req);
-        pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req & ~master_rsp[3].gnt) +
-                            PMU_INC_WIDTH'(master_req[11].req & ~master_rsp[11].gnt) +
-                            PMU_INC_WIDTH'(master_req[13].req & ~master_rsp[13].gnt);
+        // 0-31 retain the original counter ABI for historical comparisons.
+        pmu_event_inc[0] = PMU_INC_WIDTH'(!pmu_filter_enable || pmu_any_selected_active);
+        pmu_event_inc[1] = PMU_INC_WIDTH'(snitch_core_events.retired_instr && pmu_current_selected);
+        pmu_event_inc[2] = PMU_INC_WIDTH'(snitch_core_events.retired_load && pmu_current_selected);
+        pmu_event_inc[3] = PMU_INC_WIDTH'(snitch_core_events.retired_i && pmu_current_selected);
+        pmu_event_inc[4] = PMU_INC_WIDTH'(snitch_core_events.retired_acc && pmu_current_selected);
+        pmu_event_inc[5] = PMU_INC_WIDTH'(master_req[0].req && pmu_current_selected);
+        pmu_event_inc[6] = PMU_INC_WIDTH'(master_req[0].req && !master_rsp[0].gnt && pmu_current_selected);
+        pmu_event_inc[7] = PMU_INC_WIDTH'(acc_qvalid && acc_qready && pmu_current_selected);
+        pmu_event_inc[8] = PMU_INC_WIDTH'(acc_pvalid && acc_pready && pmu_spatz_selected);
+        pmu_event_inc[9] = PMU_INC_WIDTH'(master_req[1].req && pmu_spatz_selected) +
+                           PMU_INC_WIDTH'(master_req[8].req && pmu_spatz_selected);
+        pmu_event_inc[10] = PMU_INC_WIDTH'(master_req[1].req && !master_rsp[1].gnt && pmu_spatz_selected) +
+                            PMU_INC_WIDTH'(master_req[8].req && !master_rsp[8].gnt && pmu_spatz_selected);
+        pmu_event_inc[11] = PMU_INC_WIDTH'((idma_irq_a2o_busy && pmu_dma_a2o_selected) ||
+                                           (idma_irq_o2a_busy && pmu_dma_o2a_selected));
+        pmu_event_inc[12] = PMU_INC_WIDTH'(idma_irq_a2o_start && pmu_current_selected) +
+                            PMU_INC_WIDTH'(idma_irq_o2a_start && pmu_current_selected);
+        pmu_event_inc[13] = PMU_INC_WIDTH'(idma_irq_a2o_done && pmu_dma_a2o_selected) +
+                            PMU_INC_WIDTH'(idma_irq_o2a_done && pmu_dma_o2a_selected);
+        pmu_event_inc[14] = PMU_INC_WIDTH'(master_req[2].req && pmu_dma_a2o_selected) +
+                            PMU_INC_WIDTH'(master_req[9].req && pmu_dma_o2a_selected);
+        pmu_event_inc[15] = PMU_INC_WIDTH'(master_req[2].req && !master_rsp[2].gnt && pmu_dma_a2o_selected) +
+                            PMU_INC_WIDTH'(master_req[9].req && !master_rsp[9].gnt && pmu_dma_o2a_selected);
+        pmu_event_inc[16] = PMU_INC_WIDTH'(afu_done && pmu_afu_selected);
+        pmu_event_inc[17] = PMU_INC_WIDTH'(master_req[10].req && pmu_afu_selected) +
+                            PMU_INC_WIDTH'(master_req[12].req && pmu_afu_selected);
+        pmu_event_inc[18] = PMU_INC_WIDTH'(master_req[10].req && !master_rsp[10].gnt && pmu_afu_selected) +
+                            PMU_INC_WIDTH'(master_req[12].req && !master_rsp[12].gnt && pmu_afu_selected);
+        pmu_event_inc[19] = PMU_INC_WIDTH'(sys_compute_en && pmu_sys_selected);
+        pmu_event_inc[20] = PMU_INC_WIDTH'(sys_weight_load_en && pmu_sys_selected);
+        pmu_event_inc[21] = PMU_INC_WIDTH'(sys_ofm_valid && pmu_sys_selected);
+        pmu_event_inc[22] = PMU_INC_WIDTH'(master_req[3].req && pmu_sys_selected) +
+                            PMU_INC_WIDTH'(master_req[11].req && pmu_sys_selected) +
+                            PMU_INC_WIDTH'(master_req[13].req && pmu_sys_selected);
+        pmu_event_inc[23] = PMU_INC_WIDTH'(master_req[3].req && !master_rsp[3].gnt && pmu_sys_selected) +
+                            PMU_INC_WIDTH'(master_req[11].req && !master_rsp[11].gnt && pmu_sys_selected) +
+                            PMU_INC_WIDTH'(master_req[13].req && !master_rsp[13].gnt && pmu_sys_selected);
         for (int port = 0; port < 4; port++) begin
-            pmu_event_inc[24] += PMU_INC_WIDTH'(sys_obi_o_req[port]);
-            pmu_event_inc[25] += PMU_INC_WIDTH'(sys_obi_o_req[port] & ~sys_obi_o_gnt[port]);
+            pmu_event_inc[24] += PMU_INC_WIDTH'(sys_obi_o_req[port] && pmu_sys_selected);
+            pmu_event_inc[25] += PMU_INC_WIDTH'(sys_obi_o_req[port] && !sys_obi_o_gnt[port] && pmu_sys_selected);
         end
-
-        // 26-31: Shared TCDM aggregate request, grant/stall, bank activity.
         for (int mst = 0; mst < NUM_MASTERS; mst++) begin
-            pmu_event_inc[26] += PMU_INC_WIDTH'(master_req[mst].req);
-            pmu_event_inc[27] += PMU_INC_WIDTH'(master_req[mst].req & master_rsp[mst].gnt);
-            pmu_event_inc[28] += PMU_INC_WIDTH'(master_req[mst].req & ~master_rsp[mst].gnt);
-            pmu_event_inc[30] += PMU_INC_WIDTH'(master_req[mst].req & ~master_req[mst].we);
-            pmu_event_inc[31] += PMU_INC_WIDTH'(master_req[mst].req & master_req[mst].we);
+            pmu_event_inc[26] += PMU_INC_WIDTH'(master_req[mst].req && pmu_master_selected[mst]);
+            pmu_event_inc[27] += PMU_INC_WIDTH'(master_req[mst].req && master_rsp[mst].gnt && pmu_master_selected[mst]);
+            pmu_event_inc[28] += PMU_INC_WIDTH'(master_req[mst].req && !master_rsp[mst].gnt && pmu_master_selected[mst]);
+            pmu_event_inc[30] += PMU_INC_WIDTH'(master_req[mst].req && !master_req[mst].we && pmu_master_selected[mst]);
+            pmu_event_inc[31] += PMU_INC_WIDTH'(master_req[mst].req && master_req[mst].we && pmu_master_selected[mst]);
         end
-        for (int bank = 0; bank < TCDM_NUM_BANKS; bank++) begin
+        for (int bank = 0; bank < TCDM_NUM_BANKS; bank++)
             pmu_event_inc[29] += PMU_INC_WIDTH'(slave_req[bank].req);
+
+        // 32-43: firmware command context and coarse runtime phases.
+        pmu_event_inc[32] = PMU_INC_WIDTH'(pmu_context_active && pmu_current_selected);
+        pmu_event_inc[33] = PMU_INC_WIDTH'(pmu_context_begin && pmu_tag_selected(pmu_context_id, 1'b1));
+        pmu_event_inc[34] = PMU_INC_WIDTH'(pmu_context_end && pmu_tag_selected(pmu_context_id, 1'b1));
+        for (int phase = 1; phase <= 9; phase++)
+            pmu_event_inc[34+phase] = PMU_INC_WIDTH'((pmu_phase == 4'(phase)) &&
+                (!pmu_filter_enable || pmu_current_selected));
+
+        // 44-73: split DMA engines, job queues, AXI handshakes and latency.
+        pmu_event_inc[44] = PMU_INC_WIDTH'(idma_irq_a2o_busy && pmu_dma_a2o_selected);
+        pmu_event_inc[45] = PMU_INC_WIDTH'(idma_irq_o2a_busy && pmu_dma_o2a_selected);
+        pmu_event_inc[46] = PMU_INC_WIDTH'(idma_irq_a2o_busy && idma_irq_o2a_busy &&
+                                           pmu_dma_a2o_selected && pmu_dma_o2a_selected);
+        pmu_event_inc[47] = PMU_INC_WIDTH'(idma_irq_a2o_start && pmu_current_selected);
+        pmu_event_inc[48] = PMU_INC_WIDTH'(idma_irq_a2o_done && pmu_dma_a2o_selected);
+        pmu_event_inc[49] = PMU_INC_WIDTH'(idma_irq_o2a_start && pmu_current_selected);
+        pmu_event_inc[50] = PMU_INC_WIDTH'(idma_irq_o2a_done && pmu_dma_o2a_selected);
+        pmu_event_inc[51] = PMU_INC_WIDTH'(pmu_dma_a2o_selected ? idma_a2o_queue_usage : 0);
+        pmu_event_inc[52] = PMU_INC_WIDTH'(pmu_dma_o2a_selected ? idma_o2a_queue_usage : 0);
+        pmu_event_inc[53] = pmu_event_inc[51];
+        pmu_event_inc[54] = pmu_event_inc[52];
+        pmu_event_inc[55] = PMU_INC_WIDTH'(axi_ar_valid_o && axi_ar_ready_i && pmu_dma_a2o_selected);
+        pmu_event_inc[56] = PMU_INC_WIDTH'(axi_r_valid_i && axi_r_ready_o && pmu_dma_a2o_selected);
+        pmu_event_inc[57] = PMU_INC_WIDTH'(axi_aw_valid_o && axi_aw_ready_i && pmu_dma_o2a_selected);
+        pmu_event_inc[58] = PMU_INC_WIDTH'(axi_w_valid_o && axi_w_ready_i && pmu_dma_o2a_selected);
+        pmu_event_inc[59] = PMU_INC_WIDTH'(axi_b_valid_i && axi_b_ready_o && pmu_dma_o2a_selected);
+        pmu_event_inc[60] = PMU_INC_WIDTH'((axi_r_valid_i && axi_r_ready_o && pmu_dma_a2o_selected) ?
+                                           (OBI_DATA_WIDTH / 8) : 0);
+        pmu_event_inc[61] = PMU_INC_WIDTH'((axi_w_valid_o && axi_w_ready_i && pmu_dma_o2a_selected) ?
+                                           $countones(axi_w_strb_o) : 0);
+        pmu_event_inc[62] = PMU_INC_WIDTH'(axi_ar_valid_o && !axi_ar_ready_i && pmu_dma_a2o_selected);
+        pmu_event_inc[63] = PMU_INC_WIDTH'(axi_r_valid_i && !axi_r_ready_o && pmu_dma_a2o_selected);
+        pmu_event_inc[64] = PMU_INC_WIDTH'(axi_aw_valid_o && !axi_aw_ready_i && pmu_dma_o2a_selected);
+        pmu_event_inc[65] = PMU_INC_WIDTH'(axi_w_valid_o && !axi_w_ready_i && pmu_dma_o2a_selected);
+        pmu_event_inc[66] = PMU_INC_WIDTH'(pmu_dma_a2o_selected ? pmu_axi_read_outstanding_q : 0);
+        pmu_event_inc[67] = PMU_INC_WIDTH'(pmu_dma_o2a_selected ? pmu_axi_write_outstanding_q : 0);
+        pmu_event_inc[68] = pmu_event_inc[66];
+        pmu_event_inc[69] = pmu_event_inc[67];
+        pmu_event_inc[70] = PMU_INC_WIDTH'((axi_r_valid_i && axi_r_ready_o && axi_r_last_i &&
+                                            pmu_dma_a2o_selected) ? pmu_axi_read_latency : 0);
+        pmu_event_inc[71] = PMU_INC_WIDTH'((axi_b_valid_i && axi_b_ready_o && pmu_dma_o2a_selected) ?
+                                           pmu_axi_write_latency : 0);
+        pmu_event_inc[72] = pmu_event_inc[70];
+        pmu_event_inc[73] = pmu_event_inc[71];
+
+        // 74-95: systolic state, useful work and precise TCDM handshakes.
+        pmu_event_inc[74] = PMU_INC_WIDTH'((sys_debug_state != 3'd0) && (sys_debug_state != 3'd4) && pmu_sys_selected);
+        pmu_event_inc[75] = PMU_INC_WIDTH'((sys_debug_state == 3'd1) && pmu_sys_selected);
+        pmu_event_inc[76] = PMU_INC_WIDTH'((sys_debug_state == 3'd2) && pmu_sys_selected);
+        pmu_event_inc[77] = PMU_INC_WIDTH'((sys_debug_state == 3'd3) && pmu_sys_selected);
+        pmu_event_inc[78] = PMU_INC_WIDTH'((sys_debug_state == 3'd4) && pmu_sys_selected);
+        pmu_event_inc[79] = PMU_INC_WIDTH'(sys_compute_en && pmu_sys_selected);
+        pmu_event_inc[80] = PMU_INC_WIDTH'(sys_weight_load_en && pmu_sys_selected);
+        pmu_event_inc[81] = PMU_INC_WIDTH'(sys_ofm_valid && sys_ofm_ready && pmu_sys_selected);
+        pmu_event_inc[82] = PMU_INC_WIDTH'(sys_ofm_valid && !sys_ofm_ready && pmu_sys_selected);
+        pmu_event_inc[83] = PMU_INC_WIDTH'(sys_obi_i_req && sys_obi_i_gnt && pmu_sys_selected);
+        pmu_event_inc[84] = PMU_INC_WIDTH'(sys_obi_i_req && !sys_obi_i_gnt && pmu_sys_selected);
+        pmu_event_inc[85] = PMU_INC_WIDTH'(sys_obi_w_req && sys_obi_w_gnt && pmu_sys_selected);
+        pmu_event_inc[86] = PMU_INC_WIDTH'(sys_obi_w_req && !sys_obi_w_gnt && pmu_sys_selected);
+        pmu_event_inc[87] = PMU_INC_WIDTH'(sys_obi_b_req && sys_obi_b_gnt && pmu_sys_selected);
+        pmu_event_inc[88] = PMU_INC_WIDTH'(sys_obi_b_req && !sys_obi_b_gnt && pmu_sys_selected);
+        for (int port = 0; port < 4; port++) begin
+            pmu_event_inc[89] += PMU_INC_WIDTH'(sys_obi_o_req[port] && sys_obi_o_gnt[port] && pmu_sys_selected);
+            pmu_event_inc[90] += PMU_INC_WIDTH'(sys_obi_o_req[port] && !sys_obi_o_gnt[port] && pmu_sys_selected);
         end
+        pmu_event_inc[91] = PMU_INC_WIDTH'(sys_linebuf_busy && pmu_sys_selected);
+        pmu_event_inc[92] = PMU_INC_WIDTH'(sys_linebuf_prefetch_busy && pmu_sys_selected);
+        pmu_event_inc[93] = PMU_INC_WIDTH'(sys_binary_busy && pmu_sys_selected);
+        pmu_event_inc[94] = PMU_INC_WIDTH'(sys_perf_start && pmu_current_selected);
+        pmu_event_inc[95] = PMU_INC_WIDTH'(cfg_sys_done && pmu_sys_selected);
+
+        // 96-111: AFU active/state/stall breakdown and accepted core beats.
+        pmu_event_inc[96] = PMU_INC_WIDTH'(afu_perf_active && pmu_afu_selected);
+        pmu_event_inc[97] = PMU_INC_WIDTH'(afu_perf_start && pmu_current_selected);
+        pmu_event_inc[98] = PMU_INC_WIDTH'(afu_done && !afu_done_q && pmu_afu_selected);
+        pmu_event_inc[99] = PMU_INC_WIDTH'((afu_perf_state == 5'd1) && pmu_afu_selected);
+        pmu_event_inc[100] = PMU_INC_WIDTH'(((afu_perf_state == 5'd2) || (afu_perf_state == 5'd3)) && pmu_afu_selected);
+        pmu_event_inc[101] = PMU_INC_WIDTH'((afu_perf_state >= 5'd4) && (afu_perf_state <= 5'd10) && pmu_afu_selected);
+        pmu_event_inc[102] = PMU_INC_WIDTH'((afu_perf_state >= 5'd11) && (afu_perf_state <= 5'd13) && pmu_afu_selected);
+        pmu_event_inc[103] = PMU_INC_WIDTH'((afu_perf_state >= 5'd14) && (afu_perf_state <= 5'd19) && pmu_afu_selected);
+        pmu_event_inc[104] = PMU_INC_WIDTH'((afu_perf_state == 5'd20) && pmu_afu_selected);
+        pmu_event_inc[105] = PMU_INC_WIDTH'(afu_perf_active && (afu_perf_state == 5'd0) && pmu_afu_selected);
+        pmu_event_inc[106] = PMU_INC_WIDTH'(afu_perf_lhs_consume && pmu_afu_selected);
+        pmu_event_inc[107] = PMU_INC_WIDTH'(afu_perf_rhs_consume && pmu_afu_selected);
+        pmu_event_inc[108] = PMU_INC_WIDTH'(afu_perf_result_produce && pmu_afu_selected);
+        pmu_event_inc[109] = PMU_INC_WIDTH'(afu_perf_input_wait && pmu_afu_selected);
+        pmu_event_inc[110] = PMU_INC_WIDTH'(afu_perf_rhs_wait && pmu_afu_selected);
+        pmu_event_inc[111] = PMU_INC_WIDTH'(afu_perf_output_stall && pmu_afu_selected);
+
+        // 112-127: Spatz, exact shared-memory transactions/conflicts and overlap.
+        pmu_event_inc[112] = PMU_INC_WIDTH'(pmu_spatz_tag_valid_q && pmu_spatz_selected);
+        pmu_event_inc[113] = PMU_INC_WIDTH'(acc_qvalid && acc_qready && pmu_current_selected);
+        pmu_event_inc[114] = PMU_INC_WIDTH'(acc_pvalid && acc_pready && pmu_spatz_selected);
+        pmu_event_inc[115] = PMU_INC_WIDTH'((master_req[1].req && master_rsp[1].gnt && pmu_spatz_selected) +
+                                            (master_req[8].req && master_rsp[8].gnt && pmu_spatz_selected));
+        pmu_event_inc[116] = PMU_INC_WIDTH'((master_req[1].req && !master_rsp[1].gnt && pmu_spatz_selected) +
+                                            (master_req[8].req && !master_rsp[8].gnt && pmu_spatz_selected));
+        for (int mst = 0; mst < NUM_MASTERS; mst++) begin
+            pmu_event_inc[117] += PMU_INC_WIDTH'(master_req[mst].req && master_rsp[mst].gnt && pmu_master_selected[mst]);
+            pmu_event_inc[118] += PMU_INC_WIDTH'(master_req[mst].req && !master_rsp[mst].gnt && pmu_master_selected[mst]);
+            pmu_event_inc[122] += PMU_INC_WIDTH'(master_req[mst].req && master_rsp[mst].gnt &&
+                                                 !master_req[mst].we && pmu_master_selected[mst]);
+            pmu_event_inc[123] += PMU_INC_WIDTH'(master_req[mst].req && master_rsp[mst].gnt &&
+                                                 master_req[mst].we && pmu_master_selected[mst]);
+            if (master_req[mst].req && master_rsp[mst].gnt && pmu_master_selected[mst]) begin
+                if (master_req[mst].we)
+                    pmu_event_inc[125] += PMU_INC_WIDTH'($countones(master_req[mst].be));
+                else
+                    pmu_event_inc[124] += PMU_INC_WIDTH'($countones(master_req[mst].be));
+            end
+        end
+        pmu_event_inc[119] = pmu_event_inc[117];
+        for (int bank = 0; bank < TCDM_NUM_BANKS; bank++) begin
+            pmu_event_inc[121] += PMU_INC_WIDTH'(tcdm_bank_conflict[bank] &&
+                (!pmu_filter_enable || (|pmu_event_inc[118])));
+        end
+        pmu_event_inc[120] = PMU_INC_WIDTH'((|tcdm_bank_conflict) &&
+                                            (!pmu_filter_enable || (|pmu_event_inc[118])));
+        pmu_event_inc[126] = PMU_INC_WIDTH'(((idma_irq_a2o_busy && pmu_dma_a2o_selected) ||
+                                             (idma_irq_o2a_busy && pmu_dma_o2a_selected)) &&
+                                            (((sys_debug_state != 3'd0) && pmu_sys_selected) ||
+                                             (afu_perf_active && pmu_afu_selected) ||
+                                             (pmu_spatz_tag_valid_q && pmu_spatz_selected)));
+        pmu_event_inc[127] = PMU_INC_WIDTH'(pmu_context_active && pmu_current_selected &&
+                                            !(idma_irq_a2o_busy && pmu_dma_a2o_selected) &&
+                                            !(idma_irq_o2a_busy && pmu_dma_o2a_selected) &&
+                                            !((sys_debug_state != 3'd0) && pmu_sys_selected) &&
+                                            !(afu_perf_active && pmu_afu_selected) &&
+                                            !(pmu_spatz_tag_valid_q && pmu_spatz_selected));
+
+        // 128-162: complete state occupancy for the systolic output drain and
+        // every enumerated linebuffer FSM.  Gate IDLE states with the active
+        // systolic job tag so idle counters do not accumulate between jobs.
+        for (int state = 0; state < 4; state++)
+            pmu_event_inc[128+state] = PMU_INC_WIDTH'(
+                pmu_sys_state_scope && (sys_debug_drain_state == 2'(state)));
+        for (int state = 0; state < 15; state++)
+            pmu_event_inc[132+state] = PMU_INC_WIDTH'(
+                pmu_sys_state_scope && (sys_debug_linebuf_state == 5'(state)));
+        for (int state = 0; state < 4; state++)
+            pmu_event_inc[147+state] = PMU_INC_WIDTH'(
+                pmu_sys_state_scope && (sys_debug_linebuf_fetch_main_state == 2'(state)));
+        for (int state = 0; state < 5; state++)
+            pmu_event_inc[151+state] = PMU_INC_WIDTH'(
+                pmu_sys_state_scope && (sys_debug_linebuf_fetch_background_state == 3'(state)));
+        for (int state = 0; state < 7; state++)
+            pmu_event_inc[156+state] = PMU_INC_WIDTH'(
+                pmu_sys_state_scope && (sys_debug_linebuf_bypass_state == 3'(state)));
     end
 
     npu_pmu #(
         .ADDR_WIDTH   (OBI_ADDR_WIDTH),
         .DATA_WIDTH   (MMIO_DATA_WIDTH),
         .NUM_COUNTERS (PMU_NUM_COUNTERS),
-        .INC_WIDTH    (PMU_INC_WIDTH)
+        .INC_WIDTH    (PMU_INC_WIDTH),
+        .MAX_COUNTER_MASK(PMU_MAX_COUNTER_MASK)
     ) u_pmu (
         .clk_i       (clk_i),
         .rst_ni      (rst_ni),
@@ -1504,7 +1893,12 @@ module npu_cluster #(
         .wdata_i     (pmu_mm_wdata),
         .rvalid_o    (pmu_mm_rvalid),
         .rdata_o     (pmu_mm_rdata),
-        .event_inc_i (pmu_event_inc)
+        .event_inc_i (pmu_event_inc),
+        .context_id_i(pmu_context_id),
+        .context_active_i(pmu_context_active),
+        .phase_i     (pmu_phase),
+        .filter_enable_o(pmu_filter_enable),
+        .filter_context_o(pmu_filter_context)
     );
 
 endmodule

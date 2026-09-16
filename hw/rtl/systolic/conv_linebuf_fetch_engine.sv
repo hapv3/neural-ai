@@ -64,7 +64,10 @@ module conv_linebuf_fetch_engine #(
 
     output logic [BANKS-1:0] bank_write_req_o,
     output logic [BANKS-1:0][BANK_ADDR_WIDTH-1:0] bank_write_addr_o,
-    output logic [BANKS-1:0][DATA_WIDTH-1:0] bank_write_data_o
+    output logic [BANKS-1:0][DATA_WIDTH-1:0] bank_write_data_o,
+
+    output logic [1:0] debug_main_state_o,
+    output logic [2:0] debug_background_state_o
 );
 
     localparam int unsigned BEAT_BYTES = DATA_WIDTH / 8;
@@ -98,6 +101,9 @@ module conv_linebuf_fetch_engine #(
 
     main_state_e main_state_q;
     background_state_e background_state_q;
+
+    assign debug_main_state_o = main_state_q;
+    assign debug_background_state_o = background_state_q;
     logic [15:0] main_x_q;
     logic [ADDR_WIDTH-1:0] main_addr_q;
     logic [ADDR_WIDTH-1:0] main_pending_beat_addr_q;

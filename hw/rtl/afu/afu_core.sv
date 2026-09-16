@@ -40,7 +40,11 @@ module afu_core #(
     output logic [287:0] wfifo_data_o,
 
     output logic         done_o,
-    output logic         busy_o
+    output logic         busy_o,
+    output logic [4:0]   perf_state_o,
+    output logic         perf_input_wait_o,
+    output logic         perf_rhs_wait_o,
+    output logic         perf_output_stall_o
 );
 
     localparam logic [2:0] MODE_8BIT  = 3'd0;
@@ -80,6 +84,7 @@ module afu_core #(
 
     assign done_o = (state_q == ST_DONE);
     assign busy_o = (state_q != ST_IDLE) && (state_q != ST_DONE);
+    assign perf_state_o = state_q;
 
     logic [31:0] src_addr_q, src_addr_n;
     logic [31:0] rhs_addr_q, rhs_addr_n;
@@ -140,6 +145,10 @@ module afu_core #(
                       (wfifo_full_i && p1_valid_q &&
                        ((cfg_mode_i == MODE_ADD_I8) ||
                         p1_flush_mid_q || (p1_flush_done_q && out_be_q != 0)));
+    assign perf_input_wait_o = (state_q == ST_READ_IN) && rfifo_empty_i;
+    assign perf_rhs_wait_o = (state_q == ST_READ_IN) && (cfg_mode_i == MODE_ADD_I8) &&
+                             rhs_rfifo_empty_i;
+    assign perf_output_stall_o = s2_stall && wfifo_full_i;
 
     // SRAM LUT Instances
     logic s1_sram_req;
