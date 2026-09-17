@@ -394,7 +394,273 @@ using a large checkpoint. The verified restore run executes only command 6 and
 reports 52,081 PMU cycles, exactly matching command 6 after in-process segmented
 continuation; its systolic, DMA, and TCDM event counts also match.
 
-### 5.5 Per-command PMU trace
+### 5.5 Byte-exact snapshot validation against TensorFlow Lite
+
+A segmented run that stops before the final command verifies command status,
+command count, snapshot integrity, and memory restore. It does **not** compare
+intermediate tensor data with TensorFlow Lite. `PASS` at such a boundary means
+that the selected command range completed without a runtime/RTL protocol error;
+it is not proof of numerical correctness.
+
+Use the following procedure when a suffix passes but the final public output is
+wrong, or when the first numerically wrong operator must be identified.
+
+#### Step 1: freeze all inputs to the comparison
+
+Record all of the following before inspecting bytes:
+
+- compiler commit and generated `.nai` file;
+- RTL/runtime commit and Verilator build name;
+- source `.tflite` file and its hash;
+- snapshot boundary and snapshot file;
+- exact input binding bytes;
+- command range and PMU CSV used to create the snapshot.
+
+The selected YOLO320 test uses this deterministic input:
+
+```python
+input_bytes = 320 * 320 * 3
+input_data = bytes(((index * 37 + 11) & 0xFF) for index in range(input_bytes))
+```
+
+Use those exact bytes for both the RTL run and TensorFlow Lite. Do not generate
+random input independently in the two processes.
+
+#### Step 2: validate and decode the snapshot container
+
+The snapshot header is `<8s6I>` and contains magic, command boundary, model
+CRC32, TCDM size, L2-temporary size, output size, and payload CRC32. The payload
+is `TCDM || L2 temporary || public output`, compressed with zlib.
+
+The following standalone check rejects a truncated snapshot, a snapshot from a
+different compiled model, or corrupt state before any numerical comparison:
+
+```python
+from pathlib import Path
+import struct
+import zlib
+
+model = Path("/tmp/yolo320-compiled/yolov8n_320_int8.nai").read_bytes()
+snapshot = Path("/tmp/yolo320-command-4090.snapshot").read_bytes()
+header = struct.Struct("<8s6I")
+(
+    magic,
+    boundary,
+    model_crc,
+    tcdm_bytes,
+    temporary_bytes,
+    output_bytes,
+    payload_crc,
+) = header.unpack_from(snapshot)
+
+assert magic == b"NAISNP01"
+assert model_crc == (zlib.crc32(model) & 0xFFFFFFFF)
+payload = zlib.decompress(snapshot[header.size :])
+assert len(payload) == tcdm_bytes + temporary_bytes + output_bytes
+assert payload_crc == (zlib.crc32(payload) & 0xFFFFFFFF)
+
+tcdm = payload[:tcdm_bytes]
+l2_temporary = payload[tcdm_bytes : tcdm_bytes + temporary_bytes]
+public_output = payload[tcdm_bytes + temporary_bytes :]
+print(boundary, len(tcdm), len(l2_temporary), len(public_output))
+```
+
+The test harness implements the same checks in
+`_decode_yolo320_snapshot()` and `_verify_yolo320_snapshot()` in
+`sw/test/compiler_runtime/test_compiled_model.py`.
+
+#### Step 3: generate the independent TensorFlow Lite reference
+
+Use the reference op resolver and preserve intermediate tensors. Optimized
+TensorFlow Lite kernels can have different rounding behavior and are not the
+byte-exact oracle used by the full selected-model test.
+
+```python
+from pathlib import Path
+import numpy as np
+import tensorflow as tf
+
+model_path = Path("/home/dev01/neural-compiler/test/model/yolov8n_320_int8.tflite")
+input_bytes = 320 * 320 * 3
+input_data = bytes(((index * 37 + 11) & 0xFF) for index in range(input_bytes))
+
+interpreter = tf.lite.Interpreter(
+    model_path=str(model_path),
+    experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    experimental_preserve_all_tensors=True,
+)
+interpreter.allocate_tensors()
+input_detail = interpreter.get_input_details()[0]
+input_tensor = np.frombuffer(input_data, dtype=np.uint8).view(np.int8)
+input_tensor = input_tensor.reshape(input_detail["shape"])
+interpreter.set_tensor(input_detail["index"], input_tensor)
+interpreter.invoke()
+
+for detail in interpreter.get_tensor_details():
+    if "multiply_242" in detail["name"] or "transpose_25" in detail["name"]:
+        print(detail["index"], detail["name"], detail["shape"],
+              detail["quantization_parameters"])
+```
+
+Select an intermediate tensor by verified name, shape, and quantization, not by
+index alone. Tensor indices can change when the source model is regenerated.
+For the DFL investigation below, the merged scaled box tensor was tensor 397
+with shape `[1, 4, 2100]`.
+
+#### Step 4: map the reference tensor to resident accelerator memory
+
+A TFLite tensor name does not directly identify a TCDM address. Establish the
+mapping from the exact compiled package:
+
+1. Use compiler verbose schedule/debug-map output to map the TFLite operation
+   to its Neural-AI layer and ABI commands.
+2. Decode source/destination references, dimensions, layouts, and DMA gathers
+   from those commands.
+3. Track the compiler memory-state/liveness information to identify whether the
+   tensor is in TCDM, L2 temporary, or the public output at boundary `N`.
+4. Choose a snapshot after the producer and any required gather have completed,
+   but before that allocation is reused.
+5. Confirm tensor byte size from data type and shape. Never compare an entire
+   TCDM image with TensorFlow output: TCDM also contains live unrelated data,
+   reusable scratch, padding, and dead allocations.
+
+For compact INT8 tensors, the snapshot byte offset is the logical TCDM address
+used by the ABI reference. For blocked layouts, first undo C32/C16 padding and
+the emitted layout transformation before comparing with the NHWC/CHW reference.
+
+#### Step 5: compare bytes and useful error statistics
+
+This example compares the compact merged DFL result resident at TCDM offset
+1600 in the command-4090 snapshot:
+
+```python
+import numpy as np
+import zlib
+
+tensor_index = 397
+reference = interpreter.get_tensor(tensor_index).astype(np.int8).reshape(-1)
+actual = np.frombuffer(tcdm[1600 : 1600 + 8400], dtype=np.int8)
+assert actual.size == reference.size == 8400
+
+delta = actual.astype(np.int16) - reference.astype(np.int16)
+mismatch = np.flatnonzero(delta)
+print(f"actual_crc=0x{zlib.crc32(actual.tobytes()) & 0xFFFFFFFF:08x}")
+print(f"reference_crc=0x{zlib.crc32(reference.tobytes()) & 0xFFFFFFFF:08x}")
+print(f"exact={np.mean(delta == 0) * 100:.4f}%")
+print(f"mae={np.mean(np.abs(delta)):.6f}")
+print(f"max_abs={np.max(np.abs(delta))}")
+print(f"bias={np.mean(delta):.6f}")
+print(f"actual_range=[{actual.min()}, {actual.max()}]")
+print(f"reference_range=[{reference.min()}, {reference.max()}]")
+if mismatch.size:
+    index = int(mismatch[0])
+    print("first_mismatch", index, int(actual[index]), int(reference[index]))
+```
+
+CRC equality is a convenient final check, but the distribution metrics are
+what make a failure diagnosable:
+
+- one constant extreme value usually indicates saturation or a bad clamp;
+- a large one-sided bias suggests zero-point or signedness error;
+- values with the right shape but periodic mismatches suggest layout/stride;
+- small differences around rounding thresholds suggest multiplier/shift or
+  rounding-mode mismatch;
+- a correct producer tensor followed by a wrong gathered tensor points to DMA
+  dimensions, strides, ordering, or destination overlap.
+
+#### Step 6: split a merged tensor and locate the first bad producer
+
+For a tensor assembled from multiple heads, compare both the final gather and
+each source allocation. The YOLO DFL reference is side-major and can be split
+along its 2100 locations:
+
+```python
+reference_2d = reference.reshape(4, 2100)
+head_specs = [
+    # (name, first_location, locations, TCDM byte offset)
+    ("40x40", 0,    1600, 427104),
+    ("20x20", 1600,  400,      0),
+    ("10x10", 2000,  100,  41600),
+]
+
+for name, first, locations, address in head_specs:
+    expected = reference_2d[:, first : first + locations].reshape(-1)
+    observed = np.frombuffer(
+        tcdm[address : address + 4 * locations], dtype=np.int8
+    )
+    difference = observed.astype(np.int16) - expected.astype(np.int16)
+    print(name, "exact", np.mean(difference == 0),
+          "mae", np.mean(np.abs(difference)),
+          "range", (int(observed.min()), int(observed.max())))
+```
+
+Addresses are build-specific and must be re-derived after scheduling or memory
+allocation changes. The values above document the investigated package only.
+
+#### Step 7: compare adjacent snapshots without confusing writes and reuse
+
+When snapshots exist at `N-1` and `N`, report changed byte ranges separately
+for TCDM, L2 temporary, and public output. Intersect those ranges with the
+decoded destination spans of command `N`. Unexpected changes outside legal
+destinations indicate overwrite or an incomplete hazard; no change inside the
+expected destination indicates a lost start, stale read, or missing store.
+
+Do not interpret every difference as an error. Later commands legally reuse
+TCDM allocations. Compare data to TensorFlow only while the compiler memory
+model says that tensor is live.
+
+#### Worked example: DFL16 saturation in commands 3951-4090
+
+The replay restored command 3950 and executed commands 3951-4090. Runtime
+status was PASS for all 140 commands, but the snapshot comparison found:
+
+- merged DFL tensor: 8400/8400 bytes equal to `127`;
+- exact match against TensorFlow tensor 397: 0%;
+- MAE: about 216.45, with bias about +216.45;
+- all three pre-gather head tensors were already wrong;
+- the class branch at TCDM offset 42016 was 99.8006% exact, MAE 0.00386, and
+  maximum absolute error 9.
+
+This ruled out the final gather and four post-DFL box Add/Sub commands. Command
+decoding then showed these DFL16 requantization parameters:
+
+| Expanded command | Locations | Wrong multiplier/shift | Correct multiplier/shift |
+|---:|---:|---:|---:|
+| 3339 | 100 | 51003 / 8 | 58039 / 19 |
+| 3617 | 400 | 51203 / 9 | 58267 / 20 |
+| 4081 | 1600 | 51203 / 10 | 58267 / 21 |
+
+The compiler's explicit-quantization pass had converted the `Mul` input scale
+to an execution scale of 1. The later structural DFL fusion incorrectly treated
+that value as the original physical scale. Consequently raw scale deltas
+64/128/255 were used instead of approximately 0.0251/0.0502/0.1, and the DFL
+output saturated. The fix reads the original scalar quantization from TFLite
+tensor metadata for the fused DFL interface while preserving explicit
+quantization for the following Concat/Add/Sub operations.
+
+The regression gate checks the exact generated qparams, then recompiles the
+real YOLO model and checks its three ABI commands. This is stronger than merely
+checking that multiplier and shift are in their legal ranges.
+
+#### Snapshot reuse after a compiler fix
+
+Normally, never bypass the model-CRC check. Rerun from a snapshot created by the
+same `.nai` package. A narrowly scoped exception is useful for diagnosis only
+when a binary comparison proves that old and new packages have identical size,
+section layout, command boundaries, addresses, and constants, and that all
+changed bytes are understood command fields executed after the restored
+boundary.
+
+For this DFL issue, old and new packages had identical size and differed by
+only nine bytes: the low bytes of three DFL multiplier/shift pairs. Therefore a
+command-3950 snapshot could be CRC-rebound to test the third DFL at command
+4081. It could **not** prove final-model correctness, because the first two DFL
+commands at 3339 and 3617 had already produced stale wrong state. Full
+byte-exact validation must restart before the earliest changed command, or from
+command zero, and must eventually compare all 176400 public output bytes with
+TensorFlow Lite.
+
+### 5.6 Per-command PMU trace
 
 Set `YOLO320_COMMAND_PMU_CSV` on a segmented run to persist one PMU row for
 every completed ABI command:
@@ -425,7 +691,7 @@ For exact engine attribution of one zero-based command ID, set
 systolic, AFU and Spatz instead of attributing asynchronous work to whichever
 descriptor happens to be in the firmware command buffer later.
 
-### 5.6 Full selected graph
+### 5.7 Full selected graph
 
 ```bash
 env PYTHONPATH=/home/dev01/neural-ai/sw/test/compiler_runtime \
@@ -439,7 +705,7 @@ The full test compiles all 3,910 commands and compares the public output with
 TensorFlow Lite `BUILTIN_REF`. Use it only after focused and segmented gates
 are green.
 
-### 5.7 Parallel broad regression
+### 5.8 Parallel broad regression
 
 ```bash
 cd /home/dev01/neural-ai
