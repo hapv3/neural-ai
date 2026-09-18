@@ -1314,6 +1314,67 @@ def _logical_command_records(model):
     raise ValueError("commands section has no END record")
 
 
+_DMA_SUBMIT_DIRECTION_OFFSETS = {
+    24: 36,
+    25: 48,
+    26: 60,
+}
+
+
+def _restart_boundary_outstanding(commands, command_boundary):
+    """Return asynchronous work that a memory-only snapshot cannot restore."""
+    if not 0 <= command_boundary <= len(commands):
+        raise ValueError(
+            f"snapshot boundary {command_boundary} is outside 0-{len(commands)}"
+        )
+
+    dma_submits = {0: [], 1: []}
+    systolic_submit = None
+    for command_index, command in enumerate(commands[:command_boundary], start=1):
+        command_type = struct.unpack_from("<H", command)[0]
+        if command_type in _DMA_SUBMIT_DIRECTION_OFFSETS:
+            direction = struct.unpack_from(
+                "<I", command, _DMA_SUBMIT_DIRECTION_OFFSETS[command_type]
+            )[0]
+            # Local-to-local submit commands execute synchronously in firmware.
+            if direction in dma_submits:
+                dma_submits[direction].append(command_index)
+        elif command_type == 27:
+            direction = struct.unpack_from("<I", command, 16)[0]
+            if direction in dma_submits:
+                dma_submits[direction].clear()
+        elif command_type in (29, 32):
+            systolic_submit = command_index
+        elif command_type == 30:
+            systolic_submit = None
+        elif command_type == 1:
+            dma_submits[0].clear()
+            dma_submits[1].clear()
+            systolic_submit = None
+
+    return {
+        "dma_external_to_local": tuple(dma_submits[0]),
+        "dma_local_to_external": tuple(dma_submits[1]),
+        "systolic": systolic_submit,
+    }
+
+
+def _require_restart_safe_boundary(model, command_boundary):
+    commands, _end = _logical_command_records(model)
+    outstanding = _restart_boundary_outstanding(commands, command_boundary)
+    details = []
+    for name in ("dma_external_to_local", "dma_local_to_external"):
+        if outstanding[name]:
+            details.append(f"{name} submits {list(outstanding[name])}")
+    if outstanding["systolic"] is not None:
+        details.append(f"systolic submit {outstanding['systolic']}")
+    if details:
+        raise ValueError(
+            f"snapshot boundary {command_boundary} is not restart-safe; "
+            + ", ".join(details)
+        )
+
+
 def _replace_command_section(model, commands, end):
     package = bytearray(model)
     descriptor, commands_offset, commands_size = _command_section(package)
@@ -4421,6 +4482,7 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
             expected_temporary=l2_temporary_bytes,
             expected_output=output_bytes,
         )
+        _require_restart_safe_boundary(full_model, boundary)
         assert len(l2_temporary) == l2_temporary_bytes
         assert len(output) == output_bytes
         first_command = boundary
@@ -4450,6 +4512,8 @@ async def test_compiler_generated_selected_yolo320_segmented_prefix(dut):
         for previous, current in zip([first_command] + segment_ends[:-1], segment_ends)
     )
     assert segment_ends[-1] <= total_commands
+    for command_boundary in segment_ends:
+        _require_restart_safe_boundary(full_model, command_boundary)
 
     multiple_snapshot_boundaries = len(segment_ends) > 1
     for segment_index, end_command in enumerate(segment_ends):
