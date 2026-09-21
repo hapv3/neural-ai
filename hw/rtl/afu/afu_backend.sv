@@ -14,7 +14,7 @@ module afu_backend #(
     input  logic [31:0] cfg_src2_ptr_i,
     input  logic [31:0] cfg_dst_ptr_i,
     input  logic [31:0] cfg_length_i,
-    input  logic [2:0]  cfg_mode_i,
+    input  logic [3:0]  cfg_mode_i,
     input  logic        cfg_start_i,
     input  logic        read_stop_i,
     
@@ -56,8 +56,10 @@ module afu_backend #(
     output logic                    idle_o
 );
 
-    localparam logic [2:0] MODE_MUL_Q7 = 3'd3;
-    localparam logic [2:0] MODE_ADD_I8 = 3'd4;
+    localparam logic [3:0] MODE_MUL_Q7 = 4'd3;
+    localparam logic [3:0] MODE_ADD_I8 = 4'd4;
+    localparam logic [3:0] MODE_BINARY_QUANT = 4'd8;
+    localparam logic [3:0] MODE_LUT_BINARY_QUANT = 4'd9;
 
     logic        we_req;
     logic [31:0] we_addr;
@@ -202,7 +204,8 @@ module afu_backend #(
         end
 
         if (cfg_start_i && cfg_length_i > 0 &&
-            (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8)) begin
+            (cfg_mode_i == MODE_MUL_Q7 || cfg_mode_i == MODE_ADD_I8 ||
+             cfg_mode_i == MODE_BINARY_QUANT || cfg_mode_i == MODE_LUT_BINARY_QUANT)) begin
             rhs_re_active_n = 1'b1;
             rhs_re_addr_n = cfg_src2_ptr_i & ~32'h1F;
             rhs_re_end_addr_n = (cfg_src2_ptr_i + cfg_length_i - 1) & ~32'h1F;

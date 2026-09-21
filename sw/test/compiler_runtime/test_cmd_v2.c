@@ -207,6 +207,20 @@ static uint32_t mock_spatz_add(void *context, const nai_cmd_spatz_add_v2_t *comm
     return 0u;
 }
 
+static uint32_t mock_afu_binary_quant(
+    void *context, const nai_cmd_afu_binary_quant_v2_t *command,
+    uint32_t lhs, uint32_t rhs, uint32_t ofm)
+{
+    mock_state_t *state = (mock_state_t *)context;
+    state->calls++;
+    state->source = lhs;
+    state->source2 = rhs;
+    state->destination = ofm;
+    state->length = command->length;
+    state->mode = command->mode;
+    return 0u;
+}
+
 static uint32_t mock_afu_lut(void *context, const nai_cmd_afu_lut_v2_t *command,
                              uint32_t ifm, uint32_t ofm, uint32_t lut)
 {
@@ -1229,6 +1243,49 @@ int main(void)
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
     spatz_add->mode = NAI_SPATZ_BINARY_SUBTRACT;
     spatz_add->output_shift = 64u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    memset(gemm_model, 0, sizeof(gemm_model));
+    gemm_header.command_count = 1;
+    gemm_header.entry_command_off = 0;
+    gemm_commands.size = 128;
+    gemm_commands.element_count = 2;
+    nai_cmd_afu_binary_quant_v2_t *afu_quant =
+        (nai_cmd_afu_binary_quant_v2_t *)gemm_model;
+    nai_cmd_control_v2_t *afu_quant_end =
+        (nai_cmd_control_v2_t *)(gemm_model + sizeof(*afu_quant));
+    afu_quant->header.type = NAI_CMD_AFU_BINARY_QUANT;
+    afu_quant->header.size_bytes = sizeof(*afu_quant);
+    afu_quant->header.flags = NAI_CMD_FLAG_AFU_LUT_CHAIN;
+    afu_quant->lhs.region = NAI_REGION_TCDM_SCRATCH;
+    afu_quant->rhs.region = NAI_REGION_TCDM_SCRATCH;
+    afu_quant->rhs.offset = 0x100u;
+    afu_quant->ofm.region = NAI_REGION_TCDM_SCRATCH;
+    afu_quant->ofm.offset = 0x200u;
+    afu_quant->length = 67u;
+    afu_quant->lhs_scale = 0x60000000;
+    afu_quant->lhs_shift = 20u;
+    afu_quant->rhs_scale = 0x40000000;
+    afu_quant->rhs_shift = 20u;
+    afu_quant->output_scale = 0x40000000;
+    afu_quant->output_shift = 41u;
+    afu_quant->clamp_min = -128;
+    afu_quant->clamp_max = 127;
+    afu_quant->double_round_shift = 20u;
+    afu_quant->mode = NAI_SPATZ_BINARY_SUBTRACT;
+    afu_quant_end->header.type = NAI_CMD_END;
+    afu_quant_end->header.size_bytes = sizeof(*afu_quant_end);
+    gemm_ops.afu_binary_quant = mock_afu_binary_quant;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.source == 0x10100000u && state.source2 == 0x10100100u);
+    assert(state.destination == 0x10100200u && state.length == 67u);
+    assert(state.mode == NAI_SPATZ_BINARY_SUBTRACT);
+
+    afu_quant->mode = 3u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
 

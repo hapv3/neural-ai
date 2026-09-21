@@ -5,7 +5,7 @@ The RTL lives under `hw/rtl/afu`, the cluster integration is in
 `hw/rtl/cluster/npu_cluster.sv`, and the firmware wrappers are in
 `sw/lib/hal_afu.h` and `sw/lib/spatz_ops.c`.
 
-Last checked against RTL/firmware: 2026-07-21.
+Last checked against RTL/firmware: 2026-09-21.
 
 ## Current Design Snapshot
 
@@ -13,12 +13,12 @@ Last checked against RTL/firmware: 2026-07-21.
 |---|---|---|
 | Control path | 32-bit OBI target at `NPU_AFU_BASE = 0x2000_3000` | Config writes update shadow CSRs. A `STATUS/START` bit0 write commits shadow to active only when AFU is not busy. |
 | Data path | 256-bit TCDM beats, 32 bytes per beat | Production graph buffers should remain 32-byte aligned even though byte-enable tails are supported. |
-| TCDM masters | Primary read/write master plus RHS read-only master | RHS port is used only by `MUL_Q7` and `ADD_I8`. Other modes use the primary port only. |
+| TCDM masters | Primary read/write master plus RHS read-only master | RHS serves legacy binary modes and general `AFU_BINARY_QUANT`; LUT-chain uses the primary stream as LUT input and RHS as operand B. |
 | Input FIFOs | RFIFO depth 2, RHS_RFIFO depth 2 | Only one primary read and one RHS read can be outstanding; this is a low-area streaming engine, not a many-request DMA. |
 | Output FIFO | WFIFO depth 2, 256-bit data + 32 byte enables | `done_o` waits for WFIFO drain and backend idle, so completion is architecturally after writes reach TCDM. |
 | LUT storage | `LUT_LANES=4`, two 256x32 banks per lane | Normal modes ping-pong active/stage banks. DFL uses fixed bank0/bank1 interpretation. |
 | Generic LUT modes | E8/E16/E32, 4 input bytes per core step | Good for activation/clamp/table staging; not a general vector ISA. |
-| Binary modes | ADD_I8 and MUL_Q7, 32 byte lanes per paired beat | `MUL_Q7` is fixed to `(lhs * rhs) >> 7` with i8 saturation; arbitrary multiplier/shift still uses software fallback. |
+| Binary modes | Legacy ADD_I8/MUL_Q7 plus general Add/Sub/Mul requant | General standalone mode accepts one 32-byte beat/cycle after a 10-stage fill. LUT-chain remains bounded by four LUT outputs/cycle. |
 | YOLO fused modes | DFL `reg_max=4` ROW32 low16 and class sigmoid ROW32 high16 | Fixed raw-head layout: box logits in lanes `0..15`, class logits in lanes `16..31`. |
 | GlobalAvgPool | C32-blocked spatial reduction | `SRC2_PTR` carries `spatial_count`; firmware loads reciprocal Q31 into normal LUT entry 0 before start. |
 
@@ -35,7 +35,8 @@ The current AFU covers:
   activation tables.
 - Wider LUT staging: INT8 input to E16/E32 output for exp-like intermediate
   tensors.
-- Dual-source INT8 arithmetic: Q7 multiply and saturating add.
+- Dual-source INT8 arithmetic: legacy Q7/add fast modes and independently
+  quantized general Add/Sub/Mul.
 - YOLO raw-head postprocess: fused DFL `reg_max=4` and class sigmoid.
 - C32 global average pooling.
 
@@ -68,7 +69,10 @@ Snitch D-side MMIO
 |    - pending transaction register for OBI gnt stalls          |
 |                                                              |
 |  RFIFO      RHS_RFIFO      afu_core      WFIFO                |
-|    256b        256b        compute        256b + 32b BE       |
+|    256b        256b        LUT/fixed       256b + 32b BE      |
+|                              |                               |
+|                     binary beat engine                       |
+|                     + 32-lane pipeline                       |
 |                                                              |
 +--------------------------------------------------------------+
         |                         |
@@ -94,7 +98,7 @@ Current cluster parameters:
 `done_o` is asserted only when all three conditions are true:
 
 ```text
-core_done && wfifo_all_empty && backend_idle
+operation_done && wfifo_all_empty && backend_idle
 ```
 
 This prevents the firmware from observing completion before the final write beat
@@ -113,6 +117,8 @@ Top-level wrapper. It instantiates:
 - `afu_frontend`
 - `afu_backend`
 - `afu_core`
+- `afu_binary_requant_engine`
+- `afu_binary_requant_pipeline`
 - `afu_fifo_ff` for RFIFO
 - `afu_fifo_ff` for RHS_RFIFO
 - `afu_fifo_ff` for WFIFO
@@ -163,7 +169,7 @@ Primary port:
 
 RHS port:
 
-- Active only in `MUL_Q7` and `ADD_I8`.
+- Active in `MUL_Q7`, `ADD_I8`, `AFU_BINARY_QUANT`, and LUT-chain binary mode.
 - Reads `SRC2_PTR` through a separate read-only TCDM master.
 - Feeds RHS_RFIFO so binary modes can consume LHS/RHS beats together.
 
@@ -259,12 +265,18 @@ All offsets are relative to `NPU_AFU_BASE = 0x2000_3000`.
 | `0x404` | `SRC_PTR` | R/W shadow | source pointer or LHS pointer |
 | `0x408` | `DST_PTR` | R/W shadow | destination pointer |
 | `0x40c` | `LENGTH` | R/W shadow | mode-specific input length in bytes/elements |
-| `0x410` | `MODE` | R/W shadow | 3-bit mode ID |
+| `0x410` | `MODE` | R/W shadow | 4-bit mode ID |
 | `0x414` | `SRC2_PTR` | R/W shadow | RHS pointer or mode-specific metadata |
+| `0x418` | `ADD_BIAS` | R/W shadow | Legacy ADD_I8 bias |
+| `0x41c` | `BINARY_OP` | R/W shadow | General ADD=`0`, SUB=`1`, MUL=`2` |
+| `0x420..0x434` | binary multipliers/shifts | R/W shadow | LHS, RHS, and output scale pairs |
+| `0x438` | binary zero points | R/W shadow | Packed signed LHS/RHS/output INT8 zero points |
+| `0x43c` | binary clamp | R/W shadow | Packed signed INT8 minimum/maximum |
+| `0x440` | binary double-round shift | R/W shadow | Shared double-round parameter |
 | `0x800..0xbff` | DFL exp LUT | W | 256 32-bit fixed exp entries |
 | `0xc00..0xfff` | DFL reciprocal LUT | W | 256 32-bit fixed reciprocal entries |
 
-CSR address decoding uses offset bits `[5:0]` for the five CSRs, so software
+CSR address decoding uses offset bits `[7:0]`, so software
 should use the symbolic addresses in `sw/lib/npu_memory_map.h` and avoid relying
 on mirrored aliases inside the AFU aperture.
 
@@ -276,8 +288,8 @@ Status bits:
 | 1 | `BUSY` |
 | 2 | `ERROR` |
 
-`ERROR` is currently tied low in `afu.sv`; timeout handling is done in firmware
-wrappers and tests.
+`ERROR` reports invalid/empty general binary jobs; timeout handling remains in
+firmware wrappers and tests.
 
 ### 4.2. Mode IDs
 
@@ -291,6 +303,8 @@ wrappers and tests.
 | `NPU_AFU_MODE_DFL4_ROW32_Q8` | 5 | `npu_dfl_softmax4_row32_i8_q8` | ROW32 low 16 logits | four Q8.8 distances/location |
 | `NPU_AFU_MODE_CLASS_SIGMOID_ROW32_HIGH16` | 6 | `npu_class_sigmoid_row32_high16_i8` | ROW32 high 16 logits | compact 16 INT8 scores/location |
 | `NPU_AFU_MODE_GLOBAL_AVGPOOL_C32` | 7 | `npu_global_avgpool_c32_i8` | C32-blocked tensor | one C32 output group per channel group |
+| `NPU_AFU_MODE_BINARY_QUANT` | 8 | `afu_start_binary_quant` | two compact INT8 streams | compact INT8 |
+| `NPU_AFU_MODE_LUT_BINARY_QUANT` | 9 | `afu_start_binary_quant(..., lut_chain=1)` | LUT input plus compact RHS | compact INT8 |
 
 `LENGTH` meaning is mode-specific:
 
@@ -301,6 +315,7 @@ wrappers and tests.
 | DFL4_ROW32_Q8 | input bytes | Must be `locations * 32`. Output bytes are `locations * 8`. |
 | CLASS_SIGMOID_ROW32_HIGH16 | input bytes | Must be `locations * 32`. Output bytes are `locations * 16`. |
 | GLOBAL_AVGPOOL_C32 | input bytes | Must be `spatial_count * ceil(channels/32) * 32`; `SRC2_PTR` is `spatial_count`. |
+| BINARY_QUANT/LUT_BINARY_QUANT | input/output bytes | One byte per element; final beat uses byte enables. |
 
 ### 4.3. Alignment Contract
 
@@ -364,7 +379,23 @@ dst_i8 = clamp_i8(lhs_i8 + rhs_i8)
 The wrapper `spatz_add_i8()` uses AFU only for the full-range clamp case
 `[-128, 127]`; other min/max ranges still fall back to the scalar helper path.
 
-### 5.4. Fused YOLO DFL
+### 5.4. General binary requant
+
+`BINARY_QUANT` reads aligned LHS and RHS beats directly from TCDM. The AFU
+binary engine feeds a 10-stage, 32-lane Add/Sub/Mul requant pipeline and carries
+the final-beat byte enable alongside the elastic datapath.
+
+`LUT_BINARY_QUANT` instead obtains LHS from `afu_core`: eight groups of four LUT
+outputs are gathered into one 32-byte beat before entering the same pipeline.
+It therefore simplifies the connection without claiming 32 LUT elements per
+cycle; steady-state LUT-chain throughput remains four elements per cycle. The
+RHS still comes from the independent AFU RHS TCDM port.
+
+Command ABI type `AFU_BINARY_QUANT` selects standalone mode by default. Flag
+`AFU_LUT_CHAIN` selects the chain mode and requires the intended 256-entry LUT
+to be resident in the active AFU LUT bank.
+
+### 5.5. Fused YOLO DFL
 
 Mode `NPU_AFU_MODE_DFL4_ROW32_Q8` consumes one 32-byte raw-head row per spatial
 location. Bytes `0..15` are interpreted as:

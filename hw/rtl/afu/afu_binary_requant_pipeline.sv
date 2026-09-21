@@ -1,6 +1,6 @@
 `default_nettype none
 
-module binary_requant_pipeline #(
+module afu_binary_requant_pipeline #(
     parameter int unsigned LANES = 32
 )(
     input  logic                         clk_i,

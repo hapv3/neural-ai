@@ -372,6 +372,24 @@ static uint32_t runtime_spatz_add(void *context,
     return 0u;
 }
 
+static uint32_t runtime_afu_binary_quant(
+    void *context, const nai_cmd_afu_binary_quant_v2_t *command,
+    uint32_t lhs, uint32_t rhs, uint32_t ofm)
+{
+    const afu_binary_quant_params_t params = {
+        command->lhs_scale, command->lhs_shift,
+        command->rhs_scale, command->rhs_shift,
+        command->output_scale, command->output_shift,
+        command->lhs_zero_point, command->rhs_zero_point,
+        command->output_zero_point, command->clamp_min,
+        command->clamp_max, command->double_round_shift, command->mode,
+    };
+    (void)context;
+    afu_start_binary_quant(lhs, rhs, ofm, command->length,
+        (command->header.flags & NAI_CMD_FLAG_AFU_LUT_CHAIN) != 0u, &params);
+    return afu_wait_done(1000000u) ? 0u : 1u;
+}
+
 static uint32_t runtime_afu_lut(void *context,
                                 const nai_cmd_afu_lut_v2_t *command,
                                 uint32_t ifm, uint32_t ofm, uint32_t lut)
@@ -837,7 +855,8 @@ const nai_runtime_ops_v2_t *nai_default_runtime_ops_v2(void)
         runtime_linebuf_submit,
         runtime_systolic_wait,
         runtime_linebuf_binary_job,
-        runtime_linebuf_binary_submit
+        runtime_linebuf_binary_submit,
+        runtime_afu_binary_quant
     };
     return &ops;
 }

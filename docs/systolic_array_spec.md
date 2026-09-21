@@ -1,7 +1,7 @@
 # Systolic Array Architecture Specification
 
 **Version**: Current implemented cluster baseline
-**Last Updated**: 2026-09-10
+**Last Updated**: 2026-09-21
 
 This document describes the RTL/software behavior that is currently implemented
 in the Neural AI repository. It is not a wishlist architecture. When a feature
@@ -17,8 +17,8 @@ Primary source references:
 - Output drain: `hw/rtl/systolic/systolic_output_drain.sv`
 - Output postprocess shell: `hw/rtl/systolic/systolic_output_postprocess.sv`
 - Requant pipeline: `hw/rtl/systolic/requant_pipeline.sv`
-- General binary post-op pipeline: `hw/rtl/systolic/binary_requant_pipeline.sv`
-- Binary operand prefetch: `hw/rtl/systolic/binary_operand_stream.sv`
+- AFU binary pipeline: `hw/rtl/afu/afu_binary_requant_pipeline.sv`
+- AFU binary beat engine: `hw/rtl/afu/afu_binary_requant_engine.sv`
 - Depthwise MAC datapath: `hw/rtl/systolic/depthwise_mac_engine.sv`
 - Firmware register definitions: `sw/lib/npu_memory_map.h`
 - Operator-level usage: `docs/operator_support_matrix.md`
@@ -38,9 +38,8 @@ The current subsystem contains these blocks:
 - a controller FSM with direct GEMM, linebuffer Conv, pool, and depthwise modes;
 - a banked row-ring/window linebuffer for Conv/Pool/Depthwise input streams;
 - a 3-stage INT32-to-INT8 requant pipeline;
-- an optional 10-stage, 32-lane quantized Add/Sub/Mul post-op pipeline;
-- a credit-controlled operand-B prefetch stream with multiple OBI reads in
-  flight;
+- a requant-only systolic output postprocess; general Add/Sub/Mul is owned by
+  the AFU;
 - an OFM FIFO and a PSum FIFO for drain/read decoupling;
 - a 64 KiB dual-bank on-chip PSum buffer for multi-K-tile accumulation;
 - a shadow-register MMIO file so firmware can preload a full job and atomically
@@ -60,8 +59,6 @@ graph TD
             PSum["OFM/PSum FIFOs + 2-bank PSum buffer"]
             subgraph Post["systolic_output_postprocess"]
                 RQ["requant_pipeline"]
-                BRQ["binary_requant_pipeline<br/>optional Add/Sub/Mul"]
-                BFetch["binary_operand_stream<br/>credit + response FIFO"]
             end
         end
         TCDM["Shared TCDM"]
@@ -81,19 +78,14 @@ graph TD
     DW -->|INT32 rows| Drain
     Pool -->|INT8 rows| Drain
     PSum -->|selected INT32 rows| RQ
-    RQ -->|lhs INT8 rows| BRQ
-    BFetch -->|obi_b: rhs read| TCDM
-    TCDM -->|rhs INT8 rows| BFetch
-    BFetch -->|ready/valid rhs| BRQ
-    BRQ -->|final INT8 rows| Drain
-    RQ -->|bypass when binary disabled| Drain
+    RQ -->|INT8 rows| Drain
     Drain -->|obi_o[3:0]: psum read / output write| TCDM
 ```
 
 Important mismatch with older notes: the updated controller interface has
 **three dedicated read masters**. `obi_i` is used for direct IFM and linebuffer
-reads, `obi_w` is used for weight reads, and `obi_b` fetches the independent
-INT8 operand for a fused binary post-op. The four `obi_o` ports are output-side
+reads and `obi_w` is used for weight reads. The legacy `obi_b` interface is
+kept at the controller boundary but is inactive. The four `obi_o` ports are output-side
 OBI masters and are also used for external PSum reads when accumulation must
 read old partial sums from TCDM.
 
@@ -243,7 +235,6 @@ later K tiles.
 | Linebuffer banks | `BANKS=14`, `BANK_DEPTH=320`, 256-bit words | Row-ring/window storage for streaming Conv/Pool/Depthwise input rows up to `input_w=640`. |
 | Linebuffer beat FIFO | 4 entries | Tracks outstanding OBI beat metadata for row/tap fetches. |
 | Window register | `5 x 5 x 256b` logical window | Holds current tap vectors; used by linebuffer stream formatting. |
-| Binary operand FIFO | 8 x 256-bit rows by default | Holds returned operand-B rows and decouples TCDM response timing from the binary post-op. Credits include both FIFO-resident and outstanding rows. |
 
 Linebuffer storage is not a full activation-tile resident cache. With current
 localparams:
@@ -289,25 +280,15 @@ Limits:
 
 ### 2.6 General Binary Post-Op
 
-The optional binary path is placed after the existing Conv/GEMM requant stage.
-Both paths and their handshake routing are encapsulated by
-`systolic_output_postprocess`:
+The systolic output path contains only per-channel requant and packing. Legacy
+binary configuration registers remain ABI-visible, but enabling them is an
+explicit configuration error. New command streams emit `AFU_BINARY_QUANT`.
 
-```text
-INT32 accumulator
-  -> per-channel requant_pipeline
-  -> lhs INT8 row --------------------+
-                                      +-> binary_requant_pipeline -> obi_o[0]
-TCDM -> obi_b -> binary_operand_stream -> rhs INT8 row
-```
-
-This placement keeps the 32x32 MAC array and its accumulator path unchanged.
-When `REG_BINARY_CTRL.EN=0`, `requant_pipeline` connects directly to the normal
-INT8 output writer. When enabled, the controller only accepts a requant row and
-an operand-B row in the same handshake. Neither side can advance alone, so a
-TCDM stall or output backpressure cannot misalign the two tensors.
-
-For each lane, let:
+The AFU has two binary sources: standalone mode reads both operands from TCDM;
+LUT-chain mode gathers eight four-lane LUT results into one 32-byte beat and
+combines that beat with an RHS beat. Both modes share the same 10-stage,
+32-lane Add/Sub/Mul requant pipeline. The standalone path can accept one C32
+beat per cycle; LUT-chain throughput remains bounded by the four LUT lanes.
 
 ```text
 lhs_c = lhs_i8 - lhs_zero_point
@@ -347,23 +328,10 @@ Only valid bits are asynchronously reset; datapath registers are overwritten
 when their stage accepts valid data. With no stalls it accepts and produces one
 256-bit C32 row per cycle after fill latency.
 
-`binary_operand_stream` issues sequential 32-byte reads and supports a regular
-strided 2-D traversal. `REG_BINARY_RHS_TILE_COLS` specifies the number of
-contiguous C32 rows before applying `REG_BINARY_RHS_ROW_STRIDE`. A zero stride
-or zero tile-column count selects a contiguous stream. Its credit count covers
-both accepted reads awaiting responses and returned rows held in the FIFO, so
-the block cannot overrun its response storage.
-
-Current controller validity rules are:
-
-- normal requant must also be enabled;
-- mode must be ADD (`0`), SUB (`1`), or MUL (`2`);
-- output multiplier must be positive; ADD/SUB input multipliers must also be
-  positive;
-- all three shifts must be `0..63`, and double-round shift must be `0..30`;
-- clamp minimum must not exceed clamp maximum;
-- operand-B base must be 32-byte aligned;
-- pool and depthwise modes do not currently accept the fused binary option.
+The AFU backend issues aligned sequential 32-byte reads on its main and RHS
+ports. Command validation requires ADD (`0`), SUB (`1`), or MUL (`2`), positive
+scale multipliers, shifts in `0..63`, double-round shift `0` or `20`, valid INT8
+zero points/clamps, and non-overlapping 32-byte-aligned TCDM buffers.
 
 ---
 
@@ -526,7 +494,7 @@ The current controller has seven OBI master interfaces:
 |---|---:|---|---|
 | `obi_i` | 256-bit | Read-only IFM/linebuffer data | Used by direct IFM reads and linebuffer row/tap fetches. |
 | `obi_w` | 256-bit | Read-only weight data | Separate from `obi_i`, enabling weight preload to overlap linebuffer prefetch subject to TCDM bank conflicts. |
-| `obi_b` | 256-bit | Read-only binary operand B | Uses credit-controlled multi-outstanding reads. Active only for the fused binary post-op. |
+| `obi_b` | 256-bit | Reserved legacy input | Inactive after binary post-processing moved to the AFU. |
 | `obi_o[0]` | 256-bit | Output/PSum read-write | Used for INT8 output writes and lane group 0 of INT32 rows. |
 | `obi_o[1]` | 256-bit | Output/PSum read-write | Used for lane group 1 of INT32 rows. |
 | `obi_o[2]` | 256-bit | Output/PSum read-write | Used for lane group 2 of INT32 rows. |
@@ -536,8 +504,6 @@ Output bandwidth:
 
 - INT32 OFM row: 1024 bits, all four `obi_o` ports in one row transaction.
 - INT8 requant/pool/depthwise row: 256 bits, `obi_o[0]` only.
-- Fused binary operand row: one 256-bit read through `obi_b`, paired with one
-  256-bit requant result, followed by one 256-bit write through `obi_o[0]`.
 - External PSum read: 1024 bits, all four `obi_o` ports as read masters.
 
 The ports connect to shared TCDM through the cluster interconnect. There is no
@@ -643,7 +609,7 @@ contracts are the graph/HAL paths listed in `docs/operator_support_matrix.md`.
 | Operator family | Current stable path | Key limits |
 |---|---|---|
 | Direct GEMM | `SYSTOLIC_GEMM32`, `SYSTOLIC_GEMM32_REQUANT` | K/N fixed to 32 per RTL start; larger shapes are HAL scheduled. |
-| Requant + binary post-op | Optional hardware tail of a Conv/GEMM job | Consumes one aligned C32 operand-B row per requant output row; supports independently quantized ADD/SUB and centered MUL. |
+| General Add/Sub/Mul | `AFU_BINARY_QUANT` after producer completion | Two aligned TCDM inputs, one C32 beat/cycle after pipeline fill; supports independent quantization and centered MUL. |
 | Pointwise / Linear-like C32 | `CONV2D_POINTWISE_C32_REQUANT` | IC and OC must be multiples of 32. Multi-IC uses INT32 PSum scratch. |
 | RGB stem Conv | `CONV2D_RGB_LINEBUF_REQUANT` | Specialized RGB C3, OC32, 3x3/s2/p1. |
 | C32 Conv | `CONV2D_C32_LINEBUF*` and `CONV2D_C32_MULTI_LINEBUF_REQUANT` | Stable graph path is Conv3x3, pad1, stride1/2 variants. Multi-C32 requires channel multiples of 32. |
@@ -719,12 +685,8 @@ Firmware should not own model-level scheduling decisions for optimized paths.
    - INT32 rows use four 256-bit ports and can be one row per granted cycle.
    - INT8 rows use one 256-bit port and are smaller, but can still backpressure
      through the requant/output ready-valid chain.
-   - The binary post-op has initiation interval 1 after pipeline fill, but
-     sustained throughput also requires one granted/returned `obi_b` row and
-     one granted `obi_o[0]` write per output row.
-   - Its 10 elastic stages add latency without reducing steady-state row rate;
-     stalls propagate through ready/valid rather than dropping or reordering
-     operand pairs.
+   - General binary work is scheduled on the AFU and no longer consumes the
+     systolic `obi_b` or output-drain datapath.
 
 5. **Depthwise**
    - Current depthwise datapath is one C32 tap vector per accepted cycle, with

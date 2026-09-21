@@ -546,6 +546,39 @@ static nai_dispatch_status_v2_t run_spatz_add(
         NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
 }
 
+static nai_dispatch_status_v2_t run_afu_binary_quant(
+    const nai_cmd_afu_binary_quant_v2_t *command,
+    const nai_model_view_v1_t *view,
+    const nai_resolver_v1_t *resolver,
+    const nai_runtime_ops_v2_t *ops)
+{
+    uint32_t lhs;
+    uint32_t rhs;
+    uint32_t ofm;
+    if (ops->afu_binary_quant == 0 || NAI_TRUSTED_INVALID(
+        command->length == 0u || command->lhs_scale <= 0 || command->rhs_scale <= 0 ||
+        command->output_scale <= 0 || command->lhs_shift > 63u || command->rhs_shift > 63u ||
+        command->output_shift > 63u ||
+        (command->double_round_shift != 0u && command->double_round_shift != 20u) ||
+        command->mode > NAI_SPATZ_BINARY_MULTIPLY ||
+        command->lhs_zero_point < -128 || command->lhs_zero_point > 127 ||
+        command->rhs_zero_point < -128 || command->rhs_zero_point > 127 ||
+        command->output_zero_point < -128 || command->output_zero_point > 127 ||
+        command->clamp_min < -128 || command->clamp_max > 127 ||
+        command->clamp_min > command->clamp_max ||
+        command->lhs.region != NAI_REGION_TCDM_SCRATCH ||
+        command->rhs.region != NAI_REGION_TCDM_SCRATCH ||
+        command->ofm.region != NAI_REGION_TCDM_SCRATCH)) return NAI_DISPATCH_BAD_COMMAND;
+    if (resolve(view, resolver, &command->lhs, command->length, NAI_ALIGNMENT_BYTES, &lhs) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->rhs, command->length, NAI_ALIGNMENT_BYTES, &rhs) != NAI_DISPATCH_OK ||
+        resolve(view, resolver, &command->ofm, command->length, NAI_ALIGNMENT_BYTES, &ofm) != NAI_DISPATCH_OK)
+        return NAI_DISPATCH_BAD_REFERENCE;
+    if (NAI_TRUSTED_INVALID(ranges_overlap(lhs, ofm, command->length) ||
+        ranges_overlap(rhs, ofm, command->length))) return NAI_DISPATCH_BAD_COMMAND;
+    return ops->afu_binary_quant(ops->context, command, lhs, rhs, ofm) == 0u ?
+        NAI_DISPATCH_OK : NAI_DISPATCH_OPERATION_FAILED;
+}
+
 static nai_dispatch_status_v2_t run_afu_lut(
     const nai_cmd_afu_lut_v2_t *command,
     const nai_model_view_v1_t *view,
@@ -921,9 +954,12 @@ static uint32_t valid_executable_header(const nai_cmd_header_v2_t *header,
         header->size_bytes <= available &&
         !NAI_TRUSTED_INVALID(
             (header->flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE |
-                               NAI_CMD_FLAG_AFU_LUT_REUSE)) != 0u ||
+                               NAI_CMD_FLAG_AFU_LUT_REUSE |
+                               NAI_CMD_FLAG_AFU_LUT_CHAIN)) != 0u ||
             ((header->flags & NAI_CMD_FLAG_AFU_LUT_REUSE) != 0u &&
-             header->type != NAI_CMD_AFU_LUT));
+             header->type != NAI_CMD_AFU_LUT) ||
+            ((header->flags & NAI_CMD_FLAG_AFU_LUT_CHAIN) != 0u &&
+             header->type != NAI_CMD_AFU_BINARY_QUANT));
 }
 
 static nai_dispatch_status_v2_t run_executable_command(
@@ -967,6 +1003,10 @@ static nai_dispatch_status_v2_t run_executable_command(
     if (header->type == NAI_CMD_SPATZ_ADD &&
         header->size_bytes == sizeof(nai_cmd_spatz_add_v2_t))
         return run_spatz_add((const nai_cmd_spatz_add_v2_t *)header, view, resolver, ops);
+    if (header->type == NAI_CMD_AFU_BINARY_QUANT &&
+        header->size_bytes == sizeof(nai_cmd_afu_binary_quant_v2_t))
+        return run_afu_binary_quant(
+            (const nai_cmd_afu_binary_quant_v2_t *)header, view, resolver, ops);
     if (header->type == NAI_CMD_AFU_GLOBAL_AVGPOOL &&
         header->size_bytes == sizeof(nai_cmd_afu_global_avgpool_v2_t))
         return run_afu_global_avgpool(

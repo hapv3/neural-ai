@@ -142,11 +142,11 @@ $(REPO_ROOT)/hw/rtl/afu/afu_fifo_ff.sv
 $(REPO_ROOT)/hw/rtl/afu/afu_frontend.sv
 $(REPO_ROOT)/hw/rtl/afu/afu_backend.sv
 $(REPO_ROOT)/hw/rtl/afu/afu_core.sv
+$(REPO_ROOT)/hw/rtl/afu/afu_binary_requant_pipeline.sv
+$(REPO_ROOT)/hw/rtl/afu/afu_binary_requant_engine.sv
 $(REPO_ROOT)/hw/rtl/afu/afu.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/systolic/requant_pipeline.sv
-$(REPO_ROOT)/hw/rtl/systolic/binary_requant_pipeline.sv
-$(REPO_ROOT)/hw/rtl/systolic/binary_operand_stream.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_output_postprocess.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_output_drain.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_weight_engine.sv

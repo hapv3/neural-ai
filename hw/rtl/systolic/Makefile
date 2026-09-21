@@ -21,16 +21,8 @@ SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
 TOPLEVEL = npu_systolic_array
 
 ifeq ($(MODULE),test_binary_requant_pipeline)
-TOPLEVEL = binary_requant_pipeline
-VERILOG_SOURCES = $(PWD)/binary_requant_pipeline.sv
-endif
-
-ifeq ($(MODULE),test_binary_operand_stream)
-TOPLEVEL = binary_operand_stream
-VERILOG_SOURCES = \
-	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
-	$(PWD)/binary_operand_stream.sv
-EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
+TOPLEVEL = afu_binary_requant_pipeline
+VERILOG_SOURCES = $(REPO_ROOT)/hw/rtl/afu/afu_binary_requant_pipeline.sv
 endif
 
 ifeq ($(MODULE),test_systolic_output_postprocess)
@@ -38,8 +30,6 @@ TOPLEVEL = systolic_output_postprocess
 VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
 	$(PWD)/requant_pipeline.sv \
-	$(PWD)/binary_requant_pipeline.sv \
-	$(PWD)/binary_operand_stream.sv \
 	$(PWD)/systolic_output_postprocess.sv
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
 endif
@@ -49,8 +39,6 @@ TOPLEVEL = systolic_output_drain
 VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/common_cells/src/fifo_v3.sv \
 	$(PWD)/requant_pipeline.sv \
-	$(PWD)/binary_requant_pipeline.sv \
-	$(PWD)/binary_operand_stream.sv \
 	$(PWD)/systolic_output_postprocess.sv \
 	$(PWD)/systolic_output_drain.sv
 EXTRA_ARGS += +incdir+$(REPO_ROOT)/hw/common_cells/include
@@ -154,8 +142,6 @@ VERILOG_SOURCES = \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram.sv \
 	$(REPO_ROOT)/hw/tech_cells/src/rtl/tc_sram_impl.sv \
 	$(PWD)/requant_pipeline.sv \
-	$(PWD)/binary_requant_pipeline.sv \
-	$(PWD)/binary_operand_stream.sv \
 	$(PWD)/systolic_output_postprocess.sv \
 	$(PWD)/systolic_output_drain.sv \
 	$(PWD)/systolic_weight_engine.sv \

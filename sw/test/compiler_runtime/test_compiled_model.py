@@ -3217,26 +3217,26 @@ async def test_compiler_generated_quantized_add_c32_package(dut):
         command_type, command_size = struct.unpack_from("<HH", model, offset)
         command_types.append(command_type)
         offset += command_size
-    assert 16 in command_types
+    assert 34 in command_types
 
     # Read the exact compiler-emitted parameters so this independent reference
     # also freezes command field interpretation across the two repositories.
-    spatz_offset = next(
+    afu_binary_offset = next(
         pos for pos in range(commands_offset, commands_offset + commands_size, 32)
-        if struct.unpack_from("<H", model, pos)[0] == 16
+        if struct.unpack_from("<H", model, pos)[0] == 34
     )
     # The command layout contains alternating signed scale / unsigned shift;
     # unpack explicitly to avoid relying on Python integer wraparound.
-    lhs_scale = struct.unpack_from("<i", model, spatz_offset + 44)[0]
-    lhs_shift = struct.unpack_from("<I", model, spatz_offset + 48)[0]
-    rhs_scale = struct.unpack_from("<i", model, spatz_offset + 52)[0]
-    rhs_shift = struct.unpack_from("<I", model, spatz_offset + 56)[0]
-    output_scale = struct.unpack_from("<i", model, spatz_offset + 60)[0]
-    output_shift = struct.unpack_from("<I", model, spatz_offset + 64)[0]
+    lhs_scale = struct.unpack_from("<i", model, afu_binary_offset + 44)[0]
+    lhs_shift = struct.unpack_from("<I", model, afu_binary_offset + 48)[0]
+    rhs_scale = struct.unpack_from("<i", model, afu_binary_offset + 52)[0]
+    rhs_shift = struct.unpack_from("<I", model, afu_binary_offset + 56)[0]
+    output_scale = struct.unpack_from("<i", model, afu_binary_offset + 60)[0]
+    output_shift = struct.unpack_from("<I", model, afu_binary_offset + 64)[0]
     lhs_zp, rhs_zp, output_zp, clamp_min, clamp_max = struct.unpack_from(
-        "<5i", model, spatz_offset + 68
+        "<5i", model, afu_binary_offset + 68
     )
-    double_round_shift = struct.unpack_from("<I", model, spatz_offset + 88)[0]
+    double_round_shift = struct.unpack_from("<I", model, afu_binary_offset + 88)[0]
     def scale_value(value, scale, shift, double_shift):
         if shift == 0:
             return value * scale

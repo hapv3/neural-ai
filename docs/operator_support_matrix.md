@@ -29,8 +29,8 @@ limits, and the source files that show how to use and test the path.
 | `SPATZ_REQUANT` | Spatz vector helper | `ROW32` i32 to `ROW32` i8 | Supported / legacy graph path | Uses software wrapper and scratch; systolic fused requant is preferred after conv | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
 | `LOGISTIC_LUT_I8` | AFU E8 LUT | Any i8 byte tensor | Supported | Requires 256-entry LUT tensor; wrapper reloads LUT before start | `sw/lib/spatz_ops.c`, `sw/test/afu_ops`, `sw/test/spatz_ops` |
 | `CLAMP_I8` | AFU E8 LUT | Any i8 layout, same shape in/out | Supported | Out-of-place only; min/max in i8 range | `sw/test/afu_ops`, `hw/rtl/cluster/tb/tests/test_spatz_operator_library.py` |
-| `MUL_I8` | AFU MUL_Q7 or Spatz fallback | Any i8 byte tensor | Supported | AFU fast path only for Q7 config: multiplier=1, shift=7, clamp=-128..127 | `sw/lib/spatz_ops.c`, `sw/test/afu_ops` |
-| `ADD_I8` | AFU ADD_I8 or Spatz fallback | Same-shape i8 tensors | Supported | AFU fast path only for full i8 clamp; graph requires same H/W/C | `sw/lib/spatz_ops.c`, `sw/test/afu_ops` |
+| `MUL_I8` | AFU general binary requant or legacy MUL_Q7 | Any i8 byte tensor | RTL supported | 32 lanes/cycle after pipeline fill; compiler graph lowering for general Mul remains separate work | `hw/rtl/afu/afu_binary_requant_engine.sv`, `sw/lib/hal_afu.h` |
+| `ADD_I8`, `SUB_I8` | AFU general binary requant; legacy ADD_I8 for identity-scale fast cases | Same-shape i8 tensors | Supported | Independent input/output quantization, partial final beats, out-of-place output | `hw/rtl/afu/afu_binary_requant_engine.sv`, `sw/test/compiler_runtime` |
 | `MAXPOOL2D_I8` | Systolic linebuffer pool for C32, Spatz fallback otherwise | i8 | Supported | Fast path requires C=32, K=5x5, S=1, P=2, out-of-place | `sw/test/spatz_ops`, `sw/test/micro_yolo` |
 | `UPSAMPLE_NEAREST_I8` | Spatz C32 specialized or generic wrapper | i8 | Supported | Scale fixed to 2x in graph op; out-of-place | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
 | `DFL_SOFTMAX_I8_Q8` | AFU fused DFL mode | input `ROW32` i8, output u16 Q8 | Supported | Expects 32 input lanes per location; uses channels 0..15 as 4 sides x 4 bins | `sw/test/afu_ops`, `sw/test/micro_yolo` |
@@ -407,8 +407,8 @@ max_val    = 127
 
 Limits:
 
-- Non-fast-path add/mul falls back to scalar/Spatz helper code in
-  `sw/lib/spatz_ops.c`; avoid that in optimized model graphs.
+- General quantized Add/Sub is emitted as `AFU_BINARY_QUANT`. General Mul is
+  available in the same RTL/HAL path when compiler lowering selects it.
 - No in-place graph contract is guaranteed.
 
 Reference:

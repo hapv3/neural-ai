@@ -67,11 +67,11 @@
 ../../../../hw/rtl/afu/afu_frontend.sv
 ../../../../hw/rtl/afu/afu_backend.sv
 ../../../../hw/rtl/afu/afu_core.sv
+../../../../hw/rtl/afu/afu_binary_requant_pipeline.sv
+../../../../hw/rtl/afu/afu_binary_requant_engine.sv
 ../../../../hw/rtl/afu/afu.sv
 ../../../../hw/rtl/interconnect/tcdm_interconnect.sv
 ../../../../hw/rtl/systolic/requant_pipeline.sv
-../../../../hw/rtl/systolic/binary_requant_pipeline.sv
-../../../../hw/rtl/systolic/binary_operand_stream.sv
 ../../../../hw/rtl/systolic/systolic_output_postprocess.sv
 ../../../../hw/rtl/systolic/systolic_output_drain.sv
 ../../../../hw/rtl/systolic/systolic_weight_engine.sv

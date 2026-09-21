@@ -23,8 +23,21 @@ module afu_frontend #(
     output logic [31:0]             cfg_src2_ptr_o,
     output logic [31:0]             cfg_dst_ptr_o,
     output logic [31:0]             cfg_length_o,
-    output logic [2:0]              cfg_mode_o,
+    output logic [3:0]              cfg_mode_o,
     output logic signed [31:0]      cfg_add_bias_o,
+    output logic [1:0]              cfg_binary_mode_o,
+    output logic signed [31:0]      cfg_binary_lhs_multiplier_o,
+    output logic [6:0]              cfg_binary_lhs_shift_o,
+    output logic signed [31:0]      cfg_binary_rhs_multiplier_o,
+    output logic [6:0]              cfg_binary_rhs_shift_o,
+    output logic signed [31:0]      cfg_binary_output_multiplier_o,
+    output logic [6:0]              cfg_binary_output_shift_o,
+    output logic signed [31:0]      cfg_binary_lhs_zero_point_o,
+    output logic signed [31:0]      cfg_binary_rhs_zero_point_o,
+    output logic signed [31:0]      cfg_binary_output_zero_point_o,
+    output logic signed [31:0]      cfg_binary_clamp_min_o,
+    output logic signed [31:0]      cfg_binary_clamp_max_o,
+    output logic [5:0]              cfg_binary_double_round_shift_o,
     output logic                    cfg_start_o,
     input  logic                    afu_done_i,
     input  logic                    afu_busy_i,
@@ -43,16 +56,42 @@ module afu_frontend #(
     logic [31:0] cfg_src2_ptr_q;
     logic [31:0] cfg_dst_ptr_q;
     logic [31:0] cfg_length_q;
-    logic [2:0]  cfg_mode_q;
+    logic [3:0]  cfg_mode_q;
     logic signed [31:0] cfg_add_bias_q;
+    logic [1:0] cfg_binary_mode_q;
+    logic signed [31:0] cfg_binary_lhs_multiplier_q;
+    logic [6:0] cfg_binary_lhs_shift_q;
+    logic signed [31:0] cfg_binary_rhs_multiplier_q;
+    logic [6:0] cfg_binary_rhs_shift_q;
+    logic signed [31:0] cfg_binary_output_multiplier_q;
+    logic [6:0] cfg_binary_output_shift_q;
+    logic signed [7:0] cfg_binary_lhs_zero_point_q;
+    logic signed [7:0] cfg_binary_rhs_zero_point_q;
+    logic signed [7:0] cfg_binary_output_zero_point_q;
+    logic signed [7:0] cfg_binary_clamp_min_q;
+    logic signed [7:0] cfg_binary_clamp_max_q;
+    logic [5:0] cfg_binary_double_round_shift_q;
     logic        cfg_start_q;
 
     logic [31:0] cfg_src_ptr_shadow_q;
     logic [31:0] cfg_src2_ptr_shadow_q;
     logic [31:0] cfg_dst_ptr_shadow_q;
     logic [31:0] cfg_length_shadow_q;
-    logic [2:0]  cfg_mode_shadow_q;
+    logic [3:0]  cfg_mode_shadow_q;
     logic signed [31:0] cfg_add_bias_shadow_q;
+    logic [1:0] cfg_binary_mode_shadow_q;
+    logic signed [31:0] cfg_binary_lhs_multiplier_shadow_q;
+    logic [6:0] cfg_binary_lhs_shift_shadow_q;
+    logic signed [31:0] cfg_binary_rhs_multiplier_shadow_q;
+    logic [6:0] cfg_binary_rhs_shift_shadow_q;
+    logic signed [31:0] cfg_binary_output_multiplier_shadow_q;
+    logic [6:0] cfg_binary_output_shift_shadow_q;
+    logic signed [7:0] cfg_binary_lhs_zero_point_shadow_q;
+    logic signed [7:0] cfg_binary_rhs_zero_point_shadow_q;
+    logic signed [7:0] cfg_binary_output_zero_point_shadow_q;
+    logic signed [7:0] cfg_binary_clamp_min_shadow_q;
+    logic signed [7:0] cfg_binary_clamp_max_shadow_q;
+    logic [5:0] cfg_binary_double_round_shift_shadow_q;
 
     logic        obi_s_rvalid_q;
     logic [31:0] obi_s_rdata_q;
@@ -74,6 +113,22 @@ module afu_frontend #(
     assign cfg_length_o  = cfg_length_q;
     assign cfg_mode_o    = cfg_mode_q;
     assign cfg_add_bias_o = cfg_add_bias_q;
+    assign cfg_binary_mode_o = cfg_binary_mode_q;
+    assign cfg_binary_lhs_multiplier_o = cfg_binary_lhs_multiplier_q;
+    assign cfg_binary_lhs_shift_o = cfg_binary_lhs_shift_q;
+    assign cfg_binary_rhs_multiplier_o = cfg_binary_rhs_multiplier_q;
+    assign cfg_binary_rhs_shift_o = cfg_binary_rhs_shift_q;
+    assign cfg_binary_output_multiplier_o = cfg_binary_output_multiplier_q;
+    assign cfg_binary_output_shift_o = cfg_binary_output_shift_q;
+    assign cfg_binary_lhs_zero_point_o = {{24{cfg_binary_lhs_zero_point_q[7]}},
+                                          cfg_binary_lhs_zero_point_q};
+    assign cfg_binary_rhs_zero_point_o = {{24{cfg_binary_rhs_zero_point_q[7]}},
+                                          cfg_binary_rhs_zero_point_q};
+    assign cfg_binary_output_zero_point_o = {{24{cfg_binary_output_zero_point_q[7]}},
+                                             cfg_binary_output_zero_point_q};
+    assign cfg_binary_clamp_min_o = {{24{cfg_binary_clamp_min_q[7]}}, cfg_binary_clamp_min_q};
+    assign cfg_binary_clamp_max_o = {{24{cfg_binary_clamp_max_q[7]}}, cfg_binary_clamp_max_q};
+    assign cfg_binary_double_round_shift_o = cfg_binary_double_round_shift_q;
     assign cfg_start_o   = cfg_start_q;
 
     assign lut_pingpong_sel = (obi_s_addr_i[15:12] == 4'h0) && (obi_s_addr_i[11:10] == 2'b00);
@@ -83,7 +138,7 @@ module afu_frontend #(
     assign lut_sel = lut_pingpong_sel || lut_dfl_sel;
     assign csr_sel = (obi_s_addr_i[11:10] == 2'b01) || (obi_s_addr_i[15:12] == 4'h1);
     assign start_fire = obi_s_req_i && obi_s_we_i && csr_sel &&
-                        (obi_s_addr_i[5:0] == 6'h00) && obi_s_wdata_i[0] && !afu_busy_i;
+                        (obi_s_addr_i[7:0] == 8'h00) && obi_s_wdata_i[0] && !afu_busy_i;
 
     function automatic logic [31:0] apply_cfg_be(
         input logic [31:0] current,
@@ -117,6 +172,19 @@ module afu_frontend #(
             cfg_length_q   <= '0;
             cfg_mode_q     <= '0;
             cfg_add_bias_q <= '0;
+            cfg_binary_mode_q <= '0;
+            cfg_binary_lhs_multiplier_q <= 32'd1;
+            cfg_binary_lhs_shift_q <= '0;
+            cfg_binary_rhs_multiplier_q <= 32'd1;
+            cfg_binary_rhs_shift_q <= '0;
+            cfg_binary_output_multiplier_q <= 32'd1;
+            cfg_binary_output_shift_q <= '0;
+            cfg_binary_lhs_zero_point_q <= '0;
+            cfg_binary_rhs_zero_point_q <= '0;
+            cfg_binary_output_zero_point_q <= '0;
+            cfg_binary_clamp_min_q <= -8'sd128;
+            cfg_binary_clamp_max_q <= 8'sd127;
+            cfg_binary_double_round_shift_q <= '0;
             cfg_start_q    <= 1'b0;
             cfg_src_ptr_shadow_q  <= '0;
             cfg_src2_ptr_shadow_q <= '0;
@@ -124,19 +192,49 @@ module afu_frontend #(
             cfg_length_shadow_q   <= '0;
             cfg_mode_shadow_q     <= '0;
             cfg_add_bias_shadow_q <= '0;
+            cfg_binary_mode_shadow_q <= '0;
+            cfg_binary_lhs_multiplier_shadow_q <= 32'd1;
+            cfg_binary_lhs_shift_shadow_q <= '0;
+            cfg_binary_rhs_multiplier_shadow_q <= 32'd1;
+            cfg_binary_rhs_shift_shadow_q <= '0;
+            cfg_binary_output_multiplier_shadow_q <= 32'd1;
+            cfg_binary_output_shift_shadow_q <= '0;
+            cfg_binary_lhs_zero_point_shadow_q <= '0;
+            cfg_binary_rhs_zero_point_shadow_q <= '0;
+            cfg_binary_output_zero_point_shadow_q <= '0;
+            cfg_binary_clamp_min_shadow_q <= -8'sd128;
+            cfg_binary_clamp_max_shadow_q <= 8'sd127;
+            cfg_binary_double_round_shift_shadow_q <= '0;
         end else begin
             obi_s_rvalid_q <= obi_s_req_i;
             obi_s_rdata_q  <= '0;
             cfg_start_q    <= 1'b0;
 
             if (obi_s_req_i && obi_s_we_i && csr_sel) begin
-                unique case (obi_s_addr_i[5:0])
-                    6'h04: cfg_src_ptr_shadow_q <= apply_cfg_be(cfg_src_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
-                    6'h08: cfg_dst_ptr_shadow_q <= apply_cfg_be(cfg_dst_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
-                    6'h0c: cfg_length_shadow_q <= apply_cfg_be(cfg_length_shadow_q, obi_s_wdata_i, obi_s_be_i);
-                    6'h10: cfg_mode_shadow_q <= apply_cfg_be({29'd0, cfg_mode_shadow_q}, obi_s_wdata_i, obi_s_be_i)[2:0];
-                    6'h14: cfg_src2_ptr_shadow_q <= apply_cfg_be(cfg_src2_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
-                    6'h18: cfg_add_bias_shadow_q <= apply_cfg_be(cfg_add_bias_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                unique case (obi_s_addr_i[7:0])
+                    8'h04: cfg_src_ptr_shadow_q <= apply_cfg_be(cfg_src_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    8'h08: cfg_dst_ptr_shadow_q <= apply_cfg_be(cfg_dst_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    8'h0c: cfg_length_shadow_q <= apply_cfg_be(cfg_length_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    8'h10: cfg_mode_shadow_q <= apply_cfg_be({28'd0, cfg_mode_shadow_q}, obi_s_wdata_i, obi_s_be_i)[3:0];
+                    8'h14: cfg_src2_ptr_shadow_q <= apply_cfg_be(cfg_src2_ptr_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    8'h18: cfg_add_bias_shadow_q <= apply_cfg_be(cfg_add_bias_shadow_q, obi_s_wdata_i, obi_s_be_i);
+                    8'h1c: cfg_binary_mode_shadow_q <= obi_s_wdata_i[1:0];
+                    8'h20: cfg_binary_lhs_multiplier_shadow_q <= obi_s_wdata_i;
+                    8'h24: cfg_binary_lhs_shift_shadow_q <= obi_s_wdata_i[6:0];
+                    8'h28: cfg_binary_rhs_multiplier_shadow_q <= obi_s_wdata_i;
+                    8'h2c: cfg_binary_rhs_shift_shadow_q <= obi_s_wdata_i[6:0];
+                    8'h30: cfg_binary_output_multiplier_shadow_q <= obi_s_wdata_i;
+                    8'h34: cfg_binary_output_shift_shadow_q <= obi_s_wdata_i[6:0];
+                    8'h38: begin
+                        cfg_binary_lhs_zero_point_shadow_q <= obi_s_wdata_i[7:0];
+                        cfg_binary_rhs_zero_point_shadow_q <= obi_s_wdata_i[15:8];
+                        cfg_binary_output_zero_point_shadow_q <= obi_s_wdata_i[23:16];
+                    end
+                    8'h3c: begin
+                        cfg_binary_clamp_min_shadow_q <= obi_s_wdata_i[7:0];
+                        cfg_binary_clamp_max_shadow_q <= obi_s_wdata_i[15:8];
+                    end
+                    8'h40: cfg_binary_double_round_shift_shadow_q <= obi_s_wdata_i[5:0];
                     default: ;
                 endcase
             end
@@ -148,19 +246,45 @@ module afu_frontend #(
                 cfg_length_q <= cfg_length_shadow_q;
                 cfg_mode_q <= cfg_mode_shadow_q;
                 cfg_add_bias_q <= cfg_add_bias_shadow_q;
+                cfg_binary_mode_q <= cfg_binary_mode_shadow_q;
+                cfg_binary_lhs_multiplier_q <= cfg_binary_lhs_multiplier_shadow_q;
+                cfg_binary_lhs_shift_q <= cfg_binary_lhs_shift_shadow_q;
+                cfg_binary_rhs_multiplier_q <= cfg_binary_rhs_multiplier_shadow_q;
+                cfg_binary_rhs_shift_q <= cfg_binary_rhs_shift_shadow_q;
+                cfg_binary_output_multiplier_q <= cfg_binary_output_multiplier_shadow_q;
+                cfg_binary_output_shift_q <= cfg_binary_output_shift_shadow_q;
+                cfg_binary_lhs_zero_point_q <= cfg_binary_lhs_zero_point_shadow_q;
+                cfg_binary_rhs_zero_point_q <= cfg_binary_rhs_zero_point_shadow_q;
+                cfg_binary_output_zero_point_q <= cfg_binary_output_zero_point_shadow_q;
+                cfg_binary_clamp_min_q <= cfg_binary_clamp_min_shadow_q;
+                cfg_binary_clamp_max_q <= cfg_binary_clamp_max_shadow_q;
+                cfg_binary_double_round_shift_q <= cfg_binary_double_round_shift_shadow_q;
                 cfg_start_q <= 1'b1;
             end
 
             if (obi_s_req_i && !obi_s_we_i) begin
                 if (csr_sel) begin
-                    unique case (obi_s_addr_i[5:0])
-                        6'h00: obi_s_rdata_q <= {29'd0, afu_error_i, afu_busy_i, afu_done_i};
-                        6'h04: obi_s_rdata_q <= cfg_src_ptr_shadow_q;
-                        6'h08: obi_s_rdata_q <= cfg_dst_ptr_shadow_q;
-                        6'h0c: obi_s_rdata_q <= cfg_length_shadow_q;
-                        6'h10: obi_s_rdata_q <= {29'd0, cfg_mode_shadow_q};
-                        6'h14: obi_s_rdata_q <= cfg_src2_ptr_shadow_q;
-                        6'h18: obi_s_rdata_q <= cfg_add_bias_shadow_q;
+                    unique case (obi_s_addr_i[7:0])
+                        8'h00: obi_s_rdata_q <= {29'd0, afu_error_i, afu_busy_i, afu_done_i};
+                        8'h04: obi_s_rdata_q <= cfg_src_ptr_shadow_q;
+                        8'h08: obi_s_rdata_q <= cfg_dst_ptr_shadow_q;
+                        8'h0c: obi_s_rdata_q <= cfg_length_shadow_q;
+                        8'h10: obi_s_rdata_q <= {28'd0, cfg_mode_shadow_q};
+                        8'h14: obi_s_rdata_q <= cfg_src2_ptr_shadow_q;
+                        8'h18: obi_s_rdata_q <= cfg_add_bias_shadow_q;
+                        8'h1c: obi_s_rdata_q <= {30'd0, cfg_binary_mode_shadow_q};
+                        8'h20: obi_s_rdata_q <= cfg_binary_lhs_multiplier_shadow_q;
+                        8'h24: obi_s_rdata_q <= {25'd0, cfg_binary_lhs_shift_shadow_q};
+                        8'h28: obi_s_rdata_q <= cfg_binary_rhs_multiplier_shadow_q;
+                        8'h2c: obi_s_rdata_q <= {25'd0, cfg_binary_rhs_shift_shadow_q};
+                        8'h30: obi_s_rdata_q <= cfg_binary_output_multiplier_shadow_q;
+                        8'h34: obi_s_rdata_q <= {25'd0, cfg_binary_output_shift_shadow_q};
+                        8'h38: obi_s_rdata_q <= {8'd0, cfg_binary_output_zero_point_shadow_q,
+                                                   cfg_binary_rhs_zero_point_shadow_q,
+                                                   cfg_binary_lhs_zero_point_shadow_q};
+                        8'h3c: obi_s_rdata_q <= {16'd0, cfg_binary_clamp_max_shadow_q,
+                                                   cfg_binary_clamp_min_shadow_q};
+                        8'h40: obi_s_rdata_q <= {26'd0, cfg_binary_double_round_shift_shadow_q};
                         default: obi_s_rdata_q <= '0;
                     endcase
                 end

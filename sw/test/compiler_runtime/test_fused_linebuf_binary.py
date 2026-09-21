@@ -12,7 +12,7 @@ BINDING_TABLE_BASE = 0x80055000
 
 
 @cocotb.test()
-async def test_compiler_generated_fused_linebuf_binary_package(dut):
+async def test_compiler_generated_afu_binary_package(dut):
     cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
     axi_master = AxiLiteMaster(
         AxiLiteBus.from_prefix(dut, "s_axi"),
@@ -41,11 +41,11 @@ async def test_compiler_generated_fused_linebuf_binary_package(dut):
         command_type, size = struct.unpack_from("<HH", model, offset)
         assert size >= 32
         fused_commands += command_type in (31, 32)
-        general_adds += command_type == 16
+        general_adds += command_type == 34
         offset += size
     assert offset == command_offset + command_bytes
-    assert fused_commands == 1
-    assert general_adds == 0
+    assert fused_commands == 0
+    assert general_adds == 1
 
     runtime_bindings = [
         (1, 0, compiled.INPUT_BASE, len(input_data)),

@@ -4,6 +4,28 @@
 #include "npu_memory_map.h"
 #include "npu_types.h"
 
+typedef struct {
+    int32_t lhs_multiplier;
+    uint32_t lhs_shift;
+    int32_t rhs_multiplier;
+    uint32_t rhs_shift;
+    int32_t output_multiplier;
+    uint32_t output_shift;
+    int32_t lhs_zero_point;
+    int32_t rhs_zero_point;
+    int32_t output_zero_point;
+    int32_t clamp_min;
+    int32_t clamp_max;
+    uint32_t double_round_shift;
+    uint32_t operation;
+} afu_binary_quant_params_t;
+
+enum {
+    AFU_BINARY_QUANT_ADD = 0u,
+    AFU_BINARY_QUANT_SUBTRACT = 1u,
+    AFU_BINARY_QUANT_MULTIPLY = 2u
+};
+
 static inline void afu_load_lut_entry(uint32_t index, uint32_t value) {
     REG_WRITE(NPU_AFU_LUT_BASE + (index * 4u), value);
 }
@@ -94,6 +116,39 @@ static inline void afu_start_add_i8(uint32_t lhs, uint32_t rhs, uint32_t dst,
 static inline void afu_start_add_i8_bias(uint32_t lhs, uint32_t rhs, uint32_t dst,
                                          uint32_t length, int32_t bias) {
     afu_preload_binary_bias(lhs, rhs, dst, length, NPU_AFU_MODE_ADD_I8, bias);
+    afu_start_preloaded();
+}
+
+static inline void afu_preload_binary_quant(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                             uint32_t length, uint32_t lut_chain,
+                                             const afu_binary_quant_params_t *params) {
+    REG_WRITE(NPU_AFU_SRC_PTR, lhs);
+    REG_WRITE(NPU_AFU_SRC2_PTR, rhs);
+    REG_WRITE(NPU_AFU_DST_PTR, dst);
+    REG_WRITE(NPU_AFU_LENGTH, length);
+    REG_WRITE(NPU_AFU_BINARY_OP, params->operation);
+    REG_WRITE(NPU_AFU_BINARY_LHS_MULTIPLIER, (uint32_t)params->lhs_multiplier);
+    REG_WRITE(NPU_AFU_BINARY_LHS_SHIFT, params->lhs_shift);
+    REG_WRITE(NPU_AFU_BINARY_RHS_MULTIPLIER, (uint32_t)params->rhs_multiplier);
+    REG_WRITE(NPU_AFU_BINARY_RHS_SHIFT, params->rhs_shift);
+    REG_WRITE(NPU_AFU_BINARY_OUT_MULTIPLIER, (uint32_t)params->output_multiplier);
+    REG_WRITE(NPU_AFU_BINARY_OUT_SHIFT, params->output_shift);
+    REG_WRITE(NPU_AFU_BINARY_ZERO_POINTS,
+              ((uint32_t)params->lhs_zero_point & 0xffu) |
+              (((uint32_t)params->rhs_zero_point & 0xffu) << 8) |
+              (((uint32_t)params->output_zero_point & 0xffu) << 16));
+    REG_WRITE(NPU_AFU_BINARY_CLAMP,
+              ((uint32_t)params->clamp_min & 0xffu) |
+              (((uint32_t)params->clamp_max & 0xffu) << 8));
+    REG_WRITE(NPU_AFU_BINARY_DOUBLE_ROUND, params->double_round_shift);
+    REG_WRITE(NPU_AFU_MODE, lut_chain != 0u ?
+              NPU_AFU_MODE_LUT_BINARY_QUANT : NPU_AFU_MODE_BINARY_QUANT);
+}
+
+static inline void afu_start_binary_quant(uint32_t lhs, uint32_t rhs, uint32_t dst,
+                                           uint32_t length, uint32_t lut_chain,
+                                           const afu_binary_quant_params_t *params) {
+    afu_preload_binary_quant(lhs, rhs, dst, length, lut_chain, params);
     afu_start_preloaded();
 }
 

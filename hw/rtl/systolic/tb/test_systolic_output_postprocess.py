@@ -113,42 +113,17 @@ async def postprocess_requant_path_preserves_backpressure(dut):
 
 
 @cocotb.test()
-async def postprocess_binary_path_fetches_and_merges_operand(dut):
+async def postprocess_rejects_legacy_systolic_binary_path(dut):
     cocotb.start_soon(Clock(dut.clk_i, 2, unit="ns").start())
     await reset(dut)
 
-    lhs = [lane - 12 for lane in range(LANES)]
-    rhs = [7 - (lane % 11) for lane in range(LANES)]
     dut.binary_enable_i.value = 1
     dut.binary_active_i.value = 1
-    dut.row_count_i.value = 1
     dut.out_ready_i.value = 1
-
-    await FallingEdge(dut.clk_i)
-    dut.job_start_i.value = 1
-    await RisingEdge(dut.clk_i)
-    await FallingEdge(dut.clk_i)
-    dut.job_start_i.value = 0
-    assert dut.binary_busy_o.value
-
-    await push_acc(dut, lhs)
-
-    response_pending = False
-    result = None
-    for _ in range(40):
-        await FallingEdge(dut.clk_i)
-        dut.obi_gnt_i.value = dut.obi_req_o.value
-        dut.obi_rvalid_i.value = response_pending
-        dut.obi_rdata_i.value = pack_lanes(rhs, 8) if response_pending else 0
-        await Timer(1, unit="ps")
-        response_pending = bool(dut.obi_req_o.value and dut.obi_gnt_i.value)
-        if dut.out_valid_o.value and dut.out_ready_i.value:
-            result = unpack_bytes(int(dut.packed_o.value))
-            break
-        await RisingEdge(dut.clk_i)
-    assert result is not None, "binary output did not become valid"
-    assert result == [max(-128, min(127, a + b)) & 0xFF for a, b in zip(lhs, rhs)]
-    assert not dut.invalid_o.value
+    await Timer(1, unit="ps")
+    assert dut.binary_config_invalid_o.value
+    assert not dut.binary_busy_o.value
+    assert not dut.obi_req_o.value
 
 
 @cocotb.test()
@@ -171,7 +146,6 @@ async def postprocess_rejects_invalid_configuration(dut):
     await Timer(1, unit="ps")
     assert dut.binary_config_invalid_o.value
 
-    dut.binary_forbidden_i.value = 0
+    dut.binary_enable_i.value = 0
     await Timer(1, unit="ps")
     assert not dut.binary_config_invalid_o.value
-

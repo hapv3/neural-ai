@@ -10,12 +10,14 @@ module tb_afu;
     localparam int unsigned LUT_LANES      = 4;
     localparam int unsigned MEM_SIZE       = 16 * 1024;
 
-    localparam logic [2:0] MODE_8BIT  = 3'd0;
-    localparam logic [2:0] MODE_16BIT = 3'd1;
-    localparam logic [2:0] MODE_32BIT = 3'd2;
-    localparam logic [2:0] MODE_ADD_I8 = 3'd4;
-    localparam logic [2:0] MODE_DFL4_ROW32_Q8 = 3'd5;
-    localparam logic [2:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 3'd6;
+    localparam logic [3:0] MODE_8BIT  = 4'd0;
+    localparam logic [3:0] MODE_16BIT = 4'd1;
+    localparam logic [3:0] MODE_32BIT = 4'd2;
+    localparam logic [3:0] MODE_ADD_I8 = 4'd4;
+    localparam logic [3:0] MODE_DFL4_ROW32_Q8 = 4'd5;
+    localparam logic [3:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 4'd6;
+    localparam logic [3:0] MODE_BINARY_QUANT = 4'd8;
+    localparam logic [3:0] MODE_LUT_BINARY_QUANT = 4'd9;
     localparam logic [31:0] AFU_CSR_BASE = 32'h400;
     localparam logic [31:0] AFU_DFL_EXP_LUT_BASE = 32'h800;
     localparam logic [31:0] AFU_DFL_RECIP_LUT_BASE = 32'hc00;
@@ -84,7 +86,16 @@ module tb_afu;
         .obi_rhs_wdata_o(obi_rhs_wdata),
         .obi_rhs_rvalid_i(obi_rhs_rvalid),
         .obi_rhs_rdata_i(obi_rhs_rdata),
-        .done_o         (done)
+        .done_o         (done),
+        .perf_start_o   (),
+        .perf_active_o  (),
+        .perf_state_o   (),
+        .perf_lhs_consume_o(),
+        .perf_rhs_consume_o(),
+        .perf_result_produce_o(),
+        .perf_input_wait_o(),
+        .perf_rhs_wait_o(),
+        .perf_output_stall_o()
     );
 
     logic [7:0] tcdm_mem [0:MEM_SIZE-1];
@@ -232,12 +243,12 @@ module tb_afu;
         input logic [31:0] src_ptr,
         input logic [31:0] dst_ptr,
         input logic [31:0] length,
-        input logic [2:0]  mode
+        input logic [3:0]  mode
     );
         write_obi(AFU_CSR_BASE + 32'h04, src_ptr);
         write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
         write_obi(AFU_CSR_BASE + 32'h0c, length);
-        write_obi(AFU_CSR_BASE + 32'h10, {29'd0, mode});
+        write_obi(AFU_CSR_BASE + 32'h10, {28'd0, mode});
         write_obi(AFU_CSR_BASE + 32'h14, 32'd0);
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
@@ -250,7 +261,7 @@ module tb_afu;
         write_obi(AFU_CSR_BASE + 32'h04, src_ptr);
         write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
         write_obi(AFU_CSR_BASE + 32'h0c, length);
-        write_obi(AFU_CSR_BASE + 32'h10, {29'd0, MODE_DFL4_ROW32_Q8});
+        write_obi(AFU_CSR_BASE + 32'h10, {28'd0, MODE_DFL4_ROW32_Q8});
         write_obi(AFU_CSR_BASE + 32'h14, 32'd16);
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
@@ -265,9 +276,36 @@ module tb_afu;
         write_obi(AFU_CSR_BASE + 32'h04, lhs_ptr);
         write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
         write_obi(AFU_CSR_BASE + 32'h0c, length);
-        write_obi(AFU_CSR_BASE + 32'h10, {29'd0, MODE_ADD_I8});
+        write_obi(AFU_CSR_BASE + 32'h10, {28'd0, MODE_ADD_I8});
         write_obi(AFU_CSR_BASE + 32'h14, rhs_ptr);
         write_obi(AFU_CSR_BASE + 32'h18, 32'(bias));
+        write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
+    endtask
+
+    task automatic start_binary_quant_afu(
+        input logic [31:0] lhs_ptr,
+        input logic [31:0] rhs_ptr,
+        input logic [31:0] dst_ptr,
+        input logic [31:0] length,
+        input logic [1:0] operation,
+        input logic lut_chain
+    );
+        write_obi(AFU_CSR_BASE + 32'h04, lhs_ptr);
+        write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
+        write_obi(AFU_CSR_BASE + 32'h0c, length);
+        write_obi(AFU_CSR_BASE + 32'h14, rhs_ptr);
+        write_obi(AFU_CSR_BASE + 32'h1c, {30'd0, operation});
+        write_obi(AFU_CSR_BASE + 32'h20, 32'd1);
+        write_obi(AFU_CSR_BASE + 32'h24, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h28, 32'd1);
+        write_obi(AFU_CSR_BASE + 32'h2c, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h30, 32'd1);
+        write_obi(AFU_CSR_BASE + 32'h34, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h38, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h3c, 32'h0000_7f80);
+        write_obi(AFU_CSR_BASE + 32'h40, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h10, lut_chain ?
+                  {28'd0, MODE_LUT_BINARY_QUANT} : {28'd0, MODE_BINARY_QUANT});
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
 
@@ -515,7 +553,7 @@ module tb_afu;
         end
     endtask
 
-    task automatic fill_lut(input logic [2:0] mode, input int pattern_id);
+    task automatic fill_lut(input logic [3:0] mode, input int pattern_id);
         for (int i = 0; i < 256; i++) begin
             unique case (mode)
                 MODE_8BIT: begin
@@ -533,7 +571,7 @@ module tb_afu;
 
     task automatic check_case(
         input string       name,
-        input logic [2:0]  mode,
+        input logic [3:0]  mode,
         input int          src_base,
         input int          dst_base,
         input int          length,
@@ -586,6 +624,63 @@ module tb_afu;
         if (errors == 0) begin
             $display("[PASS] %s", name);
         end
+    endtask
+
+    task automatic check_binary_quant_case(
+        input string name,
+        input int lhs_base,
+        input int rhs_base,
+        input int dst_base,
+        input int length,
+        input logic [1:0] operation,
+        input logic lut_chain
+    );
+        $display("[AFU TB] %s: binary quant op=%0d chain=%0d len=%0d",
+                 name, operation, lut_chain, length);
+        $fflush();
+        if (lut_chain) begin
+            for (int value = 0; value < 256; value++) lut_data[value] = value;
+            load_lut();
+        end
+        for (int i = 0; i < length; i++) begin
+            tcdm_mem[(lhs_base + i) % MEM_SIZE] = 8'(((i * 5 + 9) % 31) - 15);
+            tcdm_mem[(rhs_base + i) % MEM_SIZE] = 8'(((i * 7 + 3) % 17) - 8);
+        end
+        for (int i = -16; i < length + 16; i++)
+            tcdm_mem[(dst_base + i + MEM_SIZE) % MEM_SIZE] = 8'ha5;
+
+        start_binary_quant_afu(lhs_base, rhs_base, dst_base, length, operation, lut_chain);
+        wait_done(name);
+
+        for (int i = 0; i < length; i++) begin
+            int lhs;
+            int rhs;
+            int expected;
+            logic [7:0] actual;
+            lhs = $signed({{24{tcdm_mem[(lhs_base + i) % MEM_SIZE][7]}},
+                           tcdm_mem[(lhs_base + i) % MEM_SIZE]});
+            rhs = $signed({{24{tcdm_mem[(rhs_base + i) % MEM_SIZE][7]}},
+                           tcdm_mem[(rhs_base + i) % MEM_SIZE]});
+            unique case (operation)
+                2'd0: expected = lhs + rhs;
+                2'd1: expected = lhs - rhs;
+                default: expected = lhs * rhs;
+            endcase
+            if (expected > 127) expected = 127;
+            if (expected < -128) expected = -128;
+            actual = tcdm_mem[(dst_base + i) % MEM_SIZE];
+            if (actual !== 8'(expected)) begin
+                $display("[FAIL] %s idx=%0d lhs=%0d rhs=%0d exp=%0d act=%0d",
+                         name, i, lhs, rhs, expected, $signed(actual));
+                errors++;
+            end
+        end
+        if (tcdm_mem[(dst_base - 1 + MEM_SIZE) % MEM_SIZE] !== 8'ha5 ||
+            tcdm_mem[(dst_base + length) % MEM_SIZE] !== 8'ha5) begin
+            $display("[FAIL] %s modified output guard bytes", name);
+            errors++;
+        end
+        if (errors == 0) $display("[PASS] %s", name);
     endtask
 
     task automatic check_add_bias_case(
@@ -770,6 +865,10 @@ module tb_afu;
         check_case("mode32_unaligned_17", MODE_32BIT, 'h255, 'h684, 17, 2);
         check_add_bias_case("add_bias110_unaligned_65", 'h3000, 'h3400, 'h3803, 65, 110);
         check_add_bias_case("add_bias_minus382_tail_33", 'h3000, 'h3400, 'h3805, 33, -382);
+        check_binary_quant_case("binary_quant_add_tail_67", 'h3000, 'h3400, 'h3800, 67, 0, 0);
+        check_binary_quant_case("binary_quant_sub_96", 'h3000, 'h3400, 'h3800, 96, 1, 0);
+        check_binary_quant_case("binary_quant_mul_tail_45", 'h3000, 'h3400, 'h3800, 45, 2, 0);
+        check_binary_quant_case("lut_binary_quant_chain_tail_73", 'h3000, 'h3400, 'h3800, 73, 0, 1);
         check_dfl_case("dfl_row32_aligned_17", 'h1000, 'h2000, 17);
         check_dfl16_case("dfl16_row32_unaligned_output_19", 'h1800, 'h2606, 19);
         check_dfl_case("dfl4_after_dfl16_3", 'h2200, 'h2a00, 3);

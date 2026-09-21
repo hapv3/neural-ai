@@ -18,6 +18,7 @@ COMMAND_FLAGS = {
     "CommandFlagOptional": "NAI_CMD_FLAG_OPTIONAL",
     "CommandFlagSkippable": "NAI_CMD_FLAG_SKIPPABLE",
     "CommandFlagAFULutReuse": "NAI_CMD_FLAG_AFU_LUT_REUSE",
+    "CommandFlagAFULutChain": "NAI_CMD_FLAG_AFU_LUT_CHAIN",
 }
 
 ENUMS = {
@@ -79,10 +80,12 @@ ENUMS = {
     "LineBufferBinary": "NAI_CMD_LINEBUF_BINARY",
     "LineBufferBinarySubmit": "NAI_CMD_LINEBUF_BINARY_SUBMIT",
     "AffineLoop": "NAI_CMD_AFFINE_LOOP",
+    "AFUBinaryQuant": "NAI_CMD_AFU_BINARY_QUANT",
     "AddI8": "NAI_AFU_BINARY_ADD_I8",
     "AddI8Bias": "NAI_AFU_BINARY_ADD_I8_BIAS",
     "Add": "NAI_SPATZ_BINARY_ADD",
     "Subtract": "NAI_SPATZ_BINARY_SUBTRACT",
+    "Multiply": "NAI_SPATZ_BINARY_MULTIPLY",
     "NHWCToRow32": "NAI_COPY_NHWC_TO_ROW32",
     "Row32ToNHWC": "NAI_COPY_ROW32_TO_NHWC",
     "NHWCToC32": "NAI_COPY_NHWC_TO_C32",
@@ -113,6 +116,7 @@ STRUCTS = {
     "CommandAFULutV2": "nai_cmd_afu_lut_v2_t",
     "CommandAFUBinaryV2": "nai_cmd_afu_binary_v2_t",
     "CommandSpatzAddV2": "nai_cmd_spatz_add_v2_t",
+    "CommandAFUBinaryQuantV2": "nai_cmd_afu_binary_quant_v2_t",
     "CommandAFUGlobalAvgPoolV2": "nai_cmd_afu_global_avgpool_v2_t",
     "CommandUpsampleNearestV2": "nai_cmd_upsample_nearest_v2_t",
     "CommandMaxPoolV2": "nai_cmd_maxpool_v2_t",

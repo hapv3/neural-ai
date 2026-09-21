@@ -59,9 +59,25 @@ module afu #(
     logic [31:0] cfg_src2_ptr;
     logic [31:0] cfg_dst_ptr;
     logic [31:0] cfg_length;
-    logic [2:0]  cfg_mode;
+    logic [3:0]  cfg_mode;
     logic signed [31:0] cfg_add_bias;
+    logic [1:0] cfg_binary_mode;
+    logic signed [31:0] cfg_binary_lhs_multiplier;
+    logic [6:0] cfg_binary_lhs_shift;
+    logic signed [31:0] cfg_binary_rhs_multiplier;
+    logic [6:0] cfg_binary_rhs_shift;
+    logic signed [31:0] cfg_binary_output_multiplier;
+    logic [6:0] cfg_binary_output_shift;
+    logic signed [31:0] cfg_binary_lhs_zero_point;
+    logic signed [31:0] cfg_binary_rhs_zero_point;
+    logic signed [31:0] cfg_binary_output_zero_point;
+    logic signed [31:0] cfg_binary_clamp_min;
+    logic signed [31:0] cfg_binary_clamp_max;
+    logic [5:0] cfg_binary_double_round_shift;
     logic        cfg_start;
+
+    localparam logic [3:0] MODE_BINARY_QUANT = 4'd8;
+    localparam logic [3:0] MODE_LUT_BINARY_QUANT = 4'd9;
     
     // LUT write interface
     logic        lut_we;
@@ -88,15 +104,57 @@ module afu #(
 
     logic core_done;
     logic core_busy;
+    logic core_start;
+    logic [2:0] core_mode;
+    logic core_rfifo_pop;
+    logic core_rhs_rfifo_pop;
+    logic core_wfifo_full;
+    logic core_wfifo_push;
+    logic [287:0] core_wfifo_wdata;
+    logic [4:0] core_perf_state;
+    logic core_perf_input_wait;
+    logic core_perf_rhs_wait;
+    logic core_perf_output_stall;
+    logic binary_done;
+    logic binary_busy;
+    logic binary_error;
+    logic binary_lhs_pop;
+    logic binary_rhs_pop;
+    logic binary_chain_ready;
+    logic binary_out_valid;
+    logic [287:0] binary_out_data;
+    logic binary_input_wait;
+    logic binary_rhs_wait;
+    logic binary_output_stall;
+    logic binary_standalone;
+    logic binary_chain;
+    logic binary_active;
+    logic operation_done;
     logic backend_idle;
     logic afu_error;
 
-    assign afu_error = 1'b0;
+    assign binary_standalone = cfg_mode == MODE_BINARY_QUANT;
+    assign binary_chain = cfg_mode == MODE_LUT_BINARY_QUANT;
+    assign binary_active = binary_standalone || binary_chain;
+    assign core_start = cfg_start && !binary_standalone;
+    assign core_mode = binary_chain ? 3'd0 : cfg_mode[2:0];
+    assign operation_done = binary_active ? binary_done : core_done;
+    assign afu_error = binary_active && binary_error;
     assign perf_start_o = cfg_start;
-    assign perf_active_o = core_busy || !backend_idle;
+    assign perf_active_o = core_busy || binary_busy || !backend_idle;
+    assign perf_state_o = binary_active ? {3'd6, binary_busy, binary_chain} : core_perf_state;
     assign perf_lhs_consume_o = rfifo_pop;
     assign perf_rhs_consume_o = rhs_rfifo_pop;
     assign perf_result_produce_o = wfifo_push;
+    assign perf_input_wait_o = binary_active ? binary_input_wait : core_perf_input_wait;
+    assign perf_rhs_wait_o = binary_active ? binary_rhs_wait : core_perf_rhs_wait;
+    assign perf_output_stall_o = binary_active ? binary_output_stall : core_perf_output_stall;
+
+    assign rfifo_pop = binary_standalone ? binary_lhs_pop : core_rfifo_pop;
+    assign rhs_rfifo_pop = binary_active ? binary_rhs_pop : core_rhs_rfifo_pop;
+    assign core_wfifo_full = binary_chain ? !binary_chain_ready : wfifo_full;
+    assign wfifo_push = binary_active ? (binary_out_valid && !wfifo_full) : core_wfifo_push;
+    assign wfifo_wdata = binary_active ? binary_out_data : core_wfifo_wdata;
     
     afu_frontend #(
         .ADDR_WIDTH (ADDR_WIDTH),
@@ -118,6 +176,19 @@ module afu #(
         .cfg_length_o   (cfg_length),
         .cfg_mode_o     (cfg_mode),
         .cfg_add_bias_o (cfg_add_bias),
+        .cfg_binary_mode_o(cfg_binary_mode),
+        .cfg_binary_lhs_multiplier_o(cfg_binary_lhs_multiplier),
+        .cfg_binary_lhs_shift_o(cfg_binary_lhs_shift),
+        .cfg_binary_rhs_multiplier_o(cfg_binary_rhs_multiplier),
+        .cfg_binary_rhs_shift_o(cfg_binary_rhs_shift),
+        .cfg_binary_output_multiplier_o(cfg_binary_output_multiplier),
+        .cfg_binary_output_shift_o(cfg_binary_output_shift),
+        .cfg_binary_lhs_zero_point_o(cfg_binary_lhs_zero_point),
+        .cfg_binary_rhs_zero_point_o(cfg_binary_rhs_zero_point),
+        .cfg_binary_output_zero_point_o(cfg_binary_output_zero_point),
+        .cfg_binary_clamp_min_o(cfg_binary_clamp_min),
+        .cfg_binary_clamp_max_o(cfg_binary_clamp_max),
+        .cfg_binary_double_round_shift_o(cfg_binary_double_round_shift),
         .cfg_start_o    (cfg_start),
         .lut_we_o       (lut_we),
         .lut_addr_o     (lut_addr),
@@ -126,7 +197,7 @@ module afu #(
         .lut_fixed_bank_o(lut_fixed_bank),
         .lut_bank_o      (lut_bank),
         .afu_done_i     (done_o),
-        .afu_busy_i     (core_busy || !backend_idle),
+        .afu_busy_i     (core_busy || binary_busy || !backend_idle),
         .afu_error_i    (afu_error)
     );
     
@@ -143,7 +214,7 @@ module afu #(
         .cfg_length_i   (cfg_length),
         .cfg_mode_i     (cfg_mode),
         .cfg_start_i    (cfg_start),
-        .read_stop_i    (core_done),
+        .read_stop_i    (operation_done),
         .obi_m_req_o    (obi_m_req_o),
         .obi_m_gnt_i    (obi_m_gnt_i),
         .obi_m_addr_o   (obi_m_addr_o),
@@ -172,7 +243,7 @@ module afu #(
         .idle_o         (backend_idle)
     );
 
-    assign done_o = core_done && wfifo_all_empty && backend_idle;
+    assign done_o = operation_done && wfifo_all_empty && backend_idle;
     
     afu_core #(
         .LUT_LANES (LUT_LANES)
@@ -183,9 +254,9 @@ module afu #(
         .cfg_src2_ptr_i (cfg_src2_ptr),
         .cfg_dst_ptr_i  (cfg_dst_ptr),
         .cfg_length_i   (cfg_length),
-        .cfg_mode_i     (cfg_mode),
+        .cfg_mode_i     (core_mode),
         .cfg_add_bias_i (cfg_add_bias),
-        .cfg_start_i    (cfg_start),
+        .cfg_start_i    (core_start),
         .lut_we_i       (lut_we),
         .lut_addr_i     (lut_addr),
         .lut_wdata_i    (lut_wdata),
@@ -193,20 +264,61 @@ module afu #(
         .lut_fixed_bank_i(lut_fixed_bank),
         .lut_bank_i      (lut_bank),
         .rfifo_empty_i  (rfifo_empty),
-        .rfifo_pop_o    (rfifo_pop),
+        .rfifo_pop_o    (core_rfifo_pop),
         .rfifo_data_i   (rfifo_rdata),
         .rhs_rfifo_empty_i(rhs_rfifo_empty),
-        .rhs_rfifo_pop_o(rhs_rfifo_pop),
+        .rhs_rfifo_pop_o(core_rhs_rfifo_pop),
         .rhs_rfifo_data_i(rhs_rfifo_rdata),
-        .wfifo_full_i   (wfifo_full),
-        .wfifo_push_o   (wfifo_push),
-        .wfifo_data_o   (wfifo_wdata),
+        .wfifo_full_i   (core_wfifo_full),
+        .wfifo_push_o   (core_wfifo_push),
+        .wfifo_data_o   (core_wfifo_wdata),
         .done_o         (core_done),
         .busy_o         (core_busy),
-        .perf_state_o   (perf_state_o),
-        .perf_input_wait_o(perf_input_wait_o),
-        .perf_rhs_wait_o(perf_rhs_wait_o),
-        .perf_output_stall_o(perf_output_stall_o)
+        .perf_state_o   (core_perf_state),
+        .perf_input_wait_o(core_perf_input_wait),
+        .perf_rhs_wait_o(core_perf_rhs_wait),
+        .perf_output_stall_o(core_perf_output_stall)
+    );
+
+    afu_binary_requant_engine #(
+        .LANES(32)
+    ) i_binary_requant_engine (
+        .clk_i,
+        .rst_ni,
+        .start_i                  (cfg_start && binary_active),
+        .chain_i                  (binary_chain),
+        .length_i                 (cfg_length),
+        .mode_i                   (cfg_binary_mode),
+        .lhs_multiplier_i         (cfg_binary_lhs_multiplier),
+        .lhs_shift_i              (cfg_binary_lhs_shift),
+        .rhs_multiplier_i         (cfg_binary_rhs_multiplier),
+        .rhs_shift_i              (cfg_binary_rhs_shift),
+        .output_multiplier_i      (cfg_binary_output_multiplier),
+        .output_shift_i           (cfg_binary_output_shift),
+        .lhs_zero_point_i         (cfg_binary_lhs_zero_point),
+        .rhs_zero_point_i         (cfg_binary_rhs_zero_point),
+        .output_zero_point_i      (cfg_binary_output_zero_point),
+        .clamp_min_i              (cfg_binary_clamp_min),
+        .clamp_max_i              (cfg_binary_clamp_max),
+        .double_round_shift_i     (cfg_binary_double_round_shift),
+        .lhs_empty_i              (rfifo_empty),
+        .lhs_pop_o                (binary_lhs_pop),
+        .lhs_data_i               (rfifo_rdata),
+        .chain_valid_i            (binary_chain && core_wfifo_push),
+        .chain_ready_o            (binary_chain_ready),
+        .chain_data_i             (core_wfifo_wdata),
+        .rhs_empty_i              (rhs_rfifo_empty),
+        .rhs_pop_o                (binary_rhs_pop),
+        .rhs_data_i               (rhs_rfifo_rdata),
+        .out_valid_o              (binary_out_valid),
+        .out_ready_i              (!wfifo_full),
+        .out_data_o               (binary_out_data),
+        .done_o                   (binary_done),
+        .busy_o                   (binary_busy),
+        .error_o                  (binary_error),
+        .input_wait_o             (binary_input_wait),
+        .rhs_wait_o               (binary_rhs_wait),
+        .output_stall_o           (binary_output_stall)
     );
     
     afu_fifo_ff #(

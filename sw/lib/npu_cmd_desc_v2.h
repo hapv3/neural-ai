@@ -7,6 +7,7 @@
 #define NAI_CMD_FLAG_OPTIONAL  (1u << 0)
 #define NAI_CMD_FLAG_SKIPPABLE (1u << 1)
 #define NAI_CMD_FLAG_AFU_LUT_REUSE (1u << 2)
+#define NAI_CMD_FLAG_AFU_LUT_CHAIN (1u << 3)
 
 typedef enum {
     NAI_CMD_END = 0,
@@ -42,7 +43,8 @@ typedef enum {
     NAI_CMD_SYSTOLIC_WAIT = 30,
     NAI_CMD_LINEBUF_BINARY = 31,
     NAI_CMD_LINEBUF_BINARY_SUBMIT = 32,
-    NAI_CMD_AFFINE_LOOP = 33
+    NAI_CMD_AFFINE_LOOP = 33,
+    NAI_CMD_AFU_BINARY_QUANT = 34
 } nai_cmd_type_v2_t;
 
 typedef struct {
@@ -223,7 +225,8 @@ typedef enum {
 
 typedef enum {
     NAI_SPATZ_BINARY_ADD = 0,
-    NAI_SPATZ_BINARY_SUBTRACT = 1
+    NAI_SPATZ_BINARY_SUBTRACT = 1,
+    NAI_SPATZ_BINARY_MULTIPLY = 2
 } nai_spatz_binary_mode_v2_t;
 
 typedef struct {
@@ -257,6 +260,27 @@ typedef struct {
     uint32_t double_round_shift;
     uint32_t mode;
 } nai_cmd_spatz_add_v2_t;
+
+typedef struct {
+    nai_cmd_header_v2_t header;
+    nai_ref_v1_t lhs;
+    nai_ref_v1_t rhs;
+    nai_ref_v1_t ofm;
+    uint32_t length;
+    int32_t lhs_scale;
+    uint32_t lhs_shift;
+    int32_t rhs_scale;
+    uint32_t rhs_shift;
+    int32_t output_scale;
+    uint32_t output_shift;
+    int32_t lhs_zero_point;
+    int32_t rhs_zero_point;
+    int32_t output_zero_point;
+    int32_t clamp_min;
+    int32_t clamp_max;
+    uint32_t double_round_shift;
+    uint32_t mode;
+} nai_cmd_afu_binary_quant_v2_t;
 
 typedef struct {
     nai_cmd_header_v2_t header;
@@ -360,6 +384,8 @@ _Static_assert(sizeof(nai_cmd_depthwise_c32_v2_t) == 96, "nai_cmd_depthwise_c32_
 _Static_assert(sizeof(nai_cmd_afu_lut_v2_t) == 64, "nai_cmd_afu_lut_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_binary_v2_t) == 64, "nai_cmd_afu_binary_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_spatz_add_v2_t) == 96, "nai_cmd_spatz_add_v2_t ABI size");
+_Static_assert(sizeof(nai_cmd_afu_binary_quant_v2_t) == 96,
+               "nai_cmd_afu_binary_quant_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_afu_global_avgpool_v2_t) == 64,
                "nai_cmd_afu_global_avgpool_v2_t ABI size");
 _Static_assert(sizeof(nai_cmd_upsample_nearest_v2_t) == 64,
@@ -440,6 +466,9 @@ typedef struct {
         void *context, const nai_cmd_linebuf_binary_v2_t *command);
     uint32_t (*linebuf_binary_submit)(
         void *context, const nai_cmd_linebuf_binary_v2_t *command);
+    uint32_t (*afu_binary_quant)(void *context,
+                                 const nai_cmd_afu_binary_quant_v2_t *command,
+                                 uint32_t lhs, uint32_t rhs, uint32_t ofm);
 } nai_runtime_ops_v2_t;
 
 nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
