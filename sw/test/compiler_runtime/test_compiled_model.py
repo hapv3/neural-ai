@@ -63,8 +63,8 @@ def _ref(region, index=0, offset=0):
     return struct.pack("<HHI", region, index, offset)
 
 
-def _command_header(command_type, size, layer=0, tile=0):
-    return struct.pack("<HHIII", command_type, size, 0, layer, tile)
+def _command_header(command_type, size, layer=0, tile=0, flags=0):
+    return struct.pack("<HHIII", command_type, size, flags, layer, tile)
 
 
 def _dma_1d(source, destination, length, direction, tile):
@@ -187,6 +187,38 @@ def _afu_binary(lhs, rhs, ofm, length, mode, tile, bias=0):
     command += lhs + rhs + ofm
     command += struct.pack("<2Ii3I", length, mode, bias, 0, 0, 0)
     assert len(command) == 64
+    return command
+
+
+def _afu_lut(ifm, ofm, lut, length, tile):
+    command = _command_header(12, 64, tile=tile)
+    command += ifm + ofm + lut
+    command += struct.pack("<I5I", length, 0, 0, 0, 0, 0)
+    assert len(command) == 64
+    return command
+
+
+def _afu_binary_quant(lhs, rhs, ofm, length, mode, tile, *, lut_chain=False):
+    command = _command_header(34, 96, tile=tile, flags=(1 << 3) if lut_chain else 0)
+    command += lhs + rhs + ofm
+    command += struct.pack(
+        "<IiIiIiIiiiiiII",
+        length,
+        1,
+        0,
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        -128,
+        127,
+        0,
+        mode,
+    )
+    assert len(command) == 96
     return command
 
 
@@ -419,6 +451,38 @@ def build_afu_add_bias_model(bias):
         + _binding(2, 0, dimensions=dimensions)
     )
     return _package(commands, b"", bindings, 4, 0x480, 2, 1)
+
+
+def build_afu_lut_binary_chain_model(length=73):
+    lut = bytes((index * 3 + 7) & 0xFF for index in range(256))
+    dimensions = (1, 1, 1, length)
+    commands = b"".join(
+        [
+            _dma_1d(_ref(3, 0), _ref(6), length, 0, 0),
+            _dma_1d(_ref(3, 1), _ref(6, offset=0x100), length, 0, 1),
+            # Run one LUT command to stage and activate the table. Its output is
+            # intentionally temporary; the following command exercises the
+            # direct LUT-output-to-binary pipeline instead of reading it back.
+            _afu_lut(_ref(6), _ref(6, offset=0x200), _ref(1), length, 2),
+            _afu_binary_quant(
+                _ref(6),
+                _ref(6, offset=0x100),
+                _ref(6, offset=0x300),
+                length,
+                0,
+                3,
+                lut_chain=True,
+            ),
+            _dma_1d(_ref(6, offset=0x300), _ref(4), length, 1, 4),
+            _command_header(0, 32, tile=5).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=dimensions)
+        + _binding(1, 1, dimensions=dimensions)
+        + _binding(2, 0, dimensions=dimensions)
+    )
+    return _package(commands, lut, bindings, 5, 0x380, 2, 1), lut
 
 
 def _dfl_exp_lut_value(index):
@@ -2241,6 +2305,52 @@ async def test_compiler_runtime_afu_add_bias_c32_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
+
+
+@cocotb.test()
+async def test_compiler_runtime_afu_lut_binary_chain_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    count = 73
+    lhs = bytes((index * 11 + 5) & 0xFF for index in range(count))
+    rhs = bytes((index * 7 + 131) & 0xFF for index in range(count))
+    model, lut = build_afu_lut_binary_chain_model(count)
+
+    def signed(byte):
+        return byte if byte < 128 else byte - 256
+
+    expected = bytes(
+        max(-128, min(127, signed(lut[left]) + signed(right))) & 0xFF
+        for left, right in zip(lhs, rhs)
+    )
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, count),
+        (1, 1, INPUT2_BASE, count),
+        (2, 0, OUTPUT_BASE, count),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, lhs)
+    await write_l2_bytes(dut, INPUT2_BASE, rhs)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(count))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation, model=model)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 5
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, count)) == expected
 
 
