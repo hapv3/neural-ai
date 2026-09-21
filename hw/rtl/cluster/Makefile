@@ -3,6 +3,8 @@
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 VERILATOR_JOBS ?= 8
+export CCACHE_DIR ?= /tmp/ccache
+export CCACHE_TEMPDIR ?= /tmp/ccache-tmp
 SYSTOLIC_OFM_FIFO_DEPTH ?= 8
 SYSTOLIC_OTCDM_STALL_PERIOD ?= 0
 SYSTOLIC_OTCDM_STALL_HOLD ?= 0

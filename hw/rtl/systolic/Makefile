@@ -3,6 +3,8 @@
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 VERILATOR_JOBS ?= 8
+export CCACHE_DIR ?= /tmp/ccache
+export CCACHE_TEMPDIR ?= /tmp/ccache-tmp
 
 PWD=$(shell pwd)
 REPO_ROOT=$(PWD)/../../..
