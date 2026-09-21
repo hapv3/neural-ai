@@ -10,12 +10,16 @@ REPO_ROOT=$(PWD)/../../..
 # MODULE is the basename of the Python test file
 export PYTHONPATH := $(PWD)/tb:$(PYTHONPATH)
 MODULE ?= test_systolic
+SIM_ROOT ?= $(PWD)/tb/sim
 
 # RTL sources
 VERILOG_SOURCES = $(PWD)/npu_systolic_array.sv
 
 # Set build directory to tb/sim/<test_name>
-SIM_BUILD = $(PWD)/tb/sim/$(MODULE)
+SIM_BUILD ?= $(SIM_ROOT)/$(MODULE)
+COCOTB_RESULTS_FILE ?= $(SIM_BUILD)/results.xml
+SIM_LOG ?= $(SIM_BUILD)/sim.log
+SIM_CMD_SUFFIX += 2>&1 | tee $(SIM_LOG)
 
 # TOPLEVEL is the name of the toplevel module in your Verilog
 TOPLEVEL = npu_systolic_array
@@ -194,6 +198,7 @@ endif
 DEBUG ?= 0
 ifeq ($(DEBUG), 1)
     EXTRA_ARGS += --trace
+    SIM_ARGS += --trace-file $(SIM_BUILD)/dump.vcd
     export WAVES = 1
 endif
 

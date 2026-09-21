@@ -30,4 +30,4 @@ sim: $(SRC)
 	{ $(VERILATOR) $(VERILATOR_FLAGS) $(SRC) && ./$(SIM_BIN); } 2>&1 | tee $(SIM_LOG)
 
 clean:
-	rm -rf $(SIM_ROOT)
+	rm -rf tb/sim

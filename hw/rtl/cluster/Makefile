@@ -21,9 +21,13 @@ export PYTHONPATH := $(PWD)/tb:$(PWD)/tb/tests:$(PYTHONPATH)
 COCOTB_TEST_MODULES ?= test_snitch_boot
 MODULE = $(COCOTB_TEST_MODULES)
 CLUSTER_SIM_NAME ?= $(MODULE)
+SIM_ROOT ?= $(PWD)/tb/sim
 
 # Set build directory to tb/sim/<test_name>
-SIM_BUILD = $(PWD)/tb/sim/$(CLUSTER_SIM_NAME)
+SIM_BUILD ?= $(SIM_ROOT)/$(CLUSTER_SIM_NAME)
+COCOTB_RESULTS_FILE ?= $(SIM_BUILD)/results.xml
+SIM_LOG ?= $(SIM_BUILD)/sim.log
+SIM_CMD_SUFFIX += 2>&1 | tee $(SIM_LOG)
 SNITCH_F_STAMP = $(SIM_BUILD)/snitch_expanded.stamp
 
 # TOPLEVEL is the name of the toplevel module in your Verilog
@@ -57,10 +61,10 @@ TRACE_FORMAT ?= vcd
 ifeq ($(DEBUG), 1)
     ifeq ($(TRACE_FORMAT), fst)
         COMPILE_ARGS += --trace-fst
-        SIM_ARGS += --trace --trace-file dump.fst
+        SIM_ARGS += --trace --trace-file $(SIM_BUILD)/dump.fst
     else
         COMPILE_ARGS += --trace
-        SIM_ARGS += --trace --trace-file dump.vcd
+        SIM_ARGS += --trace --trace-file $(SIM_BUILD)/dump.vcd
     endif
     export WAVES = 1
 endif
@@ -94,12 +98,13 @@ $(SNITCH_F_STAMP): $(SNITCH_F_TEMPLATE) FORCE | $(SIM_BUILD)
 sim: gen_f
 
 pmu_unit_build:
+	mkdir -p $(SIM_ROOT)/pmu_unit
 	verilator --binary --timing -sv -j $(VERILATOR_JOBS) \
 		-Wno-fatal -Wno-DECLFILENAME -Wno-TIMESCALEMOD --top-module tb_npu_pmu \
-		--Mdir tb/sim/pmu_unit npu_pmu.sv tb/tb_npu_pmu.sv
+		--Mdir $(SIM_ROOT)/pmu_unit npu_pmu.sv tb/tb_npu_pmu.sv
 
 pmu_unit: pmu_unit_build
-	tb/sim/pmu_unit/Vtb_npu_pmu
+	$(SIM_ROOT)/pmu_unit/Vtb_npu_pmu 2>&1 | tee $(SIM_ROOT)/pmu_unit/sim.log
 
 # Clean output dir
 clean::
