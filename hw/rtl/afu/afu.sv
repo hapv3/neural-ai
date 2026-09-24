@@ -78,6 +78,7 @@ module afu #(
 
     localparam logic [3:0] MODE_BINARY_QUANT = 4'd8;
     localparam logic [3:0] MODE_LUT_BINARY_QUANT = 4'd9;
+    localparam logic [3:0] MODE_GLOBAL_AVGPOOL_REQUANT = 4'd10;
     
     // LUT write interface
     logic        lut_we;
@@ -129,6 +130,7 @@ module afu #(
     logic binary_standalone;
     logic binary_chain;
     logic binary_active;
+    logic global_avgpool_requant;
     logic operation_done;
     logic backend_idle;
     logic afu_error;
@@ -136,8 +138,10 @@ module afu #(
     assign binary_standalone = cfg_mode == MODE_BINARY_QUANT;
     assign binary_chain = cfg_mode == MODE_LUT_BINARY_QUANT;
     assign binary_active = binary_standalone || binary_chain;
+    assign global_avgpool_requant = cfg_mode == MODE_GLOBAL_AVGPOOL_REQUANT;
     assign core_start = cfg_start && !binary_standalone;
-    assign core_mode = binary_chain ? 3'd0 : cfg_mode[2:0];
+    assign core_mode = binary_chain ? 3'd0 :
+                       (global_avgpool_requant ? 3'd7 : cfg_mode[2:0]);
     assign operation_done = binary_active ? binary_done : core_done;
     assign afu_error = binary_active && binary_error;
     assign perf_start_o = cfg_start;
@@ -256,6 +260,13 @@ module afu #(
         .cfg_length_i   (cfg_length),
         .cfg_mode_i     (core_mode),
         .cfg_add_bias_i (cfg_add_bias),
+        .cfg_gap_requant_i(global_avgpool_requant),
+        .cfg_output_multiplier_i(cfg_binary_output_multiplier),
+        .cfg_output_shift_i(cfg_binary_output_shift),
+        .cfg_output_zero_point_i(cfg_binary_output_zero_point),
+        .cfg_clamp_min_i(cfg_binary_clamp_min),
+        .cfg_clamp_max_i(cfg_binary_clamp_max),
+        .cfg_double_round_shift_i(cfg_binary_double_round_shift),
         .cfg_start_i    (core_start),
         .lut_we_i       (lut_we),
         .lut_addr_i     (lut_addr),

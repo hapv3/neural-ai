@@ -421,11 +421,18 @@ static uint32_t runtime_afu_global_avgpool(
     const uint32_t spatial_count = command->input_h * command->input_w;
     const uint32_t groups = (command->channels + 31u) / 32u;
     const uint32_t input_bytes = spatial_count * groups * 32u;
-    const uint32_t reciprocal_q31 =
-        (uint32_t)((1ull << 31) / (uint64_t)spatial_count);
     (void)context;
-    afu_load_lut_entry(0u, reciprocal_q31);
-    afu_start_global_avgpool_c32(ifm, ofm, input_bytes, spatial_count);
+    if ((command->header.flags & NAI_CMD_FLAG_AFU_GLOBAL_AVGPOOL_REQUANT) != 0u) {
+        afu_start_global_avgpool_requant_c32(ifm, ofm, input_bytes, spatial_count,
+            command->output_multiplier, command->output_shift,
+            command->input_offset, command->output_zero_point,
+            command->double_round_shift);
+    } else {
+        const uint32_t reciprocal_q31 =
+            (uint32_t)((1ull << 31) / (uint64_t)spatial_count);
+        afu_load_lut_entry(0u, reciprocal_q31);
+        afu_start_global_avgpool_c32(ifm, ofm, input_bytes, spatial_count);
+    }
     return afu_wait_done(100000u + input_bytes) ? 0u : 1u;
 }
 

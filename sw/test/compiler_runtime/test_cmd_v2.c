@@ -52,6 +52,11 @@ typedef struct {
     uint32_t linebuf_k_tiles;
     uint32_t binary_rhs;
     uint32_t binary_lhs_shift;
+    int32_t output_multiplier;
+    uint32_t output_shift;
+    int32_t input_offset;
+    int32_t output_zero_point;
+    uint32_t double_round_shift;
 } mock_state_t;
 
 typedef struct {
@@ -260,6 +265,11 @@ static uint32_t mock_afu_global_avgpool(
     state->input_h = command->input_h;
     state->input_w = command->input_w;
     state->channels = command->channels;
+    state->output_multiplier = command->output_multiplier;
+    state->output_shift = command->output_shift;
+    state->input_offset = command->input_offset;
+    state->output_zero_point = command->output_zero_point;
+    state->double_round_shift = command->double_round_shift;
     return 0u;
 }
 
@@ -1328,6 +1338,33 @@ int main(void)
     assert(completed == 0u && state.calls == 0u);
     global_avgpool->ofm.offset = 0x200u;
     global_avgpool->input_h = 0u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+
+    global_avgpool->input_h = 2u;
+    global_avgpool->header.flags = NAI_CMD_FLAG_AFU_GLOBAL_AVGPOOL_REQUANT;
+    global_avgpool->output_multiplier = 0x40000000;
+    global_avgpool->output_shift = 31u;
+    global_avgpool->input_offset = 18;
+    global_avgpool->output_zero_point = -7;
+    global_avgpool->double_round_shift = 20u;
+    state = (mock_state_t){0};
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_OK);
+    assert(completed == 1u && state.calls == 1u);
+    assert(state.output_multiplier == 0x40000000);
+    assert(state.output_shift == 31u && state.input_offset == 18);
+    assert(state.output_zero_point == -7 && state.double_round_shift == 20u);
+
+    global_avgpool->output_multiplier = 0;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    global_avgpool->output_multiplier = 0x40000000;
+    global_avgpool->output_shift = 64u;
+    assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
+        &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
+    global_avgpool->output_shift = 31u;
+    global_avgpool->header.flags = 0u;
     assert(nai_cmd_dispatch_v2(&gemm_view, &gemm_resolver, &gemm_ops,
         &completed, &failure) == NAI_DISPATCH_BAD_COMMAND);
 

@@ -1690,6 +1690,18 @@ def _compile_global_avgpool_model():
     )
 
 
+def _compile_spatial_mean_model():
+    return _compile_tflite_fixture_model(
+        "mean_spatial_h2w3_c33", "neural-ai-compiled-spatial-mean-"
+    )
+
+
+def _compile_token_mean_model():
+    return _compile_tflite_fixture_model(
+        "mean_token_t7_c33", "neural-ai-compiled-token-mean-"
+    )
+
+
 def _compile_resize_nearest_model():
     return _compile_tflite_fixture_model(
         "resize_nearest_h2w3_c32_2x", "neural-ai-compiled-resize-nearest-"
@@ -3741,6 +3753,94 @@ async def test_compiler_generated_global_avgpool_c32_package(dut):
         counters["afu_done"],
         counters["afu_tcdm_req"],
     )
+
+
+@cocotb.test()
+async def test_compiler_generated_mean_fused_requant_packages(dut):
+    """Check spatial and token Mean byte-for-byte against TensorFlow Lite."""
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+
+    cases = (
+        (
+            "spatial",
+            _compile_spatial_mean_model,
+            (2, 3, 33),
+            198,
+            bytes.fromhex(
+                "06fcf3ea292016c403faf0e7261dcbc101f7ee2d24d2c808fef5342bd8cf0e05fc"
+            ),
+        ),
+        (
+            "token",
+            _compile_token_mean_model,
+            (1, 7, 33),
+            231,
+            bytes.fromhex(
+                "1a1bd3d41e2021d923dbdcde2829e1e2e3e4e63031e9eaebecee3839f1f2f3f4f6"
+            ),
+        ),
+    )
+
+    for name, compile_model, dimensions, input_count, expected in cases:
+        await reset_dut(dut)
+        input_data = bytes(((index * 37 + 11) % 255) - 128 & 0xFF
+                           for index in range(input_count))
+        model = compile_model()
+
+        section_table_offset = struct.unpack_from("<I", model, 24)[0]
+        command_offset = struct.unpack_from(
+            "<I", model, section_table_offset + 8
+        )[0]
+        command_bytes = struct.unpack_from(
+            "<I", model, section_table_offset + 12
+        )[0]
+        offset = command_offset
+        avgpool_commands = 0
+        while offset < command_offset + command_bytes:
+            command_type, command_size = struct.unpack_from("<HH", model, offset)
+            if command_type == 14:
+                flags = struct.unpack_from("<I", model, offset + 4)[0]
+                assert flags & (1 << 4)
+                assert struct.unpack_from("<3I", model, offset + 32) == dimensions
+                output_multiplier, output_shift, input_offset, output_zero_point = (
+                    struct.unpack_from("<iIii", model, offset + 44)
+                )
+                assert output_multiplier > 0
+                assert output_shift <= 63
+                assert input_offset == dimensions[0] * dimensions[1]
+                assert output_zero_point == -1
+                avgpool_commands += 1
+            offset += command_size
+        assert offset == command_offset + command_bytes
+        assert avgpool_commands == 1
+
+        runtime_bindings = [
+            (1, 0, INPUT_BASE, len(input_data)),
+            (2, 0, OUTPUT_BASE, len(expected)),
+        ]
+        invocation, binding_addresses = build_invocation_with_bindings(
+            model, runtime_bindings
+        )
+        await write_l2_bytes(dut, INPUT_BASE, input_data)
+        await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+        await write_l2_bytes(dut, MODEL_BASE, model)
+        await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+        await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+        await _load_and_run(dut, axi_master, invocation, timeout_cycles=300000)
+
+        assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+        assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+        command_count = struct.unpack_from("<I", model, 32)[0]
+        assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+        actual = bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected)))
+        assert actual == expected, f"{name} Mean output differs from TFLite"
 
 
 @cocotb.test()

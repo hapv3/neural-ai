@@ -8,6 +8,7 @@
 #define NAI_CMD_FLAG_SKIPPABLE (1u << 1)
 #define NAI_CMD_FLAG_AFU_LUT_REUSE (1u << 2)
 #define NAI_CMD_FLAG_AFU_LUT_CHAIN (1u << 3)
+#define NAI_CMD_FLAG_AFU_GLOBAL_AVGPOOL_REQUANT (1u << 4)
 
 typedef enum {
     NAI_CMD_END = 0,
@@ -289,7 +290,11 @@ typedef struct {
     uint32_t input_h;
     uint32_t input_w;
     uint32_t channels;
-    uint32_t reserved[5];
+    int32_t output_multiplier;
+    uint32_t output_shift;
+    int32_t input_offset;
+    int32_t output_zero_point;
+    uint32_t double_round_shift;
 } nai_cmd_afu_global_avgpool_v2_t;
 
 typedef struct {

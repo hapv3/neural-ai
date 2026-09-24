@@ -14,6 +14,13 @@ module afu_core #(
     input  logic [31:0]  cfg_length_i,
     input  logic [2:0]   cfg_mode_i,
     input  logic signed [31:0] cfg_add_bias_i,
+    input  logic         cfg_gap_requant_i,
+    input  logic signed [31:0] cfg_output_multiplier_i,
+    input  logic [6:0]   cfg_output_shift_i,
+    input  logic signed [31:0] cfg_output_zero_point_i,
+    input  logic signed [31:0] cfg_clamp_min_i,
+    input  logic signed [31:0] cfg_clamp_max_i,
+    input  logic [5:0]   cfg_double_round_shift_i,
     input  logic         cfg_start_i,
 
     // LUT write interface
@@ -77,6 +84,10 @@ module afu_core #(
         ST_GAP_MUL_WRITE,
         ST_GAP_WRITE,
         ST_GAP_PUSH,
+        ST_GAP_REQUANT_MUL,
+        ST_GAP_REQUANT_ROUND,
+        ST_GAP_REQUANT_SHIFT_LOW,
+        ST_GAP_REQUANT_SHIFT_HIGH,
         ST_DONE
     } state_e;
 
@@ -204,8 +215,8 @@ module afu_core #(
     logic [31:0] gap_next_elem_cnt;
     logic        gap_group_done;
     logic        gap_final_input;
-    logic [63:0] gap_mul_product_q [32];
-    logic [63:0] gap_mul_product_n [32];
+    logic signed [64:0] gap_mul_product_q [32];
+    logic signed [64:0] gap_mul_product_n [32];
     logic        gap_mul_negative_q [32];
     logic        gap_mul_negative_n [32];
     logic signed [31:0] gap_avg_q [32];
@@ -352,6 +363,48 @@ module afu_core #(
             end else begin
                 avg_i32_from_product = $signed({1'b0, quotient[30:0]});
             end
+        end
+    endfunction
+
+    function automatic logic signed [64:0] gap_round_offset(
+        input logic [6:0] shift
+    );
+        begin
+            gap_round_offset = '0;
+            if (shift != 0 && shift <= 7'd63)
+                gap_round_offset = 65'sd1 <<< (shift - 1'b1);
+        end
+    endfunction
+
+    function automatic logic signed [64:0] gap_double_round_offset(
+        input logic [6:0] shift,
+        input logic [5:0] double_round_shift
+    );
+        begin
+            gap_double_round_offset = '0;
+            if (double_round_shift != 0 && double_round_shift <= 6'd30 &&
+                shift > (7'd31 - {1'b0, double_round_shift}))
+                gap_double_round_offset = 65'sd1 <<<
+                    (7'd30 - {1'b0, double_round_shift});
+        end
+    endfunction
+
+    function automatic logic [7:0] gap_requant_byte(
+        input logic signed [64:0] value,
+        input logic signed [31:0] zero_point,
+        input logic signed [31:0] clamp_min,
+        input logic signed [31:0] clamp_max
+    );
+        logic signed [64:0] adjusted;
+        logic signed [64:0] minimum;
+        logic signed [64:0] maximum;
+        begin
+            adjusted = value + {{33{zero_point[31]}}, zero_point};
+            minimum = {{33{clamp_min[31]}}, clamp_min};
+            maximum = {{33{clamp_max[31]}}, clamp_max};
+            if (adjusted < minimum) gap_requant_byte = clamp_min[7:0];
+            else if (adjusted > maximum) gap_requant_byte = clamp_max[7:0];
+            else gap_requant_byte = adjusted[7:0];
         end
     endfunction
 
@@ -567,7 +620,7 @@ module afu_core #(
     logic [255:0] gap_in_buf_next;
     logic         gap_rfifo_pop_next;
     logic signed [31:0] gap_acc_next [32];
-    logic [63:0] gap_mul_product_next [32];
+    logic signed [64:0] gap_mul_product_next [32];
     logic        gap_mul_negative_next [32];
     logic signed [31:0] gap_avg_next [32];
     logic        gap_recip_req_next;
@@ -1038,8 +1091,17 @@ module afu_core #(
 
                 if (gap_group_done) begin
                     gap_row_count_next = '0;
-                    gap_recip_req_next = 1'b1;
-                    gap_state_n = ST_GAP_RECIP_WAIT;
+                    if (cfg_gap_requant_i) begin
+                        for (int i = 0; i < 32; i++) begin
+                            gap_mul_product_next[i] =
+                                $signed({{33{gap_acc_next[i][31]}}, gap_acc_next[i]}) +
+                                $signed({{33{cfg_add_bias_i[31]}}, cfg_add_bias_i});
+                        end
+                        gap_state_n = ST_GAP_REQUANT_MUL;
+                    end else begin
+                        gap_recip_req_next = 1'b1;
+                        gap_state_n = ST_GAP_RECIP_WAIT;
+                    end
                 end else begin
                     gap_row_count_next = gap_row_count_q + 32'd1;
                     if (!rfifo_empty_i) begin
@@ -1073,12 +1135,50 @@ module afu_core #(
                 if (gap_spatial_count != 32'd0) begin
                     for (int i = 0; i < 32; i++) begin
                         gap_avg_next[i] = avg_i32_from_product(
-                            gap_mul_product_q[i],
+                            gap_mul_product_q[i][63:0],
                             gap_mul_negative_q[i],
                             gap_acc_q[i][31] ? 32'(-gap_acc_q[i]) : 32'(gap_acc_q[i]),
                             gap_spatial_count
                         );
                     end
+                end
+                gap_state_n = ST_GAP_WRITE;
+            end
+
+            ST_GAP_REQUANT_MUL: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_mul_product_next[i] =
+                        $signed(gap_mul_product_q[i][32:0]) *
+                        $signed(cfg_output_multiplier_i);
+                end
+                gap_state_n = ST_GAP_REQUANT_ROUND;
+            end
+
+            ST_GAP_REQUANT_ROUND: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_mul_product_next[i] = gap_mul_product_q[i] +
+                        gap_round_offset(cfg_output_shift_i) +
+                        (gap_mul_product_q[i][64] ?
+                            -gap_double_round_offset(
+                                cfg_output_shift_i, cfg_double_round_shift_i) :
+                            gap_double_round_offset(
+                                cfg_output_shift_i, cfg_double_round_shift_i));
+                end
+                gap_state_n = ST_GAP_REQUANT_SHIFT_LOW;
+            end
+
+            ST_GAP_REQUANT_SHIFT_LOW: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_mul_product_next[i] = gap_mul_product_q[i] >>>
+                        cfg_output_shift_i[3:0];
+                end
+                gap_state_n = ST_GAP_REQUANT_SHIFT_HIGH;
+            end
+
+            ST_GAP_REQUANT_SHIFT_HIGH: begin
+                for (int i = 0; i < 32; i++) begin
+                    gap_mul_product_next[i] = gap_mul_product_q[i] >>>
+                        {cfg_output_shift_i[6:4], 4'b0000};
                 end
                 gap_state_n = ST_GAP_WRITE;
             end
@@ -1243,7 +1343,9 @@ module afu_core #(
                 end
 
                 ST_GAP_ACCUM, ST_GAP_RECIP_REQ, ST_GAP_RECIP_WAIT,
-                ST_GAP_MUL_WRITE, ST_GAP_WRITE, ST_GAP_PUSH: begin
+                ST_GAP_MUL_WRITE, ST_GAP_WRITE, ST_GAP_PUSH,
+                ST_GAP_REQUANT_MUL, ST_GAP_REQUANT_ROUND,
+                ST_GAP_REQUANT_SHIFT_LOW, ST_GAP_REQUANT_SHIFT_HIGH: begin
                     state_n = gap_state_n;
                     elem_cnt_n = gap_elem_cnt_n;
                     in_buf_n = gap_in_buf_next;
@@ -1304,7 +1406,10 @@ module afu_core #(
 
         if (state_q == ST_GAP_WRITE && gap_spatial_count != 32'd0) begin
             for (int i = 0; i < 32; i++) begin
-                gap_wb_out_buf[i * 8 +: 8] = i8_byte_from_i16(gap_avg_q[i][15:0]);
+                gap_wb_out_buf[i * 8 +: 8] = cfg_gap_requant_i ?
+                    gap_requant_byte(gap_mul_product_q[i],
+                        cfg_output_zero_point_i, cfg_clamp_min_i, cfg_clamp_max_i) :
+                    i8_byte_from_i16(gap_avg_q[i][15:0]);
                 gap_wb_out_be[i] = 1'b1;
             end
             gap_wb_push_now = !wfifo_full_i;

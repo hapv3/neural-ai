@@ -669,6 +669,8 @@ static nai_dispatch_status_v2_t run_afu_global_avgpool(
     const nai_resolver_v1_t *resolver,
     const nai_runtime_ops_v2_t *ops)
 {
+    const uint32_t requant =
+        command->header.flags & NAI_CMD_FLAG_AFU_GLOBAL_AVGPOOL_REQUANT;
     uint32_t spatial_count;
     uint32_t groups;
     uint32_t input_bytes;
@@ -677,7 +679,13 @@ static nai_dispatch_status_v2_t run_afu_global_avgpool(
     uint32_t ofm;
     if (ops->afu_global_avgpool == 0 || NAI_TRUSTED_INVALID(
         command->input_h == 0u || command->input_w == 0u ||
-        command->channels == 0u || !all_zero(command->reserved, 5u) ||
+        command->channels == 0u ||
+        (requant == 0u && (command->output_multiplier != 0 ||
+            command->output_shift != 0u || command->input_offset != 0 ||
+            command->output_zero_point != 0 || command->double_round_shift != 0u)) ||
+        (requant != 0u && (command->output_multiplier <= 0 ||
+            command->output_shift > 63u || command->output_zero_point < -128 ||
+            command->output_zero_point > 127 || command->double_round_shift > 30u)) ||
         command->ifm.region != NAI_REGION_TCDM_SCRATCH ||
         command->ofm.region != NAI_REGION_TCDM_SCRATCH) ||
         !multiply(command->input_h, command->input_w, &spatial_count) ||
@@ -685,6 +693,13 @@ static nai_dispatch_status_v2_t run_afu_global_avgpool(
         return NAI_DISPATCH_BAD_COMMAND;
     }
     groups = (command->channels + 31u) / 32u;
+    if (requant != 0u && NAI_TRUSTED_INVALID(
+        (int64_t)command->input_offset - (int64_t)128 * spatial_count <
+            (-2147483647LL - 1LL) ||
+        (int64_t)command->input_offset + (int64_t)127 * spatial_count >
+            2147483647LL)) {
+        return NAI_DISPATCH_BAD_COMMAND;
+    }
     if (!multiply(spatial_count, groups, &input_bytes) ||
         !multiply(input_bytes, 32u, &input_bytes) ||
         !multiply(groups, 32u, &output_bytes)) {
@@ -955,11 +970,14 @@ static uint32_t valid_executable_header(const nai_cmd_header_v2_t *header,
         !NAI_TRUSTED_INVALID(
             (header->flags & ~(NAI_CMD_FLAG_OPTIONAL | NAI_CMD_FLAG_SKIPPABLE |
                                NAI_CMD_FLAG_AFU_LUT_REUSE |
-                               NAI_CMD_FLAG_AFU_LUT_CHAIN)) != 0u ||
+                               NAI_CMD_FLAG_AFU_LUT_CHAIN |
+                               NAI_CMD_FLAG_AFU_GLOBAL_AVGPOOL_REQUANT)) != 0u ||
             ((header->flags & NAI_CMD_FLAG_AFU_LUT_REUSE) != 0u &&
              header->type != NAI_CMD_AFU_LUT) ||
             ((header->flags & NAI_CMD_FLAG_AFU_LUT_CHAIN) != 0u &&
-             header->type != NAI_CMD_AFU_BINARY_QUANT));
+             header->type != NAI_CMD_AFU_BINARY_QUANT) ||
+            ((header->flags & NAI_CMD_FLAG_AFU_GLOBAL_AVGPOOL_REQUANT) != 0u &&
+             header->type != NAI_CMD_AFU_GLOBAL_AVGPOOL));
 }
 
 static nai_dispatch_status_v2_t run_executable_command(

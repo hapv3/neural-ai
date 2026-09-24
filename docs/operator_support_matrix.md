@@ -35,7 +35,7 @@ limits, and the source files that show how to use and test the path.
 | `UPSAMPLE_NEAREST_I8` | Spatz C32 specialized or generic wrapper | i8 | Supported | Scale fixed to 2x in graph op; out-of-place | `sw/lib/spatz_ops.c`, `sw/test/spatz_ops` |
 | `DFL_SOFTMAX_I8_Q8` | AFU fused DFL mode | input `ROW32` i8, output u16 Q8 | Supported | Expects 32 input lanes per location; uses channels 0..15 as 4 sides x 4 bins | `sw/test/afu_ops`, `sw/test/micro_yolo` |
 | `CLASS_SIGMOID_ROW32_HIGH16_I8` | AFU class sigmoid mode | input `ROW32` i8, output packed i8 | Supported | Expects 32 input lanes; applies LUT to high 16 lanes | `sw/test/afu_ops`, `sw/test/micro_yolo` |
-| `GLOBAL_AVGPOOL_C32_REDUCE` | AFU global avgpool mode | `C32_BLOCKED` i8 | Supported | Output must be 1x1 with same channel count; channels may have tail lanes | `sw/test/afu_ops`, `hw/rtl/cluster/tb/tests/test_spatz_operator_library.py` |
+| `GLOBAL_AVGPOOL_C32_REDUCE` / TFLite `MEAN` | AFU global avgpool modes | `C32_BLOCKED` i8 | Supported | Output must be 1x1 with the same channel count. Fused mode 10 supports asymmetric input/output quantization; `[1,T,C]` token Mean is a zero-copy reshape to `[1,1,T,C]`. | `hw/rtl/afu/tb/tb_afu.sv`, `sw/test/compiler_runtime` |
 | `LEGACY_IM2COL_C3_PAD32`, `LEGACY_IM2COL_C3_DOWNSAMPLE_PAD32` | CPU firmware helper | HWC RGB to ROW32 | Legacy / avoid for new optimized paths | Scalar prepare path, kept for old fixtures | `sw/lib/npu_graph.c`, `sw/test/conv_perf` |
 
 ## Common Graph ABI
@@ -484,10 +484,22 @@ Contract:
 - Source and destination are `C32_BLOCKED` i8.
 - Destination must be 1x1 with the same logical channel count.
 - AFU receives `spatial_count = H * W` through `SRC2_PTR`.
+- Fused mode `NPU_AFU_MODE_GLOBAL_AVGPOOL_REQUANT_C32` accumulates signed INT8,
+  adds the precomputed `-input_zero_point * spatial_count` correction, applies
+  the compiler-provided multiplier/right shift, then adds output zero-point and
+  clamps to INT8.
+- The fused mode does not read or overwrite AFU LUT SRAM. The legacy mode keeps
+  reciprocal-Q31 LUT entry 0 for ABI compatibility.
+- The compiler maps TFLite Mean over all non-unit H/W axes directly to this
+  command. A batch-one `[1,T,C]` token Mean is normalized to `[1,1,T,C]`
+  without copying data and uses the same command.
 
 Limits:
 
 - Intended for global average pooling only, not arbitrary pooling window sizes.
+- Reduction over batch or channels, single-axis H/W reductions with another
+  non-unit spatial axis, adaptive pooling above 1x1, INT16, and per-channel
+  output quantization remain unsupported.
 - Channels can be non-multiple-of-32 in metadata, but padded lanes exist in the
   C32 layout.
 

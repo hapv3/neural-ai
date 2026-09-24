@@ -205,6 +205,7 @@
 #define NPU_AFU_MODE_GLOBAL_AVGPOOL_C32 7u
 #define NPU_AFU_MODE_BINARY_QUANT 8u
 #define NPU_AFU_MODE_LUT_BINARY_QUANT 9u
+#define NPU_AFU_MODE_GLOBAL_AVGPOOL_REQUANT_C32 10u
 
 // Host command-control bootstrap/status registers.
 #define NPU_CMD_L2_BASE       (NPU_CMD_CTRL_BASE + 0x00)

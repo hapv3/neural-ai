@@ -5,7 +5,7 @@ The RTL lives under `hw/rtl/afu`, the cluster integration is in
 `hw/rtl/cluster/npu_cluster.sv`, and the firmware wrappers are in
 `sw/lib/hal_afu.h` and `sw/lib/spatz_ops.c`.
 
-Last checked against RTL/firmware: 2026-09-21.
+Last checked against RTL/firmware: 2026-09-23.
 
 ## Current Design Snapshot
 
@@ -20,7 +20,7 @@ Last checked against RTL/firmware: 2026-09-21.
 | Generic LUT modes | E8/E16/E32, 4 input bytes per core step | Good for activation/clamp/table staging; not a general vector ISA. |
 | Binary modes | Legacy ADD_I8/MUL_Q7 plus general Add/Sub/Mul requant | General standalone mode accepts one 32-byte beat/cycle after a 10-stage fill. LUT-chain remains bounded by four LUT outputs/cycle. |
 | YOLO fused modes | DFL `reg_max=4` ROW32 low16 and class sigmoid ROW32 high16 | Fixed raw-head layout: box logits in lanes `0..15`, class logits in lanes `16..31`. |
-| GlobalAvgPool | C32-blocked spatial reduction | `SRC2_PTR` carries `spatial_count`; firmware loads reciprocal Q31 into normal LUT entry 0 before start. |
+| GlobalAvgPool | C32-blocked spatial reduction with optional fused INT8 requant | `SRC2_PTR` carries `spatial_count`; mode 7 uses the legacy reciprocal LUT, while mode 10 applies input zero-point correction, scale/divide, output zero-point, and clamp without occupying LUT state. |
 
 ## 1. Role
 
@@ -38,7 +38,8 @@ The current AFU covers:
 - Dual-source INT8 arithmetic: legacy Q7/add fast modes and independently
   quantized general Add/Sub/Mul.
 - YOLO raw-head postprocess: fused DFL `reg_max=4` and class sigmoid.
-- C32 global average pooling.
+- C32 global average pooling, including fused INT8 requantization for TFLite
+  spatial Mean and reshape-compatible token Mean.
 
 The AFU is not a general vector engine. Spatz remains the owner for general
 vector instructions and reductions that are already supported there. The AFU is

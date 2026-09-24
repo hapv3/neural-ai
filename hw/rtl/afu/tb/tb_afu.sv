@@ -18,6 +18,7 @@ module tb_afu;
     localparam logic [3:0] MODE_CLASS_SIGMOID_ROW32_HIGH16 = 4'd6;
     localparam logic [3:0] MODE_BINARY_QUANT = 4'd8;
     localparam logic [3:0] MODE_LUT_BINARY_QUANT = 4'd9;
+    localparam logic [3:0] MODE_GLOBAL_AVGPOOL_REQUANT = 4'd10;
     localparam logic [31:0] AFU_CSR_BASE = 32'h400;
     localparam logic [31:0] AFU_DFL_EXP_LUT_BASE = 32'h800;
     localparam logic [31:0] AFU_DFL_RECIP_LUT_BASE = 32'hc00;
@@ -306,6 +307,32 @@ module tb_afu;
         write_obi(AFU_CSR_BASE + 32'h40, 32'd0);
         write_obi(AFU_CSR_BASE + 32'h10, lut_chain ?
                   {28'd0, MODE_LUT_BINARY_QUANT} : {28'd0, MODE_BINARY_QUANT});
+        write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
+    endtask
+
+    task automatic start_global_avgpool_requant_afu(
+        input logic [31:0] src_ptr,
+        input logic [31:0] dst_ptr,
+        input logic [31:0] input_bytes,
+        input logic [31:0] spatial_count,
+        input integer      output_multiplier,
+        input logic [6:0]  output_shift,
+        input integer      input_offset,
+        input integer      output_zero_point
+    );
+        write_obi(AFU_CSR_BASE + 32'h04, src_ptr);
+        write_obi(AFU_CSR_BASE + 32'h08, dst_ptr);
+        write_obi(AFU_CSR_BASE + 32'h0c, input_bytes);
+        write_obi(AFU_CSR_BASE + 32'h14, spatial_count);
+        write_obi(AFU_CSR_BASE + 32'h18, 32'(input_offset));
+        write_obi(AFU_CSR_BASE + 32'h30, 32'(output_multiplier));
+        write_obi(AFU_CSR_BASE + 32'h34, {25'd0, output_shift});
+        write_obi(AFU_CSR_BASE + 32'h38,
+                  {8'd0, 8'(output_zero_point), 16'd0});
+        write_obi(AFU_CSR_BASE + 32'h3c, 32'h0000_7f80);
+        write_obi(AFU_CSR_BASE + 32'h40, 32'd0);
+        write_obi(AFU_CSR_BASE + 32'h10,
+                  {28'd0, MODE_GLOBAL_AVGPOOL_REQUANT});
         write_obi(AFU_CSR_BASE + 32'h00, 32'd1);
     endtask
 
@@ -837,6 +864,73 @@ module tb_afu;
         end
     endtask
 
+    task automatic check_global_avgpool_requant_case(
+        input string name,
+        input int    src_base,
+        input int    dst_base
+    );
+        localparam int SPATIAL = 6;
+        localparam int GROUPS = 2;
+        localparam int CHANNELS = 33;
+        localparam int OUTPUT_MULTIPLIER = 715827882;
+        localparam int OUTPUT_SHIFT = 33;
+        localparam int INPUT_OFFSET = 18;
+        localparam int OUTPUT_ZERO_POINT = -3;
+
+        $display("[AFU TB] %s: fused global average requant", name);
+        $fflush();
+
+        for (int group = 0; group < GROUPS; group++) begin
+            for (int pixel = 0; pixel < SPATIAL; pixel++) begin
+                for (int lane = 0; lane < 32; lane++) begin
+                    int channel;
+                    int signed value;
+                    channel = group * 32 + lane;
+                    value = channel < CHANNELS ?
+                        (((channel * 13 + pixel * 17) % 127) - 63) : -3;
+                    tcdm_mem[(src_base + (group * SPATIAL + pixel) * 32 + lane) %
+                             MEM_SIZE] = 8'(value);
+                end
+            end
+        end
+        for (int i = 0; i < GROUPS * 32; i++) begin
+            tcdm_mem[(dst_base + i) % MEM_SIZE] = 8'ha5;
+        end
+
+        start_global_avgpool_requant_afu(src_base, dst_base,
+            SPATIAL * GROUPS * 32, SPATIAL, OUTPUT_MULTIPLIER,
+            OUTPUT_SHIFT, INPUT_OFFSET, OUTPUT_ZERO_POINT);
+        wait_done(name);
+
+        for (int channel = 0; channel < CHANNELS; channel++) begin
+            longint signed sum;
+            longint signed product;
+            longint signed shifted;
+            int signed expected;
+            int signed actual;
+            sum = INPUT_OFFSET;
+            for (int pixel = 0; pixel < SPATIAL; pixel++) begin
+                sum += (((channel * 13 + pixel * 17) % 127) - 63);
+            end
+            product = sum * OUTPUT_MULTIPLIER;
+            shifted = (product + (64'sd1 <<< (OUTPUT_SHIFT - 1))) >>>
+                OUTPUT_SHIFT;
+            expected = shifted + OUTPUT_ZERO_POINT;
+            if (expected < -128) expected = -128;
+            if (expected > 127) expected = 127;
+            actual = $signed(tcdm_mem[(dst_base + channel) % MEM_SIZE]);
+            if (actual != expected) begin
+                $display("[FAIL] %s channel=%0d sum=%0d exp=%0d act=%0d",
+                         name, channel, sum, expected, actual);
+                errors++;
+            end
+        end
+
+        if (errors == 0) begin
+            $display("[PASS] %s", name);
+        end
+    endtask
+
     initial begin
         errors      = 0;
         obi_s_req   = 1'b0;
@@ -873,6 +967,8 @@ module tb_afu;
         check_dfl16_case("dfl16_row32_unaligned_output_19", 'h1800, 'h2606, 19);
         check_dfl_case("dfl4_after_dfl16_3", 'h2200, 'h2a00, 3);
         check_class_sigmoid_case("class_sigmoid_row32_high16_17", 'h1200, 'h2800, 17);
+        check_global_avgpool_requant_case(
+            "global_avgpool_requant_c32_6x33", 'h1000, 'h2c00);
         check_case("mode8_after_dfl_pingpong", MODE_8BIT, 'h300, 'h900, 37, 3);
 
         $display("========================================");

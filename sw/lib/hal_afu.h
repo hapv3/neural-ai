@@ -190,6 +190,34 @@ static inline void afu_start_global_avgpool_c32(uint32_t src, uint32_t dst,
     afu_start_preloaded();
 }
 
+static inline void afu_preload_global_avgpool_requant_c32(
+    uint32_t src, uint32_t dst, uint32_t input_bytes, uint32_t spatial_count,
+    int32_t output_multiplier, uint32_t output_shift, int32_t input_offset,
+    int32_t output_zero_point, uint32_t double_round_shift) {
+    REG_WRITE(NPU_AFU_SRC_PTR, src);
+    REG_WRITE(NPU_AFU_SRC2_PTR, spatial_count);
+    REG_WRITE(NPU_AFU_DST_PTR, dst);
+    REG_WRITE(NPU_AFU_LENGTH, input_bytes);
+    REG_WRITE(NPU_AFU_ADD_BIAS, (uint32_t)input_offset);
+    REG_WRITE(NPU_AFU_BINARY_OUT_MULTIPLIER, (uint32_t)output_multiplier);
+    REG_WRITE(NPU_AFU_BINARY_OUT_SHIFT, output_shift);
+    REG_WRITE(NPU_AFU_BINARY_ZERO_POINTS,
+              ((uint32_t)output_zero_point & 0xffu) << 16);
+    REG_WRITE(NPU_AFU_BINARY_CLAMP, 0x00007f80u);
+    REG_WRITE(NPU_AFU_BINARY_DOUBLE_ROUND, double_round_shift);
+    REG_WRITE(NPU_AFU_MODE, NPU_AFU_MODE_GLOBAL_AVGPOOL_REQUANT_C32);
+}
+
+static inline void afu_start_global_avgpool_requant_c32(
+    uint32_t src, uint32_t dst, uint32_t input_bytes, uint32_t spatial_count,
+    int32_t output_multiplier, uint32_t output_shift, int32_t input_offset,
+    int32_t output_zero_point, uint32_t double_round_shift) {
+    afu_preload_global_avgpool_requant_c32(src, dst, input_bytes, spatial_count,
+        output_multiplier, output_shift, input_offset, output_zero_point,
+        double_round_shift);
+    afu_start_preloaded();
+}
+
 static inline uint32_t afu_wait_done(uint32_t timeout_cycles) {
     while (timeout_cycles-- > 0u) {
         uint32_t status = afu_status();
