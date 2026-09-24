@@ -1111,7 +1111,7 @@ def _micro_mobilenet_stage10_input_and_expected():
     )
 
 
-def _compile_fully_connected_model():
+def _compile_fully_connected_model(asymmetric=False):
     default_root = Path(__file__).resolve().parents[4] / "neural-compiler"
     compiler_root = Path(os.environ.get("NEURAL_COMPILER_ROOT", default_root)).resolve()
     extension_modules = list((compiler_root / "ethosu").glob("regor*.so"))
@@ -1120,11 +1120,16 @@ def _compile_fully_connected_model():
             f"Neural compiler Python extension is not built under {compiler_root}/ethosu"
         )
 
-    fixture = Path(__file__).with_name("fully_connected_k33_n34.tflite.b64")
+    stem = (
+        "fully_connected_asym_k33_n34"
+        if asymmetric
+        else "fully_connected_k33_n34"
+    )
+    fixture = Path(__file__).with_name(f"{stem}.tflite.b64")
     model_data = base64.b64decode(fixture.read_text(encoding="ascii"))
     with tempfile.TemporaryDirectory(prefix="neural-ai-compiled-model-") as temporary_dir:
         temporary_path = Path(temporary_dir)
-        input_path = temporary_path / "fully_connected_k33_n34.tflite"
+        input_path = temporary_path / f"{stem}.tflite"
         output_path = temporary_path / "output"
         input_path.write_bytes(model_data)
         command = [
@@ -1152,7 +1157,7 @@ def _compile_fully_connected_model():
             raise RuntimeError(
                 f"Neural compiler failed ({result.returncode}):\n{result.stdout}\n{result.stderr}"
             )
-        package = (output_path / "fully_connected_k33_n34.nai").read_bytes()
+        package = (output_path / f"{stem}.nai").read_bytes()
     assert package[:4] == b"NAIM"
     return package
 
@@ -3177,6 +3182,41 @@ async def test_compiler_generated_fully_connected_package(dut):
     input_values = [(index % 5) - 2 for index in range(33)]
     input_data = bytes(value & 0xFF for value in input_values)
     expected = bytes([sum(input_values) & 0xFF] * 34)
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(expected)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(expected)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+    await _load_and_run(dut, axi_master, invocation)
+
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(expected))) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_asymmetric_fully_connected_package(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model = _compile_fully_connected_model(asymmetric=True)
+    input_values = [-7 + ((index % 5) - 2) for index in range(33)]
+    input_data = bytes(value & 0xFF for value in input_values)
+    expected_value = sum(value + 7 for value in input_values)
+    expected = bytes([expected_value & 0xFF] * 34)
     runtime_bindings = [
         (1, 0, INPUT_BASE, len(input_data)),
         (2, 0, OUTPUT_BASE, len(expected)),
