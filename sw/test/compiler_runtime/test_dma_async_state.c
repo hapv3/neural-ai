@@ -1,5 +1,6 @@
 #include "npu_dma_async_state.h"
 #include "idma_transfer_id.h"
+#include "idma_transfer_plan.h"
 
 #include <assert.h>
 #include <string.h>
@@ -43,5 +44,11 @@ int main(void)
     assert(idma_mm_transfer_completed(2u, 0xffffffffu));
     assert(!idma_mm_transfer_completed(0xffffffffu, 2u));
     assert(!idma_mm_transfer_completed(3u, 0u));
+
+    assert(idma_limit_axi_4k_chunk(0x81000000u, 4096u) == 4096u);
+    assert(idma_limit_axi_4k_chunk(0x81000900u, 2048u) == 1792u);
+    assert(idma_limit_axi_4k_chunk(0x81001000u, 256u) == 256u);
+    assert(idma_limit_axi_4k_chunk(0x81001ff0u, 64u) == 16u);
+    assert(idma_limit_axi_4k_chunk(0x10009ebcu, 2048u) == 324u);
     return 0;
 }

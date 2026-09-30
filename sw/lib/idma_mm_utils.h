@@ -3,6 +3,7 @@
 
 #include "npu_memory_map.h"
 #include "idma_transfer_id.h"
+#include "idma_transfer_plan.h"
 #include "npu_types.h"
 
 #define IDMA_MM_DIRECTION_OFFSET IDMA_DIR_OFFSET
@@ -236,10 +237,13 @@ static inline uint32_t idma_memcpy_blocking(uint32_t src, uint32_t dst, uint32_t
         uint32_t chunk = size - offset;
         uint32_t dir;
         int tx_id;
+        uint32_t external_address;
 
         if (chunk > IDMA_MM_MAX_1D_CHUNK) {
             chunk = IDMA_MM_MAX_1D_CHUNK;
         }
+        external_address = src_is_l1 ? dst + offset : src + offset;
+        chunk = idma_limit_axi_4k_chunk(external_address, chunk);
 
         if (src_is_l1) {
             dir = IDMA_DIR_L1_TO_L2;
