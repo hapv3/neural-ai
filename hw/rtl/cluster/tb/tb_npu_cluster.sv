@@ -167,7 +167,8 @@ module tb_npu_cluster #(
     assign axi_req.ar.region = '0;
     assign axi_req.ar.user   = '0;
 
-    // Instance of PULP AXI Simulation Memory
+    // Drive/sample away from the active edge of the 1ns clock. Zero-delay
+    // acquisition races DMA RREADY changes and can drop a stalled final beat.
     axi_sim_mem #(
         .AddrWidth          (AXI_ADDR_WIDTH),
         .DataWidth          (AXI_DATA_WIDTH),
@@ -178,8 +179,8 @@ module tb_npu_cluster #(
         .axi_rsp_t          (axi_resp_t),
         .WarnUninitialized  (1'b0),
         .UninitializedData  ("zeros"),
-        .ApplDelay          (0),
-        .AcqDelay           (0)
+        .ApplDelay          (100ps),
+        .AcqDelay           (400ps)
     ) u_axi_sim_mem (
         .clk_i              (clk_i),
         .rst_ni             (rst_ni),
