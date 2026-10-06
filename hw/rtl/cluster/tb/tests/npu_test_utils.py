@@ -579,6 +579,7 @@ async def monitor_command_buffer_pmu(
     command_buffer_address,
     command_headers,
     sample_callback=None,
+    command_pointer_address=None,
 ):
     """Return PMU deltas for successive streamed ABI commands.
 
@@ -624,14 +625,22 @@ async def monitor_command_buffer_pmu(
                 sample_callback(expected_id, delta)
         return deltas
 
-    header_words = [
-        _dtcm_word_handle(dut, command_buffer_address + offset)
-        for offset in range(0, 16, 4)
-    ]
     samples = []
     deltas = []
     for expected in headers:
-        while _dtcm_header(dut, command_buffer_address) != expected:
+        while True:
+            address = command_buffer_address
+            header_words = []
+            if command_pointer_address is not None:
+                pointer = _dtcm_word_handle(dut, command_pointer_address)
+                header_words.append(pointer)
+                address = read_dtcm_word(dut, command_pointer_address)
+            if address:
+                if _dtcm_header(dut, address) == expected:
+                    break
+                header_words.extend(
+                    _dtcm_word_handle(dut, address + offset) for offset in range(0, 16, 4)
+                )
             await First(*(ValueChange(word) for word in header_words))
             await ReadOnly()
         samples.append(pmu_direct_snapshot(dut))

@@ -1,5 +1,8 @@
 #include "npu_cmd_desc_v2.h"
 
+/* Simulation diagnostics: descriptors no longer always start at buffer[0]. */
+const nai_cmd_header_v2_t *volatile g_nai_current_command;
+
 #if defined(NAI_TRUSTED_FIRMWARE)
 #define NAI_TRUSTED_INVALID(condition) 0u
 #else
@@ -1061,6 +1064,7 @@ static nai_dispatch_status_v2_t run_profiled_command(
     const nai_resolver_v1_t *resolver, const nai_runtime_ops_v2_t *ops,
     uint32_t command_id)
 {
+    g_nai_current_command = header;
 #if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
     extern void nai_pmu_command_begin(uint32_t command_id);
     extern void nai_pmu_command_end(uint32_t command_id);
@@ -1211,7 +1215,6 @@ static nai_dispatch_status_v2_t run_affine_loop_buffer(
         for (uint32_t child = 0u; child < loop.body_command_count; child++) {
             nai_cmd_header_v2_t *header = (nai_cmd_header_v2_t *)(record + body_offset +
                 child_offsets[child]);
-            __builtin_memcpy(record, header, sizeof(*header));
             nai_dispatch_status_v2_t status = run_profiled_command(
                 header, view, resolver, ops, *completed);
             if (status != NAI_DISPATCH_OK) {
@@ -1282,6 +1285,30 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
     return NAI_DISPATCH_BAD_STREAM;
 }
 
+/* Keep consumed records in place. Move only an incomplete tail when refilling;
+ * moving the whole retained window after each command costs thousands of scalar
+ * loads/stores even for a barrier. Forward copying is safe for overlapping tails.
+ */
+static uint32_t refill_command_window(const nai_model_reader_v1_t *reader,
+    uint8_t *buffer, uint32_t capacity, uint32_t *cursor, uint32_t *buffered_bytes,
+    uint32_t required, uint32_t model_offset, uint32_t remaining)
+{
+    if (required > capacity || required > remaining) return 0u;
+    if (*buffered_bytes >= required) return 1u;
+    if (*cursor != 0u) {
+        volatile uint8_t *bytes = buffer;
+        for (uint32_t index = 0u; index < *buffered_bytes; index++)
+            bytes[index] = bytes[*cursor + index];
+        *cursor = 0u;
+    }
+    uint32_t window = remaining < capacity ? remaining : capacity;
+    uint32_t refill = window - *buffered_bytes;
+    if (reader->read(reader->context, model_offset + *buffered_bytes,
+            buffer + *buffered_bytes, refill) != 0u) return 0u;
+    *buffered_bytes = window;
+    return 1u;
+}
+
 nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *view,
                                                     const nai_resolver_v1_t *resolver,
                                                     const nai_runtime_ops_v2_t *ops,
@@ -1292,8 +1319,11 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                                                     uint32_t *failure_command_offset)
 {
     uint32_t offset;
+    uint32_t buffered_bytes = 0u;
+    uint32_t cursor = 0u;
     uint32_t completed = 0u;
 
+    g_nai_current_command = 0;
     if (completed_commands != 0) *completed_commands = 0u;
     if (failure_command_offset != 0) *failure_command_offset = 0u;
     if (view == 0 || view->header == 0 || view->commands == 0 || resolver == 0 || ops == 0 ||
@@ -1306,63 +1336,65 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
         nai_cmd_header_v2_t header;
         nai_dispatch_status_v2_t status = NAI_DISPATCH_OK;
         uint32_t model_offset = view->commands->offset + offset;
-        uint32_t prefetched_bytes = view->commands->size - offset;
-        if (prefetched_bytes > sizeof(nai_cmd_linebuf_binary_v2_t))
-            prefetched_bytes = sizeof(nai_cmd_linebuf_binary_v2_t);
-        if (prefetched_bytes > command_buffer_bytes) prefetched_bytes = command_buffer_bytes;
+        uint32_t consumed = 0u;
         if (!valid_range(offset, sizeof(header), view->commands->size) ||
-            reader->read(reader->context, model_offset, command_buffer, prefetched_bytes) != 0u)
+            !refill_command_window(reader, command_buffer, command_buffer_bytes,
+                &cursor, &buffered_bytes, sizeof(header), model_offset,
+                view->commands->size - offset)) {
+            if (completed_commands != 0) *completed_commands = completed;
+            if (failure_command_offset != 0) *failure_command_offset = model_offset;
             return NAI_DISPATCH_BAD_STREAM;
-        __builtin_memcpy(&header, command_buffer, sizeof(header));
+        }
+        __builtin_memcpy(&header, (uint8_t *)command_buffer + cursor, sizeof(header));
         if (!valid_executable_header(&header, view->commands->size - offset)) {
             status = NAI_DISPATCH_BAD_COMMAND;
-        } else if (header.type == NAI_CMD_END) {
-            if (header.size_bytes > prefetched_bytes)
+        } else if (!refill_command_window(reader, command_buffer, command_buffer_bytes,
+                &cursor, &buffered_bytes, header.size_bytes, model_offset,
+                view->commands->size - offset)) status = NAI_DISPATCH_BAD_STREAM;
+        uint8_t *record = (uint8_t *)command_buffer + cursor;
+        g_nai_current_command = (const nai_cmd_header_v2_t *)record;
+        if (status == NAI_DISPATCH_OK && header.type == NAI_CMD_END) {
+            if (header.size_bytes > buffered_bytes)
                 status = NAI_DISPATCH_BAD_STREAM;
             else if (header.size_bytes != sizeof(nai_cmd_control_v2_t) ||
                 NAI_TRUSTED_INVALID(
-                    !all_zero(((const nai_cmd_control_v2_t *)command_buffer)->reserved, 4u) ||
+                    !all_zero(((const nai_cmd_control_v2_t *)record)->reserved, 4u) ||
                     completed != view->header->command_count)) status = NAI_DISPATCH_BAD_STREAM;
             else {
                 if (completed_commands != 0) *completed_commands = completed;
                 return NAI_DISPATCH_OK;
             }
-        } else if (header.type == NAI_CMD_AFFINE_LOOP) {
+        } else if (status == NAI_DISPATCH_OK && header.type == NAI_CMD_AFFINE_LOOP) {
             const nai_cmd_affine_loop_v2_t *loop =
-                (const nai_cmd_affine_loop_v2_t *)command_buffer;
-            uint32_t record_bytes = 0u;
+                (const nai_cmd_affine_loop_v2_t *)record;
             uint32_t failure_relative = 0u;
-            if (prefetched_bytes < sizeof(*loop) || loop->patch_count > NAI_AFFINE_LOOP_MAX_PATCHES ||
+            if (buffered_bytes < sizeof(*loop) || loop->patch_count > NAI_AFFINE_LOOP_MAX_PATCHES ||
                 header.size_bytes > NAI_AFFINE_LOOP_MAX_RECORD_BYTES ||
                 header.size_bytes != affine_loop_descriptor_bytes(loop->patch_count) ||
                 loop->body_bytes > NAI_AFFINE_LOOP_MAX_RECORD_BYTES - header.size_bytes) {
                 status = NAI_DISPATCH_BAD_STREAM;
             } else {
-                record_bytes = header.size_bytes + loop->body_bytes;
-                if (record_bytes > command_buffer_bytes ||
-                    !valid_range(offset, record_bytes, view->commands->size)) {
+                consumed = header.size_bytes + loop->body_bytes;
+                if (consumed > command_buffer_bytes ||
+                    !valid_range(offset, consumed, view->commands->size))
                     status = NAI_DISPATCH_BAD_STREAM;
-                } else {
-                    if (record_bytes > prefetched_bytes &&
-                        reader->read(reader->context, model_offset + prefetched_bytes,
-                            (uint8_t *)command_buffer + prefetched_bytes,
-                            record_bytes - prefetched_bytes) != 0u)
-                        status = NAI_DISPATCH_BAD_STREAM;
-                    else status = run_affine_loop_buffer((uint8_t *)command_buffer,
-                        record_bytes, view, resolver, ops, view->header->command_count,
-                        &completed, &record_bytes, &failure_relative);
+                else {
+                    if (!refill_command_window(reader, command_buffer, command_buffer_bytes,
+                            &cursor, &buffered_bytes, consumed, model_offset,
+                            view->commands->size - offset)) status = NAI_DISPATCH_BAD_STREAM;
+                    if (status == NAI_DISPATCH_OK)
+                        status = run_affine_loop_buffer((uint8_t *)command_buffer + cursor,
+                            consumed, view, resolver, ops, view->header->command_count,
+                            &completed, &consumed, &failure_relative);
                 }
-                if (status == NAI_DISPATCH_OK) {
-                    offset += record_bytes;
-                    continue;
-                }
-                if (failure_command_offset != 0)
+                if (status != NAI_DISPATCH_OK && failure_command_offset != 0)
                     *failure_command_offset = model_offset + failure_relative;
             }
-        } else {
-            if (header.size_bytes > prefetched_bytes) status = NAI_DISPATCH_BAD_STREAM;
+        } else if (status == NAI_DISPATCH_OK && header.type != NAI_CMD_END) {
+            consumed = header.size_bytes;
+            if (consumed > buffered_bytes) status = NAI_DISPATCH_BAD_STREAM;
             else status = run_profiled_command(
-                (const nai_cmd_header_v2_t *)command_buffer, view, resolver, ops, completed);
+                (const nai_cmd_header_v2_t *)record, view, resolver, ops, completed);
         }
         if (status != NAI_DISPATCH_OK) {
             if (completed_commands != 0) *completed_commands = completed;
@@ -1370,8 +1402,10 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                 *failure_command_offset = model_offset;
             return status;
         }
-        completed++;
-        offset += header.size_bytes;
+        if (header.type != NAI_CMD_AFFINE_LOOP) completed++;
+        offset += consumed;
+        cursor += consumed;
+        buffered_bytes -= consumed;
     }
     return NAI_DISPATCH_BAD_STREAM;
 }

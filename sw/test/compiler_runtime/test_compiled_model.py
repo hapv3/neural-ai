@@ -1841,10 +1841,41 @@ async def _run_compiler_striped_pointwise(dut, axi_master, width):
 
 
 
-def _firmware_symbol_address(symbol_name):
+def _runtime_firmware_path():
+    manifest = os.environ.get("NAI_REPLAY_MANIFEST")
+    firmware_override = os.environ.get("NAI_REPLAY_FIRMWARE_ELF")
+    if firmware_override:
+        if not manifest:
+            raise ValueError("NAI_REPLAY_FIRMWARE_ELF requires NAI_REPLAY_MANIFEST")
+        return Path(firmware_override).resolve()
+    if manifest:
+        return Path(manifest).resolve().with_suffix(".elf")
+    return Path(__file__).resolve().parents[3] / "sw/runtime/neural_ai/neural_ai.elf"
+
+
+def _load_pinned_range(manifest_path):
+    """Validate both saved artifacts and the original range/address settings."""
+    import hashlib
+    import json
+
+    manifest_path = Path(manifest_path).resolve()
+    manifest = json.loads(manifest_path.read_text())
+    payloads = {}
+    for suffix in (".nai", ".elf"):
+        payload = manifest_path.with_suffix(suffix).read_bytes()
+        if hashlib.sha256(payload).hexdigest() != manifest[suffix]:
+            raise ValueError(f"Pinned replay {suffix} SHA-256 mismatch")
+        payloads[suffix] = payload
+    for key, expected in manifest["environment"].items():
+        if key.startswith("YOLO320_RANGE_") and os.environ.get(key) != expected:
+            raise ValueError(f"Pinned replay setting mismatch: {key} must be {expected}")
+    return payloads[".nai"]
+
+
+def _firmware_symbol_address(symbol_name, *, optional=False):
     repository_root = Path(__file__).resolve().parents[3]
     nm = repository_root / "hw/spatz/install/llvm/bin/llvm-nm"
-    firmware = repository_root / "sw/runtime/neural_ai/neural_ai.elf"
+    firmware = _runtime_firmware_path()
     result = subprocess.run(
         [str(nm), "-n", str(firmware)],
         check=True,
@@ -1855,6 +1886,8 @@ def _firmware_symbol_address(symbol_name):
         fields = line.split()
         if len(fields) == 3 and fields[2] == symbol_name:
             return int(fields[0], 16)
+    if optional:
+        return None
     raise AssertionError(f"firmware symbol not found: {symbol_name}")
 
 
@@ -1884,12 +1917,23 @@ def _describe_model_command(model, descriptor_header):
     )
 
 
-def _current_model_command(dut, model, command_buffer_address):
+def _current_model_command(dut, model, command_buffer_address, command_pointer_address=None):
+    if command_pointer_address is not None:
+        command_buffer_address = read_dtcm_word(dut, command_pointer_address)
+        if command_buffer_address == 0:
+            return "command=not_started"
     descriptor_header = b"".join(
         read_dtcm_word(dut, command_buffer_address + offset).to_bytes(4, "little")
         for offset in range(0, 16, 4)
     )
     return _describe_model_command(model, descriptor_header)
+
+
+def _snitch_debug_state(dut):
+    pc_signal = dut.u_npu_cluster.u_snitch_core.i_snitch.pc_q
+    if not pc_signal.value.is_resolvable:
+        return "pc=unresolved"
+    return f"pc=0x{pc_signal.value.to_unsigned():08x}"
 
 
 def _systolic_debug_state(dut):
@@ -1983,6 +2027,7 @@ def _dma_debug_state(dut):
     for label, signal_name in (
         ("dma_next_id", "a2o_next_id"),
         ("dma_done_id", "a2o_done_id"),
+        ("backend_busy_bits", "a2o_busy"),
         ("front_valid", "a2o_front_valid"),
         ("front_ready", "a2o_front_ready"),
         ("fifo_valid", "a2o_fe_valid"),
@@ -2000,6 +2045,7 @@ def _dma_debug_state(dut):
         ("axi_r_r", "axi_r_ready_o"),
         ("obi_w_req", "idma_obi_write_req"),
         ("obi_w_gnt", "idma_obi_write_gnt"),
+        ("obi_w_rsp", "idma_obi_write_rvalid"),
     ):
         add(label, cluster, signal_name)
     return ", ".join(details)
@@ -2019,12 +2065,48 @@ async def _load_and_run(
     await load_firmware_elf_axi(
         dut,
         axi_master,
-        Path(__file__).resolve().parents[3] / "sw/runtime/neural_ai/neural_ai.elf",
+        _runtime_firmware_path(),
     )
     await program_command_queue(axi_master, invocation_base, len(invocation))
     command_buffer_address = (
         _firmware_symbol_address("g_command_buffer") if model is not None else None
     )
+    command_pointer_address = (
+        _firmware_symbol_address("g_nai_current_command", optional=True)
+        if model is not None else None
+    )
+    dma_trace = None
+    dma_trace_task = None
+    dma_trace_path = os.environ.get("NAI_DMA_TRACE_CSV")
+    if dma_trace_path:
+        import hashlib
+        import json
+
+        from dma_debug_trace import DMAHandshakeTrace
+
+        trace_max_rows = int(os.environ.get("NAI_DMA_TRACE_MAX_ROWS", "20000"))
+        if trace_max_rows <= 0:
+            raise ValueError("NAI_DMA_TRACE_MAX_ROWS must be positive")
+        dma_trace = DMAHandshakeTrace(dut, dma_trace_path, max_rows=trace_max_rows)
+        artifact_base = Path(dma_trace_path)
+        artifact_base.parent.mkdir(parents=True, exist_ok=True)
+        artifacts = {}
+        firmware_path = _runtime_firmware_path()
+        for suffix, payload in ((".elf", firmware_path.read_bytes()), (".nai", model)):
+            if payload is not None:
+                with artifact_base.with_suffix(suffix).open("xb") as artifact:
+                    artifact.write(payload)
+                artifacts[suffix] = hashlib.sha256(payload).hexdigest()
+        artifacts["environment"] = {
+            key: value for key, value in os.environ.items()
+            if key.startswith(("YOLO320_RANGE_", "NAI_DMA_TRACE_", "NAI_REPLAY_"))
+        }
+        with artifact_base.with_suffix(".json").open("x") as manifest:
+            json.dump(artifacts, manifest, indent=2)
+        dma_trace_task = cocotb.start_soon(dma_trace.run(
+            start_cycle=int(os.environ.get("NAI_DMA_TRACE_START_CYCLE", "0")),
+            cycles=timeout_cycles,
+        ))
     command_trace_task = None
     if command_trace_records is not None:
         command_trace_task = cocotb.start_soon(
@@ -2033,6 +2115,7 @@ async def _load_and_run(
                 command_buffer_address,
                 [record["header"] for record in command_trace_records],
                 sample_callback=command_trace_callback,
+                command_pointer_address=command_pointer_address,
             )
         )
     pmu_filter = os.environ.get("NAI_PMU_COMMAND_FILTER")
@@ -2044,7 +2127,8 @@ async def _load_and_run(
     progress_callback = lambda: "; ".join(
         detail
         for detail in (
-            _current_model_command(dut, model, command_buffer_address)
+            _snitch_debug_state(dut),
+            _current_model_command(dut, model, command_buffer_address, command_pointer_address)
             if model is not None
             else "",
             _systolic_debug_state(dut),
@@ -2072,7 +2156,7 @@ async def _load_and_run(
             pc_signal.value.to_unsigned() if pc_signal.value.is_resolvable else 0
         )
         command_progress = (
-            _current_model_command(dut, model, command_buffer_address)
+            _current_model_command(dut, model, command_buffer_address, command_pointer_address)
             if model is not None
             else "command=unavailable"
         )
@@ -2085,6 +2169,10 @@ async def _load_and_run(
             f"pc=0x{program_counter:08x}; {command_progress}; {systolic_progress}; "
             f"{dma_progress}"
         ) from error
+    finally:
+        if dma_trace_task is not None:
+            dma_trace_task.cancel()
+            dma_trace.close()
     if command_trace_task is not None:
         return counters, await command_trace_task
     if measure_pmu:
@@ -4658,6 +4746,109 @@ async def test_compiler_generated_selected_yolo320_first_stem_tile(dut):
         0,
         prefix_commands,
     )
+
+
+@cocotb.test()
+async def test_compiler_generated_selected_yolo320_isolated_range(dut):
+    """Replay a restart-safe YOLO command range with deterministic memory."""
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    first_command = int(os.environ.get("YOLO320_RANGE_START", "1367"))
+    end_command = int(os.environ.get("YOLO320_RANGE_END", "1455"))
+    timeout_cycles = int(os.environ.get("YOLO320_RANGE_TIMEOUT_CYCLES", "500000"))
+    padding_bytes = int(os.environ.get("YOLO320_RANGE_PADDING_BYTES", "0"))
+    leading_padding_bytes = int(
+        os.environ.get("YOLO320_RANGE_LEADING_PADDING_BYTES", "0")
+    )
+    assert leading_padding_bytes >= 0 and leading_padding_bytes % 32 == 0
+    assert padding_bytes >= 0 and padding_bytes % 32 == 0
+    leading_padding_command_count = leading_padding_bytes // 32
+    padding_command_count = padding_bytes // 32
+    replay_manifest = os.environ.get("NAI_REPLAY_MANIFEST")
+    if replay_manifest:
+        # This package already contains the sliced commands and padding. Do
+        # not recompile, relocate sections, or insert padding a second time.
+        model = _load_pinned_range(replay_manifest)
+    else:
+        _model_path, full_model = _compile_selected_yolo320_model()
+        _require_restart_safe_boundary(full_model, first_command)
+        _require_restart_safe_boundary(full_model, end_command)
+        model = _extract_selected_yolo320_command_range(
+            full_model, first_command, end_command
+        )
+        if leading_padding_bytes or padding_bytes:
+            commands, end = _logical_command_records(model)
+            leading_padding_commands = [
+                _command_header(1, 32, tile=index).ljust(32, b"\x00")
+                for index in range(leading_padding_command_count)
+            ]
+            padding_commands = [
+                _command_header(1, 32, tile=end_command + index).ljust(32, b"\x00")
+                for index in range(padding_command_count)
+            ]
+            model = _replace_command_section(
+                model, leading_padding_commands + commands + padding_commands, end
+            )
+    commands, _end = _logical_command_records(model)
+    assert len(commands) == (
+        end_command - first_command + leading_padding_command_count + padding_command_count
+    )
+
+    input_base = 0x80000000
+    output_base = 0x80100000
+    l2_temporary_base = 0x80200000
+    invocation_base = 0x81400000
+    model_base = int(
+        os.environ.get("YOLO320_RANGE_MODEL_BASE", "0x81000000"), 0
+    )
+    binding_table_base = 0x81401000
+    input_bytes = 320 * 320 * 3
+    output_bytes = 84 * 2100
+    l2_temporary_bytes = 307200
+    runtime_bindings = [
+        (1, 0, input_base, input_bytes),
+        (2, 0, output_base, output_bytes),
+        (3, 0, l2_temporary_base, l2_temporary_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    write_tcdm_bytes(dut, bytes(TCDM_TOTAL_BYTES))
+    await write_l2_bytes(dut, input_base, bytes(input_bytes))
+    await write_l2_bytes(dut, output_base, bytes(output_bytes))
+    await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=timeout_cycles,
+        invocation_base=invocation_base,
+        model=model,
+    )
+
+    expected_commands = (
+        end_command
+        - first_command
+        + leading_padding_command_count
+        + padding_command_count
+    )
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == expected_commands
 
 
 @cocotb.test()

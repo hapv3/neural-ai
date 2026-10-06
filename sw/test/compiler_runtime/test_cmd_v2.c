@@ -475,9 +475,9 @@ int main(void)
     assert(completed == 1u);
     assert(state.calls == 1u);
     assert(state.source == 0x80000140u);
-    /* Stream dispatch prefetches each command once instead of reading its
-       header and full record through separate model-reader transactions. */
-    assert(memory.reads == 5u);
+    /* Model-open performs three reads; stream dispatch then retains the whole
+       command window from one read instead of refetching END. */
+    assert(memory.reads == 4u);
     assert(memory.largest_read == 160u);
 
     dma->direction = NAI_DMA_LOCAL_TO_EXTERNAL;
@@ -1705,7 +1705,8 @@ int main(void)
             &completed, &failure) == NAI_DISPATCH_OK);
         assert(completed == 4u && state.calls == 4u);
         assert(state.source == 0x80030100u);
-        assert(affine_memory.reads == 2u);
+        /* The affine record and following END fit in one retained window. */
+        assert(affine_memory.reads == 1u);
 
         patches[0].body_word_offset = 0;
         assert(nai_cmd_dispatch_v2(&affine_view, &affine_resolver, &ops,
