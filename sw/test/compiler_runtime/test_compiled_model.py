@@ -94,6 +94,22 @@ def _dma_2d(source, destination, length, source_stride, destination_stride,
     return command
 
 
+def _dma_submit_2d(source, destination, length, source_stride,
+                   destination_stride, repetitions, direction, tile):
+    command = bytearray(_dma_2d(
+        source, destination, length, source_stride, destination_stride,
+        repetitions, direction, tile,
+    ))
+    struct.pack_into("<H", command, 0, 25)
+    return bytes(command)
+
+
+def _dma_wait(direction, tile):
+    command = _command_header(27, 32, tile=tile) + struct.pack("<4I", direction, 0, 0, 0)
+    assert len(command) == 32
+    return command
+
+
 def _dma_3d(source, destination, length, source_stride_2,
             destination_stride_2, repetitions_2, source_stride_3,
             destination_stride_3, repetitions_3, direction, tile):
@@ -382,6 +398,119 @@ def build_unaligned_dma_model(dimension):
     )
 
 
+def build_async_dma_2d_wait_model():
+    row_bytes = 1280
+    rows = 16
+    binding_bytes = row_bytes * rows
+    commands = b"".join(
+        [
+            _dma_submit_2d(
+                _ref(3), _ref(6, offset=0x19540), row_bytes,
+                row_bytes, 1312, rows, 0, 0,
+            ),
+            _dma_2d(
+                _ref(6, offset=0x20B20), _ref(6, offset=0x19020),
+                row_bytes, row_bytes, row_bytes, 1, 2, 1,
+            ),
+            _dma_wait(0, 2),
+            _dma_2d(
+                _ref(6, offset=0x19540), _ref(4), row_bytes,
+                1312, row_bytes, rows, 1, 3,
+            ),
+            _command_header(0, 32, tile=4).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=(1, 1, 1, binding_bytes))
+        + _binding(2, 0, dimensions=(1, 1, 1, binding_bytes))
+    )
+    return (
+        _package(commands, b"", bindings, 4, 0x24000, 1, 1),
+        binding_bytes,
+    )
+
+
+def build_async_dma_before_afu_lut_model():
+    afu_bytes = 4096
+    input_bytes = 0x6000
+    lut = bytes(range(256))
+    commands = b"".join(
+        [
+            _dma_1d(_ref(3), _ref(6), afu_bytes, 0, 0),
+            _dma_2d(
+                _ref(6, offset=0x5A900), _ref(6, offset=0x53800),
+                14, 14, 14, 1, 2, 1,
+            ),
+            _dma_submit_2d(
+                _ref(3, offset=0x1000), _ref(6, offset=0x54620),
+                14, 14, 0xE20, 8, 0, 2,
+            ),
+            _dma_2d(
+                _ref(6, offset=0x62820), _ref(6, offset=0x5B720),
+                14, 14, 14, 1, 2, 3,
+            ),
+            _dma_submit_2d(
+                _ref(3, offset=0x2000), _ref(6, offset=0x5C540),
+                14, 14, 0xE20, 8, 0, 4,
+            ),
+            _dma_2d(
+                _ref(6, offset=0x6A740), _ref(6, offset=0x63640),
+                14, 14, 14, 1, 2, 5,
+            ),
+            _dma_submit_2d(
+                _ref(3, offset=0x3000), _ref(6, offset=0x64460),
+                14, 14, 0xE20, 8, 0, 6,
+            ),
+            _afu_lut(
+                _ref(6), _ref(6, offset=0x49800), _ref(1), afu_bytes, 7,
+            ),
+            _dma_wait(0, 8),
+            _dma_1d(
+                _ref(6, offset=0x49800), _ref(4), afu_bytes, 1, 9,
+            ),
+            _command_header(0, 32, tile=10).ljust(32, b"\x00"),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=(1, 1, 1, input_bytes))
+        + _binding(2, 0, dimensions=(1, 1, 1, afu_bytes))
+    )
+    return (
+        _package(commands, lut, bindings, 10, 0x6B000, 1, 1),
+        input_bytes,
+        afu_bytes,
+    )
+
+
+def build_dma_transfer_id_stress_model(iterations):
+    assert iterations > 0
+    commands = []
+    for iteration in range(iterations):
+        commands.extend(
+            [
+                _dma_submit_2d(
+                    _ref(3), _ref(6), 4, 4, 4, 1, 0, iteration * 2,
+                ),
+                _dma_wait(0, iteration * 2 + 1),
+            ]
+        )
+    commands.extend(
+        [
+            _dma_1d(_ref(6), _ref(4), 4, 1, iterations * 2),
+            _command_header(0, 32, tile=iterations * 2 + 1).ljust(
+                32, b"\x00"
+            ),
+        ]
+    )
+    bindings = (
+        _binding(1, 0, dimensions=(1, 1, 1, 4))
+        + _binding(2, 0, dimensions=(1, 1, 1, 4))
+    )
+    return _package(
+        b"".join(commands), b"", bindings, iterations * 2 + 1, 32, 1, 1
+    )
+
+
 def build_layout_model():
     dimensions = (1, 2, 2, 33)
     commands = b"".join(
@@ -618,7 +747,9 @@ def build_pointwise_c32_model(height=2, width=2, channels=64, output_channels=No
     return _package(commands, weights, bindings, 2 + output_groups * 2, 0x2200, 1, 1, qparams)
 
 
-def build_depthwise_c32_model(height=3, width=3, channels=32, stride=1):
+def build_depthwise_c32_model(height=3, width=3, channels=32, stride=1,
+                              repetitions=1):
+    assert repetitions > 0
     groups = (channels + 31) // 32
     weights = bytearray(groups * 3 * 3 * 32)
     for group in range(groups):
@@ -640,26 +771,27 @@ def build_depthwise_c32_model(height=3, width=3, channels=32, stride=1):
     for group in range(groups):
         valid_channels = min(32, channels - group * 32)
         commands.append(
-            _command_header(5, 32, tile=group * 2 + 1) +
+            _command_header(5, 32, tile=len(commands)) +
             struct.pack("<4I", group * 32, 32, group, 0)
         )
-        commands.append(
-            _depthwise_c32(
-                _ref(1, offset=group * 9 * 32),
-                _ref(6, offset=group * input_pixels * 32),
-                _ref(6, offset=0x1000 + group * output_pixels * 32),
-                height, width, output_height, output_width, valid_channels,
-                stride, stride, 1, 1, group, group * 2 + 2,
+        for _ in range(repetitions):
+            commands.append(
+                _depthwise_c32(
+                    _ref(1, offset=group * 9 * 32),
+                    _ref(6, offset=group * input_pixels * 32),
+                    _ref(6, offset=0x1000 + group * output_pixels * 32),
+                    height, width, output_height, output_width, valid_channels,
+                    stride, stride, 1, 1, group, len(commands),
+                )
             )
-        )
     commands.extend([
         _copy_layout(_ref(6, offset=0x1000), _ref(4), 4, output_dimensions,
                      len(commands)),
         _command_header(0, 32, tile=len(commands)).ljust(32, b"\x00"),
     ])
+    command_count = len(commands) - 1
     commands = b"".join(commands)
     bindings = _binding(1, 0, dimensions=input_dimensions) + _binding(2, 0, dimensions=output_dimensions)
-    command_count = 2 + groups * 2
     return _package(commands, bytes(weights), bindings, command_count, 0x2200, 1, 1, qparams)
 
 
@@ -802,6 +934,35 @@ def build_invocation_with_bindings(
         *([0] * 8),
     )
     return invocation, binding_addresses
+
+
+def _model_binding_descriptors(model):
+    section_count = struct.unpack_from("<I", model, 20)[0]
+    section_table_offset = struct.unpack_from("<I", model, 24)[0]
+    bindings_offset = None
+    bindings_size = 0
+    binding_count = 0
+    for index in range(section_count):
+        descriptor = section_table_offset + index * 32
+        section_type, _flags, offset, size, _alignment, count = struct.unpack_from(
+            "<6I", model, descriptor
+        )
+        if section_type == 4:
+            bindings_offset = offset
+            bindings_size = size
+            binding_count = count
+            break
+    if bindings_offset is None or bindings_size < binding_count * 64:
+        raise ValueError("model has an invalid bindings section")
+
+    bindings = []
+    for binding in range(binding_count):
+        offset = bindings_offset + binding * 64
+        direction, index = struct.unpack_from("<2H", model, offset)
+        dimensions = struct.unpack_from("<4I", model, offset + 16)
+        byte_size = struct.unpack_from("<I", model, offset + 32)[0]
+        bindings.append((direction, index, byte_size, dimensions))
+    return bindings
 
 
 def _signed_input(dim_m, seed):
@@ -1310,23 +1471,47 @@ def _compile_selected_yolo320_model():
     return model_path, package
 
 
+def _compile_selected_mobilenet224_model():
+    default_root = Path(__file__).resolve().parents[4] / "neural-compiler"
+    compiler_root = Path(os.environ.get("NEURAL_COMPILER_ROOT", default_root)).resolve()
+    model_path = compiler_root / "test/model/mobilenet_v2_224_int8.tflite"
+    extension_modules = list((compiler_root / "ethosu").glob("regor*.so"))
+    if not extension_modules or not model_path.is_file():
+        raise RuntimeError("Selected MobileNet224 compiler model or Python extension is missing")
+    with tempfile.TemporaryDirectory(prefix="neural-ai-compiled-mobilenet224-") as temporary_dir:
+        output_path = Path(temporary_dir) / "output"
+        command = [
+            sys.executable,
+            "-c",
+            "import sys; from ethosu.vela.vela import main; raise SystemExit(main(sys.argv[1:]))",
+            "--accelerator-config=neural-ai",
+            "--output-format=nai",
+            f"--output-dir={output_path}",
+            str(model_path),
+        ]
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = os.pathsep.join(
+            [str(compiler_root), environment.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
+        result = subprocess.run(
+            command,
+            cwd=compiler_root,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Neural compiler failed ({result.returncode}):\n{result.stdout}\n{result.stderr}"
+            )
+        package = (output_path / "mobilenet_v2_224_int8.nai").read_bytes()
+    assert package[:4] == b"NAIM"
+    return model_path, package
+
+
 def _extract_selected_yolo320_command_prefix(model, command_count):
-    package = _extract_selected_yolo320_command_range(model, 0, command_count)
-    section_table_offset = struct.unpack_from("<I", package, 24)[0]
-    section_count = struct.unpack_from("<I", package, 20)[0]
-    commands_offset = next(
-        struct.unpack_from("<I", package, section_table_offset + index * 32 + 8)[0]
-        for index in range(section_count)
-        if struct.unpack_from("<I", package, section_table_offset + index * 32)[0] == 1
-    )
-    first_stem_types = [3, 3, 3, 3, 5, 9]
-    offset = commands_offset
-    assert command_count >= len(first_stem_types)
-    for expected_type in first_stem_types:
-        command_type, command_size = struct.unpack_from("<HH", package, offset)
-        assert command_type == expected_type
-        offset += command_size
-    return package
+    return _extract_selected_yolo320_command_range(model, 0, command_count)
 
 
 def _command_section(model):
@@ -2265,6 +2450,138 @@ async def test_compiler_runtime_unaligned_raw_dma_1d_2d_3d(dut):
 
 
 @cocotb.test()
+async def test_compiler_runtime_async_dma_2d_local_wait(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model, binding_bytes = build_async_dma_2d_wait_model()
+    output_base = 0x80008000
+    input_data = bytes((index * 29 + 7) & 0xFF for index in range(binding_bytes))
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, binding_bytes),
+        (2, 0, output_base, binding_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, output_base, bytes(binding_bytes))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=500000, model=model
+    )
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(
+        dut, output_base, binding_bytes
+    )) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_async_dma_before_afu_lut(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model, input_bytes, afu_bytes = build_async_dma_before_afu_lut_model()
+    output_base = 0x80008000
+    input_data = bytes((index * 37 + 11) & 0xFF for index in range(input_bytes))
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, input_bytes),
+        (2, 0, output_base, afu_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model, runtime_bindings
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, output_base, bytes(afu_bytes))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(
+        dut, axi_master, invocation, timeout_cycles=500000, model=model
+    )
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 10
+    assert bytes(await read_l2_bytes(
+        dut, output_base, afu_bytes
+    )) == input_data[:afu_bytes]
+
+
+@cocotb.test()
+async def test_compiler_runtime_dma_transfer_id_stress(dut):
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    iterations = int(os.environ.get("DMA_TRANSFER_ID_STRESS_ITERATIONS", "1000"))
+    timeout_cycles = int(
+        os.environ.get("DMA_TRANSFER_ID_STRESS_TIMEOUT_CYCLES", "5000000")
+    )
+    model = build_dma_transfer_id_stress_model(iterations)
+    input_data = bytes((0x3D, 0xA7, 0x19, 0xE2))
+    model_base = 0x81000000
+    invocation_base = 0x81800000
+    binding_table_base = 0x81801000
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(input_data)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(input_data)))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=timeout_cycles,
+        invocation_base=invocation_base,
+        model=model,
+    )
+
+    expected_commands = iterations * 2 + 1
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == expected_commands
+    assert bytes(await read_l2_bytes(
+        dut, OUTPUT_BASE, len(input_data)
+    )) == input_data
+
+
+@cocotb.test()
 async def test_compiler_runtime_layout_round_trip(dut):
     cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
     axi_master = AxiLiteMaster(
@@ -2806,6 +3123,47 @@ async def test_compiler_runtime_depthwise_c32_package(dut):
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 4
+    assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
+
+
+@cocotb.test()
+async def test_compiler_runtime_repeated_depthwise_c32_package(dut):
+    """A retained qparam block must re-enable requant for every depthwise job."""
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    height, width, channels = 3, 3, 32
+    input_values = [
+        ((pixel + channel * 3) % 9) - 4
+        for pixel in range(height * width)
+        for channel in range(channels)
+    ]
+    input_data = bytes(value & 0xFF for value in input_values)
+    model = build_depthwise_c32_model(
+        height, width, channels, repetitions=2
+    )
+    runtime_bindings = [
+        (1, 0, INPUT_BASE, len(input_data)),
+        (2, 0, OUTPUT_BASE, len(input_data)),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(model, runtime_bindings)
+    await write_l2_bytes(dut, INPUT_BASE, input_data)
+    await write_l2_bytes(dut, OUTPUT_BASE, bytes(len(input_data)))
+    await write_l2_bytes(dut, MODEL_BASE, model)
+    await write_l2_bytes(dut, BINDING_TABLE_BASE, binding_addresses)
+    await write_l2_bytes(dut, INVOCATION_BASE, invocation)
+
+    await _load_and_run(dut, axi_master, invocation)
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == 5
     assert bytes(await read_l2_bytes(dut, OUTPUT_BASE, len(input_data))) == input_data
 
 
@@ -5130,19 +5488,230 @@ async def test_compiler_generated_selected_yolo320_full_graph(dut):
     await write_l2_bytes(dut, binding_table_base, binding_addresses)
     await write_l2_bytes(dut, invocation_base, invocation)
 
-    await _load_and_run(
+    command_pmu_csv = os.environ.get("YOLO320_COMMAND_PMU_CSV", "")
+    command_trace_records = (
+        _selected_command_trace_records(model, 0, command_count)
+        if command_pmu_csv
+        else None
+    )
+    command_trace_callback = None
+    if command_trace_records is not None:
+
+        def command_trace_callback(command_index, command_counters):
+            _write_command_pmu_csv(
+                command_pmu_csv,
+                [command_trace_records[command_index]],
+                [command_counters],
+                append=command_index != 0,
+            )
+
+    run_result = await _load_and_run(
         dut,
         axi_master,
         invocation,
-        timeout_cycles=10_000_000,
+        timeout_cycles=int(os.environ.get("YOLO320_TIMEOUT_CYCLES", "10000000")),
         invocation_base=invocation_base,
         model=model,
+        command_trace_records=command_trace_records,
+        command_trace_callback=command_trace_callback,
     )
+    if command_trace_records is not None:
+        _model_pmu, command_pmu = run_result
+        assert len(command_pmu) == command_count
+        dut._log.info(
+            "YOLO320 wrote per-command PMU for %d commands to %s",
+            command_count,
+            command_pmu_csv,
+        )
 
     assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
     assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
     assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
     assert bytes(await read_l2_bytes(dut, output_base, output_bytes)) == expected
+
+
+@cocotb.test()
+async def test_compiler_generated_selected_mobilenet224_prefix(dut):
+    """Run a short MobileNet prefix for fast command-stream regressions."""
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    _model_path, full_model = _compile_selected_mobilenet224_model()
+    commands, end = _logical_command_records(full_model)
+    prefix_commands = int(os.environ.get("MOBILENET224_PREFIX_COMMANDS", "140"))
+    assert 0 < prefix_commands <= len(commands)
+    model = _replace_command_section(full_model, commands[:prefix_commands], end)
+    bindings = _model_binding_descriptors(model)
+    input_binding = next(binding for binding in bindings if binding[0] == 1)
+    output_binding = next(binding for binding in bindings if binding[0] == 2)
+    temporary_binding = next(binding for binding in bindings if binding[0] == 3)
+    input_base = 0x80000000
+    output_base = 0x80100000
+    temporary_base = 0x80200000
+    model_base = 0x81000000
+    invocation_base = 0x81800000
+    binding_table_base = 0x81801000
+    runtime_bindings = [
+        (1, input_binding[1], input_base, input_binding[2]),
+        (2, output_binding[1], output_base, output_binding[2]),
+        (3, temporary_binding[1], temporary_base, temporary_binding[2]),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    input_data = bytes(
+        ((index * 37 + 11) & 0xFF) for index in range(input_binding[2])
+    )
+    await write_l2_bytes(dut, input_base, input_data)
+    await write_l2_bytes(dut, output_base, bytes(output_binding[2]))
+    await write_l2_bytes(dut, temporary_base, bytes(temporary_binding[2]))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=int(os.environ.get("MOBILENET224_PREFIX_TIMEOUT_CYCLES", "1000000")),
+        invocation_base=invocation_base,
+        model=model,
+    )
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == prefix_commands
+
+
+@cocotb.test()
+async def test_compiler_generated_selected_mobilenet224_full_graph(dut):
+    import numpy as np
+    import tensorflow as tf
+
+    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    axi_master = AxiLiteMaster(
+        AxiLiteBus.from_prefix(dut, "s_axi"),
+        dut.clk_i,
+        dut.rst_ni,
+        reset_active_level=False,
+    )
+    await reset_dut(dut)
+
+    model_path, model = _compile_selected_mobilenet224_model()
+    bindings = _model_binding_descriptors(model)
+    input_bindings = [binding for binding in bindings if binding[0] == 1]
+    output_bindings = [binding for binding in bindings if binding[0] == 2]
+    temporary_bindings = [binding for binding in bindings if binding[0] == 3]
+    assert len(input_bindings) == len(output_bindings) == len(temporary_bindings) == 1
+    input_bytes = input_bindings[0][2]
+    output_bytes = output_bindings[0][2]
+    l2_temporary_bytes = temporary_bindings[0][2]
+
+    interpreter = tf.lite.Interpreter(
+        model_path=str(model_path),
+        experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
+    )
+    interpreter.allocate_tensors()
+    input_detail = interpreter.get_input_details()[0]
+    output_detail = interpreter.get_output_details()[0]
+    input_values = ((np.arange(input_bytes, dtype=np.uint32) * 37 + 11) & 0xFF).astype(np.uint8)
+    input_tensor = input_values.view(np.int8).reshape(input_detail["shape"])
+    interpreter.set_tensor(input_detail["index"], input_tensor)
+    interpreter.invoke()
+    expected = interpreter.get_tensor(output_detail["index"]).tobytes()
+    assert input_tensor.nbytes == input_bytes
+    assert len(expected) == output_bytes
+
+    input_base = 0x80000000
+    output_base = 0x80100000
+    l2_temporary_base = 0x80200000
+    model_base = 0x81000000
+    invocation_base = 0x81800000
+    binding_table_base = 0x81801000
+    command_count = struct.unpack_from("<I", model, 32)[0]
+    logical_commands, _end = _logical_command_records(model)
+    assert command_count == len(logical_commands)
+    assert struct.unpack_from("<I", model, 36)[0] <= TCDM_TOTAL_BYTES
+    assert model_base + len(model) <= invocation_base
+
+    runtime_bindings = [
+        (1, input_bindings[0][1], input_base, input_bytes),
+        (2, output_bindings[0][1], output_base, output_bytes),
+        (3, temporary_bindings[0][1], l2_temporary_base, l2_temporary_bytes),
+    ]
+    invocation, binding_addresses = build_invocation_with_bindings(
+        model,
+        runtime_bindings,
+        model_base=model_base,
+        binding_table_base=binding_table_base,
+    )
+    await write_l2_bytes(dut, input_base, input_values.tobytes())
+    await write_l2_bytes(dut, output_base, bytes(output_bytes))
+    await write_l2_bytes(dut, l2_temporary_base, bytes(l2_temporary_bytes))
+    await write_l2_bytes(dut, model_base, model)
+    await write_l2_bytes(dut, binding_table_base, binding_addresses)
+    await write_l2_bytes(dut, invocation_base, invocation)
+
+    command_pmu_csv = os.environ.get("MOBILENET224_COMMAND_PMU_CSV", "")
+    command_trace_records = (
+        _selected_command_trace_records(model, 0, command_count)
+        if command_pmu_csv
+        else None
+    )
+    command_trace_callback = None
+    if command_trace_records is not None:
+
+        def command_trace_callback(command_index, command_counters):
+            _write_command_pmu_csv(
+                command_pmu_csv,
+                [command_trace_records[command_index]],
+                [command_counters],
+                append=command_index != 0,
+            )
+
+    run_result = await _load_and_run(
+        dut,
+        axi_master,
+        invocation,
+        timeout_cycles=int(os.environ.get("MOBILENET224_TIMEOUT_CYCLES", "50000000")),
+        invocation_base=invocation_base,
+        model=model,
+        command_trace_records=command_trace_records,
+        command_trace_callback=command_trace_callback,
+    )
+    if command_trace_records is not None:
+        _model_pmu, command_pmu = run_result
+        assert len(command_pmu) == command_count
+        dut._log.info(
+            "MobileNet224 wrote per-command PMU for %d commands to %s",
+            command_count,
+            command_pmu_csv,
+        )
+
+    assert await _axi_read32(axi_master, NPU_CMD_STATUS) == NPU_CMD_STATUS_PASS
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_CODE) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_FAIL_PTR) == 0
+    assert await _axi_read32(axi_master, NPU_CMD_DONE_COUNT) == command_count
+    actual = bytes(await read_l2_bytes(dut, output_base, output_bytes))
+    assert actual == expected, (
+        "MobileNet224 final output differs from TensorFlow Lite reference: "
+        f"actual_crc=0x{zlib.crc32(actual) & 0xFFFFFFFF:08x} "
+        f"expected_crc=0x{zlib.crc32(expected) & 0xFFFFFFFF:08x}"
+    )
+    dut._log.info(
+        "MobileNet224 OUTPUT DATA PASS: %d bytes match TensorFlow Lite reference "
+        "(crc32=0x%08x)",
+        output_bytes,
+        zlib.crc32(actual) & 0xFFFFFFFF,
+    )
 
 
 @cocotb.test()

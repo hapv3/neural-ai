@@ -244,12 +244,13 @@ static inline uint32_t idma_memcpy_blocking(uint32_t src, uint32_t dst, uint32_t
         }
         external_address = src_is_l1 ? dst + offset : src + offset;
         chunk = idma_limit_axi_4k_chunk(external_address, chunk);
+        dir = src_is_l1 ? IDMA_DIR_L1_TO_L2 : IDMA_DIR_L2_TO_L1;
+
+        while (idma_mm_is_busy_dir(dir, 0u)) wait_nop(1u);
 
         if (src_is_l1) {
-            dir = IDMA_DIR_L1_TO_L2;
             tx_id = idma_L1ToL2(src + offset, dst + offset, chunk);
         } else {
-            dir = IDMA_DIR_L2_TO_L1;
             tx_id = idma_L2ToL1(src + offset, dst + offset, chunk);
         }
 

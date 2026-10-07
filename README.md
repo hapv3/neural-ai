@@ -2,6 +2,12 @@
 
 Welcome to the **Neural-AI NPU Cluster**, a highly scalable, heterogeneous Neural Processing Unit architecture designed for accelerating Generative AI, YOLO, CNNs, and Vision Transformers at the edge.
 
+## Commercial Development
+
+A commercial edition of the Neural-AI NPU Cluster is currently under development.
+If you are interested in commercial use, integration, or support, please contact
+the project maintainers directly.
+
 ## Architecture Highlights
 
 The Neural-AI NPU Cluster follows a heterogeneous compute model where a lightweight RISC-V control core orchestrates highly specialized hardware engines. All components share a high-bandwidth, deterministic L1 Tightly-Coupled Data Memory (TCDM).

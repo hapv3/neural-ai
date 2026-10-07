@@ -303,6 +303,7 @@ void systolic_depthwise3x3_c32_requant_channels(uint32_t input_addr,
     cfg.channel_addr_offset = 0u;
     cfg.coalesce_k_bytes = cfg.kernel_h * cfg.kernel_w * cfg.block_valid_bytes;
 
+    REG_WRITE(REG_RQ_CTRL, REG_RQ_CTRL_EN);
     systolic_linebuf_config(&cfg);
     systolic_gemm32_tile_ex(weight_addr, 0u, 0u, output_addr, rows,
                             0u, output_w * 32u, output_w, 0u);
