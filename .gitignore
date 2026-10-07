@@ -49,3 +49,14 @@ sw/test/compiler_runtime/test_quant_buffer
 sw/test/compiler_runtime/test_model_abi
 sw/test/compiler_runtime/test_copy_layout
 sw/test/compiler_runtime/test_cmd_v2
+sw/test/compiler_runtime/test_idma_chunk
+hw/rtl/systolic/tb/refactor_traces/
+
+# Generated compiler-runtime host tests
+/sw/test/compiler_runtime/test_cmd_stream_window
+/sw/test/compiler_runtime/test_cmd_stream_window_trusted
+/sw/test/compiler_runtime/test_cmd_v2_pmu
+/sw/test/compiler_runtime/test_dma_async_state
+
+# Local-only refactor gate runner
+/hw/rtl/systolic/run_refactor_gates.sh
