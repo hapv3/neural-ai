@@ -1,0 +1,92 @@
+# YOLO Neural-AI reference replay
+
+This bounded diagnostic resumes a pinned first-cascade memory snapshot and
+checks intermediate INT8 tensors against the Neural-AI hybrid TFLite runtime.
+It is not a full-model correctness test or a general snapshot-state restorer.
+Conv/Depthwise/FC use Neural-AI reference arithmetic; other operators still use
+TFLite reference implementations.
+
+## Prepare expected data without simulation
+
+Run from the neural-ai repository with the sibling neural-compiler reference
+runtime already built (see its `tools/neural_ai_tflite_reference/README.md`):
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 sw/test/compiler_runtime/yolo_reference_replay.py \
+  --manifest hw/rtl/cluster/tb/sim/test_full_models_cursor/yolo320/dma_events.json \
+  --snapshot hw/rtl/cluster/tb/sim/test_yolo_stem_byte_exact/command-23.snapshot \
+  --output hw/rtl/cluster/tb/sim/test_yolo_neural_reference_24_75_lut
+```
+
+Choose a fresh output directory. The snapshot directory must contain its
+`byte_exact.json` provenance and `input.bin`. Preparation verifies model/firmware
+hashes, source identity, snapshot integrity, restart-safe boundaries, and all
+saved initial checkpoints against freshly computed reference tensors. It then
+derives checkpoint addresses and rows from commands, saves expected binaries,
+and writes `case.json` with artifact hashes and reference build provenance.
+
+Supported mapping is limited to the initial batch-one, C<=32 Conv/SiLU cascade
+and the first two contiguous tiles of its Conv consumer. Async/partial or
+multi-group mappings are rejected instead of guessed.
+
+## Replay
+
+Use the normal cluster cocotb/Verilator environment, adding
+`sw/test/compiler_runtime`, `hw/rtl/cluster/tb`, and
+`hw/rtl/cluster/tb/tests` to `PYTHONPATH`. Select:
+
+```bash
+export COCOTB_TEST_MODULES=test_yolo_reference_replay
+export COCOTB_TESTCASE=test_yolo_reference_replay
+export YOLO_REFERENCE_CASE=/absolute/path/to/output/case.json
+export NAI_REPLAY_MANIFEST=/absolute/path/to/yolo320/dma_events.json
+```
+
+Keep `NAI_REPLAY_FIRMWARE_ELF`, `NAI_DMA_TRACE_CSV`, and
+`NAI_PMU_COMMAND_FILTER` unset. Run the cluster simulator with log and results
+paths inside the case directory. The test uses the pinned firmware and original
+selected commands, with a 1,000,000-cycle runtime timeout.
+
+Memory snapshots do not preserve AFU LUT SRAM or requant registers. For this
+case the harness reconstructs the resident 256-byte constant LUT from its prior
+load command and writes it through normal MMIO after reset. The first unchanged
+reuse command activates the staged LUT. A requant-load command must precede the
+first replay Conv. Other AFU residency modes are deliberately unsupported.
+
+## Inspect results
+
+For the pinned command-23 snapshot, replay covers original commands 24-75:
+
+| Command | Reference tensor | Logical rows | Compared bytes |
+| --- | --- | --- | --- |
+| 25 | Stem SiLU, 159 | 3200-6399 | 51200 |
+| 70 | Consumer Conv, 161 | 0-799 | 25600 |
+| 75 | Consumer Conv, 161 | 800-1599 | 25600 |
+
+- `byte_exact.json`: running/PASS/FAIL and mismatch counts, first difference,
+  maximum absolute difference. PASS requires firmware success and zero byte
+  differences at every listed checkpoint; it does not certify unlisted tensors.
+- `command-N-expected.bin` and `command-N-actual.bin`: active INT8 channels in
+  logical row order, with C32 padding removed.
+- `command_pmu.csv`: completed commands using original logical command numbers.
+- `before-command-70-tcdm.bin`, `before-command-75-tcdm.bin`: pre-compute memory
+  for diagnosing input, weights, and in-place output overwrites.
+- `command-75.snapshot`: complete memory snapshot saved after normal runtime
+  completion, even when numerical comparisons fail. Inspect the report before
+  using it as a known-good reference. Timeout does not promise an end snapshot.
+
+A result file is never overwritten. For reruns, prepare a fresh case directory.
+Do not treat restored-memory readback or firmware completion alone as byte-exact
+success.
+
+## Offline regressions
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH=sw/test/compiler_runtime:hw/rtl/cluster/tb:hw/rtl/cluster/tb/tests \
+python3 -m unittest test_yolo_reference_helpers test_snapshot_boundary \
+  test_yolo_byte_exact_helpers -v
+```
+
+These tests validate mapping, LUT restoration planning, artifact hashes, and
+snapshot helpers. They do not replace the Verilator replay.
