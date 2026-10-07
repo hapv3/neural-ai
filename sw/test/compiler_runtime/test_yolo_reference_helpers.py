@@ -5,7 +5,7 @@ import struct
 import tempfile
 import unittest
 
-from yolo_reference_replay import artifact, checked_read, plan_checkpoints, plan_lut_restore, runtime
+from yolo_reference_replay import artifact, checked_read, plan_checkpoints, plan_lut_restore, plan_restore_preamble, runtime
 
 
 def linebuffer(layer, address, rows, width, accum=0):
@@ -87,6 +87,33 @@ class ReferenceReplayTest(unittest.TestCase):
         missing = runtime._package(lut(128, 0, 128, reuse=True) + end, constants, b"", 1, 1024, 0, 0)
         with self.assertRaisesRegex(ValueError, "known pre-snapshot load"):
             plan_lut_restore(missing, 0, 1)
+
+    def test_restore_preamble_requires_byte_idempotence(self):
+        constants = bytes(reversed(range(256)))
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        model = runtime._package(lut(128, 0, 32) + lut(160, 32, 32, reuse=True) + end,
+                                 constants, b"", 2, 1024, 0, 0)
+        restore = plan_lut_restore(model, 1, 2)
+        memory = bytearray(1024)
+        memory[128:160] = bytes(range(32))
+        memory[:32] = constants[:32]
+        preamble = plan_restore_preamble(model, 1, restore, memory)
+        self.assertEqual((preamble["command"], preamble["destination"], preamble["bytes"]), (1, 0, 32))
+        memory[0] ^= 1
+        with self.assertRaisesRegex(ValueError, "byte-idempotent"):
+            plan_restore_preamble(model, 1, restore, memory)
+        with self.assertRaisesRegex(ValueError, "immediately precede"):
+            plan_restore_preamble(model, 2, restore, memory)
+        self.assertIsNone(plan_restore_preamble(model, 1, None, memory))
+
+    def test_restore_preamble_rejects_overlap_and_scratch(self):
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        for src, dst in ((128, 128), (0x7F000, 0), (128, 1)):
+            model = runtime._package(lut(src, dst, 32) + lut(160, 32, 32, reuse=True) + end,
+                                     bytes(range(256)), b"", 2, 1024, 0, 0)
+            restore = plan_lut_restore(model, 1, 2)
+            with self.assertRaisesRegex(ValueError, "Unsafe LUT preamble"):
+                plan_restore_preamble(model, 1, restore, bytes(524288))
 
 
 if __name__ == "__main__":

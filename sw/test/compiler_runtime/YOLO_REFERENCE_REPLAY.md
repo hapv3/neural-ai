@@ -15,7 +15,7 @@ runtime already built (see its `tools/neural_ai_tflite_reference/README.md`):
 PYTHONDONTWRITEBYTECODE=1 python3 sw/test/compiler_runtime/yolo_reference_replay.py \
   --manifest hw/rtl/cluster/tb/sim/test_full_models_cursor/yolo320/dma_events.json \
   --snapshot hw/rtl/cluster/tb/sim/test_yolo_stem_byte_exact/command-23.snapshot \
-  --output hw/rtl/cluster/tb/sim/test_yolo_neural_reference_24_75_lut
+  --output hw/rtl/cluster/tb/sim/test_yolo_neural_reference_24_75_firmware_restore
 ```
 
 Choose a fresh output directory. The snapshot directory must contain its
@@ -45,17 +45,24 @@ export NAI_REPLAY_MANIFEST=/absolute/path/to/yolo320/dma_events.json
 Keep `NAI_REPLAY_FIRMWARE_ELF`, `NAI_DMA_TRACE_CSV`, and
 `NAI_PMU_COMMAND_FILTER` unset. Run the cluster simulator with log and results
 paths inside the case directory. The test uses the pinned firmware and original
-selected commands, with a 1,000,000-cycle runtime timeout.
+selected commands, with a 1,000,000-cycle runtime timeout and a whole-test
+1,200,000 ns watchdog (1 ns clock), including setup and firmware loading.
 
 Memory snapshots do not preserve AFU LUT SRAM or requant registers. For this
-case the harness reconstructs the resident 256-byte constant LUT from its prior
-load command and writes it through normal MMIO after reset. The first unchanged
-reuse command activates the staged LUT. A requant-load command must precede the
-first replay Conv. Other AFU residency modes are deliberately unsupported.
+case the harness repeats the immediately preceding original LUT-load command
+through the pinned firmware. Host AXI only exposes boot ITCM, PMU and command
+control; it cannot program AFU MMIO directly. Offline checks require unflagged,
+aligned, disjoint TCDM source/destination ranges outside firmware scratch, and
+prove that the complete saved destination already equals LUT(source). The
+runtime checks this destination again after the preamble, including C32 padding.
+Command flags and payloads are unchanged. A requant-load command must precede
+the first replay Conv. Other AFU residency modes and non-immediate restoration
+commands are deliberately unsupported.
 
 ## Inspect results
 
-For the pinned command-23 snapshot, replay covers original commands 24-75:
+For the pinned command-23 snapshot, command 23 is replayed once as restoration
+setup, followed by original commands 24-75. Setup cycles are reported separately:
 
 | Command | Reference tensor | Logical rows | Compared bytes |
 | --- | --- | --- | --- |
@@ -69,6 +76,8 @@ For the pinned command-23 snapshot, replay covers original commands 24-75:
 - `command-N-expected.bin` and `command-N-actual.bin`: active INT8 channels in
   logical row order, with C32 padding removed.
 - `command_pmu.csv`: completed commands using original logical command numbers.
+- `restore_pmu.csv`, `restore-actual.bin`: command-23 setup cost and physical
+  destination data; `restore_check` in the report must show zero differences.
 - `before-command-70-tcdm.bin`, `before-command-75-tcdm.bin`: pre-compute memory
   for diagnosing input, weights, and in-place output overwrites.
 - `command-75.snapshot`: complete memory snapshot saved after normal runtime
@@ -78,6 +87,11 @@ For the pinned command-23 snapshot, replay covers original commands 24-75:
 A result file is never overwritten. For reruns, prepare a fresh case directory.
 Do not treat restored-memory readback or firmware completion alone as byte-exact
 success.
+
+The earlier `test_yolo_neural_reference_24_75_lut` attempt stalled on its first
+host write to AFU address `0x20003000`, before executing any model command. Its
+empty checkpoint list is not a numerical failure. Preserve that log for
+diagnostics and use a newly prepared firmware-restoration case.
 
 ## Offline regressions
 

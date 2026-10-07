@@ -8,13 +8,12 @@ import cocotb
 from cocotb.clock import Clock
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 import numpy as np
-from npu_test_utils import _axi_write32
 
 from yolo_reference_replay import checked_read, load_case, runtime
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 
 
-@cocotb.test()
+@cocotb.test(timeout_time=1200000, timeout_unit="ns")
 async def test_yolo_reference_replay(dut):
     case_path = Path(os.environ["YOLO_REFERENCE_CASE"]).resolve()
     folder = case_path.parent
@@ -26,11 +25,13 @@ async def test_yolo_reference_replay(dut):
     if runtime._runtime_firmware_path().read_bytes() != checked_read(case["firmware"]):
         raise ValueError("Firmware override differs from prepared case")
     first, end = case["first_command"], case["end_command"]
-    model = runtime._extract_selected_yolo320_command_range(full_model, first, end)
+    preamble = case["restore_preamble"]
+    execution_first = first - 1 if preamble is not None else first
+    model = runtime._extract_selected_yolo320_command_range(full_model, execution_first, end)
     (folder / "replay.nai").write_bytes(model)
     report = {"first_command": first, "end_command": end, "reference": case["reference"],
               "scope": "Only listed intermediate tensors; not full-model output correctness",
-              "status": "running", "checkpoints": []}
+              "status": "running", "checkpoints": [], "restore_preamble": preamble}
 
     def persist():
         (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -50,21 +51,16 @@ async def test_yolo_reference_replay(dut):
         if bytes(await runtime.read_l2_bytes(dut, address, len(expected))) != expected:
             raise AssertionError("Snapshot L2 readback differs")
     await runtime.release_reset(dut)
-    restore = case["afu_lut_restore"]
-    if restore is not None:
-        for index, value in enumerate(bytes.fromhex(restore["data_hex"])):
-            await _axi_write32(axi, 0x20003000 + index * 4, value)
-        report["afu_lut_restore"] = {key: value for key, value in restore.items() if key != "data_hex"}
-        persist()
-        dut._log.info("Restored 256 LUT entries from command %d before unchanged reuse command %d",
-                      restore["source_command"], restore["reuse_command"])
+    if preamble is not None:
+        dut._log.info("Replaying original command %d as a verified idempotent LUT restore preamble",
+                      preamble["command"])
     bindings = [(1, 0, 0x80000000, case["input_bytes"]), (2, 0, 0x80100000, case["output_bytes"]),
                 (3, 0, 0x80200000, case["temporary_bytes"])]
     invocation, addresses = runtime.build_invocation_with_bindings(
         model, bindings, model_base=0x81000000, binding_table_base=0x81401000)
     for address, data in ((0x81000000, model), (0x81401000, addresses), (0x81400000, invocation)):
         await runtime.write_l2_bytes(dut, address, data)
-    records = runtime._selected_command_trace_records(full_model, first, end)
+    records = runtime._selected_command_trace_records(full_model, execution_first, end)
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
     before_compute = {check["command"] - 1: check["command"] for check in case["checkpoints"]
                       if check["tensor_role"] == "consumer_conv"}
@@ -73,8 +69,22 @@ async def test_yolo_reference_replay(dut):
         record = records[index]
         if record["type"] == 0:
             return
-        runtime._write_command_pmu_csv(folder / "command_pmu.csv", [record], [counters], append=index != 0)
         number = record["command"]
+        if preamble is not None and number == preamble["command"]:
+            runtime._write_command_pmu_csv(folder / "restore_pmu.csv", [record], [counters], append=False)
+            restored = runtime.read_tcdm_bytes(dut)
+            address, length = preamble["destination"], preamble["bytes"]
+            actual = restored[address:address + length]
+            expected = memory[address:address + length]
+            (folder / "restore-actual.bin").write_bytes(actual)
+            report["restore_check"] = compare_bytes(np.frombuffer(actual, np.int8),
+                                                    np.frombuffer(expected, np.int8))
+            persist()
+            assert actual == expected, "Firmware LUT preamble changed saved output bytes"
+            dut._log.info("LUT restore preamble byte-exact: %d physical bytes", length)
+            return
+        runtime._write_command_pmu_csv(folder / "command_pmu.csv", [record], [counters],
+                                       append=number != first + 1)
         if number in before_compute:
             (folder / f"before-command-{before_compute[number]}-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
         if number not in checkpoints:
@@ -106,7 +116,9 @@ async def test_yolo_reference_replay(dut):
                                     expected_output=snapshot_output)
     assert await runtime._axi_read32(axi, runtime.NPU_CMD_STATUS) == runtime.NPU_CMD_STATUS_PASS
     assert await runtime._axi_read32(axi, runtime.NPU_CMD_FAIL_CODE) == 0
-    assert await runtime._axi_read32(axi, runtime.NPU_CMD_DONE_COUNT) == end - first
+    assert await runtime._axi_read32(axi, runtime.NPU_CMD_DONE_COUNT) == end - execution_first
+    if preamble is not None:
+        assert report.get("restore_check", {}).get("mismatches") == 0
     assert len(report["checkpoints"]) == len(checkpoints)
     failures = [check for check in report["checkpoints"] if check["mismatches"]]
     report["snapshot"] = str(snapshot_path)

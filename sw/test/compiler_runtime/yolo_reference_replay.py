@@ -15,6 +15,7 @@ for directory in (AI_ROOT / "hw/rtl/cluster/tb", AI_ROOT / "hw/rtl/cluster/tb/te
     sys.path.insert(0, str(directory))
 
 import test_compiled_model as runtime
+from npu_test_utils import NPU_CMD_TCDM_BASE
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 
 
@@ -37,8 +38,8 @@ def checked_read(record):
 def plan_lut_restore(model, first_command, end_command):
     """Recover one live constant LUT for this bounded initial-cascade replay.
 
-    Memory snapshots omit AFU SRAM. Fresh MMIO writes stage the LUT and set
-    lut_pending; the first AFU START activates it without modifying command flags.
+    Memory snapshots omit AFU SRAM. Identify the original firmware LUT loader;
+    host AXI cannot access AFU MMIO, so restoration needs a safe replay preamble.
     Reject other AFU modes because their residency effects are not modeled here.
     """
     commands, _ = runtime._logical_command_records(model)
@@ -73,6 +74,42 @@ def plan_lut_restore(model, first_command, end_command):
         elif ref != active_ref:
             raise ValueError("Pre-snapshot LUT reuse reference differs from loaded LUT")
     return None
+
+
+def plan_restore_preamble(model, first_command, restore, memory):
+    """Allow replay of the immediately preceding, idempotent LUT command only.
+
+    Original source bytes must still exist, source/destination must be disjoint,
+    and the complete physical destination must already equal LUT(source).
+    Firmware scratch is excluded from both tensor ranges. This is deliberately
+    not a general reconstruction of arbitrary hardware snapshot state.
+    """
+    if restore is None:
+        return None
+    if restore["source_command"] != first_command:
+        raise ValueError("LUT preamble must immediately precede the replay range")
+    commands, _ = runtime._logical_command_records(model)
+    command = commands[first_command - 1]
+    kind, size, flags = struct.unpack_from("<HHI", command)
+    if kind != 12 or size != 64 or flags:
+        raise ValueError("LUT preamble requires an unflagged plain LUT command")
+    src_region, src_index, src = struct.unpack_from("<HHI", command, 16)
+    dst_region, dst_index, dst = struct.unpack_from("<HHI", command, 24)
+    length = struct.unpack_from("<I", command, 40)[0]
+    scratch = NPU_CMD_TCDM_BASE - 0x10100000
+    if (src_region, src_index, dst_region, dst_index) != (6, 0, 6, 0):
+        raise ValueError("LUT preamble requires local TCDM tensors")
+    if (not length or any(v % 32 for v in (src, dst, length)) or
+            max(src, dst) + length > min(len(memory), scratch) or
+            max(src, dst) < min(src + length, dst + length)):
+        raise ValueError("Unsafe LUT preamble ranges: overlap, alignment, or scratch")
+    lut = bytes.fromhex(restore["data_hex"])
+    expected = bytes(lut[value] for value in memory[src:src + length])
+    if memory[dst:dst + length] != expected:
+        raise ValueError("LUT preamble is not byte-idempotent on the saved snapshot")
+    runtime._require_restart_safe_boundary(model, first_command - 1)
+    return {"command": first_command, "source": src, "destination": dst,
+            "bytes": length, "destination_sha256": sha(expected)}
 
 
 def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consumer_tiles=2):
@@ -171,6 +208,9 @@ def load_case(path):
     if "afu_lut_restore" not in case or case["afu_lut_restore"] != plan_lut_restore(
             full_model, first, case["end_command"]):
         raise ValueError("Missing or stale AFU LUT restore plan; prepare a new replay case")
+    if "restore_preamble" not in case or case["restore_preamble"] != plan_restore_preamble(
+            full_model, first, case["afu_lut_restore"], memory):
+        raise ValueError("Missing or stale firmware restore preamble; prepare a new replay case")
     commands, _ = runtime._logical_command_records(full_model)
     loaded_qparams = False
     for command in commands[first:case["end_command"]]:
@@ -274,6 +314,7 @@ def main():
             "afu_lut_restore": plan_lut_restore(full_model, first, end),
             "input_bytes": len(input_data), "temporary_bytes": len(temporary), "output_bytes": len(output),
             "initial_snapshot_checks": initial, "checkpoints": checks}
+    case["restore_preamble"] = plan_restore_preamble(full_model, first, case["afu_lut_restore"], memory)
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
