@@ -31,7 +31,8 @@ async def test_yolo_reference_replay(dut):
     (folder / "replay.nai").write_bytes(model)
     report = {"first_command": first, "end_command": end, "reference": case["reference"],
               "scope": "Only listed intermediate tensors; not full-model output correctness",
-              "status": "running", "checkpoints": [], "restore_preamble": preamble}
+              "status": "running", "checkpoints": [], "restore_preamble": preamble,
+              "start_mode": case.get("start_mode", "snapshot")}
 
     def persist():
         (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")

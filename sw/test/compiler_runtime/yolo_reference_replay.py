@@ -188,6 +188,16 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
     raise ValueError("Not enough supported consumer tiles")
 
 
+def reset_buffers(model):
+    bindings = runtime._model_binding_descriptors(model)
+    sizes = {(direction, index): size for direction, index, size, _ in bindings}
+    if len(bindings) != 3 or set(sizes) != {(1, 0), (2, 0), (3, 0)}:
+        raise ValueError("Fresh replay requires one input, output and temporary binding, all index zero")
+    if any(size <= 0 or size > 0x100000 for size in sizes.values()):
+        raise ValueError("Fresh replay binding exceeds its non-overlapping L2 window")
+    return bytes(runtime.TCDM_TOTAL_BYTES), bytes(sizes[3, 0]), bytes(sizes[2, 0]), sizes[1, 0]
+
+
 def load_case(path):
     case = json.loads(Path(path).read_text())
     if case.get("version") != 1:
@@ -195,12 +205,23 @@ def load_case(path):
     full_model = checked_read(case["model"])
     checked_read(case["source"])
     checked_read(case["firmware"])
-    snapshot = checked_read(case["snapshot"])
-    checked_read(case["input"])
-    first, memory, temporary, output = runtime._verify_yolo320_snapshot(
-        full_model, snapshot, expected_boundary=case["first_command"],
-        expected_tcdm=runtime.TCDM_TOTAL_BYTES,
-        expected_temporary=case["temporary_bytes"], expected_output=case["output_bytes"])
+    input_data = checked_read(case["input"])
+    if case.get("start_mode", "snapshot") == "reset":
+        if case["snapshot"] is not None or case["first_command"] != 0:
+            raise ValueError("Fresh replay cannot reuse a snapshot or skip initial commands")
+        first = 0
+        memory, temporary, output, input_bytes = reset_buffers(full_model)
+        if (len(input_data), case["input_bytes"], case["temporary_bytes"], case["output_bytes"]) != (
+                input_bytes, input_bytes, len(temporary), len(output)):
+            raise ValueError("Fresh replay binding sizes differ from pinned model")
+    elif case.get("start_mode", "snapshot") == "snapshot":
+        snapshot = checked_read(case["snapshot"])
+        first, memory, temporary, output = runtime._verify_yolo320_snapshot(
+            full_model, snapshot, expected_boundary=case["first_command"],
+            expected_tcdm=runtime.TCDM_TOTAL_BYTES,
+            expected_temporary=case["temporary_bytes"], expected_output=case["output_bytes"])
+    else:
+        raise ValueError("Unsupported replay start mode")
     runtime._require_restart_safe_boundary(full_model, first)
     runtime._require_restart_safe_boundary(full_model, case["end_command"])
     if not first < case["end_command"]:
@@ -238,7 +259,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler-root", type=Path, default=AI_ROOT.parent / "neural-compiler")
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--snapshot", type=Path, required=True)
+    start = parser.add_mutually_exclusive_group(required=True)
+    start.add_argument("--snapshot", type=Path)
+    start.add_argument("--from-reset", action="store_true")
+    parser.add_argument("--consumer-tiles", type=int, default=2)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
@@ -250,11 +274,16 @@ def main():
     if sha(full_model) != pinned[".nai"] or sha(firmware_path.read_bytes()) != pinned[".elf"]:
         raise ValueError("Pinned model/ELF identity mismatch")
     source = args.compiler_root / "test/model/yolov8n_320_int8.tflite"
-    saved = json.loads((args.snapshot.parent / "byte_exact.json").read_text())
-    if saved["source_sha256"] != sha(source.read_bytes()) or saved["model_sha256"] != sha(full_model):
-        raise ValueError("Snapshot source/model provenance mismatch")
-    first, memory, temporary, output = runtime._verify_yolo320_snapshot(
-        full_model, args.snapshot.read_bytes(), expected_boundary=saved["prefix_commands"])
+    if args.from_reset:
+        first = 0
+        memory, temporary, output, input_bytes = reset_buffers(full_model)
+        saved = {"checkpoints": []}
+    else:
+        saved = json.loads((args.snapshot.parent / "byte_exact.json").read_text())
+        if saved["source_sha256"] != sha(source.read_bytes()) or saved["model_sha256"] != sha(full_model):
+            raise ValueError("Snapshot source/model provenance mismatch")
+        first, memory, temporary, output = runtime._verify_yolo320_snapshot(
+            full_model, args.snapshot.read_bytes(), expected_boundary=saved["prefix_commands"])
     spec = importlib.util.spec_from_file_location(
         "neural_ai_host_reference", args.compiler_root / "tools/neural_ai_tflite_reference/runtime.py")
     reference_module = importlib.util.module_from_spec(spec)
@@ -264,8 +293,12 @@ def main():
     if coverage["mac_fallback_nodes"]:
         raise ValueError("Unsupported MAC fallback in the Neural-AI reference")
     inp = interpreter.get_input_details()[0]
-    input_path = args.snapshot.parent / "input.bin"
-    input_data = input_path.read_bytes()
+    if args.from_reset:
+        input_path = args.output / "input.bin"
+        input_data = ((np.arange(input_bytes, dtype=np.uint32) * 37 + 11) & 255).astype(np.uint8).tobytes()
+    else:
+        input_path = args.snapshot.parent / "input.bin"
+        input_data = input_path.read_bytes()
     interpreter.set_tensor(inp["index"], np.frombuffer(input_data, np.int8).reshape(inp["shape"]))
     interpreter.invoke()
     initial = []
@@ -294,9 +327,11 @@ def main():
     producer = interpreter.get_tensor(producer_id)
     consumer = interpreter.get_tensor(consumer_id)
     commands, _ = runtime._logical_command_records(full_model)
-    checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape)
+    checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape, args.consumer_tiles)
     runtime._require_restart_safe_boundary(full_model, end)
     args.output.mkdir(parents=True)
+    if args.from_reset:
+        input_path.write_bytes(input_data)
     details = {d["index"]: d for d in interpreter.get_tensor_details()}
     for check in checks:
         tensor_id = consumer_id if check["tensor_role"] == "consumer_conv" else activation_id
@@ -309,7 +344,9 @@ def main():
             "coverage": coverage, "reference_build": json.loads((args.compiler_root /
                 "tools/neural_ai_tflite_reference/build/manifest.json").read_text()),
             "pinned_manifest": str(args.manifest.resolve()), "model": artifact(model_path),
-            "firmware": artifact(firmware_path), "source": artifact(source), "snapshot": artifact(args.snapshot),
+            "firmware": artifact(firmware_path), "source": artifact(source),
+            "start_mode": "reset" if args.from_reset else "snapshot",
+            "snapshot": None if args.from_reset else artifact(args.snapshot),
             "input": artifact(input_path), "first_command": first, "end_command": end,
             "afu_lut_restore": plan_lut_restore(full_model, first, end),
             "input_bytes": len(input_data), "temporary_bytes": len(temporary), "output_bytes": len(output),
@@ -318,7 +355,7 @@ def main():
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
-    print(f"Verified starting snapshot at {first}; replay {first + 1}-{end}; "
+    print(f"Verified {case['start_mode']} start at {first}; replay {first + 1}-{end}; "
           f"byte-exact checkpoints {[c['command'] for c in checks]}; {filename}")
 
 

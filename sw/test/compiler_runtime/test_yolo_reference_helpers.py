@@ -5,7 +5,7 @@ import struct
 import tempfile
 import unittest
 
-from yolo_reference_replay import artifact, checked_read, plan_checkpoints, plan_lut_restore, plan_restore_preamble, runtime
+from yolo_reference_replay import artifact, checked_read, plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers, runtime
 
 
 def linebuffer(layer, address, rows, width, accum=0):
@@ -26,6 +26,21 @@ def lut(src, dst, length, reuse=False):
 
 
 class ReferenceReplayTest(unittest.TestCase):
+    def test_fresh_reset_uses_binding_sizes_and_no_snapshot(self):
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        bindings = b"".join(runtime._binding(direction, 0, dimensions=(1, 1, 1, size))
+                            for direction, size in ((1, 64), (2, 96), (3, 128)))
+        model = bytearray(runtime._package(end, b"", bindings, 0, 1024, 1, 1))
+        # The lightweight package helper counts only public bindings. This test
+        # exercises descriptor decoding, including the explicit temporary one.
+        struct.pack_into("<I", model, 64 + 3 * 32 + 20, 3)
+        memory, temporary, output, input_bytes = reset_buffers(model)
+        self.assertEqual((len(memory), len(temporary), len(output), input_bytes), (524288, 128, 96, 64))
+        self.assertFalse(any(memory + temporary + output))
+        invalid = runtime._package(end, b"", bindings[:128], 0, 1024, 1, 1)
+        with self.assertRaisesRegex(ValueError, "one input, output and temporary"):
+            reset_buffers(invalid)
+
     def commands(self):
         return [linebuffer(0, 128, 4, 2), lut(128, 0, 128),
                 linebuffer(2, 0, 1, 2), linebuffer(2, 32, 1, 2)]

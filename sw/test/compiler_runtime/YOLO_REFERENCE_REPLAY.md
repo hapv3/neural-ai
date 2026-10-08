@@ -1,6 +1,6 @@
 # YOLO Neural-AI reference replay
 
-This bounded diagnostic resumes a pinned first-cascade memory snapshot and
+This bounded diagnostic starts from reset or resumes a pinned first-cascade memory snapshot and
 checks intermediate INT8 tensors against the Neural-AI hybrid TFLite runtime.
 It is not a full-model correctness test or a general snapshot-state restorer.
 Conv/Depthwise/FC use Neural-AI reference arithmetic; other operators still use
@@ -28,6 +28,34 @@ and writes `case.json` with artifact hashes and reference build provenance.
 Supported mapping is limited to the initial batch-one, C<=32 Conv/SiLU cascade
 and the first two contiguous tiles of its Conv consumer. Async/partial or
 multi-group mappings are rejected instead of guessed.
+
+### After recompiling the model
+
+A different NAI hash invalidates previous snapshots. Pin the new `.nai` and
+unchanged compatible `.elf` next to a manifest containing their SHA-256 values
+under `.nai` and `.elf`, plus an `environment` object. Then start from reset:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 sw/test/compiler_runtime/yolo_reference_replay.py \
+  --manifest hw/rtl/cluster/tb/sim/test_yolo_neural_reference_fresh_20261008/artifacts/dma_events.json \
+  --from-reset --consumer-tiles 1 \
+  --output hw/rtl/cluster/tb/sim/test_yolo_neural_reference_fresh_20261008/run
+```
+
+`--from-reset` and `--snapshot` are mutually exclusive. Reset mode derives
+buffer sizes from the model bindings, zero-initializes TCDM/temporary/output
+memory and saves deterministic input bytes `(index * 37 + 11) & 255`.
+It accepts exactly one input, output and temporary binding, each index zero and
+at most 1 MiB, matching the diagnostic's non-overlapping L2 address windows.
+No snapshot or AFU restoration preamble is used. Commands begin at 1 and
+checkpoint numbers are derived from the new ABI, not copied from an older run.
+`--consumer-tiles` defaults to 2; use 1 for a shorter first-consumer diagnostic.
+Mapping still rejects a request that crosses a producer restart.
+
+For the pinned 2026-10-08 artifact this selects commands 1–56, with SiLU checks
+at 15/25 (35840 active bytes each) and consumer Conv at 56 (17920 active bytes).
+These preparation results are not numerical PASS; the simulation must compare
+the actual outputs. Old-model command numbers below apply only to snapshot mode.
 
 ## Replay
 
