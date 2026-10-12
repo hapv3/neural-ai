@@ -27,13 +27,15 @@ derives checkpoint addresses and rows from commands, saves expected binaries,
 and writes `case.json` with artifact hashes and reference build provenance.
 
 Supported intermediate mapping is limited to the initial batch-one, C<=32
-Conv/SiLU cascade, including rolling producer storage and async producers with
-explicit waits. Async consumers, partial outputs and multi-group mappings are
-rejected instead of guessed.
+Conv/SiLU cascade, including rolling producer storage and async jobs with
+explicit waits. Async consumer outputs are compared at WAIT completion, not at
+submission. Partial outputs and multi-group mappings are rejected instead of
+guessed. Disjoint later-layer LUT work can overlap an async consumer, but is not
+silently counted as a verified cascade tensor.
 
 ## Checkpoint-first workflow
 
-Verify short bounded gates before enabling full-model regression. A checkpoint
+Verify numerical checkpoints before enabling full-model regression. A checkpoint
 PASS means zero byte differences, not merely successful command completion.
 Add `--fail-fast` to stop at the first mismatching intermediate checkpoint.
 The report is saved as `FAIL` with `failed_command`, complete tensor/row/address
@@ -58,6 +60,33 @@ both the stored data and the required hardware configuration restoration are
 verified. In particular, snapshot 107 omits a LUT reused by subsequent commands;
 use reset replay for this gate. Advance to subsequent bounded gates only after
 this gate passes, then run full regression after all numerical gates pass.
+
+### Run the complete supported checkpoint list in one pass
+
+Use `--all-cascade-checkpoints` to derive every tile through completion of the
+initial consumer tensor. Omit `--fail-fast` when collecting all comparisons and
+checking the result after the run; any mismatch still makes the final verdict
+FAIL. Firmware errors or timeout remain ERROR, never numerical PASS.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 sw/test/compiler_runtime/yolo_reference_replay.py \
+  --manifest hw/rtl/cluster/tb/sim/test_yolo_external_psum_20261012/artifacts/dma_events.json \
+  --from-reset --all-cascade-checkpoints --timeout-cycles 4000000 \
+  --output hw/rtl/cluster/tb/sim/test_yolo_external_psum_20261012/run-all-cascade
+```
+
+For the pinned 2026-10-12 artifact this derives 33 checkpoints through command
+399: all 25,600 stem SiLU rows (409,600 bytes), and all 6,400 consumer Conv rows
+(204,800 bytes). Coverage validation rejects missing, duplicated or overlapping
+logical rows. The last Conv submits at 363 and completes at WAIT 399;
+`submit_command` identifies where the pre-compute TCDM dump was captured.
+This batch supersedes separate 211/260/262/311/313/360 runs: earlier checkpoints
+are collected while the same simulation advances, without repeating boot.
+
+The scope is the complete initial cascade, **not every YOLO layer**. Later
+layer/AFU/DFL tensors still require their own mappings before full numerical
+regression can be called covered. Actual bytes, expected hashes and mismatch
+statistics are retained for every listed checkpoint, with command PMU CSV.
 
 ### After recompiling the model
 

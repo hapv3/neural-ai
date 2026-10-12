@@ -38,6 +38,7 @@ async def run_reference_case(dut, case_path):
               "model": case["model"], "source": case["source"], "firmware": case["firmware"],
               "input": case["input"], "full_graph": full_graph,
               "fail_fast": case.get("fail_fast", False),
+              "cascade_coverage": case.get("cascade_coverage"),
               "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
                         if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
@@ -72,7 +73,8 @@ async def run_reference_case(dut, case_path):
         await runtime.write_l2_bytes(dut, address, data)
     records = runtime._selected_command_trace_records(full_model, execution_first, end)
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
-    before_compute = {check["command"] - 1: check["command"] for check in case["checkpoints"]
+    before_compute = {check.get("submit_command", check["command"]) - 1:
+                      check.get("submit_command", check["command"]) for check in case["checkpoints"]
                       if check["tensor_role"] == "consumer_conv"}
 
     def capture(index, counters):

@@ -119,18 +119,22 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
     Addresses/counts come from the ABI, not historical command numbers. Track
     completed producer C32 rows separately from an outstanding producer job;
     a LUT may read only completed rows, including across adjacent output tiles.
-    Consumer async/partial/multi-group jobs remain deliberately unsupported.
+    Async consumers are checked at their explicit wait, not at submission.
+    Partial/multi-group jobs remain deliberately unsupported. None requests all
+    tiles through completion of the initial consumer tensor.
     Mapping assumes the first two distinct linebuffer layers follow the first two
     source Conv operators, with producer stripes issued in logical raster order.
     """
-    if consumer_tiles < 1 or any(len(s) != 4 or s[0] != 1 or not 0 < s[3] <= 32
-                                 for s in (conv_shape, consumer_shape)):
+    if ((consumer_tiles is not None and consumer_tiles < 1) or
+            any(len(s) != 4 or s[0] != 1 or not 0 < s[3] <= 32
+                for s in (conv_shape, consumer_shape))):
         raise ValueError("Only single-batch, single-C32-group initial cascades are supported")
     producer_layer = None
     consumer_layer = None
     producer_rows = 0
     producer_map = {}
     pending_producer = None
+    pending_consumer = None
     activation_layer = None
     consumer_base = None
     consumer_rows = 0
@@ -147,11 +151,33 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
         invalidate(address, rows * 32)
         producer_map.update((address + row * 32, first_row + row) for row in range(rows))
 
+    def overlaps_consumer(address, length):
+        if pending_consumer is None:
+            return False
+        start = pending_consumer["address"]
+        return address < start + pending_consumer["rows"] * 32 and start < address + length
+
+    def finished():
+        return (consumer_rows == consumer_shape[1] * consumer_shape[2]
+                if consumer_tiles is None else count == consumer_tiles)
+
     for index, command in enumerate(commands, 1):
         kind, _, _, layer, _ = struct.unpack_from("<HHIII", command)
         if kind == 32:
             raise ValueError("Async AFU requires a completion-aware mapping")
         if kind in (2, 3, 4, 24, 25, 26):
+            src_region, _, source = struct.unpack_from("<HHI", command, 16)
+            source_length = struct.unpack_from("<I", command, 32)[0]
+            if kind in (3, 4, 25, 26):
+                stride = struct.unpack_from("<I", command, 36)[0]
+                repetitions = struct.unpack_from("<I", command, 44)[0]
+                source_length += stride * (repetitions - 1)
+            if kind in (4, 26):
+                stride = struct.unpack_from("<I", command, 48)[0]
+                repetitions = struct.unpack_from("<I", command, 56)[0]
+                source_length += stride * (repetitions - 1)
+            if src_region == 6 and overlaps_consumer(source, source_length):
+                raise ValueError("DMA reads outstanding consumer output before its wait")
             region, ref_index, destination = struct.unpack_from("<HHI", command, 24)
             if region == 6:
                 length = struct.unpack_from("<I", command, 32)[0]
@@ -163,6 +189,8 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                     length += stride * (repetitions - 1)
                 if ref_index or length <= 0:
                     raise ValueError("Invalid local DMA destination")
+                if overlaps_consumer(destination, length):
+                    raise ValueError("DMA touches outstanding consumer output before its wait")
                 # Conservatively invalidate stride gaps as well. Missing maps
                 # are safer than treating DMA-overwritten bytes as Conv output.
                 invalidate(destination, length)
@@ -171,10 +199,19 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                     if destination < start + count_rows * 32 and start < destination + length:
                         raise ValueError("DMA touches outstanding producer output before its wait")
         elif kind == 30:
-            if pending_producer is None:
-                raise ValueError("Systolic wait has no mapped outstanding producer")
-            complete_producer(pending_producer)
-            pending_producer = None
+            if pending_producer is not None:
+                complete_producer(pending_producer)
+                pending_producer = None
+            elif pending_consumer is not None:
+                if index <= first_command:
+                    raise ValueError("Snapshot is already past the first consumer tile")
+                checks.append({**pending_consumer, "command": index})
+                pending_consumer = None
+                count += 1
+                if finished():
+                    return checks, index
+            else:
+                raise ValueError("Systolic wait has no mapped outstanding job")
         elif kind in (9, 29):
             if producer_layer is None:
                 producer_layer = layer
@@ -184,6 +221,8 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                 raise ValueError("Partial/empty linebuffer outputs cannot be checked as INT8")
             if pending_producer is not None:
                 raise ValueError("Linebuffer job starts before the mapped producer wait")
+            if pending_consumer is not None:
+                raise ValueError("Linebuffer job starts before the mapped consumer wait")
             if layer == producer_layer:
                 if cols != conv_shape[2] or pitch != cols * 32:
                     raise ValueError("Producer stripes are not spatial C32 rows")
@@ -197,8 +236,6 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                 else:
                     complete_producer(tile)
             else:
-                if kind == 29:
-                    raise ValueError("Async consumer checkpoints require completion-aware output capture")
                 if consumer_layer is None:
                     consumer_layer = layer
                     consumer_base = address
@@ -211,17 +248,21 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                 if index <= first_command:
                     raise ValueError("Snapshot is already past the first consumer tile")
                 invalidate(address, rows * 32)
-                checks.append({"command": index, "tensor_role": "consumer_conv", "address": address,
-                               "rows": rows, "channels": consumer_shape[3], "row_stride": pitch,
-                               "tile_cols": cols, "reference_first_row": consumer_rows})
+                check = {"command": index, "tensor_role": "consumer_conv", "address": address,
+                         "rows": rows, "channels": consumer_shape[3], "row_stride": pitch,
+                         "tile_cols": cols, "reference_first_row": consumer_rows}
                 consumer_rows += rows
-                count += 1
-                if count == consumer_tiles:
-                    return checks, index
+                if kind == 29:
+                    pending_consumer = {**check, "submit_command": index}
+                else:
+                    checks.append(check)
+                    count += 1
+                    if finished():
+                        return checks, index
         elif kind == 12 and producer_rows:
             if activation_layer is None:
                 activation_layer = layer
-            if layer != activation_layer:
+            if layer != activation_layer and pending_consumer is None:
                 raise ValueError("Requested consumer tiles cross another activation layer")
             src_region, src_index, src = struct.unpack_from("<HHI", command, 16)
             dst_region, dst_index, dst = struct.unpack_from("<HHI", command, 24)
@@ -230,6 +271,13 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                     length <= 0 or any(value % 32 for value in (src, dst, length)) or
                     max(src, dst) + length > NPU_CMD_TCDM_BASE - 0x10100000):
                 raise ValueError("Expected an initial C32 TCDM LUT activation")
+            if any(overlaps_consumer(address, length) for address in (src, dst)):
+                raise ValueError("LUT touches outstanding consumer output before its wait")
+            if layer != activation_layer:
+                # The scheduler may overlap the next layer's disjoint LUT tiles
+                # with the last async consumer. These are not cascade checks.
+                invalidate(dst, length)
+                continue
             if pending_producer is not None:
                 start, count_rows, _ = pending_producer
                 if any(address < start + count_rows * 32 and start < address + length
@@ -247,7 +295,26 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                                "tile_cols": conv_shape[2], "reference_first_row": first_row})
         elif kind not in (0, 1, 5, 27):
             raise ValueError(f"Unsupported command {kind} in initial-cascade mapping")
-    raise ValueError("Not enough supported consumer tiles")
+    raise ValueError("Not enough completed supported consumer tiles")
+
+
+def validate_cascade_coverage(checks, shapes):
+    """Prove every logical row of both supported tensors is compared once."""
+    coverage = {}
+    for role in ("producer_activation", "consumer_conv"):
+        shape = shapes[role]
+        if len(shape) != 4 or shape[0] != 1 or any(type(v) is not int or v <= 0 for v in shape):
+            raise ValueError("Invalid complete-cascade tensor shape")
+        rows = 0
+        for check in sorted((c for c in checks if c["tensor_role"] == role),
+                            key=lambda c: c["reference_first_row"]):
+            if check["reference_first_row"] != rows or check["rows"] <= 0 or check["channels"] != shape[3]:
+                raise ValueError(f"Incomplete or overlapping cascade checkpoints: {role}")
+            rows += check["rows"]
+        if rows != shape[1] * shape[2]:
+            raise ValueError(f"Incomplete cascade checkpoints: {role}")
+        coverage[role] = {"rows": rows, "channels": shape[3], "bytes": rows * shape[3]}
+    return coverage
 
 
 def reset_buffers(model):
@@ -329,6 +396,8 @@ def load_case(path):
         raise ValueError("Unsupported replay case version")
     if type(case.get("fail_fast", False)) is not bool:
         raise ValueError("fail_fast must be boolean")
+    if type(case.get("all_cascade_checkpoints", False)) is not bool:
+        raise ValueError("all_cascade_checkpoints must be boolean")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -372,7 +441,7 @@ def load_case(path):
     for command in commands[first:case["end_command"]]:
         kind = struct.unpack_from("<H", command)[0]
         loaded_qparams |= kind == 5
-        if kind == 9 and not loaded_qparams:
+        if kind in (9, 29) and not loaded_qparams:
             raise ValueError("First replay Conv would reuse missing requant registers")
     seen = set()
     for check in case["checkpoints"]:
@@ -387,6 +456,12 @@ def load_case(path):
                     check["row_stride"], check["tile_cols"])
     if not seen and not case.get("full_graph", False):
         raise ValueError("Replay has no byte-exact checkpoints")
+    if case.get("all_cascade_checkpoints", False):
+        if case.get("start_mode") != "reset" or case.get("full_graph", False):
+            raise ValueError("Complete-cascade checkpoint batches require bounded reset replay")
+        coverage = validate_cascade_coverage(case["checkpoints"], case["cascade_shapes"])
+        if coverage != case["cascade_coverage"]:
+            raise ValueError("Stale complete-cascade coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -401,6 +476,8 @@ def main():
     start.add_argument("--from-reset", action="store_true")
     parser.add_argument("--consumer-tiles", type=int, default=2,
                         help="YOLO cascade checkpoints; 0 skips these only when verifying full output")
+    parser.add_argument("--all-cascade-checkpoints", action="store_true",
+                        help="Run every supported initial-cascade checkpoint in one bounded reset replay")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -413,6 +490,8 @@ def main():
         parser.error("Choose a fresh output directory")
     if args.full_graph and not args.from_reset:
         parser.error("--full-graph requires --from-reset; memory-only snapshots omit hardware registers")
+    if args.all_cascade_checkpoints and (not args.from_reset or args.full_graph or not args.consumer_tiles):
+        parser.error("--all-cascade-checkpoints requires bounded --from-reset with cascade mapping enabled")
     if args.timeout_cycles is not None and args.timeout_cycles <= 0:
         parser.error("--timeout-cycles must be positive")
     if args.consumer_tiles < 0 or (args.consumer_tiles == 0 and not args.full_graph):
@@ -479,7 +558,8 @@ def main():
                 raise ValueError("Second Conv is not the stem activation consumer")
         producer = interpreter.get_tensor(producer_id)
         consumer = interpreter.get_tensor(consumer_id)
-        checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape, args.consumer_tiles)
+        checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape,
+                                       None if args.all_cascade_checkpoints else args.consumer_tiles)
     if args.full_graph:
         end = len(commands)
     runtime._require_restart_safe_boundary(full_model, end)
@@ -525,6 +605,11 @@ def main():
             "input_bytes": len(input_data), "temporary_bytes": len(temporary), "output_bytes": len(output),
             "initial_snapshot_checks": initial, "checkpoints": checks}
     case["restore_preamble"] = plan_restore_preamble(full_model, first, case["afu_lut_restore"], memory)
+    if args.all_cascade_checkpoints:
+        case["all_cascade_checkpoints"] = True
+        case["cascade_shapes"] = {"producer_activation": list(map(int, producer.shape)),
+                                  "consumer_conv": list(map(int, consumer.shape))}
+        case["cascade_coverage"] = validate_cascade_coverage(checks, case["cascade_shapes"])
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)

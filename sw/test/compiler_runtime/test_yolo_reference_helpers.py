@@ -11,7 +11,7 @@ import numpy as np
 from yolo_reference_replay import (
     artifact, checked_read, execution_model, invocation_address, load_case, output_comparison,
     plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers,
-    runtime, save_checkpoint_result, validate_output_scope,
+    runtime, save_checkpoint_result, validate_cascade_coverage, validate_output_scope,
 )
 
 
@@ -337,15 +337,101 @@ class ReferenceReplayTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 plan_checkpoints(commands, 1, (1, 2, 2, 2), (1, 1, 2, 3))
 
-    def test_rejects_async_mapping_or_multigroup_tensor(self):
+    def test_rejects_async_consumer_restart_without_wait_or_multigroup_tensor(self):
         commands = self.commands()
         async_command = bytearray(commands[2])
         struct.pack_into("<H", async_command, 0, 29)
         commands[2] = bytes(async_command)
-        with self.assertRaisesRegex(ValueError, "Async"):
+        with self.assertRaisesRegex(ValueError, "consumer wait"):
             plan_checkpoints(commands, 1, (1, 2, 2, 2), (1, 1, 2, 3))
         with self.assertRaises(ValueError):
             plan_checkpoints(self.commands(), 1, (1, 2, 2, 33), (1, 1, 2, 3))
+
+    def async_consumer_commands(self):
+        commands = self.commands()
+        commands[-1] = linebuffer(2, 32, 1, 2, async_job=True)
+        # A later layer can run disjoint LUT work while the consumer finishes.
+        later = bytearray(lut(128, 256, 32))
+        struct.pack_into("<I", later, 8, 3)
+        commands.extend((bytes(later), struct.pack("<HHIII", 30, 32, 0, 2, 0).ljust(32, b"\0")))
+        return commands
+
+    def test_async_consumer_is_checked_at_wait_not_submission(self):
+        checks, end = plan_checkpoints(self.async_consumer_commands(), 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        self.assertEqual(end, 6)
+        self.assertEqual([c["command"] for c in checks], [2, 3, 6])
+        self.assertEqual(checks[-1]["submit_command"], 4)
+        self.assertEqual(checks[-1]["reference_first_row"], 1)
+
+    def test_all_cascade_tiles_are_derived_from_tensor_extent(self):
+        shapes = {"producer_activation": (1, 2, 2, 2), "consumer_conv": (1, 1, 2, 3)}
+        checks, end = plan_checkpoints(self.async_consumer_commands(), 0, *shapes.values(), None)
+        coverage = validate_cascade_coverage(checks, shapes)
+        self.assertEqual((end, coverage["producer_activation"]["bytes"], coverage["consumer_conv"]["bytes"]),
+                         (6, 8, 6))
+
+    def test_incomplete_or_duplicate_cascade_rows_are_rejected(self):
+        shapes = {"producer_activation": (1, 2, 2, 2), "consumer_conv": (1, 1, 2, 3)}
+        checks, _ = plan_checkpoints(self.commands(), 0, *shapes.values(), None)
+        for invalid in (checks[:-1], checks + [checks[0]], checks[1:]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "cascade checkpoints"):
+                validate_cascade_coverage(invalid, shapes)
+
+    def test_complete_cascade_case_revalidates_row_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.full_case(folder)
+            shapes = {"producer_activation": [1, 2, 2, 2], "consumer_conv": [1, 1, 2, 3]}
+            checks, _ = plan_checkpoints(self.commands(), 0, *shapes.values(), None)
+            for check in checks:
+                check["command"] += 1  # The packaged fixture starts with LOAD_QPARAMS.
+                expected = folder / f"check-{check['command']}.bin"
+                expected.write_bytes(bytes(check["rows"] * check["channels"]))
+                check["expected"] = artifact(expected)
+            case.update(full_graph=False, final_output=None, all_cascade_checkpoints=True,
+                        cascade_shapes=shapes, checkpoints=checks,
+                        cascade_coverage=validate_cascade_coverage(checks, shapes))
+            path = folder / "case.json"
+            path.write_text(json.dumps(case))
+            self.assertEqual(load_case(path)[0]["cascade_coverage"]["consumer_conv"]["bytes"], 6)
+            case["cascade_coverage"]["consumer_conv"]["bytes"] = 99
+            path.write_text(json.dumps(case))
+            with self.assertRaisesRegex(ValueError, "Stale complete-cascade coverage"):
+                load_case(path)
+            case["checkpoints"] = checks[:-1]
+            path.write_text(json.dumps(case))
+            with self.assertRaisesRegex(ValueError, "Incomplete cascade checkpoints"):
+                load_case(path)
+
+    def test_async_consumer_missing_wait_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Not enough completed"):
+            plan_checkpoints(self.async_consumer_commands()[:-1], 0, (1, 2, 2, 2), (1, 1, 2, 3))
+
+    def test_lut_cannot_touch_pending_consumer_output(self):
+        for source, destination in ((32, 256), (128, 32)):
+            commands = self.async_consumer_commands()
+            later = bytearray(lut(source, destination, 32))
+            struct.pack_into("<I", later, 8, 3)
+            commands[-2] = bytes(later)
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "outstanding consumer"):
+                plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+
+    def test_dma_cannot_read_or_write_pending_consumer_output(self):
+        for kind in (2, 3, 4, 24, 25, 26):
+            for source, destination in ((32, 256), (128, 32)):
+                command = bytearray(64)
+                struct.pack_into("<HHIII", command, 0, kind, 64, 0, 3, 0)
+                struct.pack_into("<HHI", command, 16, 6, 0, source)
+                struct.pack_into("<HHI", command, 24, 6, 0, destination)
+                struct.pack_into("<I", command, 32, 32)
+                if kind in (3, 4, 25, 26):
+                    struct.pack_into("<3I", command, 36, 32, 32, 1)
+                if kind in (4, 26):
+                    struct.pack_into("<3I", command, 48, 32, 32, 1)
+                commands = self.async_consumer_commands()
+                commands[-2] = bytes(command)
+                with self.subTest(kind=kind, source=source), self.assertRaisesRegex(ValueError, "outstanding consumer"):
+                    plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
 
     def test_lut_source_offset_maps_reference_rows(self):
         commands = self.commands()
