@@ -494,6 +494,8 @@ module systolic_controller #(
         .psum_buf_needs_external_i       (psum_buf_needs_external),
         .psum_buf_final_tile_i           (psum_buf_final_tile),
         .k_tile_idx_i                    (k_tile_idx_q),
+        .external_kgen_psum_i            (linebuf_kgen_multi && !psum_buf_active),
+        .k_tiles_i                      (cfg_linebuf_k_tiles_i),
         .ofm_base_ptr_i                  (cfg_sys_ofm_ptr_i),
         .psum_base_ptr_i                 (cfg_sys_psum_ptr_i),
         .row_count_i                     (cfg_sys_dim_m_i),

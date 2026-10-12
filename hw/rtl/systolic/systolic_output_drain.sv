@@ -30,6 +30,9 @@ module systolic_output_drain #(
     input  logic psum_buf_needs_external_i,
     input  logic psum_buf_final_tile_i,
     input  logic [31:0] k_tile_idx_i,
+    // Automatic multi-K jobs which cannot use the internal PSUM buffer.
+    input  logic external_kgen_psum_i,
+    input  logic [31:0] k_tiles_i,
 
     input  logic [31:0] ofm_base_ptr_i,
     input  logic [31:0] psum_base_ptr_i,
@@ -112,6 +115,13 @@ module systolic_output_drain #(
     localparam int unsigned OFM_ELEMS_PER_OBI = DATA_WIDTH / OFM_ELEM_WIDTH;
     localparam int unsigned PSUM_BUF_M = 256;
     localparam int unsigned PSUM_BUF_ADDR_WIDTH = $clog2(PSUM_BUF_M);
+
+    logic write_external_psum;
+    logic [31:0] write_row_stride_bytes;
+    assign write_external_psum = external_kgen_psum_i &&
+                                 ((k_tile_idx_i + 32'd1) < k_tiles_i);
+    assign write_row_stride_bytes = write_external_psum ?
+                                    psum_row_stride_bytes_i : ofm_row_stride_bytes_i;
 
     typedef logic [ARRAY_DIM-1:0][OFM_ELEM_WIDTH-1:0] ofm_row_t;
 
@@ -558,7 +568,7 @@ module systolic_output_drain #(
                     if (obi_o_gnt_i == 4'b1111) begin
                         ofm_fifo_pop = 1'b1;
                         o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
-                                                   ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                                   write_row_stride_bytes, ofm_tile_cols_i);
                         o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
                         drain_cnt_d = drain_cnt_q - 1'b1;
                     end
@@ -595,7 +605,7 @@ module systolic_output_drain #(
                             ofm_fifo_pop = 1'b1;
                             psum_fifo_pop = 1'b1;
                             o_ptr_d = next_strided_ptr(o_ptr_q, o_col_q, 32'(OFM_ROW_BYTES),
-                                                       ofm_row_stride_bytes_i, ofm_tile_cols_i);
+                                                       write_row_stride_bytes, ofm_tile_cols_i);
                             o_col_d = next_strided_col(o_col_q, ofm_tile_cols_i);
                             drain_cnt_d = drain_cnt_q - 1'b1;
                         end
@@ -693,7 +703,10 @@ module systolic_output_drain #(
         // Lifecycle events override work serviced in the same cycle, matching
         // their former placement after the drain service in the parent FSM.
         if (job_start_i) begin
-            o_ptr_d = ofm_base_ptr_i;
+            // The scheduler resets its K index on this same edge; do not use
+            // the preceding job's index to select the first destination.
+            o_ptr_d = (external_kgen_psum_i && (k_tiles_i > 32'd1)) ?
+                      psum_base_ptr_i : ofm_base_ptr_i;
             a_ptr_d = psum_base_ptr_i;
             o_col_d = '0;
             a_col_d = '0;
@@ -713,7 +726,10 @@ module systolic_output_drain #(
             end
         end else begin
             if (tile_advance_i) begin
-                o_ptr_d = ofm_base_ptr_i;
+                // tile_index advances on this edge too. Only the final tile
+                // writes OFM; all preceding tiles write raw INT32 to PSUM.
+                o_ptr_d = (external_kgen_psum_i && ((k_tile_idx_i + 32'd2) < k_tiles_i)) ?
+                          psum_base_ptr_i : ofm_base_ptr_i;
                 a_ptr_d = psum_base_ptr_i;
                 o_col_d = '0;
                 a_col_d = '0;

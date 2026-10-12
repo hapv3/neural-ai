@@ -33,6 +33,8 @@ def drive_defaults(dut):
     dut.psum_buf_needs_external_i.value = 0
     dut.psum_buf_final_tile_i.value = 0
     dut.k_tile_idx_i.value = 0
+    dut.external_kgen_psum_i.value = 0
+    dut.k_tiles_i.value = 1
     dut.ofm_base_ptr_i.value = 0x4000
     dut.psum_base_ptr_i.value = 0x8000
     dut.row_count_i.value = 1
@@ -95,6 +97,111 @@ async def pulse(dut, signal):
     await RisingEdge(dut.clk_i)
     await FallingEdge(dut.clk_i)
     signal.value = 0
+
+
+@cocotb.test()
+async def output_drain_external_multik_selects_destination_and_stride(dut):
+    """Separate PSUM/OFM, unequal strides, dirty PSUM and stalled OBI grants."""
+    cocotb.start_soon(Clock(dut.clk_i, 2, unit="ns").start())
+    await reset(dut)
+    psum, ofm = 0x8000, 0x4000
+    memory = bytearray([0xA5] * 0x10000)
+    pending_mask, pending_data = 0, 0
+    ticks = 0
+    writes = []
+    reads = []
+
+    async def cycle(valid=0, values=None):
+        nonlocal pending_mask, pending_data, ticks
+        await FallingEdge(dut.clk_i)
+        dut.result_valid_i.value = valid
+        dut.result_i.value = pack_lanes(values or [0] * LANES, 32)
+        dut.obi_o_gnt_i.value = 0 if ticks % 4 == 0 else 15
+        dut.obi_o_rvalid_i.value = pending_mask
+        dut.obi_o_rdata_i.value = pending_data
+        await Timer(1, unit="ps")
+        accepted = valid and int(dut.result_ready_o.value)
+        req = int(dut.obi_o_req_o.value) & int(dut.obi_o_gnt_i.value)
+        we = int(dut.obi_o_we_o.value)
+        addresses = int(dut.obi_o_addr_o.value)
+        data = int(dut.obi_o_wdata_o.value)
+        enables = int(dut.obi_o_be_o.value)
+        pending_mask, pending_data = 0, 0
+        for port in range(4):
+            if not (req & (1 << port)):
+                continue
+            address = (addresses >> (port * 32)) & 0xFFFFFFFF
+            assert address + 32 <= len(memory)
+            if we & (1 << port):
+                writes.append(address)
+                beat = ((data >> (port * 256)) & ((1 << 256) - 1)).to_bytes(32, "little")
+                for byte in range(32):
+                    if (enables >> (port * 32 + byte)) & 1:
+                        memory[address + byte] = beat[byte]
+            else:
+                reads.append(address)
+                pending_mask |= 1 << port
+                pending_data |= int.from_bytes(memory[address:address + 32], "little") << (port * 256)
+        await RisingEdge(dut.clk_i)
+        await Timer(1, unit="ps")
+        ticks += 1
+        return accepted
+
+    dut.external_kgen_psum_i.value = 1
+    dut.k_tiles_i.value = 3
+    dut.row_count_i.value = 3
+    dut.ofm_tile_cols_i.value = 2
+    dut.ofm_row_stride_bytes_i.value = 128
+    dut.psum_row_stride_bytes_i.value = 352
+    dut.requant_enable_i.value = 1
+    dut.job_start_i.value = 1
+    # Deliberately leave the preceding job's last index until job_start.
+    dut.k_tile_idx_i.value = 2
+    await cycle()
+    dut.job_start_i.value = 0
+    dut.k_tile_idx_i.value = 0
+    dut.drain_active_i.value = 1
+    expected = [[0] * LANES for _ in range(3)]
+    for tile in range(3):
+        if tile:
+            dut.tile_advance_i.value = 1
+            await cycle()
+            dut.tile_advance_i.value = 0
+            dut.k_tile_idx_i.value = tile
+        dut.accum_active_i.value = int(tile != 0)
+        dut.requant_active_i.value = int(tile == 2)
+        # tile_start must see the new accumulation mode, as in the controller.
+        if tile:
+            dut.tile_start_i.value = 1
+            await cycle()
+            dut.tile_start_i.value = 0
+        begin_writes, begin_reads = len(writes), len(reads)
+        sent = 0
+        for _ in range(300):
+            values = [tile + 1 + sent + lane % 3 for lane in range(LANES)]
+            if await cycle(sent < 3, values):
+                expected[sent] = [a + b for a, b in zip(expected[sent], values)]
+                sent += 1
+            await Timer(1, unit="ps")
+            if sent == 3 and int(dut.remaining_rows_o.value) == 0 and int(dut.ofm_empty_o.value):
+                break
+        else:
+            raise AssertionError(f"Drain timeout at tile {tile}")
+        expected_addresses = []
+        for row in range(3):
+            width, stride, base = (1, 128, ofm) if tile == 2 else (4, 352, psum)
+            address = base + (row // 2) * stride + (row % 2) * width * 32
+            expected_addresses.extend(address + port * 32 for port in range(width))
+            data = bytes(expected[row]) if tile == 2 else pack_lanes(expected[row], 32).to_bytes(128, "little")
+            assert memory[address:address + len(data)] == data
+        assert writes[begin_writes:] == expected_addresses
+        expected_reads = [] if tile == 0 else [
+            psum + (row // 2) * 352 + (row % 2) * 128 + port * 32
+            for row in range(3) for port in range(4)]
+        assert reads[begin_reads:] == expected_reads
+    # No writes are allowed in the gaps or outside the exact two footprints.
+    touched = {address + byte for address in writes for byte in range(32)}
+    assert all(value == 0xA5 for address, value in enumerate(memory) if address not in touched)
 
 
 @cocotb.test()

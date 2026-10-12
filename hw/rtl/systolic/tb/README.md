@@ -30,6 +30,24 @@ The matrix covers:
 
 ## Running
 
+The automatic multi-K accumulation regression is
+`test_systolic_controller_external_psum`. It runs consecutive jobs at
+`M=255,256,257,560` with C16 generic and C32 group-stationary KGEN schedules.
+For jobs above the 256-row internal PSUM capacity, intermediate K tiles must
+write INT32 data to the external PSUM base and use its row stride; the final
+tile writes requantized INT8 data to OFM. The test compares all 512 KiB of
+TCDM, including dirty PSUM, padding between rows, input and weight guards.
+
+Run it from `hw/rtl/systolic`:
+
+```bash
+make -j10 MODULE=test_systolic_controller_external_psum VERILATOR_JOBS=10
+```
+
+`test_systolic_output_drain` also checks external PSUM destination selection
+across tile transitions, unequal OFM/PSUM strides, OBI stalls, and a stale K
+index left by the preceding job.
+
 Run these commands from `hw/rtl/systolic/tb`.
 
 Smoke run:

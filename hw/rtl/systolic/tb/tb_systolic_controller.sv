@@ -5,7 +5,8 @@ module tb_systolic_controller;
     localparam int unsigned ADDR_WIDTH = 32;
     localparam int unsigned DATA_WIDTH = 256;
     localparam int unsigned CFG_DATA_WIDTH = 32;
-    localparam int unsigned TCDM_WORDS = 4096;
+    localparam int unsigned TCDM_WORDS = 16384;
+    localparam int unsigned TCDM_ADDR_MSB = $clog2(TCDM_WORDS) + 4;
 
     logic clk_i;
     logic rst_ni;
@@ -156,11 +157,11 @@ module tb_systolic_controller;
             obi_b_rdata_i <= '0;
         end else begin
             obi_i_rvalid_i <= obi_i_req_o && obi_i_gnt_i && !obi_i_we_o;
-            obi_i_rdata_i <= tcdm_mem[obi_i_addr_o[16:5]];
+            obi_i_rdata_i <= tcdm_mem[obi_i_addr_o[TCDM_ADDR_MSB:5]];
             obi_w_rvalid_i <= obi_w_req_o && obi_w_gnt_i && !obi_w_we_o;
-            obi_w_rdata_i <= tcdm_mem[obi_w_addr_o[16:5]];
+            obi_w_rdata_i <= tcdm_mem[obi_w_addr_o[TCDM_ADDR_MSB:5]];
             obi_b_rvalid_i <= obi_b_req_o && obi_b_gnt_i && !obi_b_we_o;
-            obi_b_rdata_i <= tcdm_mem[obi_b_addr_o[16:5]];
+            obi_b_rdata_i <= tcdm_mem[obi_b_addr_o[TCDM_ADDR_MSB:5]];
         end
     end
 
@@ -174,7 +175,7 @@ module tb_systolic_controller;
             for (int unsigned port = 0; port < 4; port++) begin
                 if (obi_o_req_o[port] && obi_o_gnt_i[port] && !obi_o_we_o[port]) begin
                     obi_o_rvalid_i[port] <= 1'b1;
-                    obi_o_rdata_i[port] <= tcdm_mem[obi_o_addr_o[port][16:5]];
+                    obi_o_rdata_i[port] <= tcdm_mem[obi_o_addr_o[port][TCDM_ADDR_MSB:5]];
                 end
             end
         end
@@ -183,7 +184,7 @@ module tb_systolic_controller;
     always_ff @(posedge clk_i) begin
         for (int unsigned port = 0; port < 4; port++) begin
             if (obi_o_req_o[port] && obi_o_gnt_i[port] && obi_o_we_o[port]) begin
-                tcdm_mem[obi_o_addr_o[port][16:5]] <= obi_o_wdata_o[port];
+                tcdm_mem[obi_o_addr_o[port][TCDM_ADDR_MSB:5]] <= obi_o_wdata_o[port];
             end
         end
     end
