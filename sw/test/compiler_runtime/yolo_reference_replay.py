@@ -309,10 +309,26 @@ def output_comparison(final_output, actual):
     return compare_bytes(np.frombuffer(actual, np.int8), np.frombuffer(expected, np.int8))
 
 
+def save_checkpoint_result(folder, report, check, actual, fail_fast=False):
+    """Persist byte evidence and the failure verdict before stopping simulation."""
+    folder = Path(folder)
+    expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
+    stats = compare_bytes(actual, expected)
+    (folder / f"command-{check['command']}-actual.bin").write_bytes(actual.tobytes())
+    report["checkpoints"].append({**check, **stats})
+    if fail_fast and stats["mismatches"]:
+        report.update(status="FAIL", failed_command=check["command"],
+                      error=f"Byte-exact mismatch at command {check['command']}, tensor {check['tensor']}")
+    (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
+    return stats
+
+
 def load_case(path):
     case = json.loads(Path(path).read_text())
     if case.get("version") != 1:
         raise ValueError("Unsupported replay case version")
+    if type(case.get("fail_fast", False)) is not bool:
+        raise ValueError("fail_fast must be boolean")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -389,6 +405,8 @@ def main():
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
                         help="Execution timeout (default: 1M bounded, 50M full graph)")
+    parser.add_argument("--fail-fast", action="store_true",
+                        help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
@@ -499,6 +517,7 @@ def main():
             "snapshot": None if args.from_reset else artifact(args.snapshot),
             "input": artifact(input_path), "first_command": first, "end_command": end,
             "invocation_base": invocation_address(full_model),
+            "fail_fast": args.fail_fast,
             "full_graph": args.full_graph, "final_output": final_output,
             "timeout_cycles": args.timeout_cycles if args.timeout_cycles is not None else
                 (50000000 if args.full_graph else 1000000),

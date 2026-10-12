@@ -6,10 +6,12 @@ import struct
 import tempfile
 import unittest
 
+import numpy as np
+
 from yolo_reference_replay import (
     artifact, checked_read, execution_model, invocation_address, load_case, output_comparison,
     plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers,
-    runtime, validate_output_scope,
+    runtime, save_checkpoint_result, validate_output_scope,
 )
 
 
@@ -31,6 +33,57 @@ def lut(src, dst, length, reuse=False):
 
 
 class ReferenceReplayTest(unittest.TestCase):
+    def test_fail_fast_saves_first_mismatch_and_complete_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            path = folder / "expected.bin"
+            path.write_bytes(bytes((1, 2, 3)))
+            check = {"command": 157, "tensor": 161, "address": 61440,
+                     "rows": 1, "channels": 3, "reference_first_row": 1920,
+                     "expected": artifact(path)}
+            actual = np.array([[1, 2, 4]], dtype=np.int8)
+            report = {"status": "running", "checkpoints": []}
+            stats = save_checkpoint_result(folder, report, check, actual, fail_fast=True)
+            saved = json.loads((folder / "byte_exact.json").read_text())
+            self.assertEqual((stats["mismatches"], stats["first_mismatch"], stats["max_abs"]), (1, 2, 1))
+            self.assertEqual((saved["status"], saved["failed_command"]), ("FAIL", 157))
+            self.assertEqual(saved["checkpoints"][0]["reference_first_row"], 1920)
+            self.assertEqual((folder / "command-157-actual.bin").read_bytes(), actual.tobytes())
+
+    def test_exact_checkpoint_does_not_claim_whole_case_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            path = folder / "expected.bin"
+            path.write_bytes(bytes((1, 2, 3)))
+            check = {"command": 1, "tensor": 2, "expected": artifact(path)}
+            report = {"status": "running", "checkpoints": []}
+            stats = save_checkpoint_result(folder, report, check, np.array([[1, 2, 3]], dtype=np.int8), True)
+            self.assertEqual(stats["mismatches"], 0)
+            self.assertEqual(report["status"], "running")
+            self.assertNotIn("failed_command", report)
+
+    def test_collect_all_mode_retains_mismatch_without_early_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            path = folder / "expected.bin"
+            path.write_bytes(bytes((1, 2, 3)))
+            check = {"command": 1, "tensor": 2, "expected": artifact(path)}
+            report = {"status": "running", "checkpoints": []}
+            stats = save_checkpoint_result(folder, report, check, np.array([[1, 2, 4]], dtype=np.int8))
+            self.assertEqual(stats["mismatches"], 1)
+            self.assertEqual(report["status"], "running")
+
+    def test_case_rejects_invalid_fail_fast_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.full_case(folder)
+            path = folder / "case.json"
+            for flag in (1, "true", None):
+                case["fail_fast"] = flag
+                path.write_text(json.dumps(case))
+                with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, "fail_fast must be boolean"):
+                    load_case(path)
+
     def test_full_output_only_still_requires_oracle_and_all_commands(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

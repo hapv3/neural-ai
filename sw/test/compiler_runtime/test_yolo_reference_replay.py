@@ -9,7 +9,9 @@ from cocotb.clock import Clock
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 import numpy as np
 
-from yolo_reference_replay import checked_read, execution_model, load_case, output_comparison, runtime
+from yolo_reference_replay import (
+    checked_read, execution_model, load_case, output_comparison, runtime, save_checkpoint_result,
+)
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 
 
@@ -35,6 +37,7 @@ async def run_reference_case(dut, case_path):
     report = {"first_command": first, "end_command": end, "reference": case["reference"],
               "model": case["model"], "source": case["source"], "firmware": case["firmware"],
               "input": case["input"], "full_graph": full_graph,
+              "fail_fast": case.get("fail_fast", False),
               "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
                         if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
@@ -99,14 +102,15 @@ async def run_reference_case(dut, case_path):
         check = checkpoints[number]
         actual = extract_c32(runtime.read_tcdm_bytes(dut), check["address"], check["rows"], check["channels"],
                              check["row_stride"], check["tile_cols"])
-        expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
-        (folder / f"command-{number}-actual.bin").write_bytes(actual.tobytes())
-        stats = compare_bytes(actual, expected)
-        report["checkpoints"].append({"command": number, "tensor": check["tensor"], **stats})
-        persist()
+        stats = save_checkpoint_result(folder, report, check, actual, report["fail_fast"])
         dut._log.info("NEURAL-AI BYTE-EXACT command %d tensor %d: %d/%d mismatches, first=%s max_abs=%d",
                       number, check["tensor"], stats["mismatches"], stats["bytes"],
                       stats["first_mismatch"], stats["max_abs"])
+        if report["fail_fast"] and stats["mismatches"]:
+            # A monitor callback can fail independently of the main coroutine;
+            # save diagnostic memory and FAIL before raising from that task.
+            (folder / "failure-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
+            raise AssertionError(report["error"])
 
     try:
         counters, samples = await runtime._load_and_run(
@@ -114,7 +118,8 @@ async def run_reference_case(dut, case_path):
             invocation_base=invocation_base, model=model,
             command_trace_records=records, command_trace_callback=capture)
     except Exception as error:
-        report.update(status="ERROR", error=str(error))
+        if report["status"] != "FAIL":
+            report.update(status="ERROR", error=str(error))
         (folder / "failure-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
         persist()
         raise

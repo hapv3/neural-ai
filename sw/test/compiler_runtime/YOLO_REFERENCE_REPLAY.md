@@ -1,8 +1,9 @@
 # YOLO Neural-AI reference replay
 
-This bounded diagnostic starts from reset or resumes a pinned first-cascade memory snapshot and
+This diagnostic starts from reset or resumes a pinned first-cascade memory snapshot and
 checks intermediate INT8 tensors against the Neural-AI hybrid TFLite runtime.
-It is not a full-model correctness test or a general snapshot-state restorer.
+Bounded mode is not a full-model correctness test or a general snapshot-state restorer.
+Full-graph mode additionally compares the complete output binding.
 Conv/Depthwise/FC use Neural-AI reference arithmetic; other operators still use
 TFLite reference implementations.
 
@@ -25,9 +26,38 @@ saved initial checkpoints against freshly computed reference tensors. It then
 derives checkpoint addresses and rows from commands, saves expected binaries,
 and writes `case.json` with artifact hashes and reference build provenance.
 
-Supported mapping is limited to the initial batch-one, C<=32 Conv/SiLU cascade
-and the first two contiguous tiles of its Conv consumer. Async/partial or
-multi-group mappings are rejected instead of guessed.
+Supported intermediate mapping is limited to the initial batch-one, C<=32
+Conv/SiLU cascade, including rolling producer storage and async producers with
+explicit waits. Async consumers, partial outputs and multi-group mappings are
+rejected instead of guessed.
+
+## Checkpoint-first workflow
+
+Verify short bounded gates before enabling full-model regression. A checkpoint
+PASS means zero byte differences, not merely successful command completion.
+Add `--fail-fast` to stop at the first mismatching intermediate checkpoint.
+The report is saved as `FAIL` with `failed_command`, complete tensor/row/address
+mapping, mismatch statistics and actual bytes before the simulator aborts;
+`failure-tcdm.bin` preserves the diagnostic memory. No end snapshot is promised
+when a gate stops early. A passing individual check does not mark the entire
+case PASS: firmware success and all requested checks are still required.
+
+For the pinned 2026-10-12 YOLO NAI, gates through commands 50 and 107 have
+passed byte-exact. The next small gate adds checks at 118, 121, 127 and 157:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 sw/test/compiler_runtime/yolo_reference_replay.py \
+  --manifest hw/rtl/cluster/tb/sim/test_yolo_external_psum_20261012/artifacts/dma_events.json \
+  --from-reset --consumer-tiles 5 --fail-fast --timeout-cycles 2000000 \
+  --output hw/rtl/cluster/tb/sim/test_yolo_external_psum_20261012/run-157
+```
+
+This prepares 13 comparisons totaling 261,120 active bytes, ending at command
+157. It does not certify later layers. Resume from memory snapshots only when
+both the stored data and the required hardware configuration restoration are
+verified. In particular, snapshot 107 omits a LUT reused by subsequent commands;
+use reset replay for this gate. Advance to subsequent bounded gates only after
+this gate passes, then run full regression after all numerical gates pass.
 
 ### After recompiling the model
 
@@ -45,12 +75,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 sw/test/compiler_runtime/yolo_reference_replay
 `--from-reset` and `--snapshot` are mutually exclusive. Reset mode derives
 buffer sizes from the model bindings, zero-initializes TCDM/temporary/output
 memory and saves deterministic input bytes `(index * 37 + 11) & 255`.
-It accepts exactly one input, output and temporary binding, each index zero and
-at most 1 MiB, matching the diagnostic's non-overlapping L2 address windows.
+It accepts exactly one input, output and temporary binding, each index zero.
+Input/output each have a 1 MiB L2 window; temporary has 14 MiB up to the model
+base at `0x81000000`. Control data is placed above the encoded model, including
+packages larger than 4 MiB.
 No snapshot or AFU restoration preamble is used. Commands begin at 1 and
 checkpoint numbers are derived from the new ABI, not copied from an older run.
 `--consumer-tiles` defaults to 2; use 1 for a shorter first-consumer diagnostic.
-Mapping still rejects a request that crosses a producer restart.
+Unsupported mappings fail explicitly.
 
 For the pinned 2026-10-08 artifact this selects commands 1–56, with SiLU checks
 at 15/25 (35840 active bytes each) and consumer Conv at 56 (17920 active bytes).
@@ -73,8 +105,9 @@ export NAI_REPLAY_MANIFEST=/absolute/path/to/yolo320/dma_events.json
 Keep `NAI_REPLAY_FIRMWARE_ELF`, `NAI_DMA_TRACE_CSV`, and
 `NAI_PMU_COMMAND_FILTER` unset. Run the cluster simulator with log and results
 paths inside the case directory. The test uses the pinned firmware and original
-selected commands, with a 1,000,000-cycle runtime timeout and a whole-test
-1,200,000 ns watchdog (1 ns clock), including setup and firmware loading.
+selected command payloads. Runtime timeout defaults to 1,000,000 cycles for
+bounded mode (50,000,000 for full graph), configurable with `--timeout-cycles`.
+The cluster clock is 1 ns.
 
 Memory snapshots do not preserve AFU LUT SRAM or requant registers. For this
 case the harness repeats the immediately preceding original LUT-load command
