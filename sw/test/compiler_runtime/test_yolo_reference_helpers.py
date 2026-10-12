@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from yolo_reference_replay import (
-    artifact, checked_read, execution_model, load_case, output_comparison,
+    artifact, checked_read, execution_model, invocation_address, load_case, output_comparison,
     plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers,
     runtime, validate_output_scope,
 )
@@ -31,6 +31,51 @@ def lut(src, dst, length, reuse=False):
 
 
 class ReferenceReplayTest(unittest.TestCase):
+    def test_full_output_only_still_requires_oracle_and_all_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.full_case(folder)
+            case["checkpoints"] = []
+            path = folder / "case.json"
+            path.write_text(json.dumps(case))
+            self.assertEqual(load_case(path)[0]["checkpoints"], [])
+            case.update(full_graph=False, final_output=None)
+            path.write_text(json.dumps(case))
+            with self.assertRaisesRegex(ValueError, "no byte-exact checkpoints"):
+                load_case(path)
+
+    def test_full_reset_needs_no_lut_residency_for_mean_only_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.full_case(folder)
+            end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+            mean = struct.pack("<HHIII", 14, 64, 0, 0, 0).ljust(64, b"\0")
+            bindings = b"".join(runtime._binding(direction, 0, dimensions=(1, 1, 1, size))
+                                for direction, size in ((1, 64), (2, 6), (3, 128)))
+            model = bytearray(runtime._package(mean + end, b"", bindings, 1, 1024, 1, 1))
+            struct.pack_into("<I", model, 64 + 3 * 32 + 20, 3)
+            (folder / "model.nai").write_bytes(model)
+            case.update(model=artifact(folder / "model.nai"), end_command=1, checkpoints=[])
+            path = folder / "case.json"
+            path.write_text(json.dumps(case))
+            self.assertIsNone(load_case(path)[0]["afu_lut_restore"])
+
+    def test_invocation_address_moves_above_large_encoded_model(self):
+        self.assertEqual(invocation_address(bytes(0x400000)), 0x81400000)
+        self.assertEqual(invocation_address(bytes(0x400001)), 0x81800000)
+        self.assertEqual(invocation_address(bytes(0x800001)), 0x81C00000)
+
+    def test_case_rejects_overlapping_or_invalid_invocation_address(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.full_case(folder)
+            path = folder / "case.json"
+            for address in (0x81000000, 0x81400001, 0xFFFFF000, True):
+                case["invocation_base"] = address
+                path.write_text(json.dumps(case))
+                with self.subTest(address=address), self.assertRaisesRegex(ValueError, "Invocation/control"):
+                    load_case(path)
+
     def full_case(self, folder):
         end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
         load = struct.pack("<HHIII", 5, 32, 0, 0, 0).ljust(32, b"\0")
@@ -198,6 +243,27 @@ class ReferenceReplayTest(unittest.TestCase):
         invalid = runtime._package(end, b"", bindings[:128], 0, 1024, 1, 1)
         with self.assertRaisesRegex(ValueError, "one input, output and temporary"):
             reset_buffers(invalid)
+
+    def test_fresh_reset_allows_temporary_above_one_mib(self):
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        bindings = b"".join(runtime._binding(direction, 0, dimensions=(1, 1, 1, size))
+                            for direction, size in ((1, 150528), (2, 1000), (3, 2408448)))
+        model = bytearray(runtime._package(end, b"", bindings, 0, 1024, 1, 1))
+        struct.pack_into("<I", model, 64 + 3 * 32 + 20, 3)
+        memory, temporary, output, input_bytes = reset_buffers(model)
+        self.assertEqual((len(memory), len(temporary), len(output), input_bytes),
+                         (524288, 2408448, 1000, 150528))
+
+    def test_fresh_reset_rejects_binding_window_overlap(self):
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        for direction, bad_size in ((1, 0x100001), (2, 0x100001), (3, 0xE00001)):
+            sizes = {1: 64, 2: 96, 3: 128, direction: bad_size}
+            bindings = b"".join(runtime._binding(kind, 0, dimensions=(1, 1, 1, size))
+                                for kind, size in sizes.items())
+            model = bytearray(runtime._package(end, b"", bindings, 0, 1024, 1, 1))
+            struct.pack_into("<I", model, 64 + 3 * 32 + 20, 3)
+            with self.subTest(direction=direction), self.assertRaisesRegex(ValueError, "non-overlapping L2"):
+                reset_buffers(model)
 
     def commands(self):
         return [linebuffer(0, 128, 4, 2), lut(128, 0, 128),

@@ -1,4 +1,4 @@
-"""Prepare a pinned YOLO cascade or full graph against the Neural-AI hybrid reference."""
+"""Prepare pinned model full graphs or YOLO cascades against the Neural-AI hybrid reference."""
 
 import argparse
 import hashlib
@@ -255,7 +255,10 @@ def reset_buffers(model):
     sizes = {(direction, index): size for direction, index, size, _ in bindings}
     if len(bindings) != 3 or set(sizes) != {(1, 0), (2, 0), (3, 0)}:
         raise ValueError("Fresh replay requires one input, output and temporary binding, all index zero")
-    if any(size <= 0 or size > 0x100000 for size in sizes.values()):
+    # Input/output each have 1 MiB. Temporary starts at 0x80200000 and
+    # may extend up to the model at 0x81000000 (14 MiB, not only 1 MiB).
+    limits = {1: 0x100000, 2: 0x100000, 3: 0xE00000}
+    if any(size <= 0 or size > limits[direction] for (direction, _), size in sizes.items()):
         raise ValueError("Fresh replay binding exceeds its non-overlapping L2 window")
     return bytes(runtime.TCDM_TOTAL_BYTES), bytes(sizes[3, 0]), bytes(sizes[2, 0]), sizes[1, 0]
 
@@ -295,6 +298,11 @@ def execution_model(case, full_model):
     return runtime._extract_selected_yolo320_command_range(full_model, first, case["end_command"])
 
 
+def invocation_address(model):
+    """Place control data above the encoded model, on a separate 4 MiB window."""
+    return max(0x81400000, (0x81000000 + len(model) + 0x3FFFFF) & ~0x3FFFFF)
+
+
 def output_comparison(final_output, actual):
     """Compare all output bytes; no tolerance or command-completion shortcut."""
     expected = checked_read(final_output["expected"])
@@ -306,6 +314,10 @@ def load_case(path):
     if case.get("version") != 1:
         raise ValueError("Unsupported replay case version")
     full_model = checked_read(case["model"])
+    invocation = case.get("invocation_base", 0x81400000)
+    if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
+            invocation < 0x81000000 + len(full_model)):
+        raise ValueError("Invocation/control data overlaps the model or exceeds address space")
     checked_read(case["source"])
     checked_read(case["firmware"])
     input_data = checked_read(case["input"])
@@ -330,8 +342,11 @@ def load_case(path):
     runtime._require_restart_safe_boundary(full_model, case["end_command"])
     if not first < case["end_command"]:
         raise ValueError("Empty replay range")
-    if "afu_lut_restore" not in case or case["afu_lut_restore"] != plan_lut_restore(
-            full_model, first, case["end_command"]):
+    # A full reset executes all configuration commands itself. No hardware
+    # residency has to be reconstructed, including for models without any LUT.
+    restore = None if case.get("full_graph", False) else plan_lut_restore(
+        full_model, first, case["end_command"])
+    if "afu_lut_restore" not in case or case["afu_lut_restore"] != restore:
         raise ValueError("Missing or stale AFU LUT restore plan; prepare a new replay case")
     if "restore_preamble" not in case or case["restore_preamble"] != plan_restore_preamble(
             full_model, first, case["afu_lut_restore"], memory):
@@ -354,7 +369,7 @@ def load_case(path):
             raise ValueError("Expected tensor size mismatch")
         extract_c32(memory, check["address"], check["rows"], check["channels"],
                     check["row_stride"], check["tile_cols"])
-    if not seen:
+    if not seen and not case.get("full_graph", False):
         raise ValueError("Replay has no byte-exact checkpoints")
     return case, full_model, memory, temporary, output
 
@@ -363,10 +378,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler-root", type=Path, default=AI_ROOT.parent / "neural-compiler")
     parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--source", type=Path,
+                        help="Source TFLite (default: YOLO320); use --consumer-tiles 0 for other full graphs")
     start = parser.add_mutually_exclusive_group(required=True)
     start.add_argument("--snapshot", type=Path)
     start.add_argument("--from-reset", action="store_true")
-    parser.add_argument("--consumer-tiles", type=int, default=2)
+    parser.add_argument("--consumer-tiles", type=int, default=2,
+                        help="YOLO cascade checkpoints; 0 skips these only when verifying full output")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -379,13 +397,15 @@ def main():
         parser.error("--full-graph requires --from-reset; memory-only snapshots omit hardware registers")
     if args.timeout_cycles is not None and args.timeout_cycles <= 0:
         parser.error("--timeout-cycles must be positive")
+    if args.consumer_tiles < 0 or (args.consumer_tiles == 0 and not args.full_graph):
+        parser.error("--consumer-tiles 0 requires --full-graph; negative counts are invalid")
     pinned = json.loads(args.manifest.read_text())
     model_path = args.manifest.with_suffix(".nai")
     firmware_path = args.manifest.with_suffix(".elf")
     full_model = model_path.read_bytes()
     if sha(full_model) != pinned[".nai"] or sha(firmware_path.read_bytes()) != pinned[".elf"]:
         raise ValueError("Pinned model/ELF identity mismatch")
-    source = args.compiler_root / "test/model/yolov8n_320_int8.tflite"
+    source = args.source or args.compiler_root / "test/model/yolov8n_320_int8.tflite"
     if args.from_reset:
         first = 0
         memory, temporary, output, input_bytes = reset_buffers(full_model)
@@ -423,23 +443,25 @@ def main():
         if stats["mismatches"]:
             raise ValueError(f"Starting snapshot already differs at command {check['command']}: {stats}")
         initial.append({"command": check["command"], **stats})
-    ops = interpreter._get_ops_details()
-    convs = [op for op in ops if op["op_name"] == "CONV_2D"]
-    producer_id, consumer_id = (int(op["outputs"][0]) for op in convs[:2])
-    sigmoid = next(op for op in ops if op["op_name"] == "LOGISTIC" and producer_id in op["inputs"])
-    activation_op = next(op for op in ops if op["op_name"] == "MUL" and
-                         set(map(int, op["inputs"])) == {producer_id, int(sigmoid["outputs"][0])})
-    activation_id = int(activation_op["outputs"][0])
-    # Ensure the second source Conv really consumes this activation through PAD.
-    consumer_input = int(convs[1]["inputs"][0])
-    if consumer_input != activation_id:
-        pad = next((op for op in ops if consumer_input in op["outputs"] and op["op_name"] == "PAD"), None)
-        if pad is None or int(pad["inputs"][0]) != activation_id:
-            raise ValueError("Second Conv is not the stem activation consumer")
-    producer = interpreter.get_tensor(producer_id)
-    consumer = interpreter.get_tensor(consumer_id)
     commands, _ = runtime._logical_command_records(full_model)
-    checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape, args.consumer_tiles)
+    checks, end = [], len(commands)
+    if args.consumer_tiles:
+        ops = interpreter._get_ops_details()
+        convs = [op for op in ops if op["op_name"] == "CONV_2D"]
+        producer_id, consumer_id = (int(op["outputs"][0]) for op in convs[:2])
+        sigmoid = next(op for op in ops if op["op_name"] == "LOGISTIC" and producer_id in op["inputs"])
+        activation_op = next(op for op in ops if op["op_name"] == "MUL" and
+                             set(map(int, op["inputs"])) == {producer_id, int(sigmoid["outputs"][0])})
+        activation_id = int(activation_op["outputs"][0])
+        # Ensure the second source Conv really consumes this activation through PAD.
+        consumer_input = int(convs[1]["inputs"][0])
+        if consumer_input != activation_id:
+            pad = next((op for op in ops if consumer_input in op["outputs"] and op["op_name"] == "PAD"), None)
+            if pad is None or int(pad["inputs"][0]) != activation_id:
+                raise ValueError("Second Conv is not the stem activation consumer")
+        producer = interpreter.get_tensor(producer_id)
+        consumer = interpreter.get_tensor(consumer_id)
+        checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape, args.consumer_tiles)
     if args.full_graph:
         end = len(commands)
     runtime._require_restart_safe_boundary(full_model, end)
@@ -476,10 +498,11 @@ def main():
             "start_mode": "reset" if args.from_reset else "snapshot",
             "snapshot": None if args.from_reset else artifact(args.snapshot),
             "input": artifact(input_path), "first_command": first, "end_command": end,
+            "invocation_base": invocation_address(full_model),
             "full_graph": args.full_graph, "final_output": final_output,
             "timeout_cycles": args.timeout_cycles if args.timeout_cycles is not None else
                 (50000000 if args.full_graph else 1000000),
-            "afu_lut_restore": plan_lut_restore(full_model, first, end),
+            "afu_lut_restore": None if args.full_graph else plan_lut_restore(full_model, first, end),
             "input_bytes": len(input_data), "temporary_bytes": len(temporary), "output_bytes": len(output),
             "initial_snapshot_checks": initial, "checkpoints": checks}
     case["restore_preamble"] = plan_restore_preamble(full_model, first, case["afu_lut_restore"], memory)

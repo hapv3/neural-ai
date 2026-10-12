@@ -1,4 +1,4 @@
-"""Verify pinned YOLO intermediate tensors and optional full-graph output."""
+"""Shared verification for pinned full models and YOLO intermediate tensors."""
 
 import json
 import os
@@ -13,9 +13,8 @@ from yolo_reference_replay import checked_read, execution_model, load_case, outp
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 
 
-@cocotb.test()
-async def test_yolo_reference_replay(dut):
-    case_path = Path(os.environ["YOLO_REFERENCE_CASE"]).resolve()
+async def run_reference_case(dut, case_path):
+    case_path = Path(case_path).resolve()
     folder = case_path.parent
     if (folder / "byte_exact.json").exists():
         raise ValueError("Refusing to overwrite a replay result")
@@ -28,7 +27,9 @@ async def test_yolo_reference_replay(dut):
     preamble = case["restore_preamble"]
     execution_first = first - 1 if preamble is not None else first
     model = execution_model(case, full_model)
-    assert 0x81000000 + len(model) <= 0x81400000, "Model overlaps invocation/control data"
+    invocation_base = case.get("invocation_base", 0x81400000)
+    binding_table_base = invocation_base + 0x1000
+    assert 0x81000000 + len(model) <= invocation_base, "Model overlaps invocation/control data"
     (folder / "replay.nai").write_bytes(model)
     full_graph = case.get("full_graph", False)
     report = {"first_command": first, "end_command": end, "reference": case["reference"],
@@ -63,8 +64,8 @@ async def test_yolo_reference_replay(dut):
     bindings = [(1, 0, 0x80000000, case["input_bytes"]), (2, 0, 0x80100000, case["output_bytes"]),
                 (3, 0, 0x80200000, case["temporary_bytes"])]
     invocation, addresses = runtime.build_invocation_with_bindings(
-        model, bindings, model_base=0x81000000, binding_table_base=0x81401000)
-    for address, data in ((0x81000000, model), (0x81401000, addresses), (0x81400000, invocation)):
+        model, bindings, model_base=0x81000000, binding_table_base=binding_table_base)
+    for address, data in ((0x81000000, model), (binding_table_base, addresses), (invocation_base, invocation)):
         await runtime.write_l2_bytes(dut, address, data)
     records = runtime._selected_command_trace_records(full_model, execution_first, end)
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
@@ -110,7 +111,7 @@ async def test_yolo_reference_replay(dut):
     try:
         counters, samples = await runtime._load_and_run(
             dut, axi, invocation, timeout_cycles=case.get("timeout_cycles", 1000000),
-            invocation_base=0x81400000, model=model,
+            invocation_base=invocation_base, model=model,
             command_trace_records=records, command_trace_callback=capture)
     except Exception as error:
         report.update(status="ERROR", error=str(error))
@@ -150,3 +151,8 @@ async def test_yolo_reference_replay(dut):
     report["status"] = "FAIL" if failures else "PASS"
     persist()
     assert not failures, f"First mismatching Neural-AI checkpoint: {failures[0] if failures else None}"
+
+
+@cocotb.test()
+async def test_yolo_reference_replay(dut):
+    await run_reference_case(dut, os.environ["YOLO_REFERENCE_CASE"])
