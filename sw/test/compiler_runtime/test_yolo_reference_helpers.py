@@ -1,11 +1,16 @@
 """Offline regression tests for reference-checkpoint preparation."""
 
 from pathlib import Path
+import json
 import struct
 import tempfile
 import unittest
 
-from yolo_reference_replay import artifact, checked_read, plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers, runtime
+from yolo_reference_replay import (
+    artifact, checked_read, execution_model, load_case, output_comparison,
+    plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers,
+    runtime, validate_output_scope,
+)
 
 
 def linebuffer(layer, address, rows, width, accum=0, async_job=False):
@@ -26,6 +31,106 @@ def lut(src, dst, length, reuse=False):
 
 
 class ReferenceReplayTest(unittest.TestCase):
+    def full_case(self, folder):
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        load = struct.pack("<HHIII", 5, 32, 0, 0, 0).ljust(32, b"\0")
+        bindings = b"".join(runtime._binding(direction, 0, dimensions=(1, 1, 1, size))
+                            for direction, size in ((1, 64), (2, 6), (3, 128)))
+        model = bytearray(runtime._package(load + b"".join(self.commands()) + end,
+                                          bytes(range(256)), bindings, 5, 1024, 1, 1))
+        struct.pack_into("<I", model, 64 + 3 * 32 + 20, 3)
+
+        def pinned(name, data):
+            path = folder / name
+            path.write_bytes(data)
+            return artifact(path)
+
+        case = {"version": 1, "start_mode": "reset", "first_command": 0, "end_command": 5,
+                "snapshot": None, "model": pinned("model.nai", model),
+                "source": pinned("source.tflite", b"source"), "firmware": pinned("firmware.elf", b"elf"),
+                "input": pinned("input.bin", bytes(64)), "input_bytes": 64, "output_bytes": 6,
+                "temporary_bytes": 128, "full_graph": True, "timeout_cycles": 50000000,
+                "afu_lut_restore": None, "restore_preamble": None,
+                "final_output": {"dtype": "int8", "shape": [1, 2, 3],
+                                 "expected": pinned("output-expected.bin", bytes(range(6)))},
+                "checkpoints": [{"command": 5, "address": 32, "rows": 1, "channels": 3,
+                                 "tile_cols": 2, "row_stride": 64,
+                                 "expected": pinned("checkpoint.bin", bytes(3))}]}
+        return case, bytes(model)
+
+    def test_full_graph_case_loads_every_command_and_pinned_oracle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, model = self.full_case(folder)
+            path = folder / "case.json"
+            path.write_text(json.dumps(case))
+            loaded, full_model, *_ = load_case(path)
+            self.assertEqual(loaded, case)
+            self.assertEqual(full_model, model)
+            self.assertIs(execution_model(loaded, full_model), full_model)
+
+    def test_full_graph_rejects_partial_or_snapshot_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.full_case(Path(directory))
+            for changes in ({"first_command": 1}, {"end_command": 4}, {"start_mode": "snapshot"},
+                            {"snapshot": case["model"]}):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "run every command"):
+                    validate_output_scope({**case, **changes}, model)
+
+    def test_full_graph_requires_complete_int8_output_oracle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.full_case(Path(directory))
+            with self.assertRaisesRegex(ValueError, "pinned final output oracle"):
+                validate_output_scope({**case, "final_output": None}, model)
+            for changes in ({"dtype": "int16"}, {"shape": [1, 2, 2]}, {"shape": [1, 0, 3]},
+                            {"shape": [1, True, 6]}, {"expected": case["checkpoints"][0]["expected"]}):
+                invalid = {**case, "final_output": {**case["final_output"], **changes}}
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "shape/dtype/size"):
+                    validate_output_scope(invalid, model)
+
+    def test_full_graph_has_no_tolerance_or_completion_only_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _ = self.full_case(Path(directory))
+            expected = checked_read(case["final_output"]["expected"])
+            self.assertEqual(output_comparison(case["final_output"], expected)["mismatches"], 0)
+            actual = bytearray(expected)
+            actual[-1] += 1
+            stats = output_comparison(case["final_output"], actual)
+            self.assertEqual((stats["bytes"], stats["mismatches"], stats["max_abs"]), (6, 1, 1))
+            with self.assertRaisesRegex(ValueError, "shape/dtype mismatch"):
+                output_comparison(case["final_output"], expected[:-1])
+
+    def test_bounded_replay_cannot_claim_final_output_and_still_slices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.full_case(Path(directory))
+            case["full_graph"] = False
+            with self.assertRaisesRegex(ValueError, "Bounded replay cannot claim"):
+                validate_output_scope(case, model)
+            case.update({"final_output": None, "end_command": 4})
+            validate_output_scope(case, model)
+            replay = execution_model(case, model)
+            self.assertEqual(len(runtime._logical_command_records(replay)[0]), 4)
+            self.assertNotEqual(replay, model)
+
+    def test_full_graph_preserves_encoded_affine_loop(self):
+        control = struct.pack("<HHIII", 1, 32, 0, 0, 0).ljust(32, b"\0")
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        loop = struct.pack("<HHIII4I", 33, 32, 0, 0, 0, 3, 1, 32, 0)
+        model = runtime._package(loop + control + end, b"", b"", 3, 1024, 0, 0)
+        self.assertEqual(len(runtime._logical_command_records(model)[0]), 3)
+        self.assertIs(execution_model({"full_graph": True}, model), model)
+        flattened = execution_model({"first_command": 0, "end_command": 3, "restore_preamble": None}, model)
+        self.assertNotEqual(flattened, model)
+
+    def test_invalid_scope_flags_and_timeout_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.full_case(Path(directory))
+            with self.assertRaisesRegex(ValueError, "must be boolean"):
+                validate_output_scope({**case, "full_graph": 1}, model)
+            for timeout in (0, -1, True, "50000000"):
+                with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "positive integer"):
+                    validate_output_scope({**case, "timeout_cycles": timeout}, model)
+
     def test_rolling_producer_maps_new_logical_rows_at_reused_addresses(self):
         commands = self.commands() + [linebuffer(0, 128, 4, 2), lut(128, 64, 128),
                                       linebuffer(2, 64, 1, 2)]

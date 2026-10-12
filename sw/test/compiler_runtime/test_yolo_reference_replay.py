@@ -1,4 +1,4 @@
-"""Replay a short saved YOLO cascade against precomputed Neural-AI tensors."""
+"""Verify pinned YOLO intermediate tensors and optional full-graph output."""
 
 import json
 import os
@@ -9,11 +9,11 @@ from cocotb.clock import Clock
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 import numpy as np
 
-from yolo_reference_replay import checked_read, load_case, runtime
+from yolo_reference_replay import checked_read, execution_model, load_case, output_comparison, runtime
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 
 
-@cocotb.test(timeout_time=1200000, timeout_unit="ns")
+@cocotb.test()
 async def test_yolo_reference_replay(dut):
     case_path = Path(os.environ["YOLO_REFERENCE_CASE"]).resolve()
     folder = case_path.parent
@@ -27,10 +27,15 @@ async def test_yolo_reference_replay(dut):
     first, end = case["first_command"], case["end_command"]
     preamble = case["restore_preamble"]
     execution_first = first - 1 if preamble is not None else first
-    model = runtime._extract_selected_yolo320_command_range(full_model, execution_first, end)
+    model = execution_model(case, full_model)
+    assert 0x81000000 + len(model) <= 0x81400000, "Model overlaps invocation/control data"
     (folder / "replay.nai").write_bytes(model)
+    full_graph = case.get("full_graph", False)
     report = {"first_command": first, "end_command": end, "reference": case["reference"],
-              "scope": "Only listed intermediate tensors; not full-model output correctness",
+              "model": case["model"], "source": case["source"], "firmware": case["firmware"],
+              "input": case["input"], "full_graph": full_graph,
+              "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
+                        if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
               "start_mode": case.get("start_mode", "snapshot")}
 
@@ -102,9 +107,18 @@ async def test_yolo_reference_replay(dut):
                       number, check["tensor"], stats["mismatches"], stats["bytes"],
                       stats["first_mismatch"], stats["max_abs"])
 
-    await runtime._load_and_run(dut, axi, invocation, timeout_cycles=1000000,
-                               invocation_base=0x81400000, model=model,
-                               command_trace_records=records, command_trace_callback=capture)
+    try:
+        counters, samples = await runtime._load_and_run(
+            dut, axi, invocation, timeout_cycles=case.get("timeout_cycles", 1000000),
+            invocation_base=0x81400000, model=model,
+            command_trace_records=records, command_trace_callback=capture)
+    except Exception as error:
+        report.update(status="ERROR", error=str(error))
+        (folder / "failure-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
+        persist()
+        raise
+    assert len(samples) == end - execution_first, "Missing per-command PMU samples"
+    report["pmu"] = counters
     # Preserve complete restart state before asserting numerical correctness.
     snapshot_memory = runtime.read_tcdm_bytes(dut)
     snapshot_temporary = bytes(await runtime.read_l2_bytes(dut, 0x80200000, case["temporary_bytes"]))
@@ -117,11 +131,21 @@ async def test_yolo_reference_replay(dut):
                                     expected_output=snapshot_output)
     assert await runtime._axi_read32(axi, runtime.NPU_CMD_STATUS) == runtime.NPU_CMD_STATUS_PASS
     assert await runtime._axi_read32(axi, runtime.NPU_CMD_FAIL_CODE) == 0
+    assert await runtime._axi_read32(axi, runtime.NPU_CMD_FAIL_PTR) == 0
     assert await runtime._axi_read32(axi, runtime.NPU_CMD_DONE_COUNT) == end - execution_first
     if preamble is not None:
         assert report.get("restore_check", {}).get("mismatches") == 0
     assert len(report["checkpoints"]) == len(checkpoints)
     failures = [check for check in report["checkpoints"] if check["mismatches"]]
+    if full_graph:
+        (folder / "output-actual.bin").write_bytes(snapshot_output)
+        report["final_output"] = {**case["final_output"],
+                                  **output_comparison(case["final_output"], snapshot_output)}
+        if report["final_output"]["mismatches"]:
+            failures.append(report["final_output"])
+        dut._log.info("NEURAL-AI FULL OUTPUT: %d/%d mismatches, first=%s max_abs=%d",
+                      report["final_output"]["mismatches"], report["final_output"]["bytes"],
+                      report["final_output"]["first_mismatch"], report["final_output"]["max_abs"])
     report["snapshot"] = str(snapshot_path)
     report["status"] = "FAIL" if failures else "PASS"
     persist()

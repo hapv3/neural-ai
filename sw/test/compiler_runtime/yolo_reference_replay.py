@@ -1,9 +1,10 @@
-"""Prepare a pinned first-cascade replay against the Neural-AI hybrid reference."""
+"""Prepare a pinned YOLO cascade or full graph against the Neural-AI hybrid reference."""
 
 import argparse
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import struct
 import sys
@@ -259,6 +260,47 @@ def reset_buffers(model):
     return bytes(runtime.TCDM_TOTAL_BYTES), bytes(sizes[3, 0]), bytes(sizes[2, 0]), sizes[1, 0]
 
 
+def validate_output_scope(case, full_model):
+    """A full-graph claim requires reset, every command, and a pinned output oracle."""
+    full_graph = case.get("full_graph", False)
+    if not isinstance(full_graph, bool):
+        raise ValueError("full_graph must be boolean")
+    timeout = case.get("timeout_cycles", 1000000)
+    if type(timeout) is not int or timeout <= 0:
+        raise ValueError("timeout_cycles must be a positive integer")
+    final_output = case.get("final_output")
+    if not full_graph:
+        if final_output is not None:
+            raise ValueError("Bounded replay cannot claim full-graph output verification")
+        return
+    commands, _ = runtime._logical_command_records(full_model)
+    if (case.get("start_mode") != "reset" or case["first_command"] != 0 or
+            case["snapshot"] is not None or case["end_command"] != len(commands)):
+        raise ValueError("Full-graph replay must start from reset and run every command")
+    if not isinstance(final_output, dict) or "expected" not in final_output:
+        raise ValueError("Full-graph replay requires a pinned final output oracle")
+    shape = final_output.get("shape", [])
+    if (final_output.get("dtype") != "int8" or not shape or
+            any(type(dimension) is not int or dimension <= 0 for dimension in shape) or
+            math.prod(shape) != case["output_bytes"] or
+            len(checked_read(final_output["expected"])) != case["output_bytes"]):
+        raise ValueError("Final output shape/dtype/size differs from the output binding")
+
+
+def execution_model(case, full_model):
+    """Keep the original encoded stream, including affine loops, for full runs."""
+    if case.get("full_graph", False):
+        return full_model
+    first = case["first_command"] - (case["restore_preamble"] is not None)
+    return runtime._extract_selected_yolo320_command_range(full_model, first, case["end_command"])
+
+
+def output_comparison(final_output, actual):
+    """Compare all output bytes; no tolerance or command-completion shortcut."""
+    expected = checked_read(final_output["expected"])
+    return compare_bytes(np.frombuffer(actual, np.int8), np.frombuffer(expected, np.int8))
+
+
 def load_case(path):
     case = json.loads(Path(path).read_text())
     if case.get("version") != 1:
@@ -267,6 +309,7 @@ def load_case(path):
     checked_read(case["source"])
     checked_read(case["firmware"])
     input_data = checked_read(case["input"])
+    validate_output_scope(case, full_model)
     if case.get("start_mode", "snapshot") == "reset":
         if case["snapshot"] is not None or case["first_command"] != 0:
             raise ValueError("Fresh replay cannot reuse a snapshot or skip initial commands")
@@ -324,10 +367,18 @@ def main():
     start.add_argument("--snapshot", type=Path)
     start.add_argument("--from-reset", action="store_true")
     parser.add_argument("--consumer-tiles", type=int, default=2)
+    parser.add_argument("--full-graph", action="store_true",
+                        help="Run the complete pinned NAI and compare the final output binding as well")
+    parser.add_argument("--timeout-cycles", type=int,
+                        help="Execution timeout (default: 1M bounded, 50M full graph)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Choose a fresh output directory")
+    if args.full_graph and not args.from_reset:
+        parser.error("--full-graph requires --from-reset; memory-only snapshots omit hardware registers")
+    if args.timeout_cycles is not None and args.timeout_cycles <= 0:
+        parser.error("--timeout-cycles must be positive")
     pinned = json.loads(args.manifest.read_text())
     model_path = args.manifest.with_suffix(".nai")
     firmware_path = args.manifest.with_suffix(".elf")
@@ -389,6 +440,8 @@ def main():
     consumer = interpreter.get_tensor(consumer_id)
     commands, _ = runtime._logical_command_records(full_model)
     checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape, args.consumer_tiles)
+    if args.full_graph:
+        end = len(commands)
     runtime._require_restart_safe_boundary(full_model, end)
     args.output.mkdir(parents=True)
     if args.from_reset:
@@ -401,6 +454,20 @@ def main():
         filename = args.output / f"command-{check['command']}-expected.bin"
         filename.write_bytes(tensor[offset:offset + check["rows"]].tobytes())
         check.update({"tensor": tensor_id, "tensor_name": details[tensor_id]["name"], "expected": artifact(filename)})
+    final_output = None
+    if args.full_graph:
+        outputs = interpreter.get_output_details()
+        if len(outputs) != 1 or outputs[0]["dtype"] != np.int8:
+            raise ValueError("Full-graph replay requires exactly one INT8 reference output")
+        detail = outputs[0]
+        expected = interpreter.get_tensor(detail["index"])
+        if expected.nbytes != len(output):
+            raise ValueError("Reference output size differs from the compiled output binding")
+        filename = args.output / "output-expected.bin"
+        filename.write_bytes(expected.tobytes())
+        final_output = {"tensor": int(detail["index"]), "tensor_name": detail["name"],
+                        "shape": list(map(int, expected.shape)), "dtype": str(expected.dtype),
+                        "expected": artifact(filename)}
     case = {"version": 1, "reference": "Neural-AI hybrid Conv/Depthwise/FC + TFLite fallback",
             "coverage": coverage, "reference_build": json.loads((args.compiler_root /
                 "tools/neural_ai_tflite_reference/build/manifest.json").read_text()),
@@ -409,6 +476,9 @@ def main():
             "start_mode": "reset" if args.from_reset else "snapshot",
             "snapshot": None if args.from_reset else artifact(args.snapshot),
             "input": artifact(input_path), "first_command": first, "end_command": end,
+            "full_graph": args.full_graph, "final_output": final_output,
+            "timeout_cycles": args.timeout_cycles if args.timeout_cycles is not None else
+                (50000000 if args.full_graph else 1000000),
             "afu_lut_restore": plan_lut_restore(full_model, first, end),
             "input_bytes": len(input_data), "temporary_bytes": len(temporary), "output_bytes": len(output),
             "initial_snapshot_checks": initial, "checkpoints": checks}
