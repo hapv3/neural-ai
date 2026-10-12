@@ -8,9 +8,9 @@ import unittest
 from yolo_reference_replay import artifact, checked_read, plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers, runtime
 
 
-def linebuffer(layer, address, rows, width, accum=0):
+def linebuffer(layer, address, rows, width, accum=0, async_job=False):
     command = bytearray(160)
-    struct.pack_into("<HHIII", command, 0, 9, 160, 0, layer, 0)
+    struct.pack_into("<HHIII", command, 0, 29 if async_job else 9, 160, 0, layer, 0)
     struct.pack_into("<5I", command, 108, address, rows, accum, width * 32, width)
     return bytes(command)
 
@@ -26,6 +26,59 @@ def lut(src, dst, length, reuse=False):
 
 
 class ReferenceReplayTest(unittest.TestCase):
+    def test_rolling_producer_maps_new_logical_rows_at_reused_addresses(self):
+        commands = self.commands() + [linebuffer(0, 128, 4, 2), lut(128, 64, 128),
+                                      linebuffer(2, 64, 1, 2)]
+        checks, end = plan_checkpoints(commands, 0, (1, 4, 2, 2), (1, 2, 2, 3), 3)
+        self.assertEqual(end, 7)
+        self.assertEqual([c["reference_first_row"] for c in checks], [0, 0, 1, 4, 2])
+
+    def test_async_producer_allows_disjoint_lut_then_wait(self):
+        commands = [linebuffer(0, 128, 2, 2), linebuffer(0, 192, 2, 2, async_job=True),
+                    lut(128, 0, 64), struct.pack("<HHIII", 30, 32, 0, 0, 0).ljust(32, b"\0"),
+                    lut(192, 64, 64), linebuffer(2, 0, 2, 2)]
+        checks, end = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), 1)
+        self.assertEqual(end, 6)
+        self.assertEqual([c["reference_first_row"] for c in checks], [0, 2, 0])
+        for source, destination in ((192, 64), (128, 192)):
+            commands[2] = lut(source, destination, 64)
+            with self.assertRaisesRegex(ValueError, "outstanding producer"):
+                plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), 1)
+
+    def test_lut_crossing_reused_and_stale_rows_is_rejected(self):
+        commands = [linebuffer(0, 128, 4, 2), linebuffer(0, 128, 2, 2),
+                    lut(128, 0, 128), linebuffer(2, 0, 1, 2)]
+        with self.assertRaisesRegex(ValueError, "contiguous producer rows"):
+            plan_checkpoints(commands, 0, (1, 3, 2, 2), (1, 1, 2, 3), 1)
+
+    def test_dma_overwrite_invalidates_producer_mapping(self):
+        for kind in (2, 3, 4, 24, 25, 26):
+            command = bytearray(64)
+            struct.pack_into("<HHIII", command, 0, kind, 64, 0, 0, 0)
+            struct.pack_into("<HHI", command, 24, 6, 0, 128)
+            struct.pack_into("<I", command, 32, 1)
+            if kind in (3, 4, 25, 26):
+                struct.pack_into("<2I", command, 40, 32, 1)
+            if kind in (4, 26):
+                struct.pack_into("<2I", command, 52, 64, 1)
+            commands = self.commands()
+            commands.insert(1, bytes(command))
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "contiguous producer rows"):
+                plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), 1)
+
+    def test_async_producer_requires_wait_and_supported_intervening_commands(self):
+        commands = self.commands()
+        commands[0] = linebuffer(0, 128, 4, 2, async_job=True)
+        with self.assertRaisesRegex(ValueError, "outstanding producer"):
+            plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), 1)
+        commands = self.commands()
+        commands.insert(1, struct.pack("<HHIII", 30, 32, 0, 0, 0).ljust(32, b"\0"))
+        with self.assertRaisesRegex(ValueError, "no mapped outstanding"):
+            plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), 1)
+        commands[1] = struct.pack("<HHIII", 10, 32, 0, 0, 0).ljust(32, b"\0")
+        with self.assertRaisesRegex(ValueError, "Unsupported command 10"):
+            plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), 1)
+
     def test_fresh_reset_uses_binding_sizes_and_no_snapshot(self):
         end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
         bindings = b"".join(runtime._binding(direction, 0, dimensions=(1, 1, 1, size))

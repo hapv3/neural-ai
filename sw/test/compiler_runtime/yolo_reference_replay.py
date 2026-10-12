@@ -113,46 +113,91 @@ def plan_restore_preamble(model, first_command, restore, memory):
 
 
 def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consumer_tiles=2):
-    """Bounded diagnostic: initial C<=32 producer and first consumer tiles only.
+    """Map a bounded C<=32 cascade, including rolling producer storage.
 
-    Addresses/counts come from the ABI, not historical command numbers. Reject
-    schedules with async/partial/multi-group producers rather than guessing maps.
+    Addresses/counts come from the ABI, not historical command numbers. Track
+    completed producer C32 rows separately from an outstanding producer job;
+    a LUT may read only completed rows, including across adjacent output tiles.
+    Consumer async/partial/multi-group jobs remain deliberately unsupported.
     Mapping assumes the first two distinct linebuffer layers follow the first two
-    source Conv operators, and their first stripes begin at logical row zero.
+    source Conv operators, with producer stripes issued in logical raster order.
     """
     if consumer_tiles < 1 or any(len(s) != 4 or s[0] != 1 or not 0 < s[3] <= 32
                                  for s in (conv_shape, consumer_shape)):
         raise ValueError("Only single-batch, single-C32-group initial cascades are supported")
     producer_layer = None
     consumer_layer = None
-    producer_base = None
     producer_rows = 0
+    producer_map = {}
+    pending_producer = None
+    activation_layer = None
     consumer_base = None
     consumer_rows = 0
     count = 0
     checks = []
+
+    def invalidate(address, length):
+        for physical in list(producer_map):
+            if address < physical + 32 and physical < address + length:
+                del producer_map[physical]
+
+    def complete_producer(tile):
+        address, rows, first_row = tile
+        invalidate(address, rows * 32)
+        producer_map.update((address + row * 32, first_row + row) for row in range(rows))
+
     for index, command in enumerate(commands, 1):
         kind, _, _, layer, _ = struct.unpack_from("<HHIII", command)
-        if kind in (29, 32):
-            raise ValueError("Async linebuffer requires a completion-aware mapping")
-        if kind == 9:
+        if kind == 32:
+            raise ValueError("Async AFU requires a completion-aware mapping")
+        if kind in (2, 3, 4, 24, 25, 26):
+            region, ref_index, destination = struct.unpack_from("<HHI", command, 24)
+            if region == 6:
+                length = struct.unpack_from("<I", command, 32)[0]
+                if kind in (3, 4, 25, 26):
+                    stride, repetitions = struct.unpack_from("<2I", command, 40)
+                    length += stride * (repetitions - 1)
+                if kind in (4, 26):
+                    stride, repetitions = struct.unpack_from("<2I", command, 52)
+                    length += stride * (repetitions - 1)
+                if ref_index or length <= 0:
+                    raise ValueError("Invalid local DMA destination")
+                # Conservatively invalidate stride gaps as well. Missing maps
+                # are safer than treating DMA-overwritten bytes as Conv output.
+                invalidate(destination, length)
+                if pending_producer is not None:
+                    start, count_rows, _ = pending_producer
+                    if destination < start + count_rows * 32 and start < destination + length:
+                        raise ValueError("DMA touches outstanding producer output before its wait")
+        elif kind == 30:
+            if pending_producer is None:
+                raise ValueError("Systolic wait has no mapped outstanding producer")
+            complete_producer(pending_producer)
+            pending_producer = None
+        elif kind in (9, 29):
             if producer_layer is None:
                 producer_layer = layer
             address, rows, accum, pitch, cols = struct.unpack_from("<5I", command, 108)
-            if rows <= 0 or accum:
+            if (rows <= 0 or accum or address % 32 or
+                    address + rows * 32 > NPU_CMD_TCDM_BASE - 0x10100000):
                 raise ValueError("Partial/empty linebuffer outputs cannot be checked as INT8")
+            if pending_producer is not None:
+                raise ValueError("Linebuffer job starts before the mapped producer wait")
             if layer == producer_layer:
-                if consumer_layer is not None:
-                    raise ValueError("Requested consumer tiles cross a producer restart")
-                if producer_base is None:
-                    producer_base = address
-                if (address != producer_base + producer_rows * 32 or
-                        cols != conv_shape[2] or pitch != cols * 32):
-                    raise ValueError("Producer stripes are not contiguous spatial C32 rows")
+                if cols != conv_shape[2] or pitch != cols * 32:
+                    raise ValueError("Producer stripes are not spatial C32 rows")
+                tile = (address, rows, producer_rows)
                 producer_rows += rows
                 if producer_rows > conv_shape[1] * conv_shape[2]:
                     raise ValueError("Producer rows exceed the source tensor")
+                if kind == 29:
+                    invalidate(address, rows * 32)
+                    pending_producer = tile
+                else:
+                    complete_producer(tile)
             else:
+                if kind == 29:
+                    raise ValueError("Async consumer checkpoints require completion-aware output capture")
                 if consumer_layer is None:
                     consumer_layer = layer
                     consumer_base = address
@@ -164,6 +209,7 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                     raise ValueError("Consumer rows exceed the source tensor")
                 if index <= first_command:
                     raise ValueError("Snapshot is already past the first consumer tile")
+                invalidate(address, rows * 32)
                 checks.append({"command": index, "tensor_role": "consumer_conv", "address": address,
                                "rows": rows, "channels": consumer_shape[3], "row_stride": pitch,
                                "tile_cols": cols, "reference_first_row": consumer_rows})
@@ -171,20 +217,35 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                 count += 1
                 if count == consumer_tiles:
                     return checks, index
-        elif kind == 12 and producer_base is not None and consumer_layer is None:
-            src_region, _, src = struct.unpack_from("<HHI", command, 16)
-            dst_region, _, dst = struct.unpack_from("<HHI", command, 24)
+        elif kind == 12 and producer_rows:
+            if activation_layer is None:
+                activation_layer = layer
+            if layer != activation_layer:
+                raise ValueError("Requested consumer tiles cross another activation layer")
+            src_region, src_index, src = struct.unpack_from("<HHI", command, 16)
+            dst_region, dst_index, dst = struct.unpack_from("<HHI", command, 24)
             length = struct.unpack_from("<I", command, 40)[0]
-            if src_region != 6 or dst_region != 6 or length <= 0 or length % 32:
+            if ((src_region, src_index, dst_region, dst_index) != (6, 0, 6, 0) or
+                    length <= 0 or any(value % 32 for value in (src, dst, length)) or
+                    max(src, dst) + length > NPU_CMD_TCDM_BASE - 0x10100000):
                 raise ValueError("Expected an initial C32 TCDM LUT activation")
-            first_row, remainder = divmod(src - producer_base, 32)
+            if pending_producer is not None:
+                start, count_rows, _ = pending_producer
+                if any(address < start + count_rows * 32 and start < address + length
+                       for address in (src, dst)):
+                    raise ValueError("LUT touches outstanding producer output before its wait")
             rows = length // 32
-            if remainder or first_row < 0 or first_row + rows > producer_rows:
-                raise ValueError("LUT source does not map to the initial producer rows")
+            mapped = [producer_map.get(src + row * 32) for row in range(rows)]
+            first_row = mapped[0]
+            if first_row is None or mapped != list(range(first_row, first_row + rows)):
+                raise ValueError("LUT source does not map to completed contiguous producer rows")
+            invalidate(dst, length)
             if index > first_command:
                 checks.append({"command": index, "tensor_role": "producer_activation", "address": dst,
                                "rows": rows, "channels": conv_shape[3], "row_stride": conv_shape[2] * 32,
                                "tile_cols": conv_shape[2], "reference_first_row": first_row})
+        elif kind not in (0, 1, 5, 27):
+            raise ValueError(f"Unsupported command {kind} in initial-cascade mapping")
     raise ValueError("Not enough supported consumer tiles")
 
 
