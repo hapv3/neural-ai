@@ -1,3 +1,4 @@
+import inspect
 import os
 import struct
 
@@ -574,6 +575,13 @@ def _dtcm_header(dut, addr):
     )
 
 
+async def _emit_command_sample(callback, index, counters):
+    if callback is not None:
+        result = callback(index, counters)
+        if inspect.isawaitable(result):
+            await result
+
+
 async def monitor_command_buffer_pmu(
     dut,
     command_buffer_address,
@@ -587,7 +595,9 @@ async def monitor_command_buffer_pmu(
     the reused D-TCM command buffer, these pulses cannot skip short commands
     when all four header words change in one simulator time step.  The callback
     runs after every command and can therefore flush live CSV output before a
-    segment completes.  Keep the D-TCM watcher as a compatibility fallback for
+    segment completes. Async callbacks may also read the existing L2 backdoor;
+    they must finish before the next context begins (sequence checks reject a
+    missed command). Keep the D-TCM watcher as a compatibility fallback for
     testbenches without command-context signals.
     """
     headers = [bytes(header) for header in command_headers]
@@ -621,8 +631,7 @@ async def monitor_command_buffer_pmu(
                 )
             delta = pmu_counter_delta(pmu_direct_snapshot(dut), begin_sample)
             deltas.append(delta)
-            if sample_callback is not None:
-                sample_callback(expected_id, delta)
+            await _emit_command_sample(sample_callback, expected_id, delta)
         return deltas
 
     samples = []
@@ -647,8 +656,7 @@ async def monitor_command_buffer_pmu(
         if len(samples) > 1:
             delta = pmu_counter_delta(samples[-1], samples[-2])
             deltas.append(delta)
-            if sample_callback is not None:
-                sample_callback(len(deltas) - 1, delta)
+            await _emit_command_sample(sample_callback, len(deltas) - 1, delta)
 
     return deltas
 

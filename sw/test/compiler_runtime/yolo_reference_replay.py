@@ -18,6 +18,7 @@ for directory in (AI_ROOT / "hw/rtl/cluster/tb", AI_ROOT / "hw/rtl/cluster/tb/te
 import test_compiled_model as runtime
 from npu_test_utils import NPU_CMD_TCDM_BASE
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
+from yolo_c2f_checkpoints import C2F_ROLES, extract_checkpoint, plan_c2f_checkpoints
 
 
 def sha(data):
@@ -592,6 +593,47 @@ def silu_output(ops, input_id):
     return int(activation["outputs"][0])
 
 
+def c2f_source_graph(interpreter, parent_id):
+    """Resolve one residual C2f block through source edges and channel slices."""
+    ops = [op for op in interpreter._get_ops_details() if op["op_name"] != "DELEGATE"]
+    slices = {int(op["outputs"][0]): op for op in ops if op["op_name"] == "STRIDED_SLICE" and
+              int(op["inputs"][0]) == parent_id}
+    conv1 = next(op for op in ops if op["op_name"] == "CONV_2D" and int(op["inputs"][0]) in slices)
+    branch_id = int(conv1["inputs"][0])
+    first_id = int(conv1["outputs"][0])
+    activation1_id = silu_output(ops, first_id)
+    conv2 = next(op for op in ops if op["op_name"] == "CONV_2D" and int(op["inputs"][0]) == activation1_id)
+    second_id = int(conv2["outputs"][0])
+    activation2_id = silu_output(ops, second_id)
+    residual = next(op for op in ops if op["op_name"] == "ADD" and
+                    set(map(int, op["inputs"])) == {branch_id, activation2_id})
+    residual_id = int(residual["outputs"][0])
+    concat = next(op for op in ops if op["op_name"] == "CONCATENATION" and
+                  {branch_id, residual_id}.issubset(set(map(int, op["inputs"]))))
+    bypass_id, = set(map(int, concat["inputs"])) - {branch_id, residual_id}
+    if bypass_id not in slices:
+        raise ValueError("C2f bypass is not a slice of the verified pointwise activation")
+    ids = dict(pointwise_activation=parent_id, branch_input=branch_id, block_conv1=first_id,
+               block_activation1=activation1_id, block_conv2=second_id, block_activation2=activation2_id,
+               block_residual=residual_id, block_concat=int(concat["outputs"][0]))
+    tensors = {role: interpreter.get_tensor(tensor) for role, tensor in ids.items()}
+    if any(tensor.dtype != np.int8 for tensor in tensors.values()):
+        raise ValueError("C2f checkpoints require INT8 tensors")
+    for conv in (conv1, conv2):
+        weights = interpreter.get_tensor(int(conv["inputs"][1]))
+        if weights.ndim != 4 or weights.shape[1:3] != (3, 3):
+            raise ValueError("C2f source Conv is not a K3 layer")
+    layout = {"concat_order": [{branch_id: "branch", bypass_id: "bypass", residual_id: "residual"}[int(t)]
+                               for t in concat["inputs"]]}
+    for role, tensor in (("branch", branch_id), ("bypass", bypass_id)):
+        op = slices[tensor]
+        begin, end, stride = [interpreter.get_tensor(int(t)).reshape(-1).tolist() for t in op["inputs"][1:]]
+        if len(begin) != 4 or begin[:3] != [0, 0, 0] or stride != [1, 1, 1, 1] or end[3] <= begin[3]:
+            raise ValueError("Unsupported C2f source channel slice")
+        layout[f"{role}_start"] = int(begin[3])
+    return ids, {role: list(map(int, tensor.shape)) for role, tensor in tensors.items()}, layout
+
+
 def reset_buffers(model):
     bindings = runtime._model_binding_descriptors(model)
     sizes = {(direction, index): size for direction, index, size, _ in bindings}
@@ -675,6 +717,8 @@ def load_case(path):
         raise ValueError("all_cascade_checkpoints must be boolean")
     if type(case.get("post_cascade_checkpoints", False)) is not bool:
         raise ValueError("post_cascade_checkpoints must be boolean")
+    if type(case.get("c2f_checkpoints", False)) is not bool:
+        raise ValueError("c2f_checkpoints must be boolean")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -729,8 +773,7 @@ def load_case(path):
         expected = checked_read(check["expected"])
         if len(expected) != check["rows"] * check["channels"]:
             raise ValueError("Expected tensor size mismatch")
-        extract_c32(memory, check["address"], check["rows"], check["channels"],
-                    check["row_stride"], check["tile_cols"])
+        extract_checkpoint(memory, check)
     if not seen and not case.get("full_graph", False):
         raise ValueError("Replay has no byte-exact checkpoints")
     if case.get("all_cascade_checkpoints", False):
@@ -739,8 +782,12 @@ def load_case(path):
         coverage = validate_cascade_coverage(case["checkpoints"], case["cascade_shapes"])
         if coverage != case["cascade_coverage"]:
             raise ValueError("Stale complete-cascade coverage")
-        location = cascade_l2_location(case["checkpoints"], commands, case["end_command"])
         saved_location = case.get("cascade_l2_output")
+        comparison_command = (saved_location or {}).get("command", case["end_command"])
+        if (type(comparison_command) is not int or not first < comparison_command <= case["end_command"] or
+                (comparison_command != case["end_command"] and not case.get("c2f_checkpoints", False))):
+            raise ValueError("Invalid live cascade L2 comparison boundary")
+        location = cascade_l2_location(case["checkpoints"], commands, comparison_command)
         if location is not None:
             if saved_location is None or any(saved_location.get(k) != v for k, v in location.items()):
                 raise ValueError("Missing or stale cascade L2 output comparison")
@@ -760,10 +807,28 @@ def load_case(path):
                 any(actual.get(key) != value for key, value in expected.items())
                 for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale post-cascade checkpoint mapping")
-        if completed_replay_boundary(full_model, end) != case["end_command"]:
+        post_boundary = completed_replay_boundary(full_model, end)
+        if post_boundary != case["end_command"] and not case.get("c2f_checkpoints", False):
             raise ValueError("Post-cascade replay must end at its first drained boundary")
         if validate_cascade_coverage(saved, shapes, POST_CASCADE_ROLES) != case["post_cascade_coverage"]:
             raise ValueError("Stale post-cascade coverage")
+    if case.get("c2f_checkpoints", False):
+        if not case.get("post_cascade_checkpoints", False):
+            raise ValueError("C2f checkpoints require complete post-cascade coverage")
+        if (case["cascade_l2_output"].get("command") != post_boundary or
+                case["c2f_shapes"]["pointwise_activation"] != case["post_cascade_shapes"]["pointwise_activation"]):
+            raise ValueError("Stale C2f parent/L2 comparison boundary")
+        planned, end = plan_c2f_checkpoints(commands, case["checkpoints"], case["c2f_shapes"],
+            case["c2f_layout"], len(memory), len(temporary))
+        saved = [c for c in case["checkpoints"] if c["tensor_role"] in C2F_ROLES]
+        if (len(saved) != len(planned) or any(
+                any(actual.get(key) != value for key, value in expected.items())
+                for actual, expected in zip(saved, planned))):
+            raise ValueError("Missing or stale C2f checkpoint mapping")
+        if completed_replay_boundary(full_model, end) != case["end_command"]:
+            raise ValueError("C2f replay must end at its first drained boundary")
+        if validate_cascade_coverage(saved, case["c2f_shapes"], C2F_ROLES) != case["c2f_coverage"]:
+            raise ValueError("Stale C2f coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -782,6 +847,8 @@ def main():
                         help="Run every supported initial-cascade checkpoint in one bounded reset replay")
     parser.add_argument("--post-cascade-checkpoints", action="store_true",
                         help="Also check the next SiLU, single-group pointwise Conv and its SiLU")
+    parser.add_argument("--c2f-checkpoints", action="store_true",
+                        help="Also check the first C2f branch, Conv/SiLU pair, residual and concat")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -790,6 +857,8 @@ def main():
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.c2f_checkpoints:
+        args.post_cascade_checkpoints = True
     if args.post_cascade_checkpoints:
         args.all_cascade_checkpoints = True
     if args.output.exists():
@@ -877,6 +946,13 @@ def main():
                            for role in POST_CASCADE_ROLES}
             post_checks, end = plan_post_cascade_checkpoints(commands, checks, post_shapes)
             checks = sorted(checks + post_checks, key=lambda check: check["command"])
+            if args.c2f_checkpoints:
+                l2_comparison_command = completed_replay_boundary(full_model, end)
+                c2f_ids, c2f_shapes, c2f_layout = c2f_source_graph(interpreter, tensor_ids["pointwise_activation"])
+                tensor_ids.update(c2f_ids)
+                c2f_checks, end = plan_c2f_checkpoints(commands, checks, c2f_shapes, c2f_layout,
+                    len(memory), len(temporary))
+                checks = sorted(checks + c2f_checks, key=lambda check: check["command"])
     if args.full_graph:
         end = len(commands)
     else:
@@ -929,14 +1005,19 @@ def main():
         case["cascade_shapes"] = {"producer_activation": list(map(int, producer.shape)),
                                   "consumer_conv": list(map(int, consumer.shape))}
         case["cascade_coverage"] = validate_cascade_coverage(checks, case["cascade_shapes"])
-        location = cascade_l2_location(checks, commands, end)
+        location = cascade_l2_location(checks, commands, l2_comparison_command if args.c2f_checkpoints else end)
         if location is not None:
             filename = args.output / "cascade-l2-expected.bin"
             filename.write_bytes(consumer.tobytes())
             case["cascade_l2_output"] = {**location, "tensor": consumer_id, "expected": artifact(filename)}
+            if args.c2f_checkpoints:
+                case["cascade_l2_output"]["command"] = l2_comparison_command
     if args.post_cascade_checkpoints:
         case.update(post_cascade_checkpoints=True, post_cascade_shapes=post_shapes,
                     post_cascade_coverage=validate_cascade_coverage(checks, post_shapes, POST_CASCADE_ROLES))
+    if args.c2f_checkpoints:
+        case.update(c2f_checkpoints=True, c2f_shapes=c2f_shapes, c2f_layout=c2f_layout,
+                    c2f_coverage=validate_cascade_coverage(checks, c2f_shapes, C2F_ROLES))
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)

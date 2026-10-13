@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
+from cocotb.triggers import Timer
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 import numpy as np
 
@@ -13,6 +14,7 @@ from yolo_reference_replay import (
     checked_read, execution_model, load_case, output_comparison, runtime, save_checkpoint_result,
 )
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
+from yolo_c2f_checkpoints import extract_checkpoint
 
 
 async def run_reference_case(dut, case_path):
@@ -40,6 +42,7 @@ async def run_reference_case(dut, case_path):
               "fail_fast": case.get("fail_fast", False),
               "cascade_coverage": case.get("cascade_coverage"),
               "post_cascade_coverage": case.get("post_cascade_coverage"),
+              "c2f_coverage": case.get("c2f_coverage"),
               "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
                         if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
@@ -76,9 +79,9 @@ async def run_reference_case(dut, case_path):
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
     before_compute = {check.get("submit_command", check["command"]) - 1:
                       check.get("submit_command", check["command"]) for check in case["checkpoints"]
-                      if check["tensor_role"] in ("consumer_conv", "pointwise_conv")}
+                      if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2")}
 
-    def capture(index, counters):
+    async def capture(index, counters):
         record = records[index]
         if record["type"] == 0:
             return
@@ -100,11 +103,30 @@ async def run_reference_case(dut, case_path):
                                        append=number != first + 1)
         if number in before_compute:
             (folder / f"before-command-{before_compute[number]}-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
+        l2_check = case.get("cascade_l2_output")
+        if l2_check is not None and l2_check.get("command") == number:
+            # The PMU callback runs in ReadOnly. Leave that phase before driving
+            # the existing backdoor address; no RTL/firmware pause is introduced.
+            await Timer(1, unit="ps")
+            last_row = l2_check["rows"] - 1
+            span = (last_row // l2_check["tile_cols"] * l2_check["row_stride"] +
+                    last_row % l2_check["tile_cols"] * 32 + l2_check["channels"])
+            retained = bytes(await runtime.read_l2_bytes(dut, 0x80200000 + l2_check["address"], span))
+            actual = extract_checkpoint(retained, {**l2_check, "address": 0})
+            expected = np.frombuffer(checked_read(l2_check["expected"]), np.int8).reshape(actual.shape)
+            (folder / "cascade-l2-actual.bin").write_bytes(actual.tobytes())
+            report["cascade_l2_output"] = {**l2_check, **compare_bytes(actual, expected)}
+            persist()
+            dut._log.info("NEURAL-AI LIVE CASCADE L2 command %d: %d/%d mismatches", number,
+                          report["cascade_l2_output"]["mismatches"], report["cascade_l2_output"]["bytes"])
+            if report["fail_fast"] and report["cascade_l2_output"]["mismatches"]:
+                report.update(status="FAIL", failed_command=number, error="Live cascade L2 output mismatch")
+                persist()
+                raise AssertionError(report["error"])
         if number not in checkpoints:
             return
         check = checkpoints[number]
-        actual = extract_c32(runtime.read_tcdm_bytes(dut), check["address"], check["rows"], check["channels"],
-                             check["row_stride"], check["tile_cols"])
+        actual = extract_checkpoint(runtime.read_tcdm_bytes(dut), check)
         stats = save_checkpoint_result(folder, report, check, actual, report["fail_fast"])
         dut._log.info("NEURAL-AI BYTE-EXACT command %d tensor %d: %d/%d mismatches, first=%s max_abs=%d",
                       number, check["tensor"], stats["mismatches"], stats["bytes"],
@@ -146,17 +168,19 @@ async def run_reference_case(dut, case_path):
         assert report.get("restore_check", {}).get("mismatches") == 0
     assert len(report["checkpoints"]) == len(checkpoints)
     failures = [check for check in report["checkpoints"] if check["mismatches"]]
-    if case.get("cascade_l2_output") is not None:
+    if case.get("cascade_l2_output") is not None and "command" not in case["cascade_l2_output"]:
         check = case["cascade_l2_output"]
         actual = extract_c32(snapshot_temporary, check["address"], check["rows"], check["channels"],
                              check["row_stride"], check["tile_cols"])
         expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
         (folder / "cascade-l2-actual.bin").write_bytes(actual.tobytes())
         report["cascade_l2_output"] = {**check, **compare_bytes(actual, expected)}
-        if report["cascade_l2_output"]["mismatches"]:
-            failures.append(report["cascade_l2_output"])
         dut._log.info("NEURAL-AI CASCADE L2 OUTPUT: %d/%d mismatches",
                       report["cascade_l2_output"]["mismatches"], report["cascade_l2_output"]["bytes"])
+    if case.get("cascade_l2_output") is not None:
+        assert "cascade_l2_output" in report, "Missing live L2 comparison"
+        if report["cascade_l2_output"]["mismatches"]:
+            failures.append(report["cascade_l2_output"])
     if full_graph:
         (folder / "output-actual.bin").write_bytes(snapshot_output)
         report["final_output"] = {**case["final_output"],
