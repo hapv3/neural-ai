@@ -408,10 +408,168 @@ def completed_replay_boundary(model, end):
     raise ValueError("No completed replay boundary after the requested checkpoints")
 
 
-def validate_cascade_coverage(checks, shapes):
-    """Prove every logical row of both supported tensors is compared once."""
+POST_CASCADE_ROLES = ("consumer_activation", "pointwise_conv", "pointwise_activation")
+
+
+def plan_post_cascade_checkpoints(commands, cascade_checks, shapes):
+    """Follow completed L2 loads, single-group pointwise Conv and its LUT.
+
+    Logical rows come from the verified consumer's stores, never from reused
+    local addresses or command IDs. Multi-group/partial jobs are rejected.
+    This is a bounded extension, not a numerical mapper for the whole graph.
+    """
+    for role in POST_CASCADE_ROLES:
+        shape = shapes[role]
+        if (len(shape) != 4 or shape[0] != 1 or
+                any(type(v) is not int or v <= 0 for v in shape) or shape[3] > 32):
+            raise ValueError("Post-cascade mapping requires single-batch, single-C32-group tensors")
+    if len({tuple(shapes[role][:3]) for role in POST_CASCADE_ROLES}) != 1:
+        raise ValueError("Post-cascade pointwise tensors must have equal spatial extents")
+    consumers = [c for c in cascade_checks if c["tensor_role"] == "consumer_conv"]
+    if (any(c["channels"] != shapes["consumer_activation"][3] for c in consumers) or
+            shapes["pointwise_conv"][3] != shapes["pointwise_activation"][3]):
+        raise ValueError("Post-cascade activation channels differ from their Conv")
+    l2_rows = {}
+    for check in consumers:
+        if "l2_store" not in check:
+            raise ValueError("Post-cascade mapping requires staged consumer stores")
+        store = check["l2_store"]
+        for row in range(check["rows"]):
+            address = store["address"] + row * 32
+            if address in l2_rows:
+                raise ValueError("Overlapping post-cascade L2 rows")
+            l2_rows[address] = (check["reference_first_row"] + row, store["complete_command"])
+    total_rows = shapes[POST_CASCADE_ROLES[0]][1] * shapes[POST_CASCADE_ROLES[0]][2]
+    if sorted(row for row, _ in l2_rows.values()) != list(range(total_rows)):
+        raise ValueError("Incomplete post-cascade L2 input mapping")
+    local_rows = {}
+    pending_loads = []
+    checks = []
+    layers = {}
+    covered = {role: set() for role in POST_CASCADE_ROLES}
+    limit = NPU_CMD_TCDM_BASE - 0x10100000
+
+    def invalidate(address, length):
+        if length <= 0 or address + length > limit:
+            raise ValueError("Post-cascade local access exceeds tensor memory")
+        if any(address < dst + size and dst < address + length for dst, size, _ in pending_loads):
+            raise ValueError("Post-cascade access overlaps an outstanding DMA load")
+        for physical in list(local_rows):
+            if address < physical + 32 and physical < address + length:
+                del local_rows[physical]
+
+    def source_rows(address, length):
+        if any(address < dst + size and dst < address + length for dst, size, _ in pending_loads):
+            raise ValueError("Post-cascade input read before DMA completion")
+        mapped = [local_rows.get(physical) for physical in range(address, address + length, 32)]
+        if not any(value is not None for value in mapped):
+            return None
+        if address % 32 or length <= 0 or length % 32 or any(value is None for value in mapped):
+            raise ValueError("Missing/stale post-cascade source rows")
+        role, first_row = mapped[0]
+        if mapped != [(role, first_row + row) for row in range(len(mapped))]:
+            raise ValueError("Noncontiguous post-cascade source rows")
+        return role, first_row
+
+    def capture(index, layer, role, address, length, first_row):
+        rows = length // 32
+        if (address % 32 or length <= 0 or length % 32 or
+                first_row + rows > total_rows or
+                (role in layers and layers[role] != layer)):
+            raise ValueError("Unsupported post-cascade output layout/layer")
+        logical = set(range(first_row, first_row + rows))
+        if covered[role] & logical:
+            raise ValueError("Duplicate post-cascade logical output rows")
+        invalidate(address, length)
+        local_rows.update((address + row * 32, (role, first_row + row)) for row in range(rows))
+        layers[role] = layer
+        covered[role].update(logical)
+        shape = shapes[role]
+        checks.append({"command": index, "tensor_role": role, "address": address,
+                       "rows": rows, "channels": shape[3], "row_stride": shape[2] * 32,
+                       "tile_cols": shape[2], "reference_first_row": first_row})
+
+    for index, command in enumerate(commands, 1):
+        kind, _, flags, layer, _ = struct.unpack_from("<HHIII", command)
+        if kind in (2, 3, 4, 24, 25, 26):
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 16)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 24)
+            length, direction = struct.unpack_from("<2I", command, 32)
+            span = length
+            if kind in (3, 4, 25, 26):
+                stride, repetitions = struct.unpack_from("<2I", command, 40)
+                span += stride * (repetitions - 1)
+            if kind in (4, 26):
+                stride, repetitions = struct.unpack_from("<2I", command, 52)
+                span += stride * (repetitions - 1)
+            if dst_region != 6:
+                continue
+            invalidate(destination, span)
+            mapped = []
+            if src_region == 5:
+                if (kind not in (2, 24) or src_index or dst_index or direction or
+                        any(v % 32 for v in (source, destination, length))):
+                    raise ValueError("Unsupported post-cascade L2 load layout")
+                for row in range(length // 32):
+                    logical = l2_rows.get(source + row * 32)
+                    if logical is None or logical[1] > index:
+                        raise ValueError("Post-cascade L2 input is missing or its store is incomplete")
+                    mapped.append((destination + row * 32, ("consumer_conv", logical[0])))
+            if kind in (24, 25, 26) and direction == 0:
+                pending_loads.append((destination, span, mapped))
+            else:
+                local_rows.update(mapped)
+        elif kind == 27 and struct.unpack_from("<I", command, 16)[0] == 0:
+            for _, _, mapped in pending_loads:
+                local_rows.update(mapped)
+            pending_loads.clear()
+        elif kind == 1:
+            for _, _, mapped in pending_loads:
+                local_rows.update(mapped)
+            pending_loads.clear()
+        elif kind in (9, 29):
+            address, rows = struct.unpack_from("<2I", command, 108)
+            invalidate(address, rows * 32)
+        elif kind == 12:
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 16)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 24)
+            length = struct.unpack_from("<I", command, 40)[0]
+            if (src_region, src_index, dst_region, dst_index) != (6, 0, 6, 0):
+                raise ValueError("Post-cascade LUT requires local input/output")
+            mapped = source_rows(source, length)
+            if mapped is None:
+                invalidate(destination, length)
+            else:
+                role, first_row = mapped
+                output_role = {"consumer_conv": "consumer_activation",
+                               "pointwise_conv": "pointwise_activation"}.get(role)
+                if output_role is None:
+                    raise ValueError("Unexpected post-cascade LUT source role")
+                capture(index, layer, output_role, destination, length, first_row)
+        elif kind == 10:
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 24)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 40)
+            rows, input_groups, output_groups = struct.unpack_from("<3I", command, 48)
+            if ((src_region, src_index, dst_region, dst_index) != (6, 0, 6, 0) or flags or
+                    (input_groups, output_groups) != (1, 1) or
+                    struct.unpack_from("<HHI", command, 32) != (0, 0, 0)):
+                raise ValueError("Unsupported post-cascade pointwise job")
+            mapped = source_rows(source, rows * 32)
+            if mapped is None or mapped[0] != "consumer_activation":
+                raise ValueError("Pointwise input is not completed post-cascade activation")
+            capture(index, layer, "pointwise_conv", destination, rows * 32, mapped[1])
+        elif kind not in (0, 5, 27, 30):
+            raise ValueError(f"Unsupported command {kind} in post-cascade mapping")
+        if all(len(rows) == total_rows for rows in covered.values()):
+            validate_cascade_coverage(checks, shapes, POST_CASCADE_ROLES)
+            return checks, index
+    raise ValueError("Incomplete post-cascade checkpoints")
+
+
+def validate_cascade_coverage(checks, shapes, roles=("producer_activation", "consumer_conv")):
+    """Prove every logical row of the requested tensors is compared once."""
     coverage = {}
-    for role in ("producer_activation", "consumer_conv"):
+    for role in roles:
         shape = shapes[role]
         if len(shape) != 4 or shape[0] != 1 or any(type(v) is not int or v <= 0 for v in shape):
             raise ValueError("Invalid complete-cascade tensor shape")
@@ -425,6 +583,13 @@ def validate_cascade_coverage(checks, shapes):
             raise ValueError(f"Incomplete cascade checkpoints: {role}")
         coverage[role] = {"rows": rows, "channels": shape[3], "bytes": rows * shape[3]}
     return coverage
+
+
+def silu_output(ops, input_id):
+    sigmoid = next(op for op in ops if op["op_name"] == "LOGISTIC" and input_id in op["inputs"])
+    activation = next(op for op in ops if op["op_name"] == "MUL" and
+                      set(map(int, op["inputs"])) == {input_id, int(sigmoid["outputs"][0])})
+    return int(activation["outputs"][0])
 
 
 def reset_buffers(model):
@@ -508,6 +673,8 @@ def load_case(path):
         raise ValueError("fail_fast must be boolean")
     if type(case.get("all_cascade_checkpoints", False)) is not bool:
         raise ValueError("all_cascade_checkpoints must be boolean")
+    if type(case.get("post_cascade_checkpoints", False)) is not bool:
+        raise ValueError("post_cascade_checkpoints must be boolean")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -583,6 +750,20 @@ def load_case(path):
             extract_c32(temporary, **location)
         elif saved_location is not None:
             raise ValueError("Unexpected cascade L2 output comparison")
+    if case.get("post_cascade_checkpoints", False):
+        if not case.get("all_cascade_checkpoints", False):
+            raise ValueError("Post-cascade checkpoints require complete initial-cascade coverage")
+        shapes = case["post_cascade_shapes"]
+        planned, end = plan_post_cascade_checkpoints(commands, case["checkpoints"], shapes)
+        saved = [c for c in case["checkpoints"] if c["tensor_role"] in POST_CASCADE_ROLES]
+        if (len(saved) != len(planned) or any(
+                any(actual.get(key) != value for key, value in expected.items())
+                for actual, expected in zip(saved, planned))):
+            raise ValueError("Missing or stale post-cascade checkpoint mapping")
+        if completed_replay_boundary(full_model, end) != case["end_command"]:
+            raise ValueError("Post-cascade replay must end at its first drained boundary")
+        if validate_cascade_coverage(saved, shapes, POST_CASCADE_ROLES) != case["post_cascade_coverage"]:
+            raise ValueError("Stale post-cascade coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -599,6 +780,8 @@ def main():
                         help="YOLO cascade checkpoints; 0 skips these only when verifying full output")
     parser.add_argument("--all-cascade-checkpoints", action="store_true",
                         help="Run every supported initial-cascade checkpoint in one bounded reset replay")
+    parser.add_argument("--post-cascade-checkpoints", action="store_true",
+                        help="Also check the next SiLU, single-group pointwise Conv and its SiLU")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -607,6 +790,8 @@ def main():
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.post_cascade_checkpoints:
+        args.all_cascade_checkpoints = True
     if args.output.exists():
         parser.error("Choose a fresh output directory")
     if args.full_graph and not args.from_reset:
@@ -667,10 +852,7 @@ def main():
         ops = interpreter._get_ops_details()
         convs = [op for op in ops if op["op_name"] == "CONV_2D"]
         producer_id, consumer_id = (int(op["outputs"][0]) for op in convs[:2])
-        sigmoid = next(op for op in ops if op["op_name"] == "LOGISTIC" and producer_id in op["inputs"])
-        activation_op = next(op for op in ops if op["op_name"] == "MUL" and
-                             set(map(int, op["inputs"])) == {producer_id, int(sigmoid["outputs"][0])})
-        activation_id = int(activation_op["outputs"][0])
+        activation_id = silu_output(ops, producer_id)
         # Ensure the second source Conv really consumes this activation through PAD.
         consumer_input = int(convs[1]["inputs"][0])
         if consumer_input != activation_id:
@@ -681,6 +863,20 @@ def main():
         consumer = interpreter.get_tensor(consumer_id)
         checks, end = plan_checkpoints(commands, first, producer.shape, consumer.shape,
                                        None if args.all_cascade_checkpoints else args.consumer_tiles)
+        tensor_ids = {"producer_activation": activation_id, "consumer_conv": consumer_id}
+        if args.post_cascade_checkpoints:
+            consumer_activation_id = silu_output(ops, consumer_id)
+            pointwise = next(op for op in convs if int(op["inputs"][0]) == consumer_activation_id)
+            weights = interpreter.get_tensor(int(pointwise["inputs"][1]))
+            if weights.ndim != 4 or weights.shape[1:3] != (1, 1):
+                raise ValueError("Post-cascade source consumer is not a pointwise Conv")
+            pointwise_id = int(pointwise["outputs"][0])
+            tensor_ids.update(consumer_activation=consumer_activation_id, pointwise_conv=pointwise_id,
+                              pointwise_activation=silu_output(ops, pointwise_id))
+            post_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
+                           for role in POST_CASCADE_ROLES}
+            post_checks, end = plan_post_cascade_checkpoints(commands, checks, post_shapes)
+            checks = sorted(checks + post_checks, key=lambda check: check["command"])
     if args.full_graph:
         end = len(commands)
     else:
@@ -691,7 +887,7 @@ def main():
         input_path.write_bytes(input_data)
     details = {d["index"]: d for d in interpreter.get_tensor_details()}
     for check in checks:
-        tensor_id = consumer_id if check["tensor_role"] == "consumer_conv" else activation_id
+        tensor_id = tensor_ids[check["tensor_role"]]
         tensor = interpreter.get_tensor(tensor_id).reshape(-1, check["channels"])
         offset = check["reference_first_row"]
         filename = args.output / f"command-{check['command']}-expected.bin"
@@ -738,6 +934,9 @@ def main():
             filename = args.output / "cascade-l2-expected.bin"
             filename.write_bytes(consumer.tobytes())
             case["cascade_l2_output"] = {**location, "tensor": consumer_id, "expected": artifact(filename)}
+    if args.post_cascade_checkpoints:
+        case.update(post_cascade_checkpoints=True, post_cascade_shapes=post_shapes,
+                    post_cascade_coverage=validate_cascade_coverage(checks, post_shapes, POST_CASCADE_ROLES))
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)

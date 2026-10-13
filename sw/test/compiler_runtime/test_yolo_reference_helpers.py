@@ -11,7 +11,8 @@ import numpy as np
 from yolo_reference_replay import (
     artifact, cascade_l2_location, checked_read, completed_replay_boundary, consumer_store_location,
     execution_model, invocation_address, load_case, output_comparison,
-    plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers,
+    plan_checkpoints, plan_lut_restore, plan_post_cascade_checkpoints, plan_restore_preamble, reset_buffers,
+    POST_CASCADE_ROLES,
     runtime, save_checkpoint_result, validate_cascade_coverage, validate_output_scope,
 )
 
@@ -41,6 +42,119 @@ def l2_store(source, destination, length=32, async_job=False):
 
 
 class ReferenceReplayTest(unittest.TestCase):
+    def post_commands(self):
+        commands = self.staged_commands()
+        for address in (64, 96):
+            load = bytearray(runtime._dma_1d(runtime._ref(5, offset=address), runtime._ref(6), 32, 0, 0))
+            struct.pack_into("<H", load, 0, 24)
+            commands.extend((bytes(load), runtime._dma_wait(0, 0), lut(0, 512, 32),
+                             runtime._pointwise_c32(runtime._ref(1), runtime._ref(6, offset=512),
+                                 runtime._ref(0), runtime._ref(6, offset=640), 1, 1, 1, 0, 32, 32, 0),
+                             lut(640, 768, 32)))
+        return commands
+
+    def post_plan(self, commands):
+        checks, _ = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), None)
+        shapes = {role: [1, 1, 2, 3] for role in POST_CASCADE_ROLES}
+        return plan_post_cascade_checkpoints(commands, checks, shapes)
+
+    def test_post_cascade_tracks_reused_staging_and_pointwise_rows(self):
+        checks, end = self.post_plan(self.post_commands())
+        self.assertEqual(end, 16)
+        self.assertEqual([c["command"] for c in checks], [9, 10, 11, 14, 15, 16])
+        for role in POST_CASCADE_ROLES:
+            selected = [c for c in checks if c["tensor_role"] == role]
+            self.assertEqual([c["reference_first_row"] for c in selected], [0, 1])
+            self.assertEqual(selected[0]["address"], selected[1]["address"])
+        coverage = validate_cascade_coverage(checks, {r: [1, 1, 2, 3] for r in POST_CASCADE_ROLES},
+                                             POST_CASCADE_ROLES)
+        self.assertEqual([c["bytes"] for c in coverage.values()], [6, 6, 6])
+
+    def test_post_cascade_requires_completed_load_and_store(self):
+        commands = self.post_commands()
+        del commands[7]
+        with self.assertRaisesRegex(ValueError, "before DMA completion"):
+            self.post_plan(commands)
+        commands = self.post_commands()
+        initial, _ = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), None)
+        initial[1]["l2_store"]["complete_command"] = 100
+        with self.assertRaisesRegex(ValueError, "store is incomplete"):
+            plan_post_cascade_checkpoints(commands, initial, {r: [1, 1, 2, 3] for r in POST_CASCADE_ROLES})
+
+    def test_post_cascade_rejects_overwritten_input_and_duplicate_rows(self):
+        commands = self.post_commands()
+        commands.insert(9, runtime._dma_1d(runtime._ref(1), runtime._ref(6, offset=512), 32, 0, 0))
+        with self.assertRaisesRegex(ValueError, "not completed post-cascade activation"):
+            self.post_plan(commands)
+        commands = self.post_commands()
+        load = bytearray(commands[11])
+        struct.pack_into("<I", load, 20, 64)
+        commands[11] = bytes(load)
+        with self.assertRaisesRegex(ValueError, "Duplicate post-cascade"):
+            self.post_plan(commands)
+
+    def test_post_cascade_rejects_partial_multigroup_or_flagged_pointwise(self):
+        for offset, value in ((32, 6), (52, 2), (56, 2), (4, 1)):
+            commands = self.post_commands()
+            pointwise = bytearray(commands[9])
+            struct.pack_into("<I", pointwise, offset, value)
+            commands[9] = bytes(pointwise)
+            with self.subTest(offset=offset), self.assertRaisesRegex(ValueError, "Unsupported.*pointwise"):
+                self.post_plan(commands)
+
+    def test_post_cascade_rejects_missing_rows_and_unsupported_shapes(self):
+        commands = self.post_commands()
+        with self.assertRaisesRegex(ValueError, "Incomplete post-cascade checkpoints"):
+            self.post_plan(commands[:-1])
+        initial, _ = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3), None)
+        for shape in ([1, 1, 2, 33], [2, 1, 2, 3], [1, 1, 2, True], [1, 1, 2, 0]):
+            with self.subTest(shape=shape), self.assertRaisesRegex(ValueError, "single-C32-group"):
+                plan_post_cascade_checkpoints(commands, initial, {r: shape for r in POST_CASCADE_ROLES})
+
+    def test_post_cascade_case_revalidates_mapping_and_coverage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.full_case(folder)
+            load_qparams = struct.pack("<HHIII", 5, 32, 0, 0, 0).ljust(32, b"\0")
+            commands = [load_qparams] + self.post_commands()
+            initial_shapes = {"producer_activation": [1, 2, 2, 2], "consumer_conv": [1, 1, 2, 3]}
+            initial, _ = plan_checkpoints(commands, 0, *initial_shapes.values(), None)
+            post_shapes = {role: [1, 1, 2, 3] for role in POST_CASCADE_ROLES}
+            post, end = plan_post_cascade_checkpoints(commands, initial, post_shapes)
+            bindings = b"".join(runtime._binding(d, 0, dimensions=(1, 1, 1, s))
+                                for d, s in ((1, 64), (2, 6), (3, 128)))
+            terminal = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+            model = bytearray(runtime._package(b"".join(commands) + terminal, bytes(range(256)),
+                                              bindings, len(commands), 1024, 1, 1))
+            struct.pack_into("<I", model, 64 + 3 * 32 + 20, 3)
+            (folder / "model.nai").write_bytes(model)
+            checks = sorted(initial + post, key=lambda c: c["command"])
+            for check in checks:
+                expected = folder / f"check-{check['command']}.bin"
+                expected.write_bytes(bytes(check["rows"] * check["channels"]))
+                check["expected"] = artifact(expected)
+            expected = folder / "l2.bin"
+            expected.write_bytes(bytes(6))
+            case.update(full_graph=False, final_output=None, model=artifact(folder / "model.nai"),
+                        end_command=end, all_cascade_checkpoints=True, cascade_shapes=initial_shapes,
+                        cascade_coverage=validate_cascade_coverage(checks, initial_shapes), checkpoints=checks,
+                        cascade_l2_output={**cascade_l2_location(checks, commands, end), "expected": artifact(expected)},
+                        post_cascade_checkpoints=True, post_cascade_shapes=post_shapes,
+                        post_cascade_coverage=validate_cascade_coverage(post, post_shapes, POST_CASCADE_ROLES))
+            path = folder / "case.json"
+            path.write_text(json.dumps(case))
+            self.assertEqual(len(load_case(path)[0]["checkpoints"]), 9)
+            for mutate, message in ((lambda: post[0].update(address=544), "stale post-cascade checkpoint"),
+                                    (lambda: case["post_cascade_coverage"]["pointwise_conv"].update(bytes=99),
+                                     "Stale post-cascade coverage")):
+                original = json.loads(path.read_text())
+                mutate()
+                path.write_text(json.dumps(case))
+                with self.assertRaisesRegex(ValueError, message):
+                    load_case(path)
+                case = original
+                path.write_text(json.dumps(case))
+
     def staged_commands(self, async_store=False):
         commands = [linebuffer(0, 128, 4, 2), lut(128, 0, 128),
                     linebuffer(2, 256, 1, 2), l2_store(256, 64),
