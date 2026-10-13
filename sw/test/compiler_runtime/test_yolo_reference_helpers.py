@@ -9,7 +9,8 @@ import unittest
 import numpy as np
 
 from yolo_reference_replay import (
-    artifact, checked_read, execution_model, invocation_address, load_case, output_comparison,
+    artifact, cascade_l2_location, checked_read, completed_replay_boundary, consumer_store_location,
+    execution_model, invocation_address, load_case, output_comparison,
     plan_checkpoints, plan_lut_restore, plan_restore_preamble, reset_buffers,
     runtime, save_checkpoint_result, validate_cascade_coverage, validate_output_scope,
 )
@@ -32,7 +33,72 @@ def lut(src, dst, length, reuse=False):
     return bytes(command)
 
 
+def l2_store(source, destination, length=32, async_job=False):
+    command = bytearray(64)
+    struct.pack_into("<HHIII", command, 0, 24 if async_job else 2, 64, 0, 2, 0)
+    struct.pack_into("<HHIHHI2I", command, 16, 6, 0, source, 5, 0, destination, length, 1)
+    return bytes(command)
+
+
 class ReferenceReplayTest(unittest.TestCase):
+    def staged_commands(self, async_store=False):
+        commands = [linebuffer(0, 128, 4, 2), lut(128, 0, 128),
+                    linebuffer(2, 256, 1, 2), l2_store(256, 64),
+                    linebuffer(2, 256, 1, 2), l2_store(256, 96, async_job=async_store)]
+        if async_store:
+            commands.append(struct.pack("<HHIII4I", 27, 32, 0, 2, 0, 1, 0, 0, 0))
+        return commands
+
+    def test_staged_consumer_uses_l2_offsets_not_reused_tcdm_addresses(self):
+        commands = self.staged_commands()
+        checks, end = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        consumers = [c for c in checks if c["tensor_role"] == "consumer_conv"]
+        self.assertEqual((end, [c["address"] for c in consumers]), (6, [256, 256]))
+        self.assertEqual([c["l2_store"]["address"] for c in consumers], [64, 96])
+        self.assertEqual(cascade_l2_location(checks, commands, end),
+                         dict(address=64, rows=2, channels=3, row_stride=64, tile_cols=2))
+
+    def test_staged_consumer_requires_store_completion_before_replay_end(self):
+        commands = self.staged_commands(async_store=True)
+        checks, end = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        self.assertEqual(end, 7)
+        with self.assertRaisesRegex(ValueError, "no completion wait"):
+            plan_checkpoints(commands[:-1], 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            cascade_l2_location(checks, commands, 6)
+
+    def test_staged_consumer_rejects_overwrite_or_noncontiguous_l2_stores(self):
+        for overwrite in (linebuffer(2, 256, 1, 2), lut(128, 256, 32)):
+            commands = self.staged_commands()
+            commands.insert(3, overwrite)
+            with self.assertRaisesRegex(ValueError, "overwritten before"):
+                plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        commands = self.staged_commands()
+        commands[-1] = l2_store(256, 128)
+        with self.assertRaisesRegex(ValueError, "not contiguous"):
+            plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+
+    def test_staged_consumer_rejects_stale_mapping_and_later_l2_overwrite(self):
+        commands = self.staged_commands()
+        checks, end = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        checks[-1]["l2_store"]["address"] += 32
+        with self.assertRaisesRegex(ValueError, "Stale L2"):
+            cascade_l2_location(checks, commands, end)
+        checks, end = plan_checkpoints(commands, 0, (1, 2, 2, 2), (1, 1, 2, 3))
+        commands.append(l2_store(256, 64))
+        with self.assertRaisesRegex(ValueError, "Unmapped DMA overwrites"):
+            cascade_l2_location(checks, commands, end + 1)
+
+    def test_completed_boundary_also_drains_the_other_dma_queue(self):
+        commands = self.staged_commands(async_store=True)
+        load = bytearray(l2_store(256, 96, async_job=True))
+        struct.pack_into("<I", load, 36, 0)
+        commands.insert(-1, bytes(load))
+        commands.append(struct.pack("<HHIII4I", 27, 32, 0, 2, 0, 0, 0, 0, 0))
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        model = runtime._package(b"".join(commands) + end, b"", b"", len(commands), 1024, 0, 0)
+        self.assertEqual(completed_replay_boundary(model, 8), 9)
+
     def test_fail_fast_saves_first_mismatch_and_complete_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)

@@ -145,6 +145,17 @@ async def run_reference_case(dut, case_path):
         assert report.get("restore_check", {}).get("mismatches") == 0
     assert len(report["checkpoints"]) == len(checkpoints)
     failures = [check for check in report["checkpoints"] if check["mismatches"]]
+    if case.get("cascade_l2_output") is not None:
+        check = case["cascade_l2_output"]
+        actual = extract_c32(snapshot_temporary, check["address"], check["rows"], check["channels"],
+                             check["row_stride"], check["tile_cols"])
+        expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
+        (folder / "cascade-l2-actual.bin").write_bytes(actual.tobytes())
+        report["cascade_l2_output"] = {**check, **compare_bytes(actual, expected)}
+        if report["cascade_l2_output"]["mismatches"]:
+            failures.append(report["cascade_l2_output"])
+        dut._log.info("NEURAL-AI CASCADE L2 OUTPUT: %d/%d mismatches",
+                      report["cascade_l2_output"]["mismatches"], report["cascade_l2_output"]["bytes"])
     if full_graph:
         (folder / "output-actual.bin").write_bytes(snapshot_output)
         report["final_output"] = {**case["final_output"],

@@ -113,6 +113,50 @@ def plan_restore_preamble(model, first_command, restore, memory):
             "bytes": length, "destination_sha256": sha(expected)}
 
 
+def consumer_store_location(commands, submit, layer, address, length):
+    """Find a staged output's L2 destination before its local bytes are reused.
+
+    Support the initial cascade's contiguous DMA1D stores only. Async stores
+    require an explicit local-to-external queue wait before the replay can end.
+    """
+    for index in range(submit, len(commands)):
+        command = commands[index]
+        kind, _, _, command_layer, _ = struct.unpack_from("<HHIII", command)
+        if kind in (9, 29):
+            begin, rows = struct.unpack_from("<2I", command, 108)
+            if begin < address + length and address < begin + rows * 32:
+                raise ValueError("Consumer staging overwritten before its L2 store")
+        if kind in (2, 3, 4, 24, 25, 26, 12):
+            region, _, destination = struct.unpack_from("<HHI", command, 24)
+            size = struct.unpack_from("<I", command, 40 if kind == 12 else 32)[0]
+            if kind in (3, 4, 25, 26):
+                stride, repetitions = struct.unpack_from("<2I", command, 40)
+                size += stride * (repetitions - 1)
+            if kind in (4, 26):
+                stride, repetitions = struct.unpack_from("<2I", command, 52)
+                size += stride * (repetitions - 1)
+            if region == 6 and destination < address + length and address < destination + size:
+                raise ValueError("Consumer staging overwritten before its L2 store")
+        if kind not in (2, 24) or command_layer != layer:
+            continue
+        source_region, source_index, source = struct.unpack_from("<HHI", command, 16)
+        region, binding, destination = struct.unpack_from("<HHI", command, 24)
+        size, direction = struct.unpack_from("<2I", command, 32)
+        if ((source_region, source_index, region, binding, direction) != (6, 0, 5, 0, 1) or
+                not source <= address < address + length <= source + size):
+            continue
+        complete = index + 1
+        if kind == 24:
+            complete = next((wait + 1 for wait in range(index + 1, len(commands))
+                             if struct.unpack_from("<H", commands[wait])[0] == 27 and
+                             struct.unpack_from("<I", commands[wait], 16)[0] == 1), None)
+            if complete is None:
+                raise ValueError("Consumer L2 store has no completion wait")
+        return {"command": index + 1, "complete_command": complete,
+                "address": destination + address - source}
+    raise ValueError("Consumer staging has no matching L2 store")
+
+
 def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consumer_tiles=2):
     """Map a bounded C<=32 cascade, including rolling producer storage.
 
@@ -137,6 +181,7 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
     pending_consumer = None
     activation_layer = None
     consumer_base = None
+    consumer_staged = False
     consumer_rows = 0
     count = 0
     checks = []
@@ -160,6 +205,9 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
     def finished():
         return (consumer_rows == consumer_shape[1] * consumer_shape[2]
                 if consumer_tiles is None else count == consumer_tiles)
+
+    def completed_end(index):
+        return max([index] + [c["l2_store"]["complete_command"] for c in checks if "l2_store" in c])
 
     for index, command in enumerate(commands, 1):
         kind, _, _, layer, _ = struct.unpack_from("<HHIII", command)
@@ -209,7 +257,7 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                 pending_consumer = None
                 count += 1
                 if finished():
-                    return checks, index
+                    return checks, completed_end(index)
             else:
                 raise ValueError("Systolic wait has no mapped outstanding job")
         elif kind in (9, 29):
@@ -238,10 +286,16 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
             else:
                 if consumer_layer is None:
                     consumer_layer = layer
-                    consumer_base = address
+                    consumer_staged = any(struct.unpack_from("<H", c)[0] in (2, 24) and
+                                          struct.unpack_from("<I", c, 8)[0] == layer and
+                                          struct.unpack_from("<H", c, 24)[0] == 5 for c in commands)
                 if layer != consumer_layer or cols != consumer_shape[2] or pitch != cols * 32:
                     raise ValueError("Unexpected consumer layer/layout")
-                if address != consumer_base + consumer_rows * 32:
+                store = consumer_store_location(commands, index, layer, address, rows * 32) if consumer_staged else None
+                logical_address = store["address"] if store is not None else address
+                if consumer_base is None:
+                    consumer_base = logical_address
+                if logical_address != consumer_base + consumer_rows * 32:
                     raise ValueError("Consumer tiles are not contiguous spatial C32 rows")
                 if consumer_rows + rows > consumer_shape[1] * consumer_shape[2]:
                     raise ValueError("Consumer rows exceed the source tensor")
@@ -251,6 +305,8 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                 check = {"command": index, "tensor_role": "consumer_conv", "address": address,
                          "rows": rows, "channels": consumer_shape[3], "row_stride": pitch,
                          "tile_cols": cols, "reference_first_row": consumer_rows}
+                if store is not None:
+                    check["l2_store"] = store
                 consumer_rows += rows
                 if kind == 29:
                     pending_consumer = {**check, "submit_command": index}
@@ -258,7 +314,7 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
                     checks.append(check)
                     count += 1
                     if finished():
-                        return checks, index
+                        return checks, completed_end(index)
         elif kind == 12 and producer_rows:
             if activation_layer is None:
                 activation_layer = layer
@@ -296,6 +352,60 @@ def plan_checkpoints(commands, first_command, conv_shape, consumer_shape, consum
         elif kind not in (0, 1, 5, 27):
             raise ValueError(f"Unsupported command {kind} in initial-cascade mapping")
     raise ValueError("Not enough completed supported consumer tiles")
+
+
+def cascade_l2_location(checks, commands, end):
+    """Locate the complete consumer in L2 and reject post-store overwrites."""
+    consumers = [c for c in checks if c["tensor_role"] == "consumer_conv"]
+    staged = [c for c in consumers if "l2_store" in c]
+    if not staged:
+        return None
+    if len(staged) != len(consumers):
+        raise ValueError("Mixed resident/staged consumer checkpoints")
+    first = staged[0]
+    base = first["l2_store"]["address"] - first["reference_first_row"] * 32
+    rows = sum(c["rows"] for c in staged)
+    stores = {c["l2_store"]["command"] for c in staged}
+    for check in staged:
+        store = check["l2_store"]
+        submit = check.get("submit_command", check["command"])
+        encoded = commands[submit - 1]
+        layer = struct.unpack_from("<I", encoded, 8)[0]
+        if (struct.unpack_from("<H", encoded)[0] not in (9, 29) or
+                struct.unpack_from("<2I", encoded, 108) != (check["address"], check["rows"]) or
+                consumer_store_location(commands, submit, layer, check["address"], check["rows"] * 32) != store):
+            raise ValueError("Stale L2 consumer store mapping")
+        if (store["address"] != base + check["reference_first_row"] * 32 or
+                store["complete_command"] > end):
+            raise ValueError("Incomplete or noncontiguous L2 consumer stores")
+    for index, command in enumerate(commands[:end], 1):
+        kind = struct.unpack_from("<H", command)[0]
+        if kind not in (2, 3, 4, 24, 25, 26) or index in stores:
+            continue
+        region, _, destination = struct.unpack_from("<HHI", command, 24)
+        if region != 5:
+            continue
+        length = struct.unpack_from("<I", command, 32)[0]
+        if kind in (3, 4, 25, 26):
+            stride, repetitions = struct.unpack_from("<2I", command, 40)
+            length += stride * (repetitions - 1)
+        if kind in (4, 26):
+            stride, repetitions = struct.unpack_from("<2I", command, 52)
+            length += stride * (repetitions - 1)
+        if destination < base + rows * 32 and base < destination + length:
+            raise ValueError("Unmapped DMA overwrites the L2 consumer before final comparison")
+    return {"address": base, "rows": rows, "channels": first["channels"],
+            "row_stride": first["row_stride"], "tile_cols": first["tile_cols"]}
+
+
+def completed_replay_boundary(model, end):
+    """Extend a bounded replay only until all queued engines are drained."""
+    commands, _ = runtime._logical_command_records(model)
+    for boundary in range(end, len(commands) + 1):
+        outstanding = runtime._restart_boundary_outstanding(commands, boundary)
+        if not any(outstanding.values()):
+            return boundary
+    raise ValueError("No completed replay boundary after the requested checkpoints")
 
 
 def validate_cascade_coverage(checks, shapes):
@@ -462,6 +572,17 @@ def load_case(path):
         coverage = validate_cascade_coverage(case["checkpoints"], case["cascade_shapes"])
         if coverage != case["cascade_coverage"]:
             raise ValueError("Stale complete-cascade coverage")
+        location = cascade_l2_location(case["checkpoints"], commands, case["end_command"])
+        saved_location = case.get("cascade_l2_output")
+        if location is not None:
+            if saved_location is None or any(saved_location.get(k) != v for k, v in location.items()):
+                raise ValueError("Missing or stale cascade L2 output comparison")
+            expected = checked_read(saved_location["expected"])
+            if len(expected) != location["rows"] * location["channels"]:
+                raise ValueError("Cascade L2 expected tensor size mismatch")
+            extract_c32(temporary, **location)
+        elif saved_location is not None:
+            raise ValueError("Unexpected cascade L2 output comparison")
     return case, full_model, memory, temporary, output
 
 
@@ -562,6 +683,8 @@ def main():
                                        None if args.all_cascade_checkpoints else args.consumer_tiles)
     if args.full_graph:
         end = len(commands)
+    else:
+        end = completed_replay_boundary(full_model, end)
     runtime._require_restart_safe_boundary(full_model, end)
     args.output.mkdir(parents=True)
     if args.from_reset:
@@ -610,6 +733,11 @@ def main():
         case["cascade_shapes"] = {"producer_activation": list(map(int, producer.shape)),
                                   "consumer_conv": list(map(int, consumer.shape))}
         case["cascade_coverage"] = validate_cascade_coverage(checks, case["cascade_shapes"])
+        location = cascade_l2_location(checks, commands, end)
+        if location is not None:
+            filename = args.output / "cascade-l2-expected.bin"
+            filename.write_bytes(consumer.tobytes())
+            case["cascade_l2_output"] = {**location, "tensor": consumer_id, "expected": artifact(filename)}
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
