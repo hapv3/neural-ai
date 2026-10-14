@@ -18,7 +18,9 @@ for directory in (AI_ROOT / "hw/rtl/cluster/tb", AI_ROOT / "hw/rtl/cluster/tb/te
 import test_compiled_model as runtime
 from npu_test_utils import NPU_CMD_TCDM_BASE
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
-from yolo_c2f_checkpoints import C2F_ROLES, extract_checkpoint, plan_c2f_checkpoints
+from yolo_c2f_checkpoints import (
+    C2F_OUTPUT_ROLES, C2F_ROLES, extract_checkpoint, plan_c2f_checkpoints, plan_c2f_output_checkpoints,
+)
 
 
 def sha(data):
@@ -719,6 +721,8 @@ def load_case(path):
         raise ValueError("post_cascade_checkpoints must be boolean")
     if type(case.get("c2f_checkpoints", False)) is not bool:
         raise ValueError("c2f_checkpoints must be boolean")
+    if type(case.get("c2f_output_checkpoints", False)) is not bool:
+        raise ValueError("c2f_output_checkpoints must be boolean")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -825,10 +829,30 @@ def load_case(path):
                 any(actual.get(key) != value for key, value in expected.items())
                 for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale C2f checkpoint mapping")
-        if completed_replay_boundary(full_model, end) != case["end_command"]:
+        c2f_boundary = completed_replay_boundary(full_model, end)
+        if c2f_boundary != case["end_command"] and not case.get("c2f_output_checkpoints", False):
             raise ValueError("C2f replay must end at its first drained boundary")
         if validate_cascade_coverage(saved, case["c2f_shapes"], C2F_ROLES) != case["c2f_coverage"]:
             raise ValueError("Stale C2f coverage")
+    if case.get("c2f_output_checkpoints", False):
+        if not case.get("c2f_checkpoints", False):
+            raise ValueError("C2f output checkpoints require complete residual/concat coverage")
+        shapes = case["c2f_output_shapes"]
+        if shapes["block_concat"] != case["c2f_shapes"]["block_concat"]:
+            raise ValueError("Stale C2f output parent shape")
+        concat, = [c for c in case["checkpoints"] if c["tensor_role"] == "block_concat"]
+        if c2f_boundary != concat["command"]:
+            raise ValueError("C2f output mapping requires drained concat completion")
+        planned, end = plan_c2f_output_checkpoints(commands, case["checkpoints"], shapes, len(memory), len(temporary))
+        saved = [c for c in case["checkpoints"] if c["tensor_role"] in C2F_OUTPUT_ROLES]
+        if (len(saved) != len(planned) or any(
+                any(actual.get(key) != value for key, value in expected.items())
+                for actual, expected in zip(saved, planned))):
+            raise ValueError("Missing or stale C2f output checkpoint mapping")
+        if completed_replay_boundary(full_model, end) != case["end_command"]:
+            raise ValueError("C2f output replay must end at its first drained boundary")
+        if validate_cascade_coverage(saved, shapes, C2F_OUTPUT_ROLES) != case["c2f_output_coverage"]:
+            raise ValueError("Stale C2f output coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -849,6 +873,8 @@ def main():
                         help="Also check the next SiLU, single-group pointwise Conv and its SiLU")
     parser.add_argument("--c2f-checkpoints", action="store_true",
                         help="Also check the first C2f branch, Conv/SiLU pair, residual and concat")
+    parser.add_argument("--c2f-output-checkpoints", action="store_true",
+                        help="Also check the C2f closing multi-group pointwise Conv and SiLU")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -857,6 +883,8 @@ def main():
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.c2f_output_checkpoints:
+        args.c2f_checkpoints = True
     if args.c2f_checkpoints:
         args.post_cascade_checkpoints = True
     if args.post_cascade_checkpoints:
@@ -953,6 +981,21 @@ def main():
                 c2f_checks, end = plan_c2f_checkpoints(commands, checks, c2f_shapes, c2f_layout,
                     len(memory), len(temporary))
                 checks = sorted(checks + c2f_checks, key=lambda check: check["command"])
+                if args.c2f_output_checkpoints:
+                    if completed_replay_boundary(full_model, end) != end:
+                        raise ValueError("C2f output mapping requires drained concat completion")
+                    closing = next(op for op in convs if int(op["inputs"][0]) == tensor_ids["block_concat"])
+                    weights = interpreter.get_tensor(int(closing["inputs"][1]))
+                    if weights.ndim != 4 or weights.shape[1:3] != (1, 1):
+                        raise ValueError("C2f output consumer is not a pointwise Conv")
+                    closing_id = int(closing["outputs"][0])
+                    tensor_ids.update(block_output_conv=closing_id,
+                                      block_output_activation=silu_output(ops, closing_id))
+                    output_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
+                                     for role in ("block_concat",) + C2F_OUTPUT_ROLES}
+                    output_checks, end = plan_c2f_output_checkpoints(commands, checks, output_shapes,
+                        len(memory), len(temporary))
+                    checks = sorted(checks + output_checks, key=lambda check: check["command"])
     if args.full_graph:
         end = len(commands)
     else:
@@ -1018,6 +1061,9 @@ def main():
     if args.c2f_checkpoints:
         case.update(c2f_checkpoints=True, c2f_shapes=c2f_shapes, c2f_layout=c2f_layout,
                     c2f_coverage=validate_cascade_coverage(checks, c2f_shapes, C2F_ROLES))
+    if args.c2f_output_checkpoints:
+        case.update(c2f_output_checkpoints=True, c2f_output_shapes=output_shapes,
+                    c2f_output_coverage=validate_cascade_coverage(checks, output_shapes, C2F_OUTPUT_ROLES))
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)

@@ -8,7 +8,9 @@ import numpy as np
 import yolo_reference_replay as replay
 from npu_test_utils import _emit_command_sample
 from test_yolo_reference_helpers import linebuffer, lut
-from yolo_c2f_checkpoints import C2F_ROLES, checkpoint_indices, extract_checkpoint, plan_c2f_checkpoints
+from yolo_c2f_checkpoints import (
+    C2F_ROLES, checkpoint_indices, extract_checkpoint, plan_c2f_checkpoints, plan_c2f_output_checkpoints,
+)
 
 
 class C2fMappingTest(unittest.TestCase):
@@ -112,6 +114,75 @@ class C2fMappingTest(unittest.TestCase):
             check.update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 checkpoint_indices(check, len(memory))
+
+
+class C2fOutputMappingTest(unittest.TestCase):
+    def commands(self):
+        runtime = replay.runtime
+
+        def pointwise(source):
+            return runtime._pointwise_c32(runtime._ref(1), runtime._ref(6, offset=source),
+                runtime._ref(6, offset=256), runtime._ref(6, offset=192), 1, 2, 1, 0, 64, 32, 0)
+
+        def dma(source, src, destination, dst, queued=False):
+            command = bytearray(runtime._dma_1d(runtime._ref(source, offset=src),
+                runtime._ref(destination, offset=dst), 32, 1 if destination == 5 else 0, 0))
+            if queued:
+                struct.pack_into("<H", command, 0, 24)
+            return bytes(command)
+
+        return [runtime._command_header(1, 32) + bytes(16), pointwise(0), dma(6, 192, 5, 0),
+                pointwise(32), dma(6, 192, 5, 32, True), dma(5, 0, 6, 160, True),
+                runtime._dma_wait(0, 0), lut(160, 0, 32), runtime._dma_wait(1, 0),
+                dma(5, 32, 6, 160), lut(160, 32, 32)]
+
+    def plan(self, commands):
+        concat = dict(command=1, tensor_role="block_concat", address=0, rows=2, channels=48,
+                      tile_cols=2, row_stride=64, group_stride=64, reference_first_row=0)
+        shapes = dict(block_concat=[1, 1, 2, 48], block_output_conv=[1, 1, 2, 32],
+                      block_output_activation=[1, 1, 2, 32])
+        return plan_c2f_output_checkpoints(commands, [concat], shapes, 512, 128)
+
+    def test_multi_input_group_pointwise_and_l2_staged_activation(self):
+        checks, end = self.plan(self.commands())
+        self.assertEqual(end, 11)
+        self.assertEqual([c["command"] for c in checks], [2, 4, 8, 11])
+        self.assertEqual([c["reference_first_row"] for c in checks], [0, 1, 0, 1])
+        self.assertEqual([c["address"] for c in checks], [192, 192, 0, 32])
+
+    def test_requires_load_and_store_completion(self):
+        for remove in (6, 8):
+            commands = self.commands()
+            del commands[remove]
+            with self.subTest(remove=remove), self.assertRaisesRegex(ValueError, "before DMA completion"):
+                self.plan(commands)
+
+    def test_rejects_partial_ofm_alias_and_wrong_input_group_stride(self):
+        for offset, value, message in ((36, 64, "overlaps resident concat"),
+                                       (44, 0, "overlaps resident concat"),
+                                       (36, 192, "overlaps partial workspace"),
+                                       (64, 96, "Unsupported multi-group"),
+                                       (52, 1, "Unsupported multi-group")):
+            commands = self.commands()
+            job = bytearray(commands[1])
+            struct.pack_into("<I", job, offset, value)
+            commands[1] = bytes(job)
+            with self.subTest(offset=offset, value=value), self.assertRaisesRegex(ValueError, message):
+                self.plan(commands)
+
+    def test_rejects_missing_duplicate_and_stale_activation_rows(self):
+        with self.assertRaisesRegex(ValueError, "Incomplete C2f output"):
+            self.plan(self.commands()[:-1])
+        commands = self.commands()
+        commands.insert(3, commands[1])
+        with self.assertRaisesRegex(ValueError, "Duplicate/out-of-range"):
+            self.plan(commands)
+        commands = self.commands()
+        load = bytearray(commands[9])
+        struct.pack_into("<I", load, 20, 0)
+        commands[9] = bytes(load)
+        with self.assertRaisesRegex(ValueError, "Duplicate/out-of-range"):
+            self.plan(commands)
 
 
 class AsyncCommandCallbackTest(unittest.IsolatedAsyncioTestCase):

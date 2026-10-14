@@ -43,6 +43,7 @@ async def run_reference_case(dut, case_path):
               "cascade_coverage": case.get("cascade_coverage"),
               "post_cascade_coverage": case.get("post_cascade_coverage"),
               "c2f_coverage": case.get("c2f_coverage"),
+              "c2f_output_coverage": case.get("c2f_output_coverage"),
               "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
                         if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
@@ -79,7 +80,8 @@ async def run_reference_case(dut, case_path):
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
     before_compute = {check.get("submit_command", check["command"]) - 1:
                       check.get("submit_command", check["command"]) for check in case["checkpoints"]
-                      if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2")}
+                      if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2",
+                                                  "block_output_conv")}
 
     async def capture(index, counters):
         record = records[index]

@@ -7,6 +7,7 @@ import numpy as np
 
 C2F_ROLES = ("branch_input", "block_conv1", "block_activation1", "block_conv2",
              "block_activation2", "block_residual", "block_concat")
+C2F_OUTPUT_ROLES = ("block_output_conv", "block_output_activation")
 _TOKEN_STRIDE = 1 << 32
 
 
@@ -279,3 +280,102 @@ def plan_c2f_checkpoints(commands, post_checks, shapes, layout, local_bytes, l2_
             capture(index, "block_concat", concat, 0)
             return checks, index
     raise ValueError("Incomplete C2f checkpoints")
+
+
+def plan_c2f_output_checkpoints(commands, c2f_checks, shapes, local_bytes, l2_bytes):
+    """Follow a resident multi-input-group concat through pointwise/L2/SiLU."""
+    concat, = [c for c in c2f_checks if c["tensor_role"] == "block_concat"]
+    parent_shape = shapes["block_concat"]
+    output_shape = shapes["block_output_conv"]
+    if (any(len(s) != 4 or s[0] != 1 or any(type(v) is not int or v <= 0 for v in s)
+            for s in (parent_shape, output_shape, shapes["block_output_activation"])) or
+            parent_shape[:3] != output_shape[:3] or
+            output_shape != shapes["block_output_activation"] or
+            not 32 < parent_shape[3] <= 64 or not 0 < output_shape[3] <= 32 or
+            (concat["rows"], concat["channels"]) != (parent_shape[1] * parent_shape[2], parent_shape[3])):
+        raise ValueError("Unsupported C2f output tensor shapes")
+    total_rows, channels = concat["rows"], output_shape[3]
+    groups = (parent_shape[3] + 31) // 32
+    group_stride = concat["group_stride"]
+    if group_stride != total_rows * 32:
+        raise ValueError("C2f output requires contiguous C32 input groups")
+    tracker = _MemoryLabels(local_bytes, l2_bytes)
+    indices = checkpoint_indices(concat, local_bytes)
+    tracker.write(6, indices.ravel(), _TOKEN_STRIDE + np.arange(indices.size))
+    checks = []
+    covered = {role: set() for role in C2F_OUTPUT_ROLES}
+    layers = {}
+
+    def capture(index, layer, role, address, rows, first_row):
+        logical = set(range(first_row, first_row + rows))
+        if (not logical or first_row < 0 or max(logical) >= total_rows or covered[role] & logical or
+                (role in layers and layers[role] != layer)):
+            raise ValueError("Duplicate/out-of-range C2f output checkpoint rows/layers")
+        covered[role].update(logical)
+        layers[role] = layer
+        checks.append(dict(command=index, tensor_role=role, address=address, rows=rows, channels=channels,
+                           tile_cols=output_shape[2], row_stride=output_shape[2] * 32,
+                           reference_first_row=first_row))
+
+    for index, command in enumerate(commands[concat["command"]:], concat["command"] + 1):
+        kind, _, flags, layer, _ = struct.unpack_from("<HHIII", command)
+        if kind in (2, 3, 4, 24, 25, 26):
+            tracker.dma(command)
+        elif kind == 27:
+            direction = struct.unpack_from("<I", command, 16)[0]
+            if direction not in (0, 1):
+                raise ValueError("Invalid C2f output DMA wait direction")
+            tracker.wait(direction)
+        elif kind == 1:
+            tracker.wait(0)
+            tracker.wait(1)
+        elif kind == 10:
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 24)
+            partial_region, partial_index, partial = struct.unpack_from("<HHI", command, 32)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 40)
+            rows, input_groups, output_groups, _, input_stride, output_stride = struct.unpack_from("<6I", command, 48)
+            if ((src_region, src_index, partial_region, partial_index, dst_region, dst_index) != (6, 0, 6, 0, 6, 0) or
+                    flags or input_groups != groups or output_groups != 1 or not rows or
+                    input_stride != group_stride or output_stride < rows * 32 or
+                    source < concat["address"] or (source - concat["address"]) % 32):
+                raise ValueError("Unsupported multi-group C2f output pointwise job")
+            first_row = (source - concat["address"]) // 32
+            if first_row + rows > total_rows:
+                raise ValueError("C2f output pointwise exceeds input rows")
+            source_indices = checkpoint_indices({**concat, "address": source, "rows": rows}, local_bytes)
+            if not np.array_equal(tracker.read(6, source_indices.ravel()),
+                    _TOKEN_STRIDE + np.arange(first_row * parent_shape[3], (first_row + rows) * parent_shape[3])):
+                raise ValueError("Missing/stale multi-group C2f output input rows")
+            for address, length in ((partial, rows * 32 * 4), (destination, rows * 32)):
+                if address < concat["address"] + groups * group_stride and concat["address"] < address + length:
+                    raise ValueError("C2f output/partial workspace overlaps resident concat")
+                tracker.write(6, np.arange(address, address + length), -1)
+            if max(partial, destination) < min(partial + rows * 128, destination + rows * 32):
+                raise ValueError("C2f output overlaps partial workspace")
+            out = dict(address=destination, rows=rows, channels=channels,
+                       tile_cols=output_shape[2], row_stride=output_shape[2] * 32)
+            tracker.write(6, checkpoint_indices(out, local_bytes).ravel(),
+                          2 * _TOKEN_STRIDE + np.arange(first_row * channels, (first_row + rows) * channels))
+            capture(index, layer, "block_output_conv", destination, rows, first_row)
+        elif kind == 12:
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 16)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 24)
+            length = struct.unpack_from("<I", command, 40)[0]
+            if (src_region, src_index, dst_region, dst_index) != (6, 0, 6, 0) or not length or length % 32:
+                raise ValueError("Unsupported C2f output LUT layout")
+            labels = tracker.read(6, np.arange(source, source + length))
+            active = np.flatnonzero(labels >= 0)
+            rows = length // 32
+            first = int(labels[0] - 2 * _TOKEN_STRIDE)
+            if (first < 0 or first % channels or first + rows * channels > total_rows * channels or
+                    not np.array_equal(active, (np.arange(rows)[:, None] * 32 + np.arange(channels)).ravel()) or
+                    not np.array_equal(labels[active], 2 * _TOKEN_STRIDE + np.arange(first, first + active.size))):
+                raise ValueError("Missing/stale C2f output LUT input rows")
+            tracker.write(6, np.arange(destination, destination + length), -1)
+            tracker.write(6, destination + active, 3 * _TOKEN_STRIDE + np.arange(first, first + active.size))
+            capture(index, layer, "block_output_activation", destination, rows, first // channels)
+        elif kind != 5:
+            raise ValueError(f"Unsupported command {kind} in C2f output mapping")
+        if all(len(rows) == total_rows for rows in covered.values()):
+            return checks, index
+    raise ValueError("Incomplete C2f output checkpoints")
