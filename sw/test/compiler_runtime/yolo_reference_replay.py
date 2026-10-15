@@ -21,6 +21,9 @@ from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 from yolo_c2f_checkpoints import (
     C2F_OUTPUT_ROLES, C2F_ROLES, extract_checkpoint, plan_c2f_checkpoints, plan_c2f_output_checkpoints,
 )
+from grouped_linebuffer_checkpoints import (
+    DOWNSAMPLE_ROLES, plan_downsample_checkpoints, reference_tensor_slice, validate_grouped_coverage,
+)
 
 
 def sha(data):
@@ -723,6 +726,8 @@ def load_case(path):
         raise ValueError("c2f_checkpoints must be boolean")
     if type(case.get("c2f_output_checkpoints", False)) is not bool:
         raise ValueError("c2f_output_checkpoints must be boolean")
+    if type(case.get("downsample_checkpoints", False)) is not bool:
+        raise ValueError("downsample_checkpoints must be boolean")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -849,10 +854,29 @@ def load_case(path):
                 any(actual.get(key) != value for key, value in expected.items())
                 for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale C2f output checkpoint mapping")
-        if completed_replay_boundary(full_model, end) != case["end_command"]:
+        output_boundary = completed_replay_boundary(full_model, end)
+        if output_boundary != case["end_command"] and not case.get("downsample_checkpoints", False):
             raise ValueError("C2f output replay must end at its first drained boundary")
         if validate_cascade_coverage(saved, shapes, C2F_OUTPUT_ROLES) != case["c2f_output_coverage"]:
             raise ValueError("Stale C2f output coverage")
+    if case.get("downsample_checkpoints", False):
+        if not case.get("c2f_output_checkpoints", False):
+            raise ValueError("Grouped downsample requires complete C2f output coverage")
+        shapes = case["downsample_shapes"]
+        if (shapes["block_output_activation"] != case["c2f_output_shapes"]["block_output_activation"] or
+                output_boundary != max(c["command"] for c in case["checkpoints"]
+                                       if c["tensor_role"] == "block_output_activation")):
+            raise ValueError("Grouped downsample requires a drained verified parent")
+        planned, end = plan_downsample_checkpoints(commands, case["checkpoints"], shapes, len(memory), len(temporary))
+        saved = [c for c in case["checkpoints"] if c["tensor_role"] in DOWNSAMPLE_ROLES]
+        if (len(saved) != len(planned) or any(
+                any(actual.get(key) != value for key, value in expected.items())
+                for actual, expected in zip(saved, planned))):
+            raise ValueError("Missing or stale grouped downsample mapping")
+        if completed_replay_boundary(full_model, end) != case["end_command"]:
+            raise ValueError("Grouped downsample replay must end at its first drained boundary")
+        if validate_grouped_coverage(saved, shapes) != case["downsample_coverage"]:
+            raise ValueError("Stale grouped downsample coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -875,6 +899,8 @@ def main():
                         help="Also check the first C2f branch, Conv/SiLU pair, residual and concat")
     parser.add_argument("--c2f-output-checkpoints", action="store_true",
                         help="Also check the C2f closing multi-group pointwise Conv and SiLU")
+    parser.add_argument("--downsample-checkpoints", action="store_true",
+                        help="Also check the following K3/S2 Conv's output groups and whole-tensor SiLU")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -883,6 +909,8 @@ def main():
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.downsample_checkpoints:
+        args.c2f_output_checkpoints = True
     if args.c2f_output_checkpoints:
         args.c2f_checkpoints = True
     if args.c2f_checkpoints:
@@ -996,6 +1024,24 @@ def main():
                     output_checks, end = plan_c2f_output_checkpoints(commands, checks, output_shapes,
                         len(memory), len(temporary))
                     checks = sorted(checks + output_checks, key=lambda check: check["command"])
+                    if args.downsample_checkpoints:
+                        if completed_replay_boundary(full_model, end) != end:
+                            raise ValueError("Grouped downsample requires a drained C2f output")
+                        parent_id = tensor_ids["block_output_activation"]
+                        padded = {int(op["outputs"][0]) for op in ops
+                                  if op["op_name"] == "PAD" and int(op["inputs"][0]) == parent_id}
+                        conv = next(op for op in convs if int(op["inputs"][0]) in padded | {parent_id})
+                        weights = interpreter.get_tensor(int(conv["inputs"][1]))
+                        if weights.ndim != 4 or weights.shape[1:3] != (3, 3):
+                            raise ValueError("Grouped downsample source is not a K3 Conv")
+                        downsample_id = int(conv["outputs"][0])
+                        tensor_ids.update(downsample_conv=downsample_id,
+                                          downsample_activation=silu_output(ops, downsample_id))
+                        downsample_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
+                                             for role in ("block_output_activation",) + DOWNSAMPLE_ROLES}
+                        downsample_checks, end = plan_downsample_checkpoints(commands, checks, downsample_shapes,
+                            len(memory), len(temporary))
+                        checks = sorted(checks + downsample_checks, key=lambda check: check["command"])
     if args.full_graph:
         end = len(commands)
     else:
@@ -1007,10 +1053,9 @@ def main():
     details = {d["index"]: d for d in interpreter.get_tensor_details()}
     for check in checks:
         tensor_id = tensor_ids[check["tensor_role"]]
-        tensor = interpreter.get_tensor(tensor_id).reshape(-1, check["channels"])
-        offset = check["reference_first_row"]
+        tensor = reference_tensor_slice(interpreter.get_tensor(tensor_id), check)
         filename = args.output / f"command-{check['command']}-expected.bin"
-        filename.write_bytes(tensor[offset:offset + check["rows"]].tobytes())
+        filename.write_bytes(tensor.tobytes())
         check.update({"tensor": tensor_id, "tensor_name": details[tensor_id]["name"], "expected": artifact(filename)})
     final_output = None
     if args.full_graph:
@@ -1064,6 +1109,9 @@ def main():
     if args.c2f_output_checkpoints:
         case.update(c2f_output_checkpoints=True, c2f_output_shapes=output_shapes,
                     c2f_output_coverage=validate_cascade_coverage(checks, output_shapes, C2F_OUTPUT_ROLES))
+    if args.downsample_checkpoints:
+        case.update(downsample_checkpoints=True, downsample_shapes=downsample_shapes,
+                    downsample_coverage=validate_grouped_coverage(checks, downsample_shapes))
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
