@@ -8,6 +8,7 @@ from yolo_c2f_checkpoints import _MemoryLabels, checkpoint_indices
 
 
 DOWNSAMPLE_ROLES = ("downsample_conv", "downsample_activation")
+RESUMED_POINTWISE_ROLES = ("resumed_pointwise_conv", "resumed_pointwise_activation")
 _TOKEN_STRIDE = 1 << 32
 
 
@@ -160,3 +161,104 @@ def plan_downsample_checkpoints(commands, parent_checks, shapes, local_bytes, l2
         elif kind != 5:
             raise ValueError(f"Unsupported command {kind} in grouped downsample mapping")
     raise ValueError("Incomplete grouped downsample checkpoints")
+
+
+def plan_grouped_pointwise_checkpoints(commands, parent, shapes, local_bytes, l2_bytes):
+    """Resume at explicit RQ loads, then verify resident pointwise groups/LUT."""
+    source_shape = shapes["downsample_activation"]
+    output = shapes["resumed_pointwise_conv"]
+    if (any(len(s) != 4 or s[0] != 1 or any(type(v) is not int or v <= 0 for v in s)
+            for s in (source_shape, output, shapes["resumed_pointwise_activation"])) or
+            source_shape[:3] != output[:3] or output != shapes["resumed_pointwise_activation"] or
+            not 32 < source_shape[3] <= 64 or not 32 < output[3] <= 64 or
+            parent["rows"] != source_shape[1] * source_shape[2] or parent["channels"] != source_shape[3]):
+        raise ValueError("Unsupported resumed grouped pointwise shapes")
+    rows = parent["rows"]
+    tracker = _MemoryLabels(local_bytes, l2_bytes)
+    indices = checkpoint_indices(parent, local_bytes)
+    tracker.write(6, indices.ravel(), _TOKEN_STRIDE + np.arange(indices.size))
+    qparams = {}
+    group_rows = [0] * ((output[3] + 31) // 32)
+    checks = []
+    layer_id = None
+    base = None
+    qparam_base = None
+    for index, command in enumerate(commands[parent["command"]:], parent["command"] + 1):
+        kind, _, flags, layer, _ = struct.unpack_from("<HHIII", command)
+        if kind == 5:
+            qparams[layer] = struct.unpack_from("<3I", command, 16)
+        elif kind in (2, 3, 4, 24, 25, 26):
+            tracker.dma(command)
+        elif kind == 27:
+            direction = struct.unpack_from("<I", command, 16)[0]
+            if direction not in (0, 1):
+                raise ValueError("Invalid resumed grouped pointwise DMA wait")
+            tracker.wait(direction)
+        elif kind == 10:
+            if layer_id is None:
+                layer_id = layer
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 24)
+            partial_region, partial_index, partial = struct.unpack_from("<HHI", command, 32)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 40)
+            count, input_groups, output_groups, group, input_stride, output_stride = struct.unpack_from("<6I", command, 48)
+            if (layer != layer_id or flags or layer not in qparams or
+                    (src_region, src_index, partial_region, partial_index, dst_region, dst_index) != (6, 0, 6, 0, 6, 0) or
+                    input_groups != (source_shape[3] + 31) // 32 or output_groups != 1 or
+                    group >= len(group_rows) or input_stride != rows * 32 or output_stride != rows * 32 or
+                    source < parent["address"] or (source - parent["address"]) % 32 or not count):
+                raise ValueError("Resumed grouped pointwise needs explicit matching RQ loads and C32 layout")
+            first_qparam, qparam_count, selected = qparams[layer]
+            if qparam_base is None:
+                qparam_base = first_qparam - group * 32
+            if (selected != group or qparam_count != min(32, output[3] - group * 32) or
+                    first_qparam != qparam_base + group * 32):
+                raise ValueError("Stale resumed grouped pointwise RQ selector")
+            first_row = (source - parent["address"]) // 32
+            if first_row != group_rows[group] or count + first_row > rows:
+                raise ValueError("Duplicate/out-of-range resumed pointwise rows")
+            source_indices = checkpoint_indices({**parent, "address": source, "rows": count}, local_bytes)
+            if not np.array_equal(tracker.read(6, source_indices.ravel()), _TOKEN_STRIDE +
+                    np.arange(first_row * source_shape[3], (first_row + count) * source_shape[3])):
+                raise ValueError("Stale resumed grouped pointwise input")
+            if base is None:
+                base = destination - group * rows * 32 - first_row * 32
+            if destination != base + group * rows * 32 + first_row * 32:
+                raise ValueError("Noncontiguous resumed grouped pointwise output")
+            for address, length in ((partial, count * 128), (destination, count * 32)):
+                if (address < parent["address"] + input_groups * rows * 32 and
+                        parent["address"] < address + length):
+                    raise ValueError("Resumed grouped pointwise workspace overlaps parent")
+                tracker.write(6, np.arange(address, address + length), -1)
+            if partial < base + len(group_rows) * rows * 32 and base < partial + count * 128:
+                raise ValueError("Resumed grouped pointwise partial overlaps output groups")
+            channels = min(32, output[3] - group * 32)
+            check = dict(command=index, tensor_role="resumed_pointwise_conv", address=destination,
+                         rows=count, channels=channels, tile_cols=output[2], row_stride=output[2] * 32,
+                         reference_first_row=first_row, reference_first_channel=group * 32)
+            output_indices = checkpoint_indices(check, local_bytes)
+            row = np.arange(first_row, first_row + count)[:, None]
+            channel = np.arange(group * 32, group * 32 + channels)[None, :]
+            tracker.write(6, output_indices.ravel(), (2 * _TOKEN_STRIDE + row * output[3] + channel).ravel())
+            group_rows[group] += count
+            checks.append(check)
+        elif kind == 12:
+            src_region, src_index, source = struct.unpack_from("<HHI", command, 16)
+            dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 24)
+            length = struct.unpack_from("<I", command, 40)[0]
+            if (group_rows != [rows] * len(group_rows) or flags or
+                    (src_region, src_index, dst_region, dst_index) != (6, 0, 6, 0) or
+                    source != base or length != rows * len(group_rows) * 32):
+                raise ValueError("Resumed grouped pointwise LUT must explicitly load and consume all groups")
+            shape = dict(rows=rows, channels=output[3], tile_cols=output[2], row_stride=output[2] * 32,
+                         group_stride=rows * 32, reference_first_row=0, reference_first_channel=0)
+            source_indices = checkpoint_indices({**shape, "address": source}, local_bytes)
+            if not np.array_equal(tracker.read(6, source_indices.ravel()),
+                                  2 * _TOKEN_STRIDE + np.arange(rows * output[3])):
+                raise ValueError("Stale resumed grouped pointwise LUT input")
+            tracker.write(6, np.arange(destination, destination + length), -1)
+            checks.append(dict(command=index, tensor_role="resumed_pointwise_activation", address=destination, **shape))
+            validate_grouped_coverage(checks, shapes, RESUMED_POINTWISE_ROLES)
+            return checks, index
+        else:
+            raise ValueError(f"Unsupported command {kind} before resumed pointwise completion")
+    raise ValueError("Incomplete resumed grouped pointwise checkpoints")
