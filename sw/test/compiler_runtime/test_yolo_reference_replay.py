@@ -46,6 +46,7 @@ async def run_reference_case(dut, case_path):
               "c2f_output_coverage": case.get("c2f_output_coverage"),
               "downsample_coverage": case.get("downsample_coverage"),
               "resumed_pointwise_coverage": case.get("resumed_pointwise_coverage"),
+              "resumed_c2f_coverage": case.get("resumed_c2f_coverage"),
               "initial_snapshot_checks": case.get("initial_snapshot_checks", []),
               "snapshot_evidence": case.get("snapshot_evidence"),
               "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
@@ -85,7 +86,9 @@ async def run_reference_case(dut, case_path):
     before_compute = {check.get("submit_command", check["command"]) - 1:
                       check.get("submit_command", check["command"]) for check in case["checkpoints"]
                       if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2",
-                                                  "block_output_conv", "downsample_conv", "resumed_pointwise_conv")}
+                                                  "block_output_conv", "downsample_conv", "resumed_pointwise_conv") or
+                      (check["tensor_role"].startswith("resumed_c2f_") and
+                       check["tensor_role"].endswith(("conv1", "conv2")))}
 
     async def capture(index, counters):
         record = records[index]

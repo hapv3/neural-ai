@@ -25,6 +25,9 @@ from grouped_linebuffer_checkpoints import (
     DOWNSAMPLE_ROLES, RESUMED_POINTWISE_ROLES, plan_downsample_checkpoints,
     plan_grouped_pointwise_checkpoints, reference_tensor_slice, validate_grouped_coverage,
 )
+from resumed_c2f_checkpoints import (
+    PARENT_ROLE, chain_roles, plan_resumed_c2f_checkpoints, resolve_c2f_chain,
+)
 
 
 def sha(data):
@@ -774,6 +777,10 @@ def load_case(path):
         raise ValueError("downsample_checkpoints must be boolean")
     if type(case.get("resumed_pointwise_checkpoints", False)) is not bool:
         raise ValueError("resumed_pointwise_checkpoints must be boolean")
+    if type(case.get("resumed_c2f_checkpoints", False)) is not bool:
+        raise ValueError("resumed_c2f_checkpoints must be boolean")
+    if case.get("resumed_c2f_checkpoints", False) and not case.get("resumed_pointwise_checkpoints", False):
+        raise ValueError("Resumed C2f chain requires the self-configuring pointwise suffix")
     full_model = checked_read(case["model"])
     invocation = case.get("invocation_base", 0x81400000)
     if (type(invocation) is not int or invocation % 32 or invocation > 0xFFFFEFC0 or
@@ -938,15 +945,35 @@ def load_case(path):
             raise ValueError("Missing or stale retained-parent verification")
         planned, end = plan_grouped_pointwise_checkpoints(commands, parent, case["resumed_pointwise_shapes"],
             len(memory), len(temporary))
-        if (len(case["checkpoints"]) != len(planned) or any(
+        saved = [c for c in case["checkpoints"] if c["tensor_role"] in RESUMED_POINTWISE_ROLES]
+        if (len(saved) != len(planned) or any(
                 any(actual.get(key) != value for key, value in expected.items())
-                for actual, expected in zip(case["checkpoints"], planned))):
+                for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale resumed pointwise mapping")
-        if completed_replay_boundary(full_model, end) != case["end_command"]:
+        if (not case.get("resumed_c2f_checkpoints", False) and
+                (completed_replay_boundary(full_model, end) != case["end_command"] or
+                 len(saved) != len(case["checkpoints"]))):
             raise ValueError("Resumed pointwise must end at its first drained boundary")
         coverage = validate_grouped_coverage(planned, case["resumed_pointwise_shapes"], RESUMED_POINTWISE_ROLES)
         if coverage != case["resumed_pointwise_coverage"]:
             raise ValueError("Stale resumed pointwise coverage")
+        if case.get("resumed_c2f_checkpoints", False):
+            shapes, layout = case["resumed_c2f_shapes"], case["resumed_c2f_layout"]
+            if shapes[PARENT_ROLE] != case["resumed_pointwise_shapes"][PARENT_ROLE]:
+                raise ValueError("Resumed C2f parent shape changed")
+            chain_parent, = [c for c in saved if c["tensor_role"] == PARENT_ROLE]
+            planned, end = plan_resumed_c2f_checkpoints(commands, chain_parent, shapes, layout,
+                len(memory), len(temporary))
+            roles = chain_roles(layout["blocks"])
+            chain_saved = [c for c in case["checkpoints"] if c["tensor_role"] in roles]
+            if (len(chain_saved) != len(planned) or len(saved) + len(chain_saved) != len(case["checkpoints"]) or any(
+                    any(actual.get(key) != value for key, value in expected.items())
+                    for actual, expected in zip(chain_saved, planned))):
+                raise ValueError("Missing or stale resumed C2f chain mapping")
+            if completed_replay_boundary(full_model, end) != case["end_command"]:
+                raise ValueError("Resumed C2f chain must end at its first drained boundary")
+            if validate_grouped_coverage(chain_saved, shapes, roles) != case["resumed_c2f_coverage"]:
+                raise ValueError("Stale resumed C2f chain coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -973,6 +1000,8 @@ def main():
                         help="Also check the following K3/S2 Conv's output groups and whole-tensor SiLU")
     parser.add_argument("--resume-grouped-pointwise-checkpoints", action="store_true",
                         help="Resume a verified grouped parent snapshot into a self-configuring pointwise/LUT suffix")
+    parser.add_argument("--resume-c2f-chain-checkpoints", action="store_true",
+                        help="Also verify every bottleneck and the concat following the resumed pointwise")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -981,6 +1010,8 @@ def main():
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.resume_c2f_chain_checkpoints:
+        args.resume_grouped_pointwise_checkpoints = True
     if args.downsample_checkpoints:
         args.c2f_output_checkpoints = True
     if args.c2f_output_checkpoints:
@@ -1156,6 +1187,13 @@ def main():
             interpreter.get_tensor(snapshot_parent["tensor"]).shape))
         checks, end = plan_grouped_pointwise_checkpoints(commands, snapshot_parent, resumed_shapes,
             len(memory), len(temporary))
+        if args.resume_c2f_chain_checkpoints:
+            chain_ids, chain_shapes, chain_layout = resolve_c2f_chain(interpreter, tensor_ids[PARENT_ROLE])
+            chain_parent, = [c for c in checks if c["tensor_role"] == PARENT_ROLE]
+            chain_checks, end = plan_resumed_c2f_checkpoints(commands, chain_parent, chain_shapes, chain_layout,
+                len(memory), len(temporary))
+            tensor_ids.update(chain_ids)
+            checks += chain_checks
     if args.full_graph:
         end = len(commands)
     else:
@@ -1230,6 +1268,10 @@ def main():
                     resumed_pointwise_coverage=validate_grouped_coverage(checks, resumed_shapes, RESUMED_POINTWISE_ROLES),
                     snapshot_case=artifact(previous_path), snapshot_evidence=artifact(evidence_path),
                     snapshot_parent=snapshot_parent)
+    if args.resume_c2f_chain_checkpoints:
+        case.update(resumed_c2f_checkpoints=True, resumed_c2f_shapes=chain_shapes, resumed_c2f_layout=chain_layout,
+                    resumed_c2f_coverage=validate_grouped_coverage(
+                        checks, chain_shapes, chain_roles(chain_layout["blocks"])))
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
