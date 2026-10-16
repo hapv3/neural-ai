@@ -161,18 +161,18 @@ class ResumedC2fMappingTest(unittest.TestCase):
 
 
 class SourceChainTest(unittest.TestCase):
-    def fixture(self):
+    def fixture(self, channels=32):
         class Interpreter:
             def __init__(self):
                 self.ops = []
-                self.tensors = {0: np.zeros((1, 1, 2, 64), np.int8),
-                                90: np.array([0, 0, 0, 0]), 91: np.array([0, 0, 0, 32]),
-                                92: np.array([0, 0, 0, 64]), 93: np.ones(4, np.int32),
-                                94: np.zeros((32, 3, 3, 32), np.int8)}
+                self.tensors = {0: np.zeros((1, 1, 2, channels * 2), np.int8),
+                                90: np.array([0, 0, 0, 0]), 91: np.array([0, 0, 0, channels]),
+                                92: np.array([0, 0, 0, channels * 2]), 93: np.ones(4, np.int32),
+                                94: np.zeros((channels, 3, 3, channels), np.int8)}
 
-            def add(self, name, inputs, output, channels=32):
+            def add(self, name, inputs, output, width=channels):
                 self.ops.append(dict(op_name=name, inputs=inputs, outputs=[output]))
-                self.tensors[output] = np.zeros((1, 1, 2, channels), np.int8)
+                self.tensors[output] = np.zeros((1, 1, 2, width), np.int8)
 
             def _get_ops_details(self):
                 return self.ops
@@ -193,7 +193,7 @@ class SourceChainTest(unittest.TestCase):
             interpreter.add("MUL", [base + 3, base + 4], base + 5)
             interpreter.add("ADD", [current, base + 5], base + 6)
             current = base + 6
-        interpreter.add("CONCATENATION", [1, 2, 16, 26], 30, 128)
+        interpreter.add("CONCATENATION", [1, 2, 16, 26], 30, channels * 4)
         return interpreter
 
     def test_resolves_full_chain_and_source_channel_order(self):
@@ -202,6 +202,12 @@ class SourceChainTest(unittest.TestCase):
                                      concat_order=["bypass", "branch", "residual_0", "residual_1"]))
         self.assertEqual(ids[CONCAT_ROLE], 30)
         self.assertEqual(shapes[CONCAT_ROLE], [1, 1, 2, 128])
+
+    def test_resolves_multigroup_branches_and_eight_group_concat(self):
+        _, shapes, layout = resolve_c2f_chain(self.fixture(64), 0)
+        self.assertEqual((layout["branch_start"], layout["bypass_start"], layout["blocks"]), (64, 0, 2))
+        self.assertEqual(shapes[PARENT_ROLE], [1, 1, 2, 128])
+        self.assertEqual(shapes[CONCAT_ROLE], [1, 1, 2, 256])
 
     def test_rejects_non_k3_conv_partial_slice_and_wrong_residual_edge(self):
         for mutation in ("kernel", "slice", "edge", "concat"):

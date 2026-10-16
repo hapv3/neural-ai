@@ -1,4 +1,4 @@
-"""Source-edge and byte-provenance mapping for resident C32 C2f chains."""
+"""Source-edge and byte-provenance mapping for resident C32-group C2f chains."""
 
 import struct
 
@@ -48,14 +48,17 @@ def resolve_c2f_chain(interpreter, parent_id):
                     {int(s["outputs"][0]) for s in slices})
     current = int(branch["inputs"][0])
     branch_id = current
+    channels = int(interpreter.get_tensor(branch_id).shape[-1])
+    if channels not in (32, 64, 128):
+        raise ValueError("C2f chain requires complete C32-group source slices")
     bypass_id, = {int(s["outputs"][0]) for s in slices} - {branch_id}
     layout = {}
     for name, tensor in (("branch", branch_id), ("bypass", bypass_id)):
         op = next(s for s in slices if int(s["outputs"][0]) == tensor)
         begin, end, stride = [interpreter.get_tensor(int(t)).reshape(-1).tolist() for t in op["inputs"][1:]]
         if (len(begin) != 4 or len(end) != 4 or begin[:3] != [0, 0, 0] or
-                stride != [1, 1, 1, 1] or end[3] - begin[3] != 32):
-            raise ValueError("C2f chain requires full-spatial C32 slices")
+                stride != [1, 1, 1, 1] or end[3] - begin[3] != channels):
+            raise ValueError("C2f chain requires full-spatial C32-group slices")
         layout[f"{name}_start"] = int(begin[3])
     ids = {PARENT_ROLE: parent_id}
     concat_sources = {branch_id: "branch", bypass_id: "bypass"}
@@ -80,10 +83,10 @@ def resolve_c2f_chain(interpreter, parent_id):
             layout.update(blocks=block + 1, concat_order=[concat_sources[int(t)] for t in concat["inputs"]])
             tensors = {role: interpreter.get_tensor(tensor) for role, tensor in ids.items()}
             parent_shape = tensors[PARENT_ROLE].shape
-            if (len(parent_shape) != 4 or parent_shape[0] != 1 or parent_shape[3] != 64 or
+            if (len(parent_shape) != 4 or parent_shape[0] != 1 or parent_shape[3] != 2 * channels or
                     any(t.dtype != np.int8 for t in tensors.values()) or
-                    any(tensors[r].shape != parent_shape[:3] + (32,) for r in chain_roles(block + 1)[:-1]) or
-                    tensors[CONCAT_ROLE].shape != parent_shape[:3] + (32 * len(concat_sources),)):
+                    any(tensors[r].shape != parent_shape[:3] + (channels,) for r in chain_roles(block + 1)[:-1]) or
+                    tensors[CONCAT_ROLE].shape != parent_shape[:3] + (channels * len(concat_sources),)):
                 raise ValueError("Unsupported C2f chain source shapes")
             return ids, {role: list(map(int, tensor.shape)) for role, tensor in tensors.items()}, layout
     raise ValueError("C2f chain has no supported complete concat")
@@ -96,6 +99,11 @@ def plan_resumed_c2f_checkpoints(commands, parent, shapes, layout, local_bytes, 
     Conv results acquire labels only at completion and are separately compared
     to independent numerical oracles. DMA cannot manufacture tensor identities.
     """
+    if shapes[PARENT_ROLE][-1] != 64:
+        # Multiple input groups require explicit external-pSUM accumulation;
+        # keep the already verified single-group/async mapper unchanged.
+        from grouped_c2f_checkpoints import plan_grouped_c2f_checkpoints
+        return plan_grouped_c2f_checkpoints(commands, parent, shapes, layout, local_bytes, l2_bytes)
     count = layout["blocks"]
     if type(count) is not int or not 1 <= count <= 8:
         raise ValueError("Unsupported C2f chain length")
