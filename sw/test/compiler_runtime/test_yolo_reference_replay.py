@@ -47,6 +47,7 @@ async def run_reference_case(dut, case_path):
               "downsample_coverage": case.get("downsample_coverage"),
               "resumed_pointwise_coverage": case.get("resumed_pointwise_coverage"),
               "resumed_c2f_coverage": case.get("resumed_c2f_coverage"),
+              "resumed_output_coverage": case.get("resumed_output_coverage"),
               "initial_snapshot_checks": case.get("initial_snapshot_checks", []),
               "snapshot_evidence": case.get("snapshot_evidence"),
               "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
@@ -86,7 +87,8 @@ async def run_reference_case(dut, case_path):
     before_compute = {check.get("submit_command", check["command"]) - 1:
                       check.get("submit_command", check["command"]) for check in case["checkpoints"]
                       if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2",
-                                                  "block_output_conv", "downsample_conv", "resumed_pointwise_conv") or
+                                                  "block_output_conv", "downsample_conv", "resumed_pointwise_conv",
+                                                  "resumed_output_conv") or
                       (check["tensor_role"].startswith("resumed_c2f_") and
                        check["tensor_role"].endswith(("conv1", "conv2")))}
 
@@ -190,6 +192,16 @@ async def run_reference_case(dut, case_path):
         assert "cascade_l2_output" in report, "Missing live L2 comparison"
         if report["cascade_l2_output"]["mismatches"]:
             failures.append(report["cascade_l2_output"])
+    if case.get("resumed_output_l2") is not None:
+        check = case["resumed_output_l2"]
+        actual = extract_checkpoint(snapshot_temporary, check)
+        expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
+        (folder / "resident-l2-actual.bin").write_bytes(actual.tobytes())
+        report["resumed_output_l2"] = {**check, **compare_bytes(actual, expected)}
+        if report["resumed_output_l2"]["mismatches"]:
+            failures.append(report["resumed_output_l2"])
+        dut._log.info("NEURAL-AI RESIDENT L2 OUTPUT: %d/%d mismatches",
+                      report["resumed_output_l2"]["mismatches"], report["resumed_output_l2"]["bytes"])
     if full_graph:
         (folder / "output-actual.bin").write_bytes(snapshot_output)
         report["final_output"] = {**case["final_output"],

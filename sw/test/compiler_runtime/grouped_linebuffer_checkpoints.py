@@ -12,16 +12,35 @@ RESUMED_POINTWISE_ROLES = ("resumed_pointwise_conv", "resumed_pointwise_activati
 _TOKEN_STRIDE = 1 << 32
 
 
+def reference_rectangles(check):
+    """Describe logical rectangles in physical sample order, including wrap."""
+    if "reference_spans" not in check:
+        return [check]
+    spans = check["reference_spans"]
+    keys = {"rows", "channels", "reference_first_row", "reference_first_channel"}
+    if (not isinstance(spans, list) or not spans or len(spans) > 32 or
+            any(not isinstance(s, dict) or set(s) != keys or
+                any(type(v) is not int for v in s.values()) or
+                s["rows"] <= 0 or s["channels"] != check["channels"] for s in spans) or
+            sum(s["rows"] for s in spans) != check["rows"] or
+            any(check.get(k, 0) != spans[0][k] for k in ("reference_first_row", "reference_first_channel"))):
+        raise ValueError("Invalid reference spans for physical checkpoint")
+    return spans
+
+
 def reference_tensor_slice(tensor, check):
-    """Slice NHWC oracles by both spatial row and active channel rectangle."""
+    """Slice NHWC oracles in physical sample order, without flattening C."""
     channels = tensor.shape[-1]
     tensor = tensor.reshape(-1, channels)
-    row, column = check["reference_first_row"], check.get("reference_first_channel", 0)
-    rows, cols = check["rows"], check["channels"]
-    if (any(type(v) is not int for v in (row, column, rows, cols)) or min(row, column) < 0 or
-            min(rows, cols) <= 0 or row + rows > tensor.shape[0] or column + cols > channels):
-        raise ValueError("Reference checkpoint rectangle exceeds tensor")
-    return tensor[row:row + rows, column:column + cols].copy()
+    pieces = []
+    for rectangle in reference_rectangles(check):
+        row, column = rectangle["reference_first_row"], rectangle.get("reference_first_channel", 0)
+        rows, cols = rectangle["rows"], rectangle["channels"]
+        if (any(type(v) is not int for v in (row, column, rows, cols)) or min(row, column) < 0 or
+                min(rows, cols) <= 0 or row + rows > tensor.shape[0] or column + cols > channels):
+            raise ValueError("Reference checkpoint rectangle exceeds tensor")
+        pieces.append(tensor[row:row + rows, column:column + cols])
+    return np.concatenate(pieces, axis=0).copy()
 
 
 def validate_grouped_coverage(checks, shapes, roles=DOWNSAMPLE_ROLES):
@@ -31,7 +50,8 @@ def validate_grouped_coverage(checks, shapes, roles=DOWNSAMPLE_ROLES):
         if len(shape) != 4 or shape[0] != 1 or any(type(v) is not int or v <= 0 for v in shape):
             raise ValueError("Invalid grouped checkpoint tensor shape")
         mask = np.zeros((shape[1] * shape[2], shape[3]), dtype=np.bool_)
-        for check in (c for c in checks if c["tensor_role"] == role):
+        rectangles = (r for c in checks if c["tensor_role"] == role for r in reference_rectangles(c))
+        for check in rectangles:
             row, col = check["reference_first_row"], check.get("reference_first_channel", 0)
             rows, channels = check["rows"], check["channels"]
             if (any(type(v) is not int for v in (row, col, rows, channels)) or

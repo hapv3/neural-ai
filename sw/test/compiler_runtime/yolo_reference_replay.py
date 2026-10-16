@@ -26,8 +26,9 @@ from grouped_linebuffer_checkpoints import (
     plan_grouped_pointwise_checkpoints, reference_tensor_slice, validate_grouped_coverage,
 )
 from resumed_c2f_checkpoints import (
-    PARENT_ROLE, chain_roles, plan_resumed_c2f_checkpoints, resolve_c2f_chain,
+    CONCAT_ROLE, PARENT_ROLE, chain_roles, plan_resumed_c2f_checkpoints, resolve_c2f_chain,
 )
+from resident_pointwise_checkpoints import OUTPUT_ROLES, plan_resident_pointwise_checkpoints
 
 
 def sha(data):
@@ -97,7 +98,8 @@ def plan_lut_restore(model, first_command, end_command):
     return None
 
 
-def validate_snapshot_parent(previous, report, snapshot, first, identity, reference_build, memory):
+def validate_snapshot_parent(previous, report, snapshot, first, identity, reference_build, memory,
+                             parent_role="downsample_activation"):
     """Require PASS provenance and recompare the still-resident full parent."""
     if (report.get("status") != "PASS" or report.get("end_command") != first or
             previous.get("end_command") != first or
@@ -109,8 +111,10 @@ def validate_snapshot_parent(previous, report, snapshot, first, identity, refere
             raise ValueError(f"Snapshot {key} provenance mismatch")
     if previous.get("reference_build") != reference_build:
         raise ValueError("Snapshot reference build changed")
+    if parent_role not in ("downsample_activation", "resumed_c2f_concat"):
+        raise ValueError("Unsupported retained snapshot parent role")
     parents = [c for c in previous["checkpoints"]
-               if c.get("tensor_role") == "downsample_activation" and c["command"] == first]
+               if c.get("tensor_role") == parent_role and c["command"] == first]
     if len(parents) != 1:
         raise ValueError("Snapshot has no complete retained grouped parent")
     parent = parents[0]
@@ -118,7 +122,10 @@ def validate_snapshot_parent(previous, report, snapshot, first, identity, refere
                all(c.get(key) == value for key, value in parent.items())]
     if (len(matches) != 1 or matches[0].get("mismatches") != 0 or
             parent["reference_first_row"] != 0 or parent.get("reference_first_channel", 0) != 0 or
-            not 32 < parent["channels"] <= 64 or parent.get("group_stride") != parent["rows"] * 32):
+            (parent_role == "downsample_activation" and not 32 < parent["channels"] <= 64) or
+            (parent_role == "resumed_c2f_concat" and
+             (not 96 <= parent["channels"] <= 320 or parent["channels"] % 32)) or
+            "reference_spans" in parent or parent.get("group_stride") != parent["rows"] * 32):
         raise ValueError("Snapshot parent is partial or lacks byte-exact evidence")
     actual = extract_checkpoint(memory, parent)
     expected = np.frombuffer(checked_read(parent["expected"]), np.int8)
@@ -759,6 +766,22 @@ def save_checkpoint_result(folder, report, check, actual, fail_fast=False):
     return stats
 
 
+def retained_case_parent(case, first, memory, role):
+    """Repeat snapshot provenance and retained-byte validation at case load."""
+    if (case.get("start_mode") != "snapshot" or case.get("full_graph", False) or
+            case["restore_preamble"] is not None or case["afu_lut_restore"] is not None):
+        raise ValueError("Resumed pointwise requires a self-configuring bounded snapshot suffix")
+    previous = json.loads(checked_read(case["snapshot_case"]))
+    evidence = json.loads(checked_read(case["snapshot_evidence"]))
+    parent, stats = validate_snapshot_parent(previous, evidence, case["snapshot"]["path"], first,
+        {key: case[key] for key in ("model", "source", "firmware", "input")}, case["reference_build"], memory, role)
+    if any(case[key] != previous[key] for key in ("input_bytes", "temporary_bytes", "output_bytes")):
+        raise ValueError("Snapshot continuation binding sizes changed")
+    if parent != case["snapshot_parent"] or case["initial_snapshot_checks"] != [{"command": first, **stats}]:
+        raise ValueError("Missing or stale retained-parent verification")
+    return parent
+
+
 def load_case(path):
     case = json.loads(Path(path).read_text())
     if case.get("version") != 1:
@@ -779,6 +802,12 @@ def load_case(path):
         raise ValueError("resumed_pointwise_checkpoints must be boolean")
     if type(case.get("resumed_c2f_checkpoints", False)) is not bool:
         raise ValueError("resumed_c2f_checkpoints must be boolean")
+    if type(case.get("resumed_output_checkpoints", False)) is not bool:
+        raise ValueError("resumed_output_checkpoints must be boolean")
+    if case.get("resumed_output_checkpoints", False) and case.get("resumed_pointwise_checkpoints", False):
+        raise ValueError("Resumed output and grouped pointwise gates are mutually exclusive")
+    if case.get("resumed_output_l2") is not None and not case.get("resumed_output_checkpoints", False):
+        raise ValueError("Retained output comparison requires its resident output gate")
     if case.get("resumed_c2f_checkpoints", False) and not case.get("resumed_pointwise_checkpoints", False):
         raise ValueError("Resumed C2f chain requires the self-configuring pointwise suffix")
     full_model = checked_read(case["model"])
@@ -931,18 +960,7 @@ def load_case(path):
         if validate_grouped_coverage(saved, shapes) != case["downsample_coverage"]:
             raise ValueError("Stale grouped downsample coverage")
     if case.get("resumed_pointwise_checkpoints", False):
-        if (case.get("start_mode") != "snapshot" or case.get("full_graph", False) or
-                case["restore_preamble"] is not None or case["afu_lut_restore"] is not None):
-            raise ValueError("Resumed pointwise requires a self-configuring bounded snapshot suffix")
-        previous = json.loads(checked_read(case["snapshot_case"]))
-        evidence = json.loads(checked_read(case["snapshot_evidence"]))
-        parent, stats = validate_snapshot_parent(previous, evidence, case["snapshot"]["path"], first,
-            {key: case[key] for key in ("model", "source", "firmware", "input")}, case["reference_build"], memory)
-        if any(case[key] != previous[key] for key in ("input_bytes", "temporary_bytes", "output_bytes")):
-            raise ValueError("Snapshot continuation binding sizes changed")
-        if (parent != case["snapshot_parent"] or
-                case["initial_snapshot_checks"] != [{"command": first, **stats}]):
-            raise ValueError("Missing or stale retained-parent verification")
+        parent = retained_case_parent(case, first, memory, "downsample_activation")
         planned, end = plan_grouped_pointwise_checkpoints(commands, parent, case["resumed_pointwise_shapes"],
             len(memory), len(temporary))
         saved = [c for c in case["checkpoints"] if c["tensor_role"] in RESUMED_POINTWISE_ROLES]
@@ -974,6 +992,25 @@ def load_case(path):
                 raise ValueError("Resumed C2f chain must end at its first drained boundary")
             if validate_grouped_coverage(chain_saved, shapes, roles) != case["resumed_c2f_coverage"]:
                 raise ValueError("Stale resumed C2f chain coverage")
+    if case.get("resumed_output_checkpoints", False):
+        parent = retained_case_parent(case, first, memory, CONCAT_ROLE)
+        shapes = case["resumed_output_shapes"]
+        planned, end, retained = plan_resident_pointwise_checkpoints(commands, parent, shapes,
+            len(memory), len(temporary))
+        if (len(case["checkpoints"]) != len(planned) or any(
+                actual.get("reference_spans") != expected.get("reference_spans") or
+                any(actual.get(key) != value for key, value in expected.items())
+                for actual, expected in zip(case["checkpoints"], planned))):
+            raise ValueError("Missing or stale resident output checkpoint mapping")
+        if completed_replay_boundary(full_model, end) != case["end_command"]:
+            raise ValueError("Resident output must end at its first drained retained-output boundary")
+        if validate_grouped_coverage(case["checkpoints"], shapes, OUTPUT_ROLES) != case["resumed_output_coverage"]:
+            raise ValueError("Stale resident output coverage")
+        saved_l2 = case.get("resumed_output_l2")
+        if (saved_l2 is None or any(saved_l2.get(key) != value for key, value in retained.items()) or
+                len(checked_read(saved_l2["expected"])) != retained["rows"] * retained["channels"]):
+            raise ValueError("Missing or stale retained resident L2 output")
+        extract_checkpoint(temporary, saved_l2)
     return case, full_model, memory, temporary, output
 
 
@@ -1002,6 +1039,8 @@ def main():
                         help="Resume a verified grouped parent snapshot into a self-configuring pointwise/LUT suffix")
     parser.add_argument("--resume-c2f-chain-checkpoints", action="store_true",
                         help="Also verify every bottleneck and the concat following the resumed pointwise")
+    parser.add_argument("--resume-c2f-output-checkpoints", action="store_true",
+                        help="Resume a verified concat into pointwise groups, streamed SiLU and complete L2 output")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -1020,9 +1059,12 @@ def main():
         args.post_cascade_checkpoints = True
     if args.post_cascade_checkpoints:
         args.all_cascade_checkpoints = True
-    if args.resume_grouped_pointwise_checkpoints and (
+    if args.resume_c2f_output_checkpoints and args.resume_grouped_pointwise_checkpoints:
+        parser.error("Choose either the resumed grouped pointwise or concat-output gate")
+    resuming = args.resume_grouped_pointwise_checkpoints or args.resume_c2f_output_checkpoints
+    if resuming and (
             args.snapshot is None or args.full_graph or args.all_cascade_checkpoints):
-        parser.error("--resume-grouped-pointwise-checkpoints requires --snapshot without reset-prefix/full-graph modes")
+        parser.error("Resumed pointwise/output gates require --snapshot without reset-prefix/full-graph modes")
     if args.output.exists():
         parser.error("Choose a fresh output directory")
     if args.full_graph and not args.from_reset:
@@ -1045,7 +1087,7 @@ def main():
         first = 0
         memory, temporary, output, input_bytes = reset_buffers(full_model)
         saved = {"checkpoints": []}
-    elif args.resume_grouped_pointwise_checkpoints:
+    elif resuming:
         previous_path = args.snapshot.parent / "case.json"
         evidence_path = args.snapshot.parent / "byte_exact.json"
         previous, *_ = load_case(previous_path)
@@ -1058,7 +1100,8 @@ def main():
         identity = dict(model=artifact(model_path), source=artifact(source), firmware=artifact(firmware_path),
                         input=previous["input"])
         snapshot_parent, parent_stats = validate_snapshot_parent(previous, saved_report, args.snapshot, first,
-            identity, reference_build, memory)
+            identity, reference_build, memory,
+            CONCAT_ROLE if args.resume_c2f_output_checkpoints else "downsample_activation")
         saved = {"checkpoints": []}
     else:
         saved = json.loads((args.snapshot.parent / "byte_exact.json").read_text())
@@ -1078,7 +1121,7 @@ def main():
     if args.from_reset:
         input_path = args.output / "input.bin"
         input_data = ((np.arange(input_bytes, dtype=np.uint32) * 37 + 11) & 255).astype(np.uint8).tobytes()
-    elif args.resume_grouped_pointwise_checkpoints:
+    elif resuming:
         input_path = Path(previous["input"]["path"])
         input_data = checked_read(previous["input"])
     else:
@@ -1087,7 +1130,7 @@ def main():
     interpreter.set_tensor(inp["index"], np.frombuffer(input_data, np.int8).reshape(inp["shape"]))
     interpreter.invoke()
     initial = []
-    if args.resume_grouped_pointwise_checkpoints:
+    if resuming:
         expected = reference_tensor_slice(interpreter.get_tensor(snapshot_parent["tensor"]), snapshot_parent)
         if expected.tobytes() != checked_read(snapshot_parent["expected"]):
             raise ValueError("Current reference differs from the verified snapshot oracle")
@@ -1103,7 +1146,7 @@ def main():
         initial.append({"command": check["command"], **stats})
     commands, _ = runtime._logical_command_records(full_model)
     checks, end = [], len(commands)
-    if args.consumer_tiles and not args.resume_grouped_pointwise_checkpoints:
+    if args.consumer_tiles and not resuming:
         ops = interpreter._get_ops_details()
         convs = [op for op in ops if op["op_name"] == "CONV_2D"]
         producer_id, consumer_id = (int(op["outputs"][0]) for op in convs[:2])
@@ -1172,7 +1215,7 @@ def main():
                         downsample_checks, end = plan_downsample_checkpoints(commands, checks, downsample_shapes,
                             len(memory), len(temporary))
                         checks = sorted(checks + downsample_checks, key=lambda check: check["command"])
-    if args.resume_grouped_pointwise_checkpoints:
+    if resuming:
         ops = interpreter._get_ops_details()
         conv = next(op for op in ops if op["op_name"] == "CONV_2D" and
                     int(op["inputs"][0]) == snapshot_parent["tensor"])
@@ -1180,20 +1223,28 @@ def main():
         if weights.ndim != 4 or weights.shape[1:3] != (1, 1):
             raise ValueError("Snapshot parent consumer is not a pointwise Conv")
         conv_id = int(conv["outputs"][0])
-        tensor_ids = dict(resumed_pointwise_conv=conv_id, resumed_pointwise_activation=silu_output(ops, conv_id))
-        resumed_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
-                          for role in RESUMED_POINTWISE_ROLES}
-        resumed_shapes["downsample_activation"] = list(map(int,
-            interpreter.get_tensor(snapshot_parent["tensor"]).shape))
-        checks, end = plan_grouped_pointwise_checkpoints(commands, snapshot_parent, resumed_shapes,
-            len(memory), len(temporary))
-        if args.resume_c2f_chain_checkpoints:
-            chain_ids, chain_shapes, chain_layout = resolve_c2f_chain(interpreter, tensor_ids[PARENT_ROLE])
-            chain_parent, = [c for c in checks if c["tensor_role"] == PARENT_ROLE]
-            chain_checks, end = plan_resumed_c2f_checkpoints(commands, chain_parent, chain_shapes, chain_layout,
+        if args.resume_c2f_output_checkpoints:
+            tensor_ids = dict(zip(OUTPUT_ROLES, (conv_id, silu_output(ops, conv_id))))
+            resident_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
+                               for role in OUTPUT_ROLES}
+            resident_shapes["parent"] = list(map(int, interpreter.get_tensor(snapshot_parent["tensor"]).shape))
+            checks, end, retained = plan_resident_pointwise_checkpoints(commands, snapshot_parent, resident_shapes,
                 len(memory), len(temporary))
-            tensor_ids.update(chain_ids)
-            checks += chain_checks
+        else:
+            tensor_ids = dict(resumed_pointwise_conv=conv_id, resumed_pointwise_activation=silu_output(ops, conv_id))
+            resumed_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
+                              for role in RESUMED_POINTWISE_ROLES}
+            resumed_shapes["downsample_activation"] = list(map(int,
+                interpreter.get_tensor(snapshot_parent["tensor"]).shape))
+            checks, end = plan_grouped_pointwise_checkpoints(commands, snapshot_parent, resumed_shapes,
+                len(memory), len(temporary))
+            if args.resume_c2f_chain_checkpoints:
+                chain_ids, chain_shapes, chain_layout = resolve_c2f_chain(interpreter, tensor_ids[PARENT_ROLE])
+                chain_parent, = [c for c in checks if c["tensor_role"] == PARENT_ROLE]
+                chain_checks, end = plan_resumed_c2f_checkpoints(commands, chain_parent, chain_shapes, chain_layout,
+                    len(memory), len(temporary))
+                tensor_ids.update(chain_ids)
+                checks += chain_checks
     if args.full_graph:
         end = len(commands)
     else:
@@ -1265,13 +1316,22 @@ def main():
                     downsample_coverage=validate_grouped_coverage(checks, downsample_shapes))
     if args.resume_grouped_pointwise_checkpoints:
         case.update(resumed_pointwise_checkpoints=True, resumed_pointwise_shapes=resumed_shapes,
-                    resumed_pointwise_coverage=validate_grouped_coverage(checks, resumed_shapes, RESUMED_POINTWISE_ROLES),
-                    snapshot_case=artifact(previous_path), snapshot_evidence=artifact(evidence_path),
+                    resumed_pointwise_coverage=validate_grouped_coverage(checks, resumed_shapes, RESUMED_POINTWISE_ROLES))
+    if resuming:
+        case.update(snapshot_case=artifact(previous_path), snapshot_evidence=artifact(evidence_path),
                     snapshot_parent=snapshot_parent)
     if args.resume_c2f_chain_checkpoints:
         case.update(resumed_c2f_checkpoints=True, resumed_c2f_shapes=chain_shapes, resumed_c2f_layout=chain_layout,
                     resumed_c2f_coverage=validate_grouped_coverage(
                         checks, chain_shapes, chain_roles(chain_layout["blocks"])))
+    if args.resume_c2f_output_checkpoints:
+        tensor_id = tensor_ids[OUTPUT_ROLES[1]]
+        expected = reference_tensor_slice(interpreter.get_tensor(tensor_id), retained)
+        filename = args.output / "resident-l2-expected.bin"
+        filename.write_bytes(expected.tobytes())
+        case.update(resumed_output_checkpoints=True, resumed_output_shapes=resident_shapes,
+                    resumed_output_coverage=validate_grouped_coverage(checks, resident_shapes, OUTPUT_ROLES),
+                    resumed_output_l2={**retained, "tensor": tensor_id, "expected": artifact(filename)})
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
