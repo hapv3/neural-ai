@@ -101,6 +101,15 @@ def plan_lut_restore(model, first_command, end_command):
     return None
 
 
+def pointwise_snapshot_role(previous, first):
+    """Select one proven downsample activation, not an arbitrary saved tensor."""
+    roles = [c["tensor_role"] for c in previous["checkpoints"] if c["command"] == first and
+             c["tensor_role"] in ("downsample_activation", L2_DOWNSAMPLE_ROLES[1])]
+    if len(roles) != 1:
+        raise ValueError("Snapshot has no unique supported pointwise parent at its boundary")
+    return roles[0]
+
+
 def validate_snapshot_parent(previous, report, snapshot, first, identity, reference_build, memory,
                              parent_role="downsample_activation"):
     """Require PASS provenance and recompare the still-resident full parent."""
@@ -114,7 +123,7 @@ def validate_snapshot_parent(previous, report, snapshot, first, identity, refere
             raise ValueError(f"Snapshot {key} provenance mismatch")
     if previous.get("reference_build") != reference_build:
         raise ValueError("Snapshot reference build changed")
-    if parent_role not in ("downsample_activation", "resumed_c2f_concat"):
+    if parent_role not in ("downsample_activation", "resumed_c2f_concat", L2_DOWNSAMPLE_ROLES[1]):
         raise ValueError("Unsupported retained snapshot parent role")
     parents = [c for c in previous["checkpoints"]
                if c.get("tensor_role") == parent_role and c["command"] == first]
@@ -126,6 +135,8 @@ def validate_snapshot_parent(previous, report, snapshot, first, identity, refere
     if (len(matches) != 1 or matches[0].get("mismatches") != 0 or
             parent["reference_first_row"] != 0 or parent.get("reference_first_channel", 0) != 0 or
             (parent_role == "downsample_activation" and not 32 < parent["channels"] <= 64) or
+            (parent_role == L2_DOWNSAMPLE_ROLES[1] and
+             (not 64 <= parent["channels"] <= 256 or parent["channels"] % 32)) or
             (parent_role == "resumed_c2f_concat" and
              (not 96 <= parent["channels"] <= 320 or parent["channels"] % 32)) or
             "reference_spans" in parent or parent.get("group_stride") != parent["rows"] * 32):
@@ -776,6 +787,8 @@ def retained_case_parent(case, first, memory, role):
         raise ValueError("Resumed pointwise requires a self-configuring bounded snapshot suffix")
     previous = json.loads(checked_read(case["snapshot_case"]))
     evidence = json.loads(checked_read(case["snapshot_evidence"]))
+    if role is None:
+        role = pointwise_snapshot_role(previous, first)
     parent, stats = validate_snapshot_parent(previous, evidence, case["snapshot"]["path"], first,
         {key: case[key] for key in ("model", "source", "firmware", "input")}, case["reference_build"], memory, role)
     if any(case[key] != previous[key] for key in ("input_bytes", "temporary_bytes", "output_bytes")):
@@ -967,7 +980,7 @@ def load_case(path):
         if validate_grouped_coverage(saved, shapes) != case["downsample_coverage"]:
             raise ValueError("Stale grouped downsample coverage")
     if case.get("resumed_pointwise_checkpoints", False):
-        parent = retained_case_parent(case, first, memory, "downsample_activation")
+        parent = retained_case_parent(case, first, memory, None)
         planned, end = plan_grouped_pointwise_checkpoints(commands, parent, case["resumed_pointwise_shapes"],
             len(memory), len(temporary))
         saved = [c for c in case["checkpoints"] if c["tensor_role"] in RESUMED_POINTWISE_ROLES]
@@ -1133,7 +1146,7 @@ def main():
                         input=previous["input"])
         snapshot_parent, parent_stats = validate_snapshot_parent(previous, saved_report, args.snapshot, first,
             identity, reference_build, memory,
-            CONCAT_ROLE if args.resume_c2f_output_checkpoints else "downsample_activation")
+            CONCAT_ROLE if args.resume_c2f_output_checkpoints else pointwise_snapshot_role(previous, first))
         saved = {"checkpoints": []}
     else:
         saved = json.loads((args.snapshot.parent / "byte_exact.json").read_text())

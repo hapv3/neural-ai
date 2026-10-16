@@ -190,14 +190,17 @@ def plan_grouped_pointwise_checkpoints(commands, parent, shapes, local_bytes, l2
     if (any(len(s) != 4 or s[0] != 1 or any(type(v) is not int or v <= 0 for v in s)
             for s in (source_shape, output, shapes["resumed_pointwise_activation"])) or
             source_shape[:3] != output[:3] or output != shapes["resumed_pointwise_activation"] or
-            not 32 < source_shape[3] <= 64 or not 32 < output[3] <= 64 or
-            parent["rows"] != source_shape[1] * source_shape[2] or parent["channels"] != source_shape[3]):
+            not 32 < source_shape[3] <= 256 or not 32 < output[3] <= 256 or
+            parent["rows"] != source_shape[1] * source_shape[2] or parent["channels"] != source_shape[3] or
+            parent.get("group_stride") != parent["rows"] * 32 or
+            (parent["tile_cols"], parent["row_stride"]) != (source_shape[2], source_shape[2] * 32)):
         raise ValueError("Unsupported resumed grouped pointwise shapes")
     rows = parent["rows"]
     tracker = _MemoryLabels(local_bytes, l2_bytes)
     indices = checkpoint_indices(parent, local_bytes)
     tracker.write(6, indices.ravel(), _TOKEN_STRIDE + np.arange(indices.size))
     qparams = {}
+    qparam_layer = None
     group_rows = [0] * ((output[3] + 31) // 32)
     checks = []
     layer_id = None
@@ -207,6 +210,7 @@ def plan_grouped_pointwise_checkpoints(commands, parent, shapes, local_bytes, l2
         kind, _, flags, layer, _ = struct.unpack_from("<HHIII", command)
         if kind == 5:
             qparams[layer] = struct.unpack_from("<3I", command, 16)
+            qparam_layer = layer
         elif kind in (2, 3, 4, 24, 25, 26):
             tracker.dma(command)
         elif kind == 27:
@@ -221,11 +225,12 @@ def plan_grouped_pointwise_checkpoints(commands, parent, shapes, local_bytes, l2
             partial_region, partial_index, partial = struct.unpack_from("<HHI", command, 32)
             dst_region, dst_index, destination = struct.unpack_from("<HHI", command, 40)
             count, input_groups, output_groups, group, input_stride, output_stride = struct.unpack_from("<6I", command, 48)
-            if (layer != layer_id or flags or layer not in qparams or
+            if (layer != layer_id or flags or layer != qparam_layer or
                     (src_region, src_index, partial_region, partial_index, dst_region, dst_index) != (6, 0, 6, 0, 6, 0) or
                     input_groups != (source_shape[3] + 31) // 32 or output_groups != 1 or
                     group >= len(group_rows) or input_stride != rows * 32 or output_stride != rows * 32 or
-                    source < parent["address"] or (source - parent["address"]) % 32 or not count):
+                    source < parent["address"] or (source - parent["address"]) % 32 or not count or
+                    any(address % 32 for address in (source, partial, destination))):
                 raise ValueError("Resumed grouped pointwise needs explicit matching RQ loads and C32 layout")
             first_qparam, qparam_count, selected = qparams[layer]
             if qparam_base is None:
@@ -244,12 +249,13 @@ def plan_grouped_pointwise_checkpoints(commands, parent, shapes, local_bytes, l2
                 base = destination - group * rows * 32 - first_row * 32
             if destination != base + group * rows * 32 + first_row * 32:
                 raise ValueError("Noncontiguous resumed grouped pointwise output")
-            for address, length in ((partial, count * 128), (destination, count * 32)):
+            partial_bytes = min(count, 256) * 128  # Runtime reuses one stripe's pSUM storage.
+            for address, length in ((partial, partial_bytes), (destination, count * 32)):
                 if (address < parent["address"] + input_groups * rows * 32 and
                         parent["address"] < address + length):
                     raise ValueError("Resumed grouped pointwise workspace overlaps parent")
                 tracker.write(6, np.arange(address, address + length), -1)
-            if partial < base + len(group_rows) * rows * 32 and base < partial + count * 128:
+            if partial < base + len(group_rows) * rows * 32 and base < partial + partial_bytes:
                 raise ValueError("Resumed grouped pointwise partial overlaps output groups")
             channels = min(32, output[3] - group * 32)
             check = dict(command=index, tensor_role="resumed_pointwise_conv", address=destination,
