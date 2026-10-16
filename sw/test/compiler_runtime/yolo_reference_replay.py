@@ -29,6 +29,9 @@ from resumed_c2f_checkpoints import (
     CONCAT_ROLE, PARENT_ROLE, chain_roles, plan_resumed_c2f_checkpoints, resolve_c2f_chain,
 )
 from resident_pointwise_checkpoints import OUTPUT_ROLES, plan_resident_pointwise_checkpoints
+from l2_downsample_checkpoints import (
+    L2_DOWNSAMPLE_ROLES, plan_l2_downsample_checkpoints, resolve_l2_downsample_source,
+)
 
 
 def sha(data):
@@ -804,6 +807,10 @@ def load_case(path):
         raise ValueError("resumed_c2f_checkpoints must be boolean")
     if type(case.get("resumed_output_checkpoints", False)) is not bool:
         raise ValueError("resumed_output_checkpoints must be boolean")
+    if type(case.get("l2_downsample_checkpoints", False)) is not bool:
+        raise ValueError("l2_downsample_checkpoints must be boolean")
+    if case.get("l2_downsample_checkpoints", False) and not case.get("resumed_output_checkpoints", False):
+        raise ValueError("L2 downsample requires the self-configuring resident output gate")
     if case.get("resumed_output_checkpoints", False) and case.get("resumed_pointwise_checkpoints", False):
         raise ValueError("Resumed output and grouped pointwise gates are mutually exclusive")
     if case.get("resumed_output_l2") is not None and not case.get("resumed_output_checkpoints", False):
@@ -997,20 +1004,41 @@ def load_case(path):
         shapes = case["resumed_output_shapes"]
         planned, end, retained = plan_resident_pointwise_checkpoints(commands, parent, shapes,
             len(memory), len(temporary))
-        if (len(case["checkpoints"]) != len(planned) or any(
+        saved = [c for c in case["checkpoints"] if c["tensor_role"] in OUTPUT_ROLES]
+        if (len(saved) != len(planned) or any(
                 actual.get("reference_spans") != expected.get("reference_spans") or
                 any(actual.get(key) != value for key, value in expected.items())
-                for actual, expected in zip(case["checkpoints"], planned))):
+                for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale resident output checkpoint mapping")
-        if completed_replay_boundary(full_model, end) != case["end_command"]:
+        ready = completed_replay_boundary(full_model, end)
+        if (not case.get("l2_downsample_checkpoints", False) and
+                (ready != case["end_command"] or len(saved) != len(case["checkpoints"]))):
             raise ValueError("Resident output must end at its first drained retained-output boundary")
-        if validate_grouped_coverage(case["checkpoints"], shapes, OUTPUT_ROLES) != case["resumed_output_coverage"]:
+        if validate_grouped_coverage(saved, shapes, OUTPUT_ROLES) != case["resumed_output_coverage"]:
             raise ValueError("Stale resident output coverage")
         saved_l2 = case.get("resumed_output_l2")
         if (saved_l2 is None or any(saved_l2.get(key) != value for key, value in retained.items()) or
                 len(checked_read(saved_l2["expected"])) != retained["rows"] * retained["channels"]):
             raise ValueError("Missing or stale retained resident L2 output")
         extract_checkpoint(temporary, saved_l2)
+        if case.get("l2_downsample_checkpoints", False):
+            downsample_shapes = case["l2_downsample_shapes"]
+            if downsample_shapes["parent"] != shapes[OUTPUT_ROLES[1]]:
+                raise ValueError("L2 downsample parent shape changed")
+            planned, end = plan_l2_downsample_checkpoints(commands, saved_l2, ready, first,
+                downsample_shapes, case["l2_downsample_padding"], len(memory), len(temporary))
+            downsample_saved = [c for c in case["checkpoints"] if c["tensor_role"] in L2_DOWNSAMPLE_ROLES]
+            if (len(saved) + len(downsample_saved) != len(case["checkpoints"]) or
+                    len(downsample_saved) != len(planned) or any(
+                        "reference_spans" in actual or
+                        any(actual.get(key) != value for key, value in expected.items())
+                        for actual, expected in zip(downsample_saved, planned))):
+                raise ValueError("Missing or stale L2 downsample mapping")
+            if completed_replay_boundary(full_model, end) != case["end_command"]:
+                raise ValueError("L2 downsample must end at its first drained boundary")
+            if (validate_grouped_coverage(downsample_saved, downsample_shapes, L2_DOWNSAMPLE_ROLES) !=
+                    case["l2_downsample_coverage"]):
+                raise ValueError("Stale L2 downsample coverage")
     return case, full_model, memory, temporary, output
 
 
@@ -1041,6 +1069,8 @@ def main():
                         help="Also verify every bottleneck and the concat following the resumed pointwise")
     parser.add_argument("--resume-c2f-output-checkpoints", action="store_true",
                         help="Resume a verified concat into pointwise groups, streamed SiLU and complete L2 output")
+    parser.add_argument("--resume-l2-downsample-checkpoints", action="store_true",
+                        help="Also verify the following L2-fed K3/S2 grouped accumulation and whole-tensor SiLU")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
     parser.add_argument("--timeout-cycles", type=int,
@@ -1049,6 +1079,8 @@ def main():
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.resume_l2_downsample_checkpoints:
+        args.resume_c2f_output_checkpoints = True
     if args.resume_c2f_chain_checkpoints:
         args.resume_grouped_pointwise_checkpoints = True
     if args.downsample_checkpoints:
@@ -1230,6 +1262,16 @@ def main():
             resident_shapes["parent"] = list(map(int, interpreter.get_tensor(snapshot_parent["tensor"]).shape))
             checks, end, retained = plan_resident_pointwise_checkpoints(commands, snapshot_parent, resident_shapes,
                 len(memory), len(temporary))
+            if args.resume_l2_downsample_checkpoints:
+                downsample_id, l2_padding = resolve_l2_downsample_source(interpreter, tensor_ids[OUTPUT_ROLES[1]])
+                tensor_ids.update(zip(L2_DOWNSAMPLE_ROLES, (downsample_id, silu_output(ops, downsample_id))))
+                l2_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
+                             for role in L2_DOWNSAMPLE_ROLES}
+                l2_shapes["parent"] = resident_shapes[OUTPUT_ROLES[1]]
+                downsample_checks, end = plan_l2_downsample_checkpoints(commands, retained,
+                    completed_replay_boundary(full_model, end), first, l2_shapes, l2_padding,
+                    len(memory), len(temporary))
+                checks += downsample_checks
         else:
             tensor_ids = dict(resumed_pointwise_conv=conv_id, resumed_pointwise_activation=silu_output(ops, conv_id))
             resumed_shapes = {role: list(map(int, interpreter.get_tensor(tensor_ids[role]).shape))
@@ -1332,6 +1374,10 @@ def main():
         case.update(resumed_output_checkpoints=True, resumed_output_shapes=resident_shapes,
                     resumed_output_coverage=validate_grouped_coverage(checks, resident_shapes, OUTPUT_ROLES),
                     resumed_output_l2={**retained, "tensor": tensor_id, "expected": artifact(filename)})
+    if args.resume_l2_downsample_checkpoints:
+        case.update(l2_downsample_checkpoints=True, l2_downsample_shapes=l2_shapes,
+                    l2_downsample_padding=l2_padding,
+                    l2_downsample_coverage=validate_grouped_coverage(checks, l2_shapes, L2_DOWNSAMPLE_ROLES))
     filename = args.output / "case.json"
     filename.write_text(json.dumps(case, indent=2) + "\n")
     load_case(filename)
