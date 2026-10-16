@@ -14,14 +14,14 @@ from test_yolo_reference_helpers import lut
 
 
 class L2DownsampleMappingTest(unittest.TestCase):
-    def fixture(self, inputs=2, queued=False):
+    def fixture(self, inputs=2, queued=False, outputs=4):
         runtime = replay.runtime
 
         def rq(group):
             return struct.pack("<HHIII4I", 5, 32, 0, 35, 0, 512 + group * 32, 32, group, 0)
 
         commands = [rq(0)]
-        for group in range(4):
+        for group in range(outputs):
             if group:
                 commands.append(rq(group))
             for first in (0, 2):
@@ -46,10 +46,10 @@ class L2DownsampleMappingTest(unittest.TestCase):
                     struct.pack_into("<9I", command, 96, input_group * 9216, 0, 18432,
                                      20000 + group * 128 + first * 32, 2, mode, 64, 2, 256)
                     commands.append(bytes(command))
-        commands.append(lut(20000, 0, 512))
+        commands.append(lut(20000, 0, 4 * outputs * 32))
         parent = dict(address=0, rows=16, channels=inputs * 32, tile_cols=4, row_stride=128,
                       group_stride=512, reference_first_row=0, reference_first_channel=0)
-        shapes = {role: [1, 2, 2, 128] for role in L2_DOWNSAMPLE_ROLES}
+        shapes = {role: [1, 2, 2, outputs * 32] for role in L2_DOWNSAMPLE_ROLES}
         shapes["parent"] = [1, 4, 4, inputs * 32]
         return commands, parent, 1, 0, shapes, [1, 1, 1, 1], 65536, 4096
 
@@ -86,6 +86,49 @@ class L2DownsampleMappingTest(unittest.TestCase):
                            struct.unpack_from("<I", c, 116)[0] == 2)
         del fixture[0][first_final]
         with self.assertRaisesRegex(ValueError, "partial accumulation group|Noncontiguous"):
+            self.plan(fixture)
+
+    def test_four_inputs_finalize_all_eight_outputs_and_full_c256_lut(self):
+        fixture = self.fixture(inputs=4, outputs=8, queued=True)
+        checks, end = self.plan(fixture)
+        self.assertEqual(end, len(fixture[0]))
+        self.assertEqual(len(checks), 17)
+        self.assertEqual([c["reference_first_channel"] for c in checks[:-1]],
+                         [group * 32 for group in range(8) for _ in range(2)])
+        self.assertEqual([c["reference_first_row"] for c in checks[:-1]], [0, 2] * 8)
+        self.assertEqual((checks[-1]["channels"], checks[-1]["group_stride"]), (256, 128))
+        self.assertEqual(sum(c["rows"] * c["channels"] for c in checks), 2048)
+
+    def test_fourth_input_must_finish_before_eighth_group_lut(self):
+        fixture = self.fixture(inputs=4, outputs=8)
+        index = next(i for i, c in enumerate(fixture[0]) if struct.unpack_from("<H", c)[0] == 9 and
+                     struct.unpack_from("<I", c, 116)[0] == 3)
+        command = bytearray(fixture[0][index])
+        struct.pack_into("<I", command, 116, 2)
+        fixture[0][index] = bytes(command)
+        with self.assertRaisesRegex(ValueError, "partial accumulation group"):
+            self.plan(fixture)
+        fixture = self.fixture(inputs=4, outputs=8)
+        del fixture[0][-2]
+        with self.assertRaisesRegex(ValueError, "every finalized group"):
+            self.plan(fixture)
+
+    def test_fourth_input_staging_and_eighth_output_rq_are_strict(self):
+        fixture = self.fixture(inputs=4, outputs=8)
+        index = next(i for i, c in enumerate(fixture[0]) if struct.unpack_from("<H", c)[0] == 3 and
+                     struct.unpack_from("<I", c, 20)[0] == 3 * 512)
+        command = bytearray(fixture[0][index])
+        struct.pack_into("<I", command, 20, 2 * 512)
+        fixture[0][index] = bytes(command)
+        with self.assertRaisesRegex(ValueError, "staged input pixels/channels"):
+            self.plan(fixture)
+        fixture = self.fixture(inputs=4, outputs=8)
+        index = next(i for i, c in enumerate(fixture[0]) if struct.unpack_from("<H", c)[0] == 5 and
+                     struct.unpack_from("<I", c, 24)[0] == 7)
+        command = bytearray(fixture[0][index])
+        struct.pack_into("<I", command, 16, 512 + 6 * 32)
+        fixture[0][index] = bytes(command)
+        with self.assertRaisesRegex(ValueError, "Stale L2 downsample RQ group"):
             self.plan(fixture)
 
     def test_rq_must_be_replayed_not_inferred_from_older_prefix(self):
