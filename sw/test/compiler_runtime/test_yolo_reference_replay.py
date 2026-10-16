@@ -36,9 +36,13 @@ async def run_reference_case(dut, case_path):
     assert 0x81000000 + len(model) <= invocation_base, "Model overlaps invocation/control data"
     (folder / "replay.nai").write_bytes(model)
     full_graph = case.get("full_graph", False)
+    remaining_graph = case.get("remaining_graph", False)
+    verify_final = full_graph or remaining_graph
     report = {"first_command": first, "end_command": end, "reference": case["reference"],
               "model": case["model"], "source": case["source"], "firmware": case["firmware"],
               "input": case["input"], "full_graph": full_graph,
+              "remaining_graph": remaining_graph,
+              "remaining_prefix_end_command": case.get("remaining_prefix_end_command"),
               "fail_fast": case.get("fail_fast", False),
               "cascade_coverage": case.get("cascade_coverage"),
               "post_cascade_coverage": case.get("post_cascade_coverage"),
@@ -51,7 +55,9 @@ async def run_reference_case(dut, case_path):
               "l2_downsample_coverage": case.get("l2_downsample_coverage"),
               "initial_snapshot_checks": case.get("initial_snapshot_checks", []),
               "snapshot_evidence": case.get("snapshot_evidence"),
-              "scope": ("Full output binding plus listed intermediate tensors against the hybrid reference"
+              "scope": ("Snapshot-to-output continuation plus listed prefix tensors; not a reset regression"
+                        if remaining_graph else
+                        "Full output binding plus listed intermediate tensors against the hybrid reference"
                         if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
               "start_mode": case.get("start_mode", "snapshot")}
@@ -203,7 +209,7 @@ async def run_reference_case(dut, case_path):
             failures.append(report["resumed_output_l2"])
         dut._log.info("NEURAL-AI RESIDENT L2 OUTPUT: %d/%d mismatches",
                       report["resumed_output_l2"]["mismatches"], report["resumed_output_l2"]["bytes"])
-    if full_graph:
+    if verify_final:
         (folder / "output-actual.bin").write_bytes(snapshot_output)
         report["final_output"] = {**case["final_output"],
                                   **output_comparison(case["final_output"], snapshot_output)}

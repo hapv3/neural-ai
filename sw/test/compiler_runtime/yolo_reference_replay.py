@@ -721,24 +721,35 @@ def reset_buffers(model):
 
 
 def validate_output_scope(case, full_model):
-    """A full-graph claim requires reset, every command, and a pinned output oracle."""
+    """Distinguish reset regression from a proven snapshot-to-output continuation."""
     full_graph = case.get("full_graph", False)
-    if not isinstance(full_graph, bool):
-        raise ValueError("full_graph must be boolean")
+    remaining = case.get("remaining_graph", False)
+    if type(full_graph) is not bool or type(remaining) is not bool:
+        raise ValueError("full_graph and remaining_graph must be boolean")
+    if full_graph and remaining:
+        raise ValueError("Reset full-graph and remaining-graph scopes are mutually exclusive")
     timeout = case.get("timeout_cycles", 1000000)
     if type(timeout) is not int or timeout <= 0:
         raise ValueError("timeout_cycles must be a positive integer")
     final_output = case.get("final_output")
-    if not full_graph:
+    if not full_graph and not remaining:
         if final_output is not None:
             raise ValueError("Bounded replay cannot claim full-graph output verification")
         return
     commands, _ = runtime._logical_command_records(full_model)
-    if (case.get("start_mode") != "reset" or case["first_command"] != 0 or
+    if full_graph and (case.get("start_mode") != "reset" or case["first_command"] != 0 or
             case["snapshot"] is not None or case["end_command"] != len(commands)):
         raise ValueError("Full-graph replay must start from reset and run every command")
+    if remaining and (case.get("start_mode") != "snapshot" or case["snapshot"] is None or
+            type(case["first_command"]) is not int or not 0 < case["first_command"] < len(commands) or
+            case["end_command"] != len(commands) or case.get("resumed_pointwise_checkpoints") is not True or
+            any(case.get(flag, False) for flag in ("resumed_c2f_checkpoints", "resumed_output_checkpoints")) or
+            type(case.get("remaining_prefix_end_command")) is not int or
+            not case["first_command"] < case["remaining_prefix_end_command"] <= len(commands)):
+        raise ValueError("Remaining-graph replay requires a verified self-configuring snapshot prefix "
+                         "and all remaining commands")
     if not isinstance(final_output, dict) or "expected" not in final_output:
-        raise ValueError("Full-graph replay requires a pinned final output oracle")
+        raise ValueError("Final-output replay requires a pinned final output oracle")
     shape = final_output.get("shape", [])
     if (final_output.get("dtype") != "int8" or not shape or
             any(type(dimension) is not int or dimension <= 0 for dimension in shape) or
@@ -988,8 +999,10 @@ def load_case(path):
                 any(actual.get(key) != value for key, value in expected.items())
                 for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale resumed pointwise mapping")
+        expected_end = (case["remaining_prefix_end_command"] if case.get("remaining_graph", False)
+                        else case["end_command"])
         if (not case.get("resumed_c2f_checkpoints", False) and
-                (completed_replay_boundary(full_model, end) != case["end_command"] or
+                (completed_replay_boundary(full_model, end) != expected_end or
                  len(saved) != len(case["checkpoints"]))):
             raise ValueError("Resumed pointwise must end at its first drained boundary")
         coverage = validate_grouped_coverage(planned, case["resumed_pointwise_shapes"], RESUMED_POINTWISE_ROLES)
@@ -1086,12 +1099,17 @@ def main():
                         help="Also verify the following L2-fed K3/S2 grouped accumulation and whole-tensor SiLU")
     parser.add_argument("--full-graph", action="store_true",
                         help="Run the complete pinned NAI and compare the final output binding as well")
+    parser.add_argument("--remaining-graph", action="store_true",
+                        help="Run every remaining command from a verified self-configuring parent snapshot "
+                             "to final output")
     parser.add_argument("--timeout-cycles", type=int,
                         help="Execution timeout (default: 1M bounded, 50M full graph)")
     parser.add_argument("--fail-fast", action="store_true",
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.remaining_graph:
+        args.resume_grouped_pointwise_checkpoints = True
     if args.resume_l2_downsample_checkpoints:
         args.resume_c2f_output_checkpoints = True
     if args.resume_c2f_chain_checkpoints:
@@ -1114,6 +1132,9 @@ def main():
         parser.error("Choose a fresh output directory")
     if args.full_graph and not args.from_reset:
         parser.error("--full-graph requires --from-reset; memory-only snapshots omit hardware registers")
+    if args.remaining_graph and (args.full_graph or args.resume_c2f_chain_checkpoints or
+                                args.resume_c2f_output_checkpoints):
+        parser.error("--remaining-graph requires only its self-configuring grouped pointwise prefix")
     if args.all_cascade_checkpoints and (not args.from_reset or args.full_graph or not args.consumer_tiles):
         parser.error("--all-cascade-checkpoints requires bounded --from-reset with cascade mapping enabled")
     if args.timeout_cycles is not None and args.timeout_cycles <= 0:
@@ -1300,7 +1321,9 @@ def main():
                     len(memory), len(temporary))
                 tensor_ids.update(chain_ids)
                 checks += chain_checks
-    if args.full_graph:
+    if args.remaining_graph:
+        prefix_end = completed_replay_boundary(full_model, end)
+    if args.full_graph or args.remaining_graph:
         end = len(commands)
     else:
         end = completed_replay_boundary(full_model, end)
@@ -1316,7 +1339,7 @@ def main():
         filename.write_bytes(tensor.tobytes())
         check.update({"tensor": tensor_id, "tensor_name": details[tensor_id]["name"], "expected": artifact(filename)})
     final_output = None
-    if args.full_graph:
+    if args.full_graph or args.remaining_graph:
         outputs = interpreter.get_output_details()
         if len(outputs) != 1 or outputs[0]["dtype"] != np.int8:
             raise ValueError("Full-graph replay requires exactly one INT8 reference output")
@@ -1340,10 +1363,12 @@ def main():
             "fail_fast": args.fail_fast,
             "full_graph": args.full_graph, "final_output": final_output,
             "timeout_cycles": args.timeout_cycles if args.timeout_cycles is not None else
-                (50000000 if args.full_graph else 1000000),
+                (50000000 if args.full_graph or args.remaining_graph else 1000000),
             "afu_lut_restore": None if args.full_graph else plan_lut_restore(full_model, first, end),
             "input_bytes": len(input_data), "temporary_bytes": len(temporary), "output_bytes": len(output),
             "initial_snapshot_checks": initial, "checkpoints": checks}
+    if args.remaining_graph:
+        case.update(remaining_graph=True, remaining_prefix_end_command=prefix_end)
     case["restore_preamble"] = plan_restore_preamble(full_model, first, case["afu_lut_restore"], memory)
     if args.all_cascade_checkpoints:
         case["all_cascade_checkpoints"] = True

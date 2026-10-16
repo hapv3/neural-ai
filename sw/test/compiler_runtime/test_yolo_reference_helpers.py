@@ -400,6 +400,57 @@ class ReferenceReplayTest(unittest.TestCase):
         flattened = execution_model({"first_command": 0, "end_command": 3, "restore_preamble": None}, model)
         self.assertNotEqual(flattened, model)
 
+    def remaining_case(self, folder):
+        case, model = self.full_case(folder)
+        case.update(full_graph=False, remaining_graph=True, start_mode="snapshot", first_command=1,
+                    snapshot=case["model"], resumed_pointwise_checkpoints=True, remaining_prefix_end_command=3)
+        return case, model
+
+    def test_remaining_scope_keeps_reset_regression_distinct_and_runs_to_final_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.remaining_case(Path(directory))
+            validate_output_scope(case, model)
+            suffix = execution_model(case, model)
+            original, original_end = runtime._logical_command_records(model)
+            selected, selected_end = runtime._logical_command_records(suffix)
+            self.assertEqual(selected, original[1:])
+            self.assertEqual(selected_end, original_end)
+            self.assertFalse(case["full_graph"])
+
+    def test_remaining_scope_rejects_partial_suffix_missing_snapshot_and_unproven_prefix(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.remaining_case(Path(directory))
+            for changes in ({"end_command": 4}, {"first_command": 0}, {"first_command": True},
+                            {"start_mode": "reset"}, {"snapshot": None},
+                            {"resumed_pointwise_checkpoints": False},
+                            {"remaining_prefix_end_command": None}, {"remaining_prefix_end_command": True},
+                            {"remaining_prefix_end_command": 1}, {"remaining_prefix_end_command": 6},
+                            {"resumed_c2f_checkpoints": True}, {"resumed_output_checkpoints": True}):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "all remaining commands"):
+                    validate_output_scope({**case, **changes}, model)
+
+    def test_remaining_scope_rejects_ambiguous_modes_and_nonboolean_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.remaining_case(Path(directory))
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                validate_output_scope({**case, "full_graph": True}, model)
+            for value in (1, None, "true"):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "must be boolean"):
+                    validate_output_scope({**case, "remaining_graph": value}, model)
+
+    def test_remaining_scope_requires_complete_oracle_and_detects_one_byte_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.remaining_case(Path(directory))
+            for output in (None, {**case["final_output"], "shape": [1, 2, 2]},
+                           {**case["final_output"], "expected": case["checkpoints"][0]["expected"]}):
+                with self.subTest(output=output), self.assertRaises(ValueError):
+                    validate_output_scope({**case, "final_output": output}, model)
+            actual = bytearray(checked_read(case["final_output"]["expected"]))
+            actual[-1] ^= 1
+            self.assertEqual(output_comparison(case["final_output"], actual)["mismatches"], 1)
+            with self.assertRaisesRegex(ValueError, "shape/dtype mismatch"):
+                output_comparison(case["final_output"], actual[:-1])
+
     def test_invalid_scope_flags_and_timeout_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             case, model = self.full_case(Path(directory))
