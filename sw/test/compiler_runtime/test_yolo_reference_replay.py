@@ -15,6 +15,7 @@ from yolo_reference_replay import (
 )
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 from yolo_c2f_checkpoints import extract_checkpoint
+from diagnostic_checkpoints import load_diagnostic_checkpoints
 
 
 async def run_reference_case(dut, case_path):
@@ -60,6 +61,7 @@ async def run_reference_case(dut, case_path):
                         "Full output binding plus listed intermediate tensors against the hybrid reference"
                         if full_graph else "Only listed intermediate tensors; not full-model output correctness"),
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
+              "diagnostic_checkpoints": [], "diagnostic_manifest": case.get("diagnostic_checkpoints"),
               "start_mode": case.get("start_mode", "snapshot")}
 
     def persist():
@@ -91,6 +93,9 @@ async def run_reference_case(dut, case_path):
         await runtime.write_l2_bytes(dut, address, data)
     records = runtime._selected_command_trace_records(full_model, execution_first, end)
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
+    commands, _ = runtime._logical_command_records(full_model)
+    diagnostics = {check["command"]: check for check in
+                   load_diagnostic_checkpoints(case, commands, len(memory), checked_read)}
     before_compute = {check.get("submit_command", check["command"]) - 1:
                       check.get("submit_command", check["command"]) for check in case["checkpoints"]
                       if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2",
@@ -141,11 +146,13 @@ async def run_reference_case(dut, case_path):
                 report.update(status="FAIL", failed_command=number, error="Live cascade L2 output mismatch")
                 persist()
                 raise AssertionError(report["error"])
-        if number not in checkpoints:
+        diagnostic = number in diagnostics
+        if number not in checkpoints and not diagnostic:
             return
-        check = checkpoints[number]
+        check = diagnostics[number] if diagnostic else checkpoints[number]
         actual = extract_checkpoint(runtime.read_tcdm_bytes(dut), check)
-        stats = save_checkpoint_result(folder, report, check, actual, report["fail_fast"])
+        stats = save_checkpoint_result(folder, report, check, actual, report["fail_fast"],
+                                       "diagnostic_checkpoints" if diagnostic else "checkpoints")
         dut._log.info("NEURAL-AI BYTE-EXACT command %d tensor %d: %d/%d mismatches, first=%s max_abs=%d",
                       number, check["tensor"], stats["mismatches"], stats["bytes"],
                       stats["first_mismatch"], stats["max_abs"])
@@ -219,6 +226,11 @@ async def run_reference_case(dut, case_path):
                       report["final_output"]["mismatches"], report["final_output"]["bytes"],
                       report["final_output"]["first_mismatch"], report["final_output"]["max_abs"])
     report["snapshot"] = str(snapshot_path)
+    if {check["command"] for check in report["diagnostic_checkpoints"]} != set(diagnostics):
+        report.update(status="ERROR", error="Missing diagnostic Conv observations")
+        persist()
+        raise AssertionError(report["error"])
+    failures.extend(check for check in report["diagnostic_checkpoints"] if check["mismatches"])
     report["status"] = "FAIL" if failures else "PASS"
     persist()
     assert not failures, f"First mismatching Neural-AI checkpoint: {failures[0] if failures else None}"

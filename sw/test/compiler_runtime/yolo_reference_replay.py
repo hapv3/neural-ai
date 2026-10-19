@@ -32,6 +32,7 @@ from resident_pointwise_checkpoints import OUTPUT_ROLES, plan_resident_pointwise
 from l2_downsample_checkpoints import (
     L2_DOWNSAMPLE_ROLES, plan_l2_downsample_checkpoints, resolve_l2_downsample_source,
 )
+from diagnostic_checkpoints import load_diagnostic_checkpoints
 
 
 def sha(data):
@@ -777,13 +778,13 @@ def output_comparison(final_output, actual):
     return compare_bytes(np.frombuffer(actual, np.int8), np.frombuffer(expected, np.int8))
 
 
-def save_checkpoint_result(folder, report, check, actual, fail_fast=False):
+def save_checkpoint_result(folder, report, check, actual, fail_fast=False, field="checkpoints"):
     """Persist byte evidence and the failure verdict before stopping simulation."""
     folder = Path(folder)
     expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
     stats = compare_bytes(actual, expected)
     (folder / f"command-{check['command']}-actual.bin").write_bytes(actual.tobytes())
-    report["checkpoints"].append({**check, **stats})
+    report[field].append({**check, **stats})
     if fail_fast and stats["mismatches"]:
         report.update(status="FAIL", failed_command=check["command"],
                       error=f"Byte-exact mismatch at command {check['command']}, tensor {check['tensor']}")
@@ -898,6 +899,7 @@ def load_case(path):
         extract_checkpoint(memory, check)
     if not seen and not case.get("full_graph", False):
         raise ValueError("Replay has no byte-exact checkpoints")
+    load_diagnostic_checkpoints(case, commands, len(memory), checked_read)
     if case.get("all_cascade_checkpoints", False):
         if case.get("start_mode") != "reset" or case.get("full_graph", False):
             raise ValueError("Complete-cascade checkpoint batches require bounded reset replay")
@@ -1102,12 +1104,16 @@ def main():
     parser.add_argument("--remaining-graph", action="store_true",
                         help="Run every remaining command from a verified self-configuring parent snapshot "
                              "to final output")
+    parser.add_argument("--diagnostic-checkpoints", type=Path,
+                        help="Pinned extra Conv observation manifest; requires --remaining-graph")
     parser.add_argument("--timeout-cycles", type=int,
                         help="Execution timeout (default: 1M bounded, 50M full graph)")
     parser.add_argument("--fail-fast", action="store_true",
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.diagnostic_checkpoints is not None and not args.remaining_graph:
+        parser.error("--diagnostic-checkpoints requires --remaining-graph")
     if args.remaining_graph:
         args.resume_grouped_pointwise_checkpoints = True
     if args.resume_l2_downsample_checkpoints:
@@ -1369,6 +1375,8 @@ def main():
             "initial_snapshot_checks": initial, "checkpoints": checks}
     if args.remaining_graph:
         case.update(remaining_graph=True, remaining_prefix_end_command=prefix_end)
+    if args.diagnostic_checkpoints is not None:
+        case["diagnostic_checkpoints"] = artifact(args.diagnostic_checkpoints)
     case["restore_preamble"] = plan_restore_preamble(full_model, first, case["afu_lut_restore"], memory)
     if args.all_cascade_checkpoints:
         case["all_cascade_checkpoints"] = True
