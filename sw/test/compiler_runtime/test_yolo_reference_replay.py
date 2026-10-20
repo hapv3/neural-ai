@@ -56,6 +56,7 @@ async def run_reference_case(dut, case_path):
               "l2_downsample_coverage": case.get("l2_downsample_coverage"),
               "initial_snapshot_checks": case.get("initial_snapshot_checks", []),
               "snapshot_evidence": case.get("snapshot_evidence"),
+              "snapshot_prefix_compatibility": case.get("snapshot_prefix_compatibility"),
               "scope": ("Snapshot-to-output continuation plus listed prefix tensors; not a reset regression"
                         if remaining_graph else
                         "Full output binding plus listed intermediate tensors against the hybrid reference"

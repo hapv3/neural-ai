@@ -33,6 +33,7 @@ from l2_downsample_checkpoints import (
     L2_DOWNSAMPLE_ROLES, plan_l2_downsample_checkpoints, resolve_l2_downsample_source,
 )
 from diagnostic_checkpoints import load_diagnostic_checkpoints
+from snapshot_prefix_compatibility import prove_snapshot_prefix
 
 
 def sha(data):
@@ -792,6 +793,20 @@ def save_checkpoint_result(folder, report, check, actual, fail_fast=False, field
     return stats
 
 
+def snapshot_identity_model(case, full_model):
+    """Retain the original snapshot CRC and require an explicit prefix proof."""
+    if "snapshot_prefix_compatibility" not in case:
+        return full_model
+    if (case.get("remaining_graph") is not True or case.get("start_mode") != "snapshot" or
+            case.get("resumed_pointwise_checkpoints") is not True):
+        raise ValueError("Compatible snapshots require a self-configuring remaining-graph replay")
+    previous = json.loads(checked_read(case["snapshot_case"]))
+    old_model = checked_read(previous["model"])
+    if prove_snapshot_prefix(old_model, full_model, case["first_command"]) != case["snapshot_prefix_compatibility"]:
+        raise ValueError("Snapshot prefix compatibility proof changed")
+    return old_model
+
+
 def retained_case_parent(case, first, memory, role):
     """Repeat snapshot provenance and retained-byte validation at case load."""
     if (case.get("start_mode") != "snapshot" or case.get("full_graph", False) or
@@ -801,8 +816,12 @@ def retained_case_parent(case, first, memory, role):
     evidence = json.loads(checked_read(case["snapshot_evidence"]))
     if role is None:
         role = pointwise_snapshot_role(previous, first)
+    identity = {key: case[key] for key in ("model", "source", "firmware", "input")}
+    if "snapshot_prefix_compatibility" in case:
+        snapshot_identity_model(case, checked_read(case["model"]))
+        identity["model"] = previous["model"]
     parent, stats = validate_snapshot_parent(previous, evidence, case["snapshot"]["path"], first,
-        {key: case[key] for key in ("model", "source", "firmware", "input")}, case["reference_build"], memory, role)
+        identity, case["reference_build"], memory, role)
     if any(case[key] != previous[key] for key in ("input_bytes", "temporary_bytes", "output_bytes")):
         raise ValueError("Snapshot continuation binding sizes changed")
     if parent != case["snapshot_parent"] or case["initial_snapshot_checks"] != [{"command": first, **stats}]:
@@ -851,6 +870,7 @@ def load_case(path):
     checked_read(case["firmware"])
     input_data = checked_read(case["input"])
     validate_output_scope(case, full_model)
+    identity_model = snapshot_identity_model(case, full_model)
     if case.get("start_mode", "snapshot") == "reset":
         if case["snapshot"] is not None or case["first_command"] != 0:
             raise ValueError("Fresh replay cannot reuse a snapshot or skip initial commands")
@@ -862,7 +882,7 @@ def load_case(path):
     elif case.get("start_mode", "snapshot") == "snapshot":
         snapshot = checked_read(case["snapshot"])
         first, memory, temporary, output = runtime._verify_yolo320_snapshot(
-            full_model, snapshot, expected_boundary=case["first_command"],
+            identity_model, snapshot, expected_boundary=case["first_command"],
             expected_tcdm=runtime.TCDM_TOTAL_BYTES,
             expected_temporary=case["temporary_bytes"], expected_output=case["output_bytes"])
     else:
@@ -1106,12 +1126,16 @@ def main():
                              "to final output")
     parser.add_argument("--diagnostic-checkpoints", type=Path,
                         help="Pinned extra Conv observation manifest; requires --remaining-graph")
+    parser.add_argument("--allow-compatible-snapshot", action="store_true",
+                        help="Prove an unchanged executed prefix and memory layout against the original PASS model")
     parser.add_argument("--timeout-cycles", type=int,
                         help="Execution timeout (default: 1M bounded, 50M full graph)")
     parser.add_argument("--fail-fast", action="store_true",
                         help="Stop at the first intermediate byte mismatch, preserving failure evidence")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.allow_compatible_snapshot and not args.remaining_graph:
+        parser.error("--allow-compatible-snapshot requires --remaining-graph")
     if args.diagnostic_checkpoints is not None and not args.remaining_graph:
         parser.error("--diagnostic-checkpoints requires --remaining-graph")
     if args.remaining_graph:
@@ -1155,6 +1179,7 @@ def main():
         raise ValueError("Pinned model/ELF identity mismatch")
     source = args.source or args.compiler_root / "test/model/yolov8n_320_int8.tflite"
     reference_build = json.loads((args.compiler_root / "tools/neural_ai_tflite_reference/build/manifest.json").read_text())
+    snapshot_compatibility = None
     if args.from_reset:
         first = 0
         memory, temporary, output, input_bytes = reset_buffers(full_model)
@@ -1162,15 +1187,20 @@ def main():
     elif resuming:
         previous_path = args.snapshot.parent / "case.json"
         evidence_path = args.snapshot.parent / "byte_exact.json"
-        previous, *_ = load_case(previous_path)
+        previous, previous_model, *_ = load_case(previous_path)
         saved_report = json.loads(evidence_path.read_text())
         first = previous["end_command"]
+        if args.allow_compatible_snapshot and previous_model != full_model:
+            snapshot_compatibility = prove_snapshot_prefix(previous_model, full_model, first)
         first, memory, temporary, output = runtime._verify_yolo320_snapshot(
-            full_model, args.snapshot.read_bytes(), expected_boundary=first,
+            previous_model if snapshot_compatibility is not None else full_model,
+            args.snapshot.read_bytes(), expected_boundary=first,
             expected_tcdm=runtime.TCDM_TOTAL_BYTES, expected_temporary=previous["temporary_bytes"],
             expected_output=previous["output_bytes"])
         identity = dict(model=artifact(model_path), source=artifact(source), firmware=artifact(firmware_path),
                         input=previous["input"])
+        if snapshot_compatibility is not None:
+            identity["model"] = previous["model"]
         snapshot_parent, parent_stats = validate_snapshot_parent(previous, saved_report, args.snapshot, first,
             identity, reference_build, memory,
             CONCAT_ROLE if args.resume_c2f_output_checkpoints else pointwise_snapshot_role(previous, first))
@@ -1375,6 +1405,8 @@ def main():
             "initial_snapshot_checks": initial, "checkpoints": checks}
     if args.remaining_graph:
         case.update(remaining_graph=True, remaining_prefix_end_command=prefix_end)
+    if snapshot_compatibility is not None:
+        case["snapshot_prefix_compatibility"] = snapshot_compatibility
     if args.diagnostic_checkpoints is not None:
         case["diagnostic_checkpoints"] = artifact(args.diagnostic_checkpoints)
     case["restore_preamble"] = plan_restore_preamble(full_model, first, case["afu_lut_restore"], memory)
