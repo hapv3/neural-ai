@@ -86,8 +86,9 @@ async def run_reference_case(dut, case_path):
     if preamble is not None:
         dut._log.info("Replaying original command %d as a verified idempotent LUT restore preamble",
                       preamble["command"])
-    bindings = [(1, 0, 0x80000000, case["input_bytes"]), (2, 0, 0x80100000, case["output_bytes"]),
-                (3, 0, 0x80200000, case["temporary_bytes"])]
+    bases = {1: 0x80000000, 2: 0x80100000, 3: 0x80200000}
+    bindings = [(direction, index, bases[direction], size)
+                for direction, index, size, _ in runtime._model_binding_descriptors(full_model)]
     invocation, addresses = runtime.build_invocation_with_bindings(
         model, bindings, model_base=0x81000000, binding_table_base=binding_table_base)
     for address, data in ((0x81000000, model), (binding_table_base, addresses), (invocation_base, invocation)):

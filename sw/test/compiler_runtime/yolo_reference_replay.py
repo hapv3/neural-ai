@@ -712,14 +712,15 @@ def c2f_source_graph(interpreter, parent_id):
 def reset_buffers(model):
     bindings = runtime._model_binding_descriptors(model)
     sizes = {(direction, index): size for direction, index, size, _ in bindings}
-    if len(bindings) != 3 or set(sizes) != {(1, 0), (2, 0), (3, 0)}:
-        raise ValueError("Fresh replay requires one input, output and temporary binding, all index zero")
+    if (len(bindings) != len(sizes) or
+            set(sizes) not in ({(1, 0), (2, 0)}, {(1, 0), (2, 0), (3, 0)})):
+        raise ValueError("Fresh replay requires one input and output, optional temporary binding, all index zero")
     # Input/output each have 1 MiB. Temporary starts at 0x80200000 and
     # may extend up to the model at 0x81000000 (14 MiB, not only 1 MiB).
     limits = {1: 0x100000, 2: 0x100000, 3: 0xE00000}
     if any(size <= 0 or size > limits[direction] for (direction, _), size in sizes.items()):
         raise ValueError("Fresh replay binding exceeds its non-overlapping L2 window")
-    return bytes(runtime.TCDM_TOTAL_BYTES), bytes(sizes[3, 0]), bytes(sizes[2, 0]), sizes[1, 0]
+    return bytes(runtime.TCDM_TOTAL_BYTES), bytes(sizes.get((3, 0), 0)), bytes(sizes[2, 0]), sizes[1, 0]
 
 
 def validate_output_scope(case, full_model):

@@ -524,9 +524,19 @@ class ReferenceReplayTest(unittest.TestCase):
         memory, temporary, output, input_bytes = reset_buffers(model)
         self.assertEqual((len(memory), len(temporary), len(output), input_bytes), (524288, 128, 96, 64))
         self.assertFalse(any(memory + temporary + output))
-        invalid = runtime._package(end, b"", bindings[:128], 0, 1024, 1, 1)
-        with self.assertRaisesRegex(ValueError, "one input, output and temporary"):
-            reset_buffers(invalid)
+        compact = runtime._package(end, b"", bindings[:128], 0, 1024, 1, 1)
+        memory, temporary, output, input_bytes = reset_buffers(compact)
+        self.assertEqual((len(memory), len(temporary), len(output), input_bytes), (524288, 0, 96, 64))
+
+    def test_fresh_reset_rejects_missing_duplicate_and_nonzero_bindings(self):
+        end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
+        for descriptors in (((1, 0),), ((1, 0), (2, 1)), ((1, 0), (2, 0), (1, 0))):
+            bindings = b"".join(runtime._binding(kind, index, dimensions=(1, 1, 1, 32))
+                                for kind, index in descriptors)
+            model = bytearray(runtime._package(end, b"", bindings, 0, 1024, 1, 1))
+            struct.pack_into("<I", model, 64 + 3 * 32 + 20, len(descriptors))
+            with self.subTest(descriptors=descriptors), self.assertRaisesRegex(ValueError, "one input and output"):
+                reset_buffers(model)
 
     def test_fresh_reset_allows_temporary_above_one_mib(self):
         end = struct.pack("<HHIII", 0, 32, 0, 0, 0).ljust(32, b"\0")
