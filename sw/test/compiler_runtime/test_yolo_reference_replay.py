@@ -17,6 +17,7 @@ from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 from yolo_c2f_checkpoints import extract_checkpoint
 from diagnostic_checkpoints import load_diagnostic_checkpoints
 from replay_snapshots import capture_with_paused_clock, save_intermediate_snapshot, validate_snapshot_boundaries
+from compute_dumps import ComputeDumpWriter, validate_compute_dump_case
 
 
 async def run_reference_case(dut, case_path):
@@ -102,6 +103,14 @@ async def run_reference_case(dut, case_path):
     records = runtime._selected_command_trace_records(full_model, execution_first, end)
     checkpoints = {check["command"]: check for check in case["checkpoints"]}
     commands, _ = runtime._logical_command_records(full_model)
+    dump_plan = validate_compute_dump_case(case, commands, checked_read)
+    compute_writer = ComputeDumpWriter(folder, dump_plan, len(memory)) if dump_plan else None
+    if compute_writer is not None:
+        if not hasattr(dut.u_npu_cluster, 'pmu_context_end'):
+            raise ValueError('Compute checkpoint dumping requires command-end PMU events')
+        report['compute_dumps'] = compute_writer.summary()
+        report['compute_dump_reference'] = case['compute_dump_reference']
+        persist()
     diagnostics = {check["command"]: check for check in
                    load_diagnostic_checkpoints(case, commands, len(memory), checked_read)}
 
@@ -142,6 +151,14 @@ async def run_reference_case(dut, case_path):
         if record["type"] == 0:
             return
         number = record["command"]
+        if compute_writer is not None and compute_writer.wants(number):
+            compute_writer.capture(number, runtime.read_tcdm_bytes(dut))
+            report['compute_dumps'] = compute_writer.summary()
+            persist()
+            interval = max(1, min(100, len(compute_writer.planned) // 10))
+            if len(compute_writer.seen) % interval == 0:
+                dut._log.info('NEURAL-AI COMPUTE DUMPS %d/%d through command %d (not yet compared)',
+                              len(compute_writer.seen), len(compute_writer.planned), number)
         if preamble is not None and number == preamble["command"]:
             runtime._write_command_pmu_csv(folder / "restore_pmu.csv", [record], [counters], append=False)
             restored = runtime.read_tcdm_bytes(dut)
@@ -203,6 +220,8 @@ async def run_reference_case(dut, case_path):
             invocation_base=invocation_base, model=model,
             command_trace_records=records, command_trace_callback=capture)
     except Exception as error:
+        if compute_writer is not None:
+            report['compute_dumps'] = compute_writer.summary()
         if report["status"] != "FAIL":
             report.update(status="ERROR", error=str(error))
         (folder / "failure-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
@@ -261,6 +280,13 @@ async def run_reference_case(dut, case_path):
                       report["final_output"]["mismatches"], report["final_output"]["bytes"],
                       report["final_output"]["first_mismatch"], report["final_output"]["max_abs"])
     report["snapshot"] = str(snapshot_path)
+    if compute_writer is not None:
+        try:
+            report['compute_dumps'] = compute_writer.summary(complete=True)
+        except ValueError as error:
+            report.update(status='ERROR', error=str(error))
+            persist()
+            raise
     assert {s['command'] for s in report['intermediate_snapshots']} == snapshot_boundaries, 'Missing requested snapshots'
     if {check["command"] for check in report["diagnostic_checkpoints"]} != set(diagnostics):
         report.update(status="ERROR", error="Missing diagnostic Conv observations")

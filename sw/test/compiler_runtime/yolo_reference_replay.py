@@ -35,6 +35,7 @@ from l2_downsample_checkpoints import (
 from diagnostic_checkpoints import load_diagnostic_checkpoints
 from snapshot_prefix_compatibility import prove_snapshot_prefix
 from replay_snapshots import parse_snapshot_boundaries, validate_snapshot_boundaries
+from compute_dumps import validate_compute_dump_case
 
 
 def sha(data):
@@ -905,6 +906,7 @@ def load_case(path):
     commands, _ = runtime._logical_command_records(full_model)
     loaded_qparams = False
     validate_snapshot_boundaries(case, full_model, runtime)
+    validate_compute_dump_case(case, commands, checked_read)
     for command in commands[first:case["end_command"]]:
         kind = struct.unpack_from("<H", command)[0]
         loaded_qparams |= kind == 5
