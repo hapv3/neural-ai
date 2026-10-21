@@ -34,6 +34,7 @@ from l2_downsample_checkpoints import (
 )
 from diagnostic_checkpoints import load_diagnostic_checkpoints
 from snapshot_prefix_compatibility import prove_snapshot_prefix
+from replay_snapshots import parse_snapshot_boundaries, validate_snapshot_boundaries
 
 
 def sha(data):
@@ -903,6 +904,7 @@ def load_case(path):
         raise ValueError("Missing or stale firmware restore preamble; prepare a new replay case")
     commands, _ = runtime._logical_command_records(full_model)
     loaded_qparams = False
+    validate_snapshot_boundaries(case, full_model, runtime)
     for command in commands[first:case["end_command"]]:
         kind = struct.unpack_from("<H", command)[0]
         loaded_qparams |= kind == 5
@@ -1129,6 +1131,8 @@ def main():
                         help="Pinned extra Conv observation manifest; requires --remaining-graph")
     parser.add_argument("--allow-compatible-snapshot", action="store_true",
                         help="Prove an unchanged executed prefix and memory layout against the original PASS model")
+    parser.add_argument("--snapshot-boundaries", type=parse_snapshot_boundaries,
+                        help="Save full TCDM/L2 snapshots at these drained intermediate command boundaries")
     parser.add_argument("--timeout-cycles", type=int,
                         help="Execution timeout (default: 1M bounded, 50M full graph)")
     parser.add_argument("--fail-fast", action="store_true",
@@ -1406,6 +1410,8 @@ def main():
             "initial_snapshot_checks": initial, "checkpoints": checks}
     if args.remaining_graph:
         case.update(remaining_graph=True, remaining_prefix_end_command=prefix_end)
+    if args.snapshot_boundaries is not None:
+        case['snapshot_boundaries'] = args.snapshot_boundaries
     if snapshot_compatibility is not None:
         case["snapshot_prefix_compatibility"] = snapshot_compatibility
     if args.diagnostic_checkpoints is not None:

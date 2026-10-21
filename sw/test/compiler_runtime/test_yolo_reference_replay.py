@@ -16,6 +16,7 @@ from yolo_reference_replay import (
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
 from yolo_c2f_checkpoints import extract_checkpoint
 from diagnostic_checkpoints import load_diagnostic_checkpoints
+from replay_snapshots import capture_with_paused_clock, save_intermediate_snapshot, validate_snapshot_boundaries
 
 
 async def run_reference_case(dut, case_path):
@@ -64,12 +65,17 @@ async def run_reference_case(dut, case_path):
               "status": "running", "checkpoints": [], "restore_preamble": preamble,
               "diagnostic_checkpoints": [], "diagnostic_manifest": case.get("diagnostic_checkpoints"),
               "start_mode": case.get("start_mode", "snapshot")}
+    report['intermediate_snapshots'] = []
+    snapshot_boundaries = set(validate_snapshot_boundaries(case, full_model, runtime))
+    if snapshot_boundaries and not hasattr(dut.u_npu_cluster, 'pmu_context_end'):
+        raise ValueError('Intermediate snapshots require exact command-end PMU events')
 
     def persist():
         (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
 
     persist()
-    cocotb.start_soon(Clock(dut.clk_i, 1, unit="ns").start())
+    clock = Clock(dut.clk_i, 1, unit="ns")
+    clock.start()
     axi = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axi"), dut.clk_i, dut.rst_ni, reset_active_level=False)
     await runtime.reset_dut(dut)
     await runtime.hold_reset(dut)
@@ -98,6 +104,31 @@ async def run_reference_case(dut, case_path):
     commands, _ = runtime._logical_command_records(full_model)
     diagnostics = {check["command"]: check for check in
                    load_diagnostic_checkpoints(case, commands, len(memory), checked_read)}
+
+    async def capture_snapshot(number):
+        if number not in snapshot_boundaries:
+            return
+
+        async def frozen_capture():
+            # Leave ReadOnly and let clock cancellation settle before backdoor IO.
+            await Timer(1, unit='ps')
+            cycle_before = runtime.pmu_direct_snapshot(dut)['cycle']
+            tcdm = runtime.read_tcdm_bytes(dut)
+            temporary_state = bytes(await runtime.read_l2_bytes(dut, 0x80200000, case['temporary_bytes']))
+            output_state = bytes(await runtime.read_l2_bytes(dut, 0x80100000, case['output_bytes']))
+            if (runtime.pmu_direct_snapshot(dut)['cycle'] != cycle_before or
+                    runtime.read_tcdm_bytes(dut) != tcdm):
+                raise AssertionError('Intermediate snapshot advanced clock or changed TCDM during capture')
+            return save_intermediate_snapshot(case_path, case, full_model, report,
+                list(checkpoints.values()) + list(diagnostics.values()), number,
+                (tcdm, temporary_state, output_state), runtime)
+
+        saved = await capture_with_paused_clock(clock, int(dut.clk_i.value), frozen_capture)
+        report['intermediate_snapshots'].append(saved)
+        persist()
+        dut._log.info('NEURAL-AI SNAPSHOT command %d: integrity=%s comparisons=%s path=%s',
+                      number, saved['integrity'], saved['observations']['status'], saved['snapshot']['path'])
+
     before_compute = {check.get("submit_command", check["command"]) - 1:
                       check.get("submit_command", check["command"]) for check in case["checkpoints"]
                       if check["tensor_role"] in ("consumer_conv", "pointwise_conv", "block_conv1", "block_conv2",
@@ -150,6 +181,7 @@ async def run_reference_case(dut, case_path):
                 raise AssertionError(report["error"])
         diagnostic = number in diagnostics
         if number not in checkpoints and not diagnostic:
+            await capture_snapshot(number)
             return
         check = diagnostics[number] if diagnostic else checkpoints[number]
         actual = extract_checkpoint(runtime.read_tcdm_bytes(dut), check)
@@ -163,6 +195,7 @@ async def run_reference_case(dut, case_path):
             # save diagnostic memory and FAIL before raising from that task.
             (folder / "failure-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
             raise AssertionError(report["error"])
+        await capture_snapshot(number)
 
     try:
         counters, samples = await runtime._load_and_run(
@@ -228,6 +261,7 @@ async def run_reference_case(dut, case_path):
                       report["final_output"]["mismatches"], report["final_output"]["bytes"],
                       report["final_output"]["first_mismatch"], report["final_output"]["max_abs"])
     report["snapshot"] = str(snapshot_path)
+    assert {s['command'] for s in report['intermediate_snapshots']} == snapshot_boundaries, 'Missing requested snapshots'
     if {check["command"] for check in report["diagnostic_checkpoints"]} != set(diagnostics):
         report.update(status="ERROR", error="Missing diagnostic Conv observations")
         persist()
