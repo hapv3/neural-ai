@@ -16,6 +16,41 @@ spatz_vec_copy_i8:
 2:
     ret
 
+    # Each vector contains one word from many pixels. Load a repeated source
+    # word once (padding/pattern fill); never touch gaps or unused C32 lanes.
+    .global spatz_vec_copy_blocks_i32
+    .type spatz_vec_copy_blocks_i32, @function
+spatz_vec_copy_blocks_i32:
+    beqz a2, 5f
+    beqz a3, 5f
+1:
+    vsetvli t0, a3, e32, m8, ta, ma
+    mv t1, a0
+    mv t2, a1
+    mv t3, a2
+2:
+    bnez a4, 3f
+    lw t4, 0(t1)
+    vmv.v.x v8, t4
+    j 4f
+3:
+    vlse32.v v8, (t1), a4
+4:
+    vsse32.v v8, (t2), a5
+    addi t1, t1, 4
+    addi t2, t2, 4
+    addi t3, t3, -1
+    bnez t3, 2b
+    mul t4, t0, a4
+    add a0, a0, t4
+    mul t4, t0, a5
+    add a1, a1, t4
+    sub a3, a3, t0
+    bnez a3, 1b
+5:
+    fence
+    ret
+
     .global spatz_vec_zero_i8
     .type spatz_vec_zero_i8, @function
 spatz_vec_zero_i8:
