@@ -745,10 +745,12 @@ def validate_output_scope(case, full_model):
     if full_graph and (case.get("start_mode") != "reset" or case["first_command"] != 0 or
             case["snapshot"] is not None or case["end_command"] != len(commands)):
         raise ValueError("Full-graph replay must start from reset and run every command")
+    remaining_modes = sum(case.get(flag) is True for flag in
+                          ("resumed_pointwise_checkpoints", "resumed_output_checkpoints"))
     if remaining and (case.get("start_mode") != "snapshot" or case["snapshot"] is None or
             type(case["first_command"]) is not int or not 0 < case["first_command"] < len(commands) or
-            case["end_command"] != len(commands) or case.get("resumed_pointwise_checkpoints") is not True or
-            any(case.get(flag, False) for flag in ("resumed_c2f_checkpoints", "resumed_output_checkpoints")) or
+            case["end_command"] != len(commands) or remaining_modes != 1 or
+            case.get("resumed_c2f_checkpoints", False) or
             type(case.get("remaining_prefix_end_command")) is not int or
             not case["first_command"] < case["remaining_prefix_end_command"] <= len(commands)):
         raise ValueError("Remaining-graph replay requires a verified self-configuring snapshot prefix "
@@ -794,6 +796,32 @@ def save_checkpoint_result(folder, report, check, actual, fail_fast=False, field
                       error=f"Byte-exact mismatch at command {check['command']}, tensor {check['tensor']}")
     (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
     return stats
+
+
+def save_resident_l2_result(folder, report, check, actual, fail_fast=False):
+    """Persist a live retained output before later commands reuse its L2 bytes."""
+    if "resumed_output_l2" in report:
+        raise ValueError("Duplicate resident L2 comparison")
+    expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
+    stats = compare_bytes(actual, expected)
+    folder = Path(folder)
+    (folder / "resident-l2-actual.bin").write_bytes(actual.tobytes())
+    report["resumed_output_l2"] = {**check, **stats}
+    if fail_fast and stats["mismatches"]:
+        report.update(status="FAIL", failed_command=check["command"],
+                      error="Live resident L2 output mismatch")
+    (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
+    return stats
+
+
+def require_resident_l2_result(report, check):
+    """A missing live comparison cannot be replaced by reading reused memory."""
+    saved = report.get("resumed_output_l2")
+    if (not isinstance(saved, dict) or any(saved.get(key) != value for key, value in check.items()) or
+            saved.get("bytes") != check["rows"] * check["channels"] or
+            type(saved.get("mismatches")) is not int or not 0 <= saved["mismatches"] <= saved["bytes"]):
+        raise ValueError("Missing or stale live resident L2 comparison")
+    return saved
 
 
 def snapshot_identity_model(case, full_model):
@@ -1064,8 +1092,10 @@ def load_case(path):
                 for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale resident output checkpoint mapping")
         ready = completed_replay_boundary(full_model, end)
+        expected_end = (case["remaining_prefix_end_command"] if case.get("remaining_graph", False)
+                        else case["end_command"])
         if (not case.get("l2_downsample_checkpoints", False) and
-                (ready != case["end_command"] or len(saved) != len(case["checkpoints"]))):
+                (ready != expected_end or len(saved) != len(case["checkpoints"]))):
             raise ValueError("Resident output must end at its first drained retained-output boundary")
         if validate_grouped_coverage(saved, shapes, OUTPUT_ROLES) != case["resumed_output_coverage"]:
             raise ValueError("Stale resident output coverage")
@@ -1073,6 +1103,8 @@ def load_case(path):
         if (saved_l2 is None or any(saved_l2.get(key) != value for key, value in retained.items()) or
                 len(checked_read(saved_l2["expected"])) != retained["rows"] * retained["channels"]):
             raise ValueError("Missing or stale retained resident L2 output")
+        if saved_l2.get("command") != (ready if case.get("remaining_graph", False) else None):
+            raise ValueError("Missing or stale live resident L2 comparison boundary")
         extract_checkpoint(temporary, saved_l2)
         if case.get("l2_downsample_checkpoints", False):
             downsample_shapes = case["l2_downsample_shapes"]
@@ -1087,7 +1119,7 @@ def load_case(path):
                         any(actual.get(key) != value for key, value in expected.items())
                         for actual, expected in zip(downsample_saved, planned))):
                 raise ValueError("Missing or stale L2 downsample mapping")
-            if completed_replay_boundary(full_model, end) != case["end_command"]:
+            if completed_replay_boundary(full_model, end) != expected_end:
                 raise ValueError("L2 downsample must end at its first drained boundary")
             if (validate_grouped_coverage(downsample_saved, downsample_shapes, L2_DOWNSAMPLE_ROLES) !=
                     case["l2_downsample_coverage"]):
@@ -1145,10 +1177,10 @@ def main():
         parser.error("--allow-compatible-snapshot requires --remaining-graph")
     if args.diagnostic_checkpoints is not None and not args.remaining_graph:
         parser.error("--diagnostic-checkpoints requires --remaining-graph")
-    if args.remaining_graph:
-        args.resume_grouped_pointwise_checkpoints = True
     if args.resume_l2_downsample_checkpoints:
         args.resume_c2f_output_checkpoints = True
+    if args.remaining_graph and not args.resume_c2f_output_checkpoints:
+        args.resume_grouped_pointwise_checkpoints = True
     if args.resume_c2f_chain_checkpoints:
         args.resume_grouped_pointwise_checkpoints = True
     if args.downsample_checkpoints:
@@ -1169,9 +1201,10 @@ def main():
         parser.error("Choose a fresh output directory")
     if args.full_graph and not args.from_reset:
         parser.error("--full-graph requires --from-reset; memory-only snapshots omit hardware registers")
-    if args.remaining_graph and (args.full_graph or args.resume_c2f_chain_checkpoints or
-                                args.resume_c2f_output_checkpoints):
-        parser.error("--remaining-graph requires only its self-configuring grouped pointwise prefix")
+    if args.remaining_graph and (args.full_graph or args.resume_c2f_chain_checkpoints):
+        parser.error("--remaining-graph requires a self-configuring pointwise or concat-output prefix")
+    if args.allow_compatible_snapshot and args.resume_c2f_output_checkpoints:
+        parser.error("Compatible-model snapshots are supported only for grouped pointwise prefixes")
     if args.all_cascade_checkpoints and (not args.from_reset or args.full_graph or not args.consumer_tiles):
         parser.error("--all-cascade-checkpoints requires bounded --from-reset with cascade mapping enabled")
     if args.timeout_cycles is not None and args.timeout_cycles <= 0:
@@ -1339,6 +1372,7 @@ def main():
             resident_shapes["parent"] = list(map(int, interpreter.get_tensor(snapshot_parent["tensor"]).shape))
             checks, end, retained = plan_resident_pointwise_checkpoints(commands, snapshot_parent, resident_shapes,
                 len(memory), len(temporary))
+            resident_ready = completed_replay_boundary(full_model, end)
             if args.resume_l2_downsample_checkpoints:
                 downsample_id, l2_padding = resolve_l2_downsample_source(interpreter, tensor_ids[OUTPUT_ROLES[1]])
                 tensor_ids.update(zip(L2_DOWNSAMPLE_ROLES, (downsample_id, silu_output(ops, downsample_id))))
@@ -1461,6 +1495,8 @@ def main():
         case.update(resumed_output_checkpoints=True, resumed_output_shapes=resident_shapes,
                     resumed_output_coverage=validate_grouped_coverage(checks, resident_shapes, OUTPUT_ROLES),
                     resumed_output_l2={**retained, "tensor": tensor_id, "expected": artifact(filename)})
+        if args.remaining_graph:
+            case["resumed_output_l2"]["command"] = resident_ready
     if args.resume_l2_downsample_checkpoints:
         case.update(l2_downsample_checkpoints=True, l2_downsample_shapes=l2_shapes,
                     l2_downsample_padding=l2_padding,

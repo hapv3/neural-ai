@@ -11,10 +11,11 @@ from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 import numpy as np
 
 from yolo_reference_replay import (
-    checked_read, execution_model, load_case, output_comparison, runtime, save_checkpoint_result,
+    checked_read, execution_model, load_case, output_comparison, require_resident_l2_result,
+    runtime, save_checkpoint_result, save_resident_l2_result,
 )
 from test_yolo_stem_byte_exact import compare_bytes, extract_c32
-from yolo_c2f_checkpoints import extract_checkpoint
+from yolo_c2f_checkpoints import checkpoint_indices, extract_checkpoint
 from diagnostic_checkpoints import load_diagnostic_checkpoints
 from replay_snapshots import capture_with_paused_clock, save_intermediate_snapshot, validate_snapshot_boundaries
 from compute_dumps import ComputeDumpWriter, validate_compute_dump_case
@@ -174,6 +175,22 @@ async def run_reference_case(dut, case_path):
             return
         runtime._write_command_pmu_csv(folder / "command_pmu.csv", [record], [counters],
                                        append=number != first + 1)
+        resident = case.get("resumed_output_l2")
+        if resident is not None and resident.get("command") == number:
+            indices = checkpoint_indices(resident, case["temporary_bytes"])
+            begin, limit = int(indices.min()), int(indices.max()) + 1
+
+            async def read_resident():
+                await Timer(1, unit="ps")
+                return bytes(await runtime.read_l2_bytes(dut, 0x80200000 + begin, limit - begin))
+
+            retained = await capture_with_paused_clock(clock, int(dut.clk_i.value), read_resident)
+            actual = extract_checkpoint(retained, {**resident, "address": resident["address"] - begin})
+            stats = save_resident_l2_result(folder, report, resident, actual, report["fail_fast"])
+            dut._log.info("NEURAL-AI LIVE RESIDENT L2 command %d: %d/%d mismatches", number,
+                          stats["mismatches"], stats["bytes"])
+            if report["fail_fast"] and stats["mismatches"]:
+                raise AssertionError(report["error"])
         if number in before_compute:
             (folder / f"before-command-{before_compute[number]}-tcdm.bin").write_bytes(runtime.read_tcdm_bytes(dut))
         l2_check = case.get("cascade_l2_output")
@@ -262,10 +279,11 @@ async def run_reference_case(dut, case_path):
             failures.append(report["cascade_l2_output"])
     if case.get("resumed_output_l2") is not None:
         check = case["resumed_output_l2"]
-        actual = extract_checkpoint(snapshot_temporary, check)
-        expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
-        (folder / "resident-l2-actual.bin").write_bytes(actual.tobytes())
-        report["resumed_output_l2"] = {**check, **compare_bytes(actual, expected)}
+        if "command" in check:
+            require_resident_l2_result(report, check)
+        else:
+            actual = extract_checkpoint(snapshot_temporary, check)
+            save_resident_l2_result(folder, report, check, actual)
         if report["resumed_output_l2"]["mismatches"]:
             failures.append(report["resumed_output_l2"])
         dut._log.info("NEURAL-AI RESIDENT L2 OUTPUT: %d/%d mismatches",
