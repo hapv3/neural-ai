@@ -4,9 +4,9 @@ NEURAL_COMPILER_ROOT ?= $(abspath ../../../..)/neural-compiler
 SIM_BUILD ?= /tmp/neural-ai-compiled-model
 COCOTB_TESTCASE ?=
 
-.PHONY: all check check_cross_repo_abi firmware sim clean
+.PHONY: all check check_cross_repo_abi check_firmware_loading firmware sim clean
 
-all: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state
+all: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy
 
 test_model_abi: test_model_abi.c ../../lib/npu_model_abi.h ../../lib/npu_cmd_desc_v2.h ../../lib/npu_model_loader.h ../../lib/npu_model_loader.c ../../lib/npu_memory_map.h
 	$(CC) $(CFLAGS) -I../../lib test_model_abi.c ../../lib/npu_model_loader.c -o $@
@@ -20,9 +20,13 @@ check: all check_cross_repo_abi
 	./test_copy_layout
 	./test_quant_buffer
 	./test_dma_async_state
+	./test_spatz_copy
 
 check_cross_repo_abi:
 	NEURAL_COMPILER_ROOT="$(NEURAL_COMPILER_ROOT)" python3 ./check_cross_repo_abi.py
+
+check_firmware_loading:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_firmware_loading.py
 
 firmware:
 	$(MAKE) -C ../../runtime/neural_ai all
@@ -56,5 +60,8 @@ test_quant_buffer: test_quant_buffer.c ../../lib/npu_quant_buffer.h ../../lib/np
 test_dma_async_state: test_dma_async_state.c ../../lib/npu_dma_async_state.h ../../lib/idma_transfer_id.h ../../lib/idma_transfer_plan.h
 	$(CC) $(CFLAGS) -I../../lib test_dma_async_state.c -o $@
 
+test_spatz_copy: test_spatz_copy.c ../../lib/spatz_copy.h ../../lib/spatz_ops.h
+	$(CC) $(CFLAGS) -I../../lib test_spatz_copy.c -o $@
+
 clean:
-	rm -f test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state
+	rm -f test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy

@@ -8,6 +8,7 @@
 #include "npu_memory_map.h"
 #include "npu_quant_buffer.h"
 #include "spatz_ops.h"
+#include "spatz_copy.h"
 
 #if defined(NAI_TRUSTED_FIRMWARE)
 #define NAI_TRUSTED_INVALID(condition) 0u
@@ -87,11 +88,9 @@ static uint32_t runtime_dma_2d_mode(void *context, uint32_t source,
         transfer_id = idma_L1ToL2_2d(source, destination, length,
             source_stride, destination_stride, repetitions);
     else if (direction == 2u) {
-        for (uint32_t rep = 0; rep < repetitions; rep++) {
-            spatz_vec_copy_i8(
-                (const int8_t *)(unsigned long)(source + rep * source_stride),
-                (int8_t *)(unsigned long)(destination + rep * destination_stride), length);
-        }
+        spatz_copy_affine_i8((const int8_t *)(unsigned long)source,
+            (int8_t *)(unsigned long)destination, (spatz_copy_geometry_t){
+                length, source_stride, destination_stride, repetitions, 0, 0, 1});
         return 0u;
     } else return 1u;
     return asynchronous ? record_async_transfer(context, direction, transfer_id) :
@@ -140,15 +139,10 @@ static uint32_t runtime_dma_3d_mode(void *context, uint32_t source,
             source_stride_2, destination_stride_2, repetitions_2,
             source_stride_3, destination_stride_3, repetitions_3);
     else if (direction == 2u) {
-        for (uint32_t rep3 = 0; rep3 < repetitions_3; rep3++) {
-            for (uint32_t rep2 = 0; rep2 < repetitions_2; rep2++) {
-                spatz_vec_copy_i8(
-                    (const int8_t *)(unsigned long)(source + rep3 * source_stride_3 +
-                        rep2 * source_stride_2),
-                    (int8_t *)(unsigned long)(destination + rep3 * destination_stride_3 +
-                        rep2 * destination_stride_2), length);
-            }
-        }
+        spatz_copy_affine_i8((const int8_t *)(unsigned long)source,
+            (int8_t *)(unsigned long)destination, (spatz_copy_geometry_t){
+                length, source_stride_2, destination_stride_2, repetitions_2,
+                source_stride_3, destination_stride_3, repetitions_3});
         return 0u;
     } else return 1u;
     return asynchronous ? record_async_transfer(context, direction, transfer_id) :

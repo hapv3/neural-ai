@@ -1,5 +1,8 @@
+import csv
 import inspect
 import logging
+import os
+from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
@@ -8,7 +11,7 @@ from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
     firmware_path,
-    load_firmware_axi,
+    load_firmware_elf_axi,
     read_dtcm_word,
     read_tcdm_byte,
     release_fetch,
@@ -707,7 +710,8 @@ async def run_firmware_case(
     )
 
     await reset_dut(dut)
-    await load_firmware_axi(
+    await load_firmware_elf_axi(
+        dut,
         axi_master,
         firmware_path(__file__, f"{firmware_dir}/{fw_name}"),
     )
@@ -832,30 +836,59 @@ async def run_firmware_case(
 @cocotb.test()
 async def test_spatz_operator_library(dut):
     await run_firmware_case(
-        dut, "spatz_ops_test.bin", "test_spatz_operator_library", 8, check_all
+        dut, "spatz_ops_test.elf", "test_spatz_operator_library", 8, check_all
     )
 
 
 @cocotb.test()
 async def test_spatz_op_copy(dut):
-    await run_firmware_case(dut, "spatz_ops_copy.bin", "test_spatz_op_copy", 1, check_copy)
+    await run_firmware_case(dut, "spatz_ops_copy.elf", "test_spatz_op_copy", 1, check_copy)
+
+
+@cocotb.test()
+async def test_spatz_op_copy_batch(dut):
+    # Firmware checks every byte, including untouched holes/canaries, after
+    # each geometry. This exercises real vlse32/vsse32, LMUL and VL tails.
+    def check_timings(dut):
+        def word(address):
+            return sum(read_tcdm_byte(dut, address + byte) << (8 * byte) for byte in range(4))
+
+        rows = []
+        for trial in range(12):
+            legacy, batch, size = (word(0x10130000 + trial * 12 + offset) for offset in (0, 4, 8))
+            assert legacy > 0 and batch > 0 and size > 0
+            rows.append((trial, size, legacy, batch))
+            dut._log.info("copy_batch[%d]: bytes=%d legacy=%d batch=%d", trial, size, legacy, batch)
+        output = Path(os.environ.get("SIM_BUILD", os.environ.get("COCOTB_RESULTS_FILE", "results.xml")))
+        if output.suffix == ".xml":
+            output = output.parent
+        output.mkdir(parents=True, exist_ok=True)
+        with (output / "copy_batch_cycles.csv").open("w", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("case", "logical_bytes", "legacy_cycles", "batch_cycles"))
+            writer.writerows(rows)
+
+    await run_firmware_case(
+        dut, "spatz_ops_copy_batch.elf", "test_spatz_op_copy_batch", 12,
+        check_timings, timeout_cycles=3000000,
+    )
 
 
 @cocotb.test()
 async def test_spatz_op_relu(dut):
-    await run_firmware_case(dut, "spatz_ops_relu.bin", "test_spatz_op_relu", 1, check_relu)
+    await run_firmware_case(dut, "spatz_ops_relu.elf", "test_spatz_op_relu", 1, check_relu)
 
 
 @cocotb.test()
 async def test_spatz_op_requant(dut):
     await run_firmware_case(
-        dut, "spatz_ops_requant.bin", "test_spatz_op_requant", 1, check_requant
+        dut, "spatz_ops_requant.elf", "test_spatz_op_requant", 1, check_requant
     )
 
 
 @cocotb.test()
 async def test_spatz_op_add(dut):
-    await run_firmware_case(dut, "spatz_ops_add.bin", "test_spatz_op_add", 1, check_add)
+    await run_firmware_case(dut, "spatz_ops_add.elf", "test_spatz_op_add", 1, check_add)
 
 
 @cocotb.test()
@@ -875,7 +908,7 @@ async def test_spatz_op_quantized_add(dut):
 
     await run_firmware_case(
         dut,
-        "spatz_ops_quant_add.bin",
+        "spatz_ops_quant_add.elf",
         "test_spatz_op_quantized_add",
         1,
         check_quantized_add,
@@ -899,7 +932,7 @@ async def test_spatz_op_quantized_sub(dut):
 
     await run_firmware_case(
         dut,
-        "spatz_ops_quant_sub.bin",
+        "spatz_ops_quant_sub.elf",
         "test_spatz_op_quantized_sub",
         1,
         check_quantized_sub,
@@ -910,7 +943,7 @@ async def test_spatz_op_quantized_sub(dut):
 async def test_afu_op_add_full(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_add_full.bin",
+        "afu_ops_add_full.elf",
         "test_afu_op_add_full",
         1,
         check_add_full,
@@ -922,14 +955,14 @@ async def test_afu_op_add_full(dut):
 
 @cocotb.test()
 async def test_spatz_op_mul(dut):
-    await run_firmware_case(dut, "spatz_ops_mul.bin", "test_spatz_op_mul", 1, check_mul)
+    await run_firmware_case(dut, "spatz_ops_mul.elf", "test_spatz_op_mul", 1, check_mul)
 
 
 @cocotb.test()
 async def test_afu_op_mul_q7_full(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_mul_q7_full.bin",
+        "afu_ops_mul_q7_full.elf",
         "test_afu_op_mul_q7_full",
         1,
         check_mul_q7_full,
@@ -943,7 +976,7 @@ async def test_afu_op_mul_q7_full(dut):
 async def test_afu_op_logistic(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_logistic.bin",
+        "afu_ops_logistic.elf",
         "test_afu_op_logistic",
         1,
         check_logistic,
@@ -955,7 +988,7 @@ async def test_afu_op_logistic(dut):
 async def test_afu_op_logistic_full(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_logistic_full.bin",
+        "afu_ops_logistic_full.elf",
         "test_afu_op_logistic_full",
         1,
         check_logistic_full,
@@ -969,7 +1002,7 @@ async def test_afu_op_logistic_full(dut):
 async def test_afu_op_clamp_relu6(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_clamp_relu6.bin",
+        "afu_ops_clamp_relu6.elf",
         "test_afu_op_clamp_relu6",
         1,
         check_clamp_relu6,
@@ -981,21 +1014,21 @@ async def test_afu_op_clamp_relu6(dut):
 @cocotb.test()
 async def test_spatz_op_maxpool(dut):
     await run_firmware_case(
-        dut, "spatz_ops_maxpool.bin", "test_spatz_op_maxpool", 1, check_maxpool
+        dut, "spatz_ops_maxpool.elf", "test_spatz_op_maxpool", 1, check_maxpool
     )
 
 
 @cocotb.test()
 async def test_spatz_op_upsample(dut):
     await run_firmware_case(
-        dut, "spatz_ops_upsample.bin", "test_spatz_op_upsample", 1, check_upsample
+        dut, "spatz_ops_upsample.elf", "test_spatz_op_upsample", 1, check_upsample
     )
 
 
 @cocotb.test()
 async def test_spatz_op_concat(dut):
     await run_firmware_case(
-        dut, "spatz_ops_concat.bin", "test_spatz_op_concat", 1, check_concat
+        dut, "spatz_ops_concat.elf", "test_spatz_op_concat", 1, check_concat
     )
 
 
@@ -1003,7 +1036,7 @@ async def test_spatz_op_concat(dut):
 async def test_afu_op_dfl_fused(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_dfl_fused.bin",
+        "afu_ops_dfl_fused.elf",
         "test_afu_op_dfl_fused",
         1,
         check_dfl_fused,
@@ -1017,7 +1050,7 @@ async def test_afu_op_dfl_fused(dut):
 async def test_afu_op_dfl16_fused(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_dfl16_fused.bin",
+        "afu_ops_dfl16_fused.elf",
         "test_afu_op_dfl16_fused",
         1,
         check_dfl16_fused,
@@ -1031,7 +1064,7 @@ async def test_afu_op_dfl16_fused(dut):
 async def test_spatz_op_dfl_q8(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_dfl_q8.bin",
+        "spatz_ops_dfl_q8.elf",
         "test_spatz_op_dfl_q8",
         1,
         check_dfl_q8,
@@ -1042,7 +1075,7 @@ async def test_spatz_op_dfl_q8(dut):
 async def test_spatz_op_dfl16_pack(dut):
     await run_firmware_case(
         dut,
-        "spatz_ops_dfl16_pack.bin",
+        "spatz_ops_dfl16_pack.elf",
         "test_spatz_op_dfl16_pack",
         1,
         check_dfl16_pack,
@@ -1053,7 +1086,7 @@ async def test_spatz_op_dfl16_pack(dut):
 async def test_afu_op_class_sigmoid(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_class_sigmoid.bin",
+        "afu_ops_class_sigmoid.elf",
         "test_afu_op_class_sigmoid",
         1,
         check_class_sigmoid,
@@ -1066,7 +1099,7 @@ async def test_afu_op_class_sigmoid(dut):
 async def test_afu_op_global_avgpool(dut):
     await run_firmware_case(
         dut,
-        "afu_ops_global_avgpool.bin",
+        "afu_ops_global_avgpool.elf",
         "test_afu_op_global_avgpool",
         1,
         check_global_avgpool,

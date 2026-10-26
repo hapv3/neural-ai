@@ -2,6 +2,7 @@
 #include "npu_memory_map.h"
 #include "hal_afu.h"
 #include "spatz_ops.h"
+#include "spatz_copy.h"
 
 /*
  * Scenario: C-callable Spatz/AFU operator library smoke/regression test.
@@ -33,6 +34,7 @@
 #define SPATZ_OP_TEST_DFL_Q8 20u
 #define SPATZ_OP_TEST_DFL16_PACK 21u
 #define SPATZ_OP_TEST_QUANT_SUB 22u
+#define SPATZ_OP_TEST_COPY_BATCH 23u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -188,6 +190,67 @@ static void run_copy(void) {
 
     spatz_vec_copy_i8((const int8_t *)SRC_I8, (int8_t *)DST_I8, VL);
     mark_pass();
+}
+
+static void run_copy_batch(void) {
+    const spatz_copy_geometry_t cases[] = {
+        {16, 32, 16, 137, 0, 0, 1},
+        {16, 16, 32, 137, 0, 0, 1},
+        {16, 32, 32, 137, 0, 0, 1},
+        {32, 64, 32, 73, 0, 0, 1},
+        {16, 0, 32, 137, 0, 0, 1},
+        {32, 0, 32, 137, 0, 0, 1},
+        {16, 32, 32, 19, 640, 672, 3},
+        {32, 32, 32, 20, 640, 640, 9},
+        {15, 32, 32, 19, 640, 672, 3},
+        {16, 1, 32, 1, 64, 96, 19},
+        {4, 8, 4, 1031, 0, 0, 1},
+        {16, 32, 16, 19, 608, 304, 3},
+    };
+    volatile int8_t *source = (volatile int8_t *)0x10100000u;
+    volatile int8_t *destination = (volatile int8_t *)0x10110000u;
+    volatile int8_t *expected = (volatile int8_t *)0x10120000u;
+    volatile uint32_t *timings = (volatile uint32_t *)0x10130000u;
+    for (uint32_t trial = 0; trial < sizeof(cases) / sizeof(cases[0]); trial++) {
+        const spatz_copy_geometry_t copy = cases[trial];
+        uint32_t source_bytes = copy.length + (copy.repetitions_2 - 1u) * copy.source_stride_2 +
+            (copy.repetitions_3 - 1u) * copy.source_stride_3;
+        uint32_t destination_bytes = copy.length + (copy.repetitions_2 - 1u) * copy.destination_stride_2 +
+            (copy.repetitions_3 - 1u) * copy.destination_stride_3 + 32u;
+        for (uint32_t i = 0; i < source_bytes; i++) source[i] = (int8_t)(i * 17u + 93u);
+        for (uint32_t i = 0; i < destination_bytes; i++) destination[i] = expected[i] = (int8_t)0xa5;
+        for (uint32_t plane = 0; plane < copy.repetitions_3; plane++)
+            for (uint32_t run = 0; run < copy.repetitions_2; run++)
+                for (uint32_t byte = 0; byte < copy.length; byte++)
+                    expected[plane * copy.destination_stride_3 + run * copy.destination_stride_2 + byte] =
+                        source[plane * copy.source_stride_3 + run * copy.source_stride_2 + byte];
+        uint32_t start;
+        uint32_t finish;
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(start) :: "memory");
+        for (uint32_t plane = 0; plane < copy.repetitions_3; plane++)
+            for (uint32_t run = 0; run < copy.repetitions_2; run++)
+                spatz_vec_copy_i8((const int8_t *)source + plane * copy.source_stride_3 +
+                    run * copy.source_stride_2, (int8_t *)destination + plane * copy.destination_stride_3 +
+                    run * copy.destination_stride_2, copy.length);
+        __asm__ volatile ("fence" ::: "memory");
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(finish) :: "memory");
+        timings[trial * 3u] = finish - start;
+        for (uint32_t i = 0; i < destination_bytes; i++) {
+            if (destination[i] != expected[i]) fail(SPATZ_OP_TEST_COPY_BATCH, trial * 65536u + i,
+                destination[i], expected[i]);
+            destination[i] = (int8_t)0xa5;
+        }
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(start) :: "memory");
+        spatz_copy_affine_i8((const int8_t *)source, (int8_t *)destination, copy);
+        __asm__ volatile ("fence" ::: "memory");
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(finish) :: "memory");
+        timings[trial * 3u + 1u] = finish - start;
+        timings[trial * 3u + 2u] = copy.length * copy.repetitions_2 * copy.repetitions_3;
+        for (uint32_t i = 0; i < destination_bytes; i++)
+            if (destination[i] != expected[i]) fail(SPATZ_OP_TEST_COPY_BATCH, trial * 65536u + i,
+                destination[i], expected[i]);
+        mark_pass();
+    }
 }
 
 static void run_relu(void) {
@@ -622,6 +685,7 @@ int main(void) {
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_ALL || SPATZ_OP_TEST_ID == SPATZ_OP_TEST_COPY) {
         run_copy();
     }
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_COPY_BATCH) run_copy_batch();
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_ALL || SPATZ_OP_TEST_ID == SPATZ_OP_TEST_RELU) {
         run_relu();
     }

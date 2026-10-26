@@ -269,6 +269,11 @@ async def load_firmware_axi(axi_master, filename, base_addr=ITCM_BASE, width=4):
     if len(firmware) % width != 0:
         firmware += b"\x00" * (width - (len(firmware) % width))
 
+    # Reject the entire raw image before touching hardware. A BIN spanning
+    # I-TCM and D-TCM must use the segment-aware ELF loader instead.
+    if base_addr < ITCM_BASE or base_addr + len(firmware) > ITCM_BASE + TCM_SIZE_BYTES:
+        raise AssertionError("AXI boot image exceeds I-TCM; use the ELF loader for multi-segment firmware")
+
     for offset in range(0, len(firmware), width):
         addr = base_addr + offset
         if not (ITCM_BASE <= addr < ITCM_BASE + TCM_SIZE_BYTES):
