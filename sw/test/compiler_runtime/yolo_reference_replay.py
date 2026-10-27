@@ -38,6 +38,12 @@ from replay_snapshots import parse_snapshot_boundaries, validate_snapshot_bounda
 from compute_dumps import validate_compute_dump_case
 
 
+AFU_REFERENCE_CONTRACTS = {
+    "neural_ai_afu_dfl_reference": ("afu_dfl16_deployed_signed_delta_v1", "afu_dfl.py"),
+    "neural_ai_afu_mean_reference": ("afu_mean_int8_fused_single_round_v1", "afu_mean.py"),
+}
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -765,6 +771,49 @@ def validate_output_scope(case, full_model):
         raise ValueError("Final output shape/dtype/size differs from the output binding")
 
 
+def validate_reference_contract(case):
+    """Pin explicitly selected AFU arithmetic without relabeling legacy cases."""
+    proof = case.get("reference_contract")
+    kind = case.get("reference_kind")
+    if proof is None:
+        if kind in AFU_REFERENCE_CONTRACTS and case.get("reference_provenance") is None:
+            raise ValueError("Missing explicit reference contract")
+        return
+    if kind not in AFU_REFERENCE_CONTRACTS or not isinstance(proof, dict):
+        raise ValueError("Unsupported explicit reference contract")
+    contract, filename = AFU_REFERENCE_CONTRACTS[kind]
+    description = proof.get("description", {})
+    sources = proof.get("sources", {})
+    if (not isinstance(description, dict) or description.get("contract") != contract or
+            description.get("source_sha256") != case["source"]["sha256"] or
+            proof.get("input_sha256") != case["input"]["sha256"] or
+            proof.get("reference_build") != case["reference_build"] or
+            not isinstance(sources, dict) or set(sources) != {"runtime.py", filename}):
+        raise ValueError("Explicit reference contract identity mismatch")
+    for record in sources.values():
+        checked_read(record)
+    if (case.get("final_output") is not None and
+            proof.get("output_sha256") != case["final_output"]["expected"]["sha256"]):
+        raise ValueError("Final output differs from the explicit reference contract")
+
+
+def require_compatible_reference(model, kind, final_output=False):
+    """Reject a known arithmetic mismatch before preparing an expensive run."""
+    if not final_output:
+        return
+    commands, _ = runtime._logical_command_records(model)
+    required = set()
+    for command in commands:
+        command_type, _, flags = struct.unpack_from("<HHI", command)
+        if command_type == 28:
+            required.add("neural_ai_afu_dfl_reference")
+        if command_type == 14 and flags & 16:
+            required.add("neural_ai_afu_mean_reference")
+    if required and required != {kind}:
+        raise ValueError("Final-output replay requires an explicit compatible --reference-kind: " +
+                         ", ".join(sorted(required)))
+
+
 def execution_model(case, full_model):
     """Keep the original encoded stream, including affine loops, for full runs."""
     if case.get("full_graph", False):
@@ -901,6 +950,10 @@ def load_case(path):
     checked_read(case["firmware"])
     input_data = checked_read(case["input"])
     validate_output_scope(case, full_model)
+    validate_reference_contract(case)
+    if case.get("reference_contract") is not None:
+        require_compatible_reference(full_model, case["reference_kind"],
+                                     case.get("full_graph", False) or case.get("remaining_graph", False))
     identity_model = snapshot_identity_model(case, full_model)
     if case.get("start_mode", "snapshot") == "reset":
         if case["snapshot"] is not None or case["first_command"] != 0:
@@ -1133,6 +1186,9 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--source", type=Path,
                         help="Source TFLite (default: YOLO320); use --consumer-tiles 0 for other full graphs")
+    parser.add_argument("--reference-kind", default="neural_ai_reference",
+                        choices=["neural_ai_reference", *AFU_REFERENCE_CONTRACTS],
+                        help="Explicit arithmetic contract; use AFU DFL for deployed YOLO or AFU Mean for MobileNet")
     start = parser.add_mutually_exclusive_group(required=True)
     start.add_argument("--snapshot", type=Path)
     start.add_argument("--from-reset", action="store_true")
@@ -1217,6 +1273,7 @@ def main():
     full_model = model_path.read_bytes()
     if sha(full_model) != pinned[".nai"] or sha(firmware_path.read_bytes()) != pinned[".elf"]:
         raise ValueError("Pinned model/ELF identity mismatch")
+    require_compatible_reference(full_model, args.reference_kind, args.full_graph or args.remaining_graph)
     source = args.source or args.compiler_root / "test/model/yolov8n_320_int8.tflite"
     reference_build = json.loads((args.compiler_root / "tools/neural_ai_tflite_reference/build/manifest.json").read_text())
     snapshot_compatibility = None
@@ -1251,8 +1308,9 @@ def main():
             raise ValueError("Snapshot source/model provenance mismatch")
         first, memory, temporary, output = runtime._verify_yolo320_snapshot(
             full_model, args.snapshot.read_bytes(), expected_boundary=saved["prefix_commands"])
-    spec = importlib.util.spec_from_file_location(
-        "neural_ai_host_reference", args.compiler_root / "tools/neural_ai_tflite_reference/runtime.py")
+    reference_root = args.compiler_root / "tools/neural_ai_tflite_reference"
+    sys.path.insert(0, str(reference_root))
+    spec = importlib.util.spec_from_file_location("neural_ai_host_reference", reference_root / "runtime.py")
     reference_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference_module)
     interpreter = reference_module.make_interpreter(source, preserve=True)
@@ -1271,16 +1329,33 @@ def main():
         input_data = input_path.read_bytes()
     interpreter.set_tensor(inp["index"], np.frombuffer(input_data, np.int8).reshape(inp["shape"]))
     interpreter.invoke()
+    numerical_reference = interpreter
+    reference_contract = None
+    if args.reference_kind in AFU_REFERENCE_CONTRACTS:
+        numerical_reference = reference_module.make_interpreter(source, args.reference_kind, preserve=True)
+        numerical_reference.set_tensor(inp["index"], np.frombuffer(input_data, np.int8).reshape(inp["shape"]))
+        control, deployed_output, _ = numerical_reference.invoke_comparison()
+        detail = interpreter.get_output_details()[0]
+        if not np.array_equal(control, interpreter.get_tensor(detail["index"])):
+            raise ValueError("AFU reference control changed the original hybrid output")
+        coverage = reference_module.coverage(numerical_reference)
+        if coverage["mac_fallback_nodes"]:
+            raise ValueError("Unsupported MAC fallback in the selected AFU reference")
+        reference_contract = dict(description=numerical_reference.plan.description(),
+            input_sha256=sha(input_data), reference_build=reference_build,
+            control_output_sha256=sha(control.tobytes()), output_sha256=sha(deployed_output.tobytes()),
+            sources={name: artifact(reference_root / name) for name in
+                     ("runtime.py", AFU_REFERENCE_CONTRACTS[args.reference_kind][1])})
     initial = []
     if resuming:
-        expected = reference_tensor_slice(interpreter.get_tensor(snapshot_parent["tensor"]), snapshot_parent)
+        expected = reference_tensor_slice(numerical_reference.get_tensor(snapshot_parent["tensor"]), snapshot_parent)
         if expected.tobytes() != checked_read(snapshot_parent["expected"]):
             raise ValueError("Current reference differs from the verified snapshot oracle")
         initial = [{"command": first, **parent_stats}]
     for check in saved["checkpoints"]:
         actual = extract_c32(memory, check["tcdm_address"], check["rows"], check["channels"],
                              check["row_stride"], check["tile_cols"])
-        tensor = interpreter.get_tensor(check["tensor"]).reshape(-1, check["channels"])
+        tensor = numerical_reference.get_tensor(check["tensor"]).reshape(-1, check["channels"])
         offset = check["reference_first_row"]
         stats = compare_bytes(actual, tensor[offset:offset + check["rows"]])
         if stats["mismatches"]:
@@ -1411,7 +1486,7 @@ def main():
     details = {d["index"]: d for d in interpreter.get_tensor_details()}
     for check in checks:
         tensor_id = tensor_ids[check["tensor_role"]]
-        tensor = reference_tensor_slice(interpreter.get_tensor(tensor_id), check)
+        tensor = reference_tensor_slice(numerical_reference.get_tensor(tensor_id), check)
         filename = args.output / f"command-{check['command']}-expected.bin"
         filename.write_bytes(tensor.tobytes())
         check.update({"tensor": tensor_id, "tensor_name": details[tensor_id]["name"], "expected": artifact(filename)})
@@ -1421,7 +1496,7 @@ def main():
         if len(outputs) != 1 or outputs[0]["dtype"] != np.int8:
             raise ValueError("Full-graph replay requires exactly one INT8 reference output")
         detail = outputs[0]
-        expected = interpreter.get_tensor(detail["index"])
+        expected = numerical_reference.get_tensor(detail["index"])
         if expected.nbytes != len(output):
             raise ValueError("Reference output size differs from the compiled output binding")
         filename = args.output / "output-expected.bin"
@@ -1446,6 +1521,9 @@ def main():
             "initial_snapshot_checks": initial, "checkpoints": checks}
     if args.remaining_graph:
         case.update(remaining_graph=True, remaining_prefix_end_command=prefix_end)
+    if reference_contract is not None:
+        case.update(reference_kind=args.reference_kind, reference_contract=reference_contract,
+                    reference=f"{args.reference_kind} / {reference_contract['description']['contract']}")
     if args.snapshot_boundaries is not None:
         case['snapshot_boundaries'] = args.snapshot_boundaries
     if snapshot_compatibility is not None:
@@ -1489,7 +1567,7 @@ def main():
                         checks, chain_shapes, chain_roles(chain_layout["blocks"])))
     if args.resume_c2f_output_checkpoints:
         tensor_id = tensor_ids[OUTPUT_ROLES[1]]
-        expected = reference_tensor_slice(interpreter.get_tensor(tensor_id), retained)
+        expected = reference_tensor_slice(numerical_reference.get_tensor(tensor_id), retained)
         filename = args.output / "resident-l2-expected.bin"
         filename.write_bytes(expected.tobytes())
         case.update(resumed_output_checkpoints=True, resumed_output_shapes=resident_shapes,

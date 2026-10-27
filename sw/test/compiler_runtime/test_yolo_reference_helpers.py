@@ -13,8 +13,9 @@ from yolo_reference_replay import (
     execution_model, invocation_address, load_case, output_comparison,
     plan_checkpoints, plan_lut_restore, plan_post_cascade_checkpoints, plan_restore_preamble, reset_buffers,
     POST_CASCADE_ROLES,
-    require_resident_l2_result, runtime, save_checkpoint_result, save_resident_l2_result,
-    validate_cascade_coverage, validate_output_scope,
+    require_compatible_reference, require_resident_l2_result, runtime, save_checkpoint_result,
+    save_resident_l2_result,
+    validate_cascade_coverage, validate_output_scope, validate_reference_contract,
 )
 
 
@@ -445,6 +446,48 @@ class ReferenceReplayTest(unittest.TestCase):
                             {"resumed_c2f_checkpoints": True}, {"snapshot": None}):
                 with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "all remaining commands"):
                     validate_output_scope({**case, **changes}, model)
+
+    def test_explicit_afu_reference_pins_kind_sources_input_and_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _ = self.full_case(Path(directory))
+            case.update(reference_build={"library": "pinned"}, reference_kind="neural_ai_afu_dfl_reference")
+            proof = dict(description=dict(contract="afu_dfl16_deployed_signed_delta_v1",
+                                          source_sha256=case['source']['sha256']),
+                         input_sha256=case['input']['sha256'], reference_build=case['reference_build'],
+                         output_sha256=case['final_output']['expected']['sha256'],
+                         sources={name: case['source'] for name in ('runtime.py', 'afu_dfl.py')})
+            case['reference_contract'] = proof
+            validate_reference_contract(case)
+            for key, value in [('input_sha256', 'wrong'), ('reference_build', {}),
+                               ('output_sha256', 'wrong'), ('sources', {}),
+                               ('description', {**proof['description'], 'contract': 'wrong'})]:
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    validate_reference_contract({**case, 'reference_contract': {**proof, key: value}})
+            with self.assertRaises(ValueError):
+                validate_reference_contract({**case, 'reference_kind': 'unknown'})
+            # Old retained cases preserve their original numerical contract.
+            del case['reference_contract']
+            with self.assertRaisesRegex(ValueError, "Missing explicit"):
+                validate_reference_contract(case)
+            del case['reference_kind']
+            validate_reference_contract(case)
+
+    def test_final_output_preflight_rejects_mac_only_for_deployed_afu(self):
+        def model(kinds):
+            records = b''.join(runtime._command_header(kind, 96, flags=flags) + bytes(80)
+                               for kind, flags in kinds)
+            return runtime._package(records + runtime._command_header(0, 32) + bytes(16),
+                                    b'', b'', len(kinds), 1024, 1, 1)
+        for kinds, selected in [([(28, 0)], 'neural_ai_afu_dfl_reference'),
+                                ([(14, 16)], 'neural_ai_afu_mean_reference')]:
+            content = model(kinds)
+            require_compatible_reference(content, selected, True)
+            require_compatible_reference(content, 'neural_ai_reference', False)
+            with self.subTest(kinds=kinds), self.assertRaisesRegex(ValueError, '--reference-kind'):
+                require_compatible_reference(content, 'neural_ai_reference', True)
+        for selected in ('neural_ai_afu_dfl_reference', 'neural_ai_afu_mean_reference'):
+            with self.assertRaisesRegex(ValueError, '--reference-kind'):
+                require_compatible_reference(model([(28, 0), (14, 16)]), selected, True)
 
     def test_live_resident_l2_evidence_survives_later_memory_reuse(self):
         with tempfile.TemporaryDirectory() as directory:
