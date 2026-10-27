@@ -16,6 +16,34 @@ spatz_vec_copy_i8:
 2:
     ret
 
+    # Disjoint long rows: amortize scalar calls and vtype setup over a plane.
+    # Byte-unit-stride accesses retain payload coalescing; e32 strided across
+    # rows would unnecessarily serialize a long contiguous row into words.
+    .global spatz_vec_copy_rows_i8
+    .type spatz_vec_copy_rows_i8, @function
+spatz_vec_copy_rows_i8:
+    beqz a2, 4f
+    beqz a3, 4f
+1:
+    mv t1, a0
+    mv t2, a1
+    mv t3, a2
+2:
+    vsetvli t0, t3, e8, m8, ta, ma
+    vle8.v v8, (t1)
+    vse8.v v8, (t2)
+    add t1, t1, t0
+    add t2, t2, t0
+    sub t3, t3, t0
+    bnez t3, 2b
+    add a0, a0, a4
+    add a1, a1, a5
+    addi a3, a3, -1
+    bnez a3, 1b
+4:
+    fence
+    ret
+
     # Each vector contains one word from many pixels. Load a repeated source
     # word once (padding/pattern fill); never touch gaps or unused C32 lanes.
     .global spatz_vec_copy_blocks_i32

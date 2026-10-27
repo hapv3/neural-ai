@@ -19,6 +19,19 @@ void spatz_vec_copy_blocks_i32(const int8_t *src, int8_t *dst,
                               uint32_t words, uint32_t runs,
                               uint32_t source_stride, uint32_t destination_stride);
 
+/* Unit-stride within each long row; one call for all rows in a plane. */
+void spatz_vec_copy_rows_i8(const int8_t *src, int8_t *dst,
+                           uint32_t length, uint32_t runs,
+                           uint32_t source_stride, uint32_t destination_stride);
+
+/* Regor/loader already prove the complete TCDM spans in the trusted runtime.
+ * Keep wide arithmetic for the standalone/legacy, untrusted helper. */
+#if defined(NAI_TRUSTED_FIRMWARE) && defined(__riscv) && __riscv_xlen == 32
+typedef uint32_t spatz_copy_span_t;
+#else
+typedef uint64_t spatz_copy_span_t;
+#endif
+
 static inline void spatz_copy_affine_i8(const int8_t *src, int8_t *dst,
                                        spatz_copy_geometry_t copy)
 {
@@ -29,14 +42,14 @@ static inline void spatz_copy_affine_i8(const int8_t *src, int8_t *dst,
         alignment |= copy.source_stride_2 | copy.destination_stride_2;
     if (copy.repetitions_3 > 1u)
         alignment |= copy.source_stride_3 | copy.destination_stride_3;
-    const uint64_t source_span = copy.length +
-        (uint64_t)(copy.repetitions_2 - 1u) * copy.source_stride_2 +
-        (uint64_t)(copy.repetitions_3 - 1u) * copy.source_stride_3;
-    const uint64_t destination_span = copy.length +
-        (uint64_t)(copy.repetitions_2 - 1u) * copy.destination_stride_2 +
-        (uint64_t)(copy.repetitions_3 - 1u) * copy.destination_stride_3;
-    const uint64_t source_begin = (unsigned long)src;
-    const uint64_t destination_begin = (unsigned long)dst;
+    const spatz_copy_span_t source_span = copy.length +
+        (spatz_copy_span_t)(copy.repetitions_2 - 1u) * copy.source_stride_2 +
+        (spatz_copy_span_t)(copy.repetitions_3 - 1u) * copy.source_stride_3;
+    const spatz_copy_span_t destination_span = copy.length +
+        (spatz_copy_span_t)(copy.repetitions_2 - 1u) * copy.destination_stride_2 +
+        (spatz_copy_span_t)(copy.repetitions_3 - 1u) * copy.destination_stride_3;
+    const spatz_copy_span_t source_begin = (unsigned long)src;
+    const spatz_copy_span_t destination_begin = (unsigned long)dst;
     const uint32_t disjoint = source_begin + source_span <= destination_begin ||
         destination_begin + destination_span <= source_begin;
     if (disjoint) {
@@ -65,11 +78,16 @@ static inline void spatz_copy_affine_i8(const int8_t *src, int8_t *dst,
     }
     const uint32_t batch = !(alignment & 3u) && copy.length <= 32u &&
         copy.repetitions_2 > 1u && copy.destination_stride_2 >= copy.length && disjoint;
+    const uint32_t row_batch = !(alignment & 3u) && copy.length > 32u &&
+        (copy.repetitions_2 == 1u || copy.destination_stride_2 >= copy.length) && disjoint;
     for (uint32_t plane = 0; plane < copy.repetitions_3; plane++) {
         const int8_t *source_row = src + plane * copy.source_stride_3;
         int8_t *destination_row = dst + plane * copy.destination_stride_3;
         if (batch) {
             spatz_vec_copy_blocks_i32(source_row, destination_row, copy.length / 4u,
+                copy.repetitions_2, copy.source_stride_2, copy.destination_stride_2);
+        } else if (row_batch) {
+            spatz_vec_copy_rows_i8(source_row, destination_row, copy.length,
                 copy.repetitions_2, copy.source_stride_2, copy.destination_stride_2);
         } else {
             /* Preserve the legacy run order for byte tails or overlapping

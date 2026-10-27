@@ -31,7 +31,7 @@ spatz_ops_copy.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=1 $(SRCS) -o $@
 
 spatz_ops_copy_batch.elf: $(SRCS) link.ld ../../lib/spatz_copy.h
-	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=23 $(SRCS) -o $@
+	$(CC) $(CFLAGS) -DNAI_TRUSTED_FIRMWARE=1 -DSPATZ_OP_TEST_ID=23 $(SRCS) -o $@
 
 spatz_ops_relu.elf: $(SRCS) link.ld
 	$(CC) $(CFLAGS) -DSPATZ_OP_TEST_ID=2 $(SRCS) -o $@
