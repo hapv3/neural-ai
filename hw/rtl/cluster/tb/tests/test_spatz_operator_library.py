@@ -838,7 +838,7 @@ async def test_spatz_op_copy_batch(dut):
             return sum(read_tcdm_byte(dut, address + byte) << (8 * byte) for byte in range(4))
 
         rows = []
-        for trial in range(12):
+        for trial in range(20):
             legacy, batch, size = (word(0x10130000 + trial * 12 + offset) for offset in (0, 4, 8))
             assert legacy > 0 and batch > 0 and size > 0
             rows.append((trial, size, legacy, batch))
@@ -853,8 +853,8 @@ async def test_spatz_op_copy_batch(dut):
             writer.writerows(rows)
 
     await run_firmware_case(
-        dut, "spatz_ops_copy_batch.elf", "test_spatz_op_copy_batch", 12,
-        check_timings, timeout_cycles=3000000,
+        dut, "spatz_ops_copy_batch.elf", "test_spatz_op_copy_batch", 20,
+        check_timings, timeout_cycles=8000000,
     )
 
 
