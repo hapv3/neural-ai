@@ -20,9 +20,10 @@ package npu_cluster_pkg;
     //---------------------------------------------------------
     // TCDM Configuration (512KB Total)
     //---------------------------------------------------------
-    localparam int unsigned TCDM_BANK_SIZE = 32 * 1024; // 32 KB
-    localparam int unsigned I_TCDM_NUM_BANKS = 12; // 384 KB
-    localparam int unsigned O_TCDM_NUM_BANKS = 4;  // 128 KB
+    localparam int unsigned TCDM_DATA_WIDTH = 32;
+    localparam int unsigned TCDM_BANK_SIZE = 8 * 1024;
+    localparam int unsigned I_TCDM_NUM_BANKS = 48; // 384 KiB, logical window unchanged
+    localparam int unsigned O_TCDM_NUM_BANKS = 16; // 128 KiB, logical window unchanged
     localparam int unsigned TCDM_NUM_BANKS = I_TCDM_NUM_BANKS + O_TCDM_NUM_BANKS;
     localparam int unsigned TCDM_TOTAL_SIZE = TCDM_NUM_BANKS * TCDM_BANK_SIZE;
 
@@ -80,5 +81,18 @@ package npu_cluster_pkg;
         logic                      rvalid;
         logic [OBI_DATA_WIDTH-1:0] rdata;
     } obi_rsp_t;
+
+    typedef struct packed {
+        logic req;
+        logic we;
+        logic [TCDM_DATA_WIDTH/8-1:0] be;
+        logic [OBI_ADDR_WIDTH-1:0] addr;
+        logic [TCDM_DATA_WIDTH-1:0] wdata;
+    } tcdm_bank_req_t;
+    typedef struct packed {
+        logic gnt;
+        logic rvalid;
+        logic [TCDM_DATA_WIDTH-1:0] rdata;
+    } tcdm_bank_rsp_t;
 
 endpackage

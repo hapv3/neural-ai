@@ -48,6 +48,7 @@ DFL_ROW32_SRC = 0x10155000
 DFL_ROW32_DST = 0x10156000
 DFL_EXP_LUT32 = 0x10157000
 DFL_RECIP_LUT = 0x10158000
+DFL16_PACK_DST = 0x10151000
 CLASS_ROW32_SRC = 0x10159000
 CLASS_DST = 0x1015A000
 GAP_SRC = 0x1015B000
@@ -321,6 +322,21 @@ def check_status(dut, expected_pass_count):
         f"rfifo_cnt={rfifo_cnt} wfifo_cnt={wfifo_cnt}"
     )
     assert read_dtcm_word(dut, DTCM_PASS_COUNT) == expected_pass_count
+
+
+def check_dfl16_pack(dut):
+    # Firmware runs full C32 (32 records) followed by a five-record tail.
+    # Lower channels outside the tail must retain the full-call result;
+    # upper 16 channels must retain the sentinel in both calls.
+    for record in range(32):
+        for channel in range(32):
+            expected = ((record * 29 + channel * 13 + (7 if record < 5 else 0)) & 0xFF
+                        if channel < 16 else 0x5A)
+            index = record * 32 + channel
+            got = read_tcdm_byte(dut, DFL16_PACK_DST + index)
+            assert got == expected, (
+                f"dfl16_pack[{record},{channel}] got={got:#04x} expected={expected:#04x}"
+            )
 
 
 def check_copy(dut):
@@ -1029,7 +1045,7 @@ async def test_spatz_op_dfl16_pack(dut):
         "spatz_ops_dfl16_pack.bin",
         "test_spatz_op_dfl16_pack",
         1,
-        lambda _dut: None,
+        check_dfl16_pack,
     )
 
 

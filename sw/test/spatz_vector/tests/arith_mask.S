@@ -1,6 +1,11 @@
+#ifndef SPATZ_MASK_TEST
+#define SPATZ_MASK_TEST 1
+#endif
     .option norvc
-    # Scenario: RVV arithmetic, compare, mask, and merge regression.
-    # Target: signed multiply/min/max/shift-right plus vmslt/vmerge behavior.
+    # Scenario: RVV arithmetic and masked-add regression.
+    # Target: signed multiply/min/max/shift-right plus memory-seeded masking.
+    # VMERGE is not forwarded and integer mask comparisons are not computed
+    # by this pinned core. Do not confuse decode entries with execution support.
     # Outputs are stored to TCDM and verified by scalar golden code.
 
     .equ SIG_BASE,        0x10008000
@@ -19,7 +24,8 @@
     .equ DST_MIN,         0x10102300
     .equ DST_MAX,         0x10102400
     .equ DST_SRA,         0x10102500
-    .equ DST_MERGE,       0x10102600
+    .equ DST_MASK,        0x10102600
+    .equ MASK_SRC,        0x10102700
     .equ VL,              16
 
     .section .text.init
@@ -57,8 +63,26 @@ _start:
     li t3, VL
     blt t0, t3, 1b
 
+#if SPATZ_MASK_TEST
+    # Load an architectural packed mask: even elements enabled, odd disabled.
+    # Keep this independent of the unsupported integer comparison operations.
+    li a0, MASK_SRC
+    li t0, 0
+seed_mask:
+    sw zero, 0(a0)
+    addi a0, a0, 4
+    addi t0, t0, 1
+    li t1, 16
+    blt t0, t1, seed_mask
+    li a0, MASK_SRC
+    li t0, 0x5555
+    sw t0, 0(a0)
+    li t0, 64
+    vsetvli t1, t0, e8, m1, tu, mu
+    vle8.v v0, (a0)
+#endif
     li t0, VL
-    vsetvli t1, t0, e32, m1, ta, ma
+    vsetvli t1, t0, e32, m1, tu, mu
     li a0, SRC_A
     vle32.v v1, (a0)
     li a0, SRC_B
@@ -101,15 +125,19 @@ _start:
     jal ra, verify_sra
     jal ra, mark_pass
 
-    vmslt.vv v0, v1, v2
-    vmerge.vvm v3, v1, v2, v0
-    li a0, DST_MERGE
+#if SPATZ_MASK_TEST
+    # Initialize from a, then update even lanes from b using the seeded mask.
+    # Mask-undisturbed keeps the initialized value in unselected lanes.
+    vadd.vi v3, v1, 0
+    vadd.vi v3, v2, 0, v0.t
+    li a0, DST_MASK
     vse32.v v3, (a0)
     fence
-    li a0, DST_MERGE
+    li a0, DST_MASK
     li a1, 5
-    jal ra, verify_max
+    jal ra, verify_mask
     jal ra, mark_pass
+#endif
 
     li t0, 0xdeadbeef
     li t1, SIG_STATUS
@@ -137,6 +165,8 @@ value_b:
     ret
 
 verify_mul:
+    addi sp, sp, -16
+    sw ra, 12(sp)
     li t0, 0
 1:
     lw t3, 0(a0)
@@ -150,9 +180,13 @@ verify_mul:
     addi t0, t0, 1
     li t5, VL
     blt t0, t5, 1b
+    lw ra, 12(sp)
+    addi sp, sp, 16
     ret
 
 verify_min:
+    addi sp, sp, -16
+    sw ra, 12(sp)
     li t0, 0
 1:
     lw t3, 0(a0)
@@ -171,9 +205,13 @@ verify_min:
     addi t0, t0, 1
     li t5, VL
     blt t0, t5, 1b
+    lw ra, 12(sp)
+    addi sp, sp, 16
     ret
 
 verify_max:
+    addi sp, sp, -16
+    sw ra, 12(sp)
     li t0, 0
 1:
     lw t3, 0(a0)
@@ -192,9 +230,36 @@ verify_max:
     addi t0, t0, 1
     li t5, VL
     blt t0, t5, 1b
+    lw ra, 12(sp)
+    addi sp, sp, 16
+    ret
+
+verify_mask:
+    addi sp, sp, -16
+    sw ra, 12(sp)
+    li t0, 0
+1:
+    lw t3, 0(a0)
+    jal ra, value_a
+    jal ra, value_b
+    andi t4, t0, 1
+    bnez t4, 2f
+    mv t1, t2
+2:
+    mv t2, t1
+    mv t1, t3
+    bne t1, t2, fail
+    addi a0, a0, 4
+    addi t0, t0, 1
+    li t5, VL
+    blt t0, t5, 1b
+    lw ra, 12(sp)
+    addi sp, sp, 16
     ret
 
 verify_sra:
+    addi sp, sp, -16
+    sw ra, 12(sp)
     li t0, 0
 1:
     lw t3, 0(a0)
@@ -207,6 +272,8 @@ verify_sra:
     addi t0, t0, 1
     li t5, VL
     blt t0, t5, 1b
+    lw ra, 12(sp)
+    addi sp, sp, 16
     ret
 
 fail:

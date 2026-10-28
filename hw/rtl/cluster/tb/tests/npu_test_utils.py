@@ -759,10 +759,18 @@ async def read_l2_bytes(dut, base_addr, length):
     return data
 
 
+def tcdm_geometry(dut):
+    """Discover physical banking; snapshots remain logical 512-KiB byte images."""
+    banks = dut.u_npu_cluster.gen_sram_banks
+    memory = banks[0].u_sram_bank.mem
+    return len(banks), len(memory), len(memory[0].value) // 8
+
+
 def read_tcdm_byte(dut, addr):
-    bank_idx = (addr >> 5) % TCDM_NUM_BANKS
-    word_index = ((addr >> 5) // TCDM_NUM_BANKS) & (TCDM_BANK_WORDS - 1)
-    bit_offset = (addr % TCDM_WORD_BYTES) * 8
+    bank_count, word_count, word_bytes = tcdm_geometry(dut)
+    bank_idx = (addr // word_bytes) % bank_count
+    word_index = ((addr // word_bytes) // bank_count) % word_count
+    bit_offset = (addr % word_bytes) * 8
     val_256 = dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem[word_index].value
     if not val_256.is_resolvable:
         return 0
@@ -778,36 +786,39 @@ def read_tcdm_word32(dut, addr):
 
 def read_tcdm_bytes(dut):
     """Read the complete interleaved TCDM image in logical address order."""
-    data = bytearray(TCDM_TOTAL_BYTES)
-    for bank_idx in range(TCDM_NUM_BANKS):
+    bank_count, word_count, word_bytes = tcdm_geometry(dut)
+    data = bytearray(bank_count * word_count * word_bytes)
+    for bank_idx in range(bank_count):
         memory = dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem
-        for word_index in range(TCDM_BANK_WORDS):
+        for word_index in range(word_count):
             value = memory[word_index].value
             if not value.is_resolvable:
                 raise AssertionError(
                     f"unresolved TCDM word bank={bank_idx} word={word_index}"
                 )
-            logical_word = word_index * TCDM_NUM_BANKS + bank_idx
-            offset = logical_word * TCDM_WORD_BYTES
-            data[offset : offset + TCDM_WORD_BYTES] = value.to_unsigned().to_bytes(
-                TCDM_WORD_BYTES, "little"
+            logical_word = word_index * bank_count + bank_idx
+            offset = logical_word * word_bytes
+            data[offset : offset + word_bytes] = value.to_unsigned().to_bytes(
+                word_bytes, "little"
             )
     return bytes(data)
 
 
 def write_tcdm_bytes(dut, data):
     """Restore a complete logical-address TCDM image through VPI deposits."""
-    if len(data) != TCDM_TOTAL_BYTES:
+    bank_count, word_count, word_bytes = tcdm_geometry(dut)
+    total_bytes = bank_count * word_count * word_bytes
+    if len(data) != total_bytes:
         raise ValueError(
-            f"TCDM snapshot has {len(data)} bytes, expected {TCDM_TOTAL_BYTES}"
+            f"TCDM snapshot has {len(data)} bytes, expected {total_bytes}"
         )
-    for bank_idx in range(TCDM_NUM_BANKS):
+    for bank_idx in range(bank_count):
         memory = dut.u_npu_cluster.gen_sram_banks[bank_idx].u_sram_bank.mem
-        for word_index in range(TCDM_BANK_WORDS):
-            logical_word = word_index * TCDM_NUM_BANKS + bank_idx
-            offset = logical_word * TCDM_WORD_BYTES
+        for word_index in range(word_count):
+            logical_word = word_index * bank_count + bank_idx
+            offset = logical_word * word_bytes
             memory[word_index].value = int.from_bytes(
-                data[offset : offset + TCDM_WORD_BYTES], "little"
+                data[offset : offset + word_bytes], "little"
             )
 
 

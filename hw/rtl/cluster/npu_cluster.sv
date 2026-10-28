@@ -414,15 +414,6 @@ module npu_cluster #(
     logic                      ddata_rvalid;
     logic [SNITCH_D_DATA_WIDTH-1:0] ddata_rdata;
 
-    logic                      ddata_wide_req;
-    logic                      ddata_wide_gnt;
-    logic [OBI_ADDR_WIDTH-1:0] ddata_wide_addr;
-    logic                      ddata_wide_we;
-    logic [(OBI_DATA_WIDTH/8)-1:0] ddata_wide_be;
-    logic [OBI_DATA_WIDTH-1:0] ddata_wide_wdata;
-    logic                      ddata_wide_rvalid;
-    logic [OBI_DATA_WIDTH-1:0] ddata_wide_rdata;
-
     logic                      reg_req;
     logic                      reg_gnt;
     logic [OBI_ADDR_WIDTH-1:0] reg_addr;
@@ -567,32 +558,6 @@ module npu_cluster #(
         .m3_wdata_o   (),
         .m3_rvalid_i  (1'b1),
         .m3_rdata_i   ('0)
-    );
-
-    obi_narrow_to_wide #(
-        .ADDR_WIDTH(OBI_ADDR_WIDTH),
-        .M_DATA_WIDTH(SNITCH_D_DATA_WIDTH),
-        .S_DATA_WIDTH(OBI_DATA_WIDTH)
-    ) u_ddata_narrow_to_wide (
-        .clk_i       (clk_i),
-        .rst_ni      (rst_ni),
-        .mst_req_i   (ddata_req),
-        .mst_gnt_o   (ddata_gnt),
-        .mst_addr_i  (ddata_addr),
-        .mst_we_i    (ddata_we),
-        .mst_be_i    (ddata_be),
-        .mst_wdata_i (ddata_wdata),
-        .mst_rvalid_o(ddata_rvalid),
-        .mst_rdata_o (ddata_rdata),
-
-        .slv_req_o   (ddata_wide_req),
-        .slv_gnt_i   (ddata_wide_gnt),
-        .slv_addr_o  (ddata_wide_addr),
-        .slv_we_o    (ddata_wide_we),
-        .slv_be_o    (ddata_wide_be),
-        .slv_wdata_o (ddata_wide_wdata),
-        .slv_rvalid_i(ddata_wide_rvalid),
-        .slv_rdata_i (ddata_wide_rdata)
     );
 
     // D-TCM SRAM Bank (32 KB — matches link.ld)
@@ -809,9 +774,17 @@ module npu_cluster #(
     );
 
     //=========================================================
-    // 5. Shared Data TCDM Interconnect (14 Masters)
+    // 5. Native mixed-width TCDM: 20 masters, 64 independent 32-bit banks.
     //=========================================================
-    localparam int unsigned NUM_MASTERS = 14;
+    localparam int unsigned NUM_MASTERS = 20;
+    localparam int unsigned SPATZ_MEM_PORTS = 8;
+    function automatic int spatz_master_index(input int port_index);
+        return port_index == 0 ? 1 : port_index == 1 ? 8 : port_index + 12;
+    endfunction
+    // Ports 0,1,8,14..19 are native 32-bit. Padding in these packed routing
+    // arrays is wiring only: no upsizer, lane shifting, or transaction adapter.
+    localparam int unsigned MASTER_WIDTHS [NUM_MASTERS] =
+        '{32,32,256,256,256,256,256,256,32,256,256,256,256,256,32,32,32,32,32,32};
     // Master 0: Snitch D-Bus
     // Master 1: Spatz Vector Engine (VLSU port 0)
     // Master 2: PULP iDMA AXI2OBI write port
@@ -830,8 +803,8 @@ module npu_cluster #(
     obi_req_t [NUM_MASTERS-1:0] master_req;
     obi_rsp_t [NUM_MASTERS-1:0] master_rsp;
 
-    obi_req_t [TCDM_NUM_BANKS-1:0] slave_req;
-    obi_rsp_t [TCDM_NUM_BANKS-1:0] slave_rsp;
+    tcdm_bank_req_t [TCDM_NUM_BANKS-1:0] slave_req;
+    tcdm_bank_rsp_t [TCDM_NUM_BANKS-1:0] slave_rsp;
 
     logic [NUM_MASTERS-1:0]                      mst_req, mst_we, mst_gnt, mst_rvalid;
     logic [NUM_MASTERS-1:0][OBI_ADDR_WIDTH-1:0]  mst_addr;
@@ -840,8 +813,8 @@ module npu_cluster #(
 
     logic [TCDM_NUM_BANKS-1:0]                   slv_req, slv_we;
     logic [TCDM_NUM_BANKS-1:0][OBI_ADDR_WIDTH-1:0] slv_addr;
-    logic [TCDM_NUM_BANKS-1:0][(OBI_DATA_WIDTH/8)-1:0] slv_be;
-    logic [TCDM_NUM_BANKS-1:0][OBI_DATA_WIDTH-1:0] slv_wdata, slv_rdata;
+    logic [TCDM_NUM_BANKS-1:0][(TCDM_DATA_WIDTH/8)-1:0] slv_be;
+    logic [TCDM_NUM_BANKS-1:0][TCDM_DATA_WIDTH-1:0] slv_wdata, slv_rdata;
     logic [TCDM_NUM_BANKS-1:0]                   tcdm_bank_conflict;
 
     for (genvar m = 0; m < NUM_MASTERS; m++) begin
@@ -859,26 +832,24 @@ module npu_cluster #(
     for (genvar b = 0; b < TCDM_NUM_BANKS; b++) begin
         assign slave_req[b].req   = slv_req[b];
         assign slave_req[b].we    = slv_we[b];
-        // tcdm_interconnect already computes the de-interleaved address:
-        //   bank_addr_o = ((addr >> BYTE_SEL) / NUM_BANKS) << BYTE_SEL
-        // This gives a byte-address within the bank. cluster_sram_bank
-        // indexes with addr_i[ADDR_BITS-1:0], so we just need to convert
-        // the byte-address to a word-address by shifting right by BYTE_SEL (5).
-        assign slave_req[b].addr  = slv_addr[b] >> 5;
+        // Router returns a de-interleaved byte address within a 32-bit bank.
+        assign slave_req[b].addr  = slv_addr[b] >> $clog2(TCDM_DATA_WIDTH/8);
         assign slave_req[b].be    = slv_be[b];
         assign slave_req[b].wdata = slv_wdata[b];
         
         assign slv_rdata[b] = slave_rsp[b].rdata;
     end
 
-    tcdm_interconnect #(
+    mixed_tcdm_interconnect #(
         .NUM_MASTERS(NUM_MASTERS),
         .NUM_BANKS(TCDM_NUM_BANKS),
         .ADDR_WIDTH(OBI_ADDR_WIDTH),
         .DATA_WIDTH(OBI_DATA_WIDTH),
-        .HWPE_MASTER_MASK(14'h3DFA), // M1, M3-M8, M10-M13: Spatz + Systolic + AFU
-        .DMA_MASTER_MASK (14'h0204), // M2, M9: iDMA local write/read ports
-        .CORE_MASTER_MASK(14'h0001)  // M0: Snitch D-Bus
+        .BANK_DATA_WIDTH(TCDM_DATA_WIDTH),
+        .MASTER_DATA_WIDTH(MASTER_WIDTHS),
+        .HWPE_MASTER_MASK(20'hFFDFA),
+        .DMA_MASTER_MASK (20'h00204),
+        .CORE_MASTER_MASK(20'h00001)
     ) u_tcdm_interconnect (
         .clk_i            (clk_i),
         .rst_ni           (rst_ni),
@@ -899,10 +870,10 @@ module npu_cluster #(
         .perf_bank_conflict_o(tcdm_bank_conflict)
     );
 
-    // Shared Data TCDM SRAM Banks (16 x 32KB = 512KB)
+    // Shared TCDM SRAM: 64 x 8 KiB, 32-bit single read/write port per bank.
     for (genvar i = 0; i < TCDM_NUM_BANKS; i++) begin : gen_sram_banks
         cluster_sram_bank #(
-            .DATA_WIDTH(OBI_DATA_WIDTH),
+            .DATA_WIDTH(TCDM_DATA_WIDTH),
             .SIZE_BYTES(TCDM_BANK_SIZE)
         ) u_sram_bank (
             .clk_i   (clk_i),
@@ -919,18 +890,18 @@ module npu_cluster #(
     end
 
     // Master 0: Snitch D-Bus
-    assign master_req[0].req   = ddata_wide_req;
-    assign master_req[0].we    = ddata_wide_we;
-    assign master_req[0].be    = ddata_wide_be;
-    assign master_req[0].addr  = ddata_wide_addr;
-    assign master_req[0].wdata = ddata_wide_wdata;
+    assign master_req[0].req   = ddata_req;
+    assign master_req[0].we    = ddata_we;
+    assign master_req[0].be    = {{(OBI_STRB_WIDTH-SNITCH_D_DATA_WIDTH/8){1'b0}}, ddata_be};
+    assign master_req[0].addr  = ddata_addr;
+    assign master_req[0].wdata = {{(OBI_DATA_WIDTH-SNITCH_D_DATA_WIDTH){1'b0}}, ddata_wdata};
     
-    assign ddata_wide_gnt    = master_rsp[0].gnt;
-    assign ddata_wide_rvalid = master_rsp[0].rvalid;
-    assign ddata_wide_rdata  = master_rsp[0].rdata;
+    assign ddata_gnt    = master_rsp[0].gnt;
+    assign ddata_rvalid = master_rsp[0].rvalid;
+    assign ddata_rdata  = master_rsp[0].rdata[SNITCH_D_DATA_WIDTH-1:0];
 
     //=========================================================
-    // 6a. Spatz Vector Engine + TCDM-to-OBI Bridge (Master 1)
+    // 6a. Spatz Vector Engine with eight native 32-bit TCDM ports
     //=========================================================
     // Spatz issue request matches Snitch's accelerator request channel.
     localparam type spatz_issue_req_t = `SNITCH_ACC_REQ_CHAN_STRUCT(64, OBI_ADDR_WIDTH);
@@ -956,8 +927,7 @@ module npu_cluster #(
         logic [31:0] data;
     } spatz_tcdm_rsp_chan_t;
 
-    // Spatz VLSU TCDM memory signals (2 ports for 2-lane INT-only config)
-    localparam int unsigned SPATZ_MEM_PORTS = 2;
+    // Each VLSU port directly addresses a 32-bit SRAM bank, without an upsizer.
     spatz_tcdm_req_chan_t [SPATZ_MEM_PORTS-1:0] spatz_mem_req;
     logic                 [SPATZ_MEM_PORTS-1:0] spatz_mem_req_valid;
     logic                 [SPATZ_MEM_PORTS-1:0] spatz_mem_req_ready;
@@ -1062,63 +1032,19 @@ module npu_cluster #(
     assign acc_pdata  = spatz_rsp.data;
     assign acc_perror = spatz_rsp.error;
 
-    // TCDM-to-OBI Bridges for Spatz VLSU → Masters 1 and 8
-    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_req;
-    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_gnt;
-    logic [SPATZ_MEM_PORTS-1:0][OBI_ADDR_WIDTH-1:0] spatz_obi_addr;
-    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_we;
-    logic [SPATZ_MEM_PORTS-1:0][31:0]               spatz_obi_be;
-    logic [SPATZ_MEM_PORTS-1:0][255:0]              spatz_obi_wdata;
-    logic [SPATZ_MEM_PORTS-1:0]                     spatz_obi_rvalid;
-    logic [SPATZ_MEM_PORTS-1:0][255:0]              spatz_obi_rdata;
-
-    for (genvar p = 0; p < SPATZ_MEM_PORTS; p++) begin : gen_spatz_tcdm_bridge
-        tcdm_to_obi_bridge #(
-            .ADDR_WIDTH(OBI_ADDR_WIDTH),
-            .DATA_WIDTH(32)  // Spatz ELEN=32 (INT-only)
-        ) u_spatz_tcdm_bridge (
-            .clk_i             (clk_i),
-            .rst_ni            (rst_ni),
-            .tcdm_req_addr_i   (spatz_mem_req[p].addr),
-            .tcdm_req_write_i  (spatz_mem_req[p].write),
-            .tcdm_req_data_i   (spatz_mem_req[p].data),
-            .tcdm_req_strb_i   (spatz_mem_req[p].strb),
-            .tcdm_req_valid_i  (spatz_mem_req_valid[p]),
-            .tcdm_req_ready_o  (spatz_mem_req_ready[p]),
-            .tcdm_rsp_data_o   (spatz_mem_rsp[p].data),
-            .tcdm_rsp_valid_o  (spatz_mem_rsp_valid[p]),
-            .obi_req_o         (spatz_obi_req[p]),
-            .obi_gnt_i         (spatz_obi_gnt[p]),
-            .obi_addr_o        (spatz_obi_addr[p]),
-            .obi_we_o          (spatz_obi_we[p]),
-            .obi_be_o          (spatz_obi_be[p]),
-            .obi_wdata_o       (spatz_obi_wdata[p]),
-            .obi_rvalid_i      (spatz_obi_rvalid[p]),
-            .obi_rdata_i       (spatz_obi_rdata[p])
-        );
+    // Native 32-bit request/response channels, one request per cycle per port.
+    // No TCDM-to-OBI bridge, width upsizer, or artificial WAIT_RVALID bubble.
+    for (genvar p = 0; p < SPATZ_MEM_PORTS; p++) begin : gen_spatz_native_port
+        localparam int M = spatz_master_index(p);
+        assign master_req[M].req = spatz_mem_req_valid[p];
+        assign master_req[M].we = spatz_mem_req[p].write;
+        assign master_req[M].addr = spatz_mem_req[p].addr;
+        assign master_req[M].be = {{(OBI_STRB_WIDTH-4){1'b0}}, spatz_mem_req[p].strb};
+        assign master_req[M].wdata = {{(OBI_DATA_WIDTH-32){1'b0}}, spatz_mem_req[p].data};
+        assign spatz_mem_req_ready[p] = master_rsp[M].gnt;
+        assign spatz_mem_rsp_valid[p] = master_rsp[M].rvalid;
+        assign spatz_mem_rsp[p].data = master_rsp[M].rdata[31:0];
     end
-
-    // Master 1: Spatz VLSU port 0 via TCDM-to-OBI Bridge
-    assign master_req[1].req   = spatz_obi_req[0];
-    assign master_req[1].we    = spatz_obi_we[0];
-    assign master_req[1].be    = spatz_obi_be[0];
-    assign master_req[1].addr  = spatz_obi_addr[0];
-    assign master_req[1].wdata = spatz_obi_wdata[0];
-
-    assign spatz_obi_gnt[0]    = master_rsp[1].gnt;
-    assign spatz_obi_rvalid[0] = master_rsp[1].rvalid;
-    assign spatz_obi_rdata[0]  = master_rsp[1].rdata;
-
-    // Master 8: Spatz VLSU port 1 via TCDM-to-OBI Bridge
-    assign master_req[8].req   = spatz_obi_req[1];
-    assign master_req[8].we    = spatz_obi_we[1];
-    assign master_req[8].be    = spatz_obi_be[1];
-    assign master_req[8].addr  = spatz_obi_addr[1];
-    assign master_req[8].wdata = spatz_obi_wdata[1];
-
-    assign spatz_obi_gnt[1]    = master_rsp[8].gnt;
-    assign spatz_obi_rvalid[1] = master_rsp[8].rvalid;
-    assign spatz_obi_rdata[1]  = master_rsp[8].rdata;
 
     // Masters 2/9: PULP iDMA MMIO frontend + AXI/OBI backends
     logic                      idma_obi_read_req;
@@ -1550,8 +1476,8 @@ module npu_cluster #(
     always_comb begin
         pmu_master_selected = '0;
         pmu_master_selected[0] = pmu_current_selected;
-        pmu_master_selected[1] = pmu_spatz_selected;
-        pmu_master_selected[8] = pmu_spatz_selected;
+        for (int p = 0; p < SPATZ_MEM_PORTS; p++)
+            pmu_master_selected[spatz_master_index(p)] = pmu_spatz_selected;
         pmu_master_selected[2] = pmu_dma_a2o_selected;
         pmu_master_selected[9] = pmu_dma_o2a_selected;
         pmu_master_selected[3] = pmu_sys_selected;
@@ -1684,10 +1610,11 @@ module npu_cluster #(
         pmu_event_inc[6] = PMU_INC_WIDTH'(master_req[0].req && !master_rsp[0].gnt && pmu_current_selected);
         pmu_event_inc[7] = PMU_INC_WIDTH'(acc_qvalid && acc_qready && pmu_current_selected);
         pmu_event_inc[8] = PMU_INC_WIDTH'(acc_pvalid && acc_pready && pmu_spatz_selected);
-        pmu_event_inc[9] = PMU_INC_WIDTH'(master_req[1].req && pmu_spatz_selected) +
-                           PMU_INC_WIDTH'(master_req[8].req && pmu_spatz_selected);
-        pmu_event_inc[10] = PMU_INC_WIDTH'(master_req[1].req && !master_rsp[1].gnt && pmu_spatz_selected) +
-                            PMU_INC_WIDTH'(master_req[8].req && !master_rsp[8].gnt && pmu_spatz_selected);
+        for (int p = 0; p < SPATZ_MEM_PORTS; p++) begin
+            pmu_event_inc[9] += PMU_INC_WIDTH'(master_req[spatz_master_index(p)].req && pmu_spatz_selected);
+            pmu_event_inc[10] += PMU_INC_WIDTH'(master_req[spatz_master_index(p)].req &&
+                !master_rsp[spatz_master_index(p)].gnt && pmu_spatz_selected);
+        end
         pmu_event_inc[11] = PMU_INC_WIDTH'((idma_irq_a2o_busy && pmu_dma_a2o_selected) ||
                                            (idma_irq_o2a_busy && pmu_dma_o2a_selected));
         pmu_event_inc[12] = PMU_INC_WIDTH'(idma_irq_a2o_start && pmu_current_selected) +
@@ -1819,10 +1746,12 @@ module npu_cluster #(
         pmu_event_inc[112] = PMU_INC_WIDTH'(pmu_spatz_tag_valid_q && pmu_spatz_selected);
         pmu_event_inc[113] = PMU_INC_WIDTH'(acc_qvalid && acc_qready && pmu_current_selected);
         pmu_event_inc[114] = PMU_INC_WIDTH'(acc_pvalid && acc_pready && pmu_spatz_selected);
-        pmu_event_inc[115] = PMU_INC_WIDTH'((master_req[1].req && master_rsp[1].gnt && pmu_spatz_selected) +
-                                            (master_req[8].req && master_rsp[8].gnt && pmu_spatz_selected));
-        pmu_event_inc[116] = PMU_INC_WIDTH'((master_req[1].req && !master_rsp[1].gnt && pmu_spatz_selected) +
-                                            (master_req[8].req && !master_rsp[8].gnt && pmu_spatz_selected));
+        for (int p = 0; p < SPATZ_MEM_PORTS; p++) begin
+            pmu_event_inc[115] += PMU_INC_WIDTH'(master_req[spatz_master_index(p)].req &&
+                master_rsp[spatz_master_index(p)].gnt && pmu_spatz_selected);
+            pmu_event_inc[116] += PMU_INC_WIDTH'(master_req[spatz_master_index(p)].req &&
+                !master_rsp[spatz_master_index(p)].gnt && pmu_spatz_selected);
+        end
         for (int mst = 0; mst < NUM_MASTERS; mst++) begin
             pmu_event_inc[117] += PMU_INC_WIDTH'(master_req[mst].req && master_rsp[mst].gnt && pmu_master_selected[mst]);
             pmu_event_inc[118] += PMU_INC_WIDTH'(master_req[mst].req && !master_rsp[mst].gnt && pmu_master_selected[mst]);

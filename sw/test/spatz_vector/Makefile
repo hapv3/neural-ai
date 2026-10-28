@@ -11,13 +11,16 @@ CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -O2 -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib \
          -T link.ld -Wl,--no-relax
 
-TESTS = basic_mem_arith memory_width arith_mask reduction strided_indexed
+TESTS = basic_mem_arith memory_width arith_basic arith_mask reduction strided_indexed eight_port_lmul
 
 .SECONDARY: $(addsuffix .elf,$(TESTS))
 
 all: $(addsuffix .bin,$(TESTS)) $(addsuffix .hex,$(TESTS))
 
 %.elf: tests/%.S link.ld
+	$(CC) $(CFLAGS) $< -o $@
+
+arith_basic.elf: tests/arith_basic.S tests/arith_mask.S link.ld
 	$(CC) $(CFLAGS) $< -o $@
 
 %.bin: %.elf

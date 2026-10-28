@@ -146,6 +146,7 @@ $(REPO_ROOT)/hw/rtl/afu/afu_binary_requant_pipeline.sv
 $(REPO_ROOT)/hw/rtl/afu/afu_binary_requant_engine.sv
 $(REPO_ROOT)/hw/rtl/afu/afu.sv
 $(REPO_ROOT)/hw/rtl/interconnect/tcdm_interconnect.sv
+$(REPO_ROOT)/hw/rtl/interconnect/mixed_tcdm_interconnect.sv
 $(REPO_ROOT)/hw/rtl/systolic/requant_pipeline.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_output_postprocess.sv
 $(REPO_ROOT)/hw/rtl/systolic/systolic_output_drain.sv

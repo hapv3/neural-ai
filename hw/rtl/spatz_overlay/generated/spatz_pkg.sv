@@ -17,9 +17,8 @@ package spatz_pkg;
   //////////////////
 
   // Number of IPUs in each VFU (between 1 and 8)
-  // Keep two INT lanes: current Spatz RTL uses $clog2(N_FU/NrMemPorts)
-  // in VLSU paths and does not elaborate cleanly with a single FU/port.
-  localparam int unsigned N_IPU = 2;
+  // Standard VLSU requires NrMemPorts == N_FU: eight native 32-bit ports.
+  localparam int unsigned N_IPU = 8;
   // Number of FPUs in each VFU (between 1 and 8)
   localparam int unsigned N_FPU = 0;  // Disabled for INT8 NPU (no FP needed)
   // Number of FUs in each VFU
