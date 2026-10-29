@@ -49,7 +49,7 @@ static uint32_t runtime_dma_1d_mode(void *context, uint32_t source,
     else if (direction == IDMA_DIR_L1_TO_L2)
         transfer_id = idma_L1ToL2(source, destination, length);
     else if (direction == 2u) {
-        spatz_vec_copy_i8((const int8_t *)(unsigned long)source,
+        spatz_copy_1d_i8((const int8_t *)(unsigned long)source,
                           (int8_t *)(unsigned long)destination, length);
         return 0u;
     } else return 1u;

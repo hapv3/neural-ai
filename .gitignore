@@ -58,6 +58,7 @@ hw/rtl/systolic/tb/refactor_traces/
 /sw/test/compiler_runtime/test_cmd_v2_pmu
 /sw/test/compiler_runtime/test_dma_async_state
 /sw/test/compiler_runtime/test_spatz_copy
+/sw/test/compiler_runtime/test_stream_prefetch
 
 # Local-only refactor gate runner
 /hw/rtl/systolic/run_refactor_gates.sh

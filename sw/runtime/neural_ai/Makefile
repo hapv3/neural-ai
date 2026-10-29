@@ -7,11 +7,13 @@ OBJCOPY = $(LLVM_BIN)/llvm-objcopy
 HEXOBJCOPY = $(GCC_BIN)/riscv32-unknown-elf-objcopy
 SIZE = $(LLVM_BIN)/llvm-size
 NAI_PMU_PROFILE ?= 1
+NAI_COMMAND_PREFETCH ?= 1
 
 CFLAGS = --target=riscv32-unknown-elf -march=rv32im_zve32x -mabi=ilp32 \
          -Os -fno-builtin -fno-jump-tables -ffunction-sections -fdata-sections \
          -mno-relax -fuse-ld=lld -nodefaultlibs -nostdlib -I../../lib -T link.ld \
-         -Wl,--no-relax -Wl,--gc-sections -DNAI_TRUSTED_FIRMWARE=1
+         -Wl,--no-relax -Wl,--gc-sections -DNAI_TRUSTED_FIRMWARE=1 \
+         -DNAI_COMMAND_PREFETCH=$(NAI_COMMAND_PREFETCH)
 
 ifeq ($(NAI_PMU_PROFILE),1)
 CFLAGS += -DNAI_PMU_PROFILE=1
@@ -32,7 +34,7 @@ HDRS = ../../lib/npu_cmd_desc.h ../../lib/npu_cmd_desc_v2.h \
        ../../lib/npu_quant_buffer.h ../../lib/npu_dma_async_state.h \
        ../../lib/npu_runtime_ops.h ../../lib/npu_memory_map.h \
        ../../lib/npu_types.h ../../lib/idma_mm_utils.h ../../lib/hal_systolic.h \
-       ../../lib/spatz_ops.h ../../lib/spatz_copy.h
+       ../../lib/spatz_ops.h ../../lib/spatz_copy.h ../../lib/npu_stream_prefetch.h
 
 .PHONY: all size clean
 

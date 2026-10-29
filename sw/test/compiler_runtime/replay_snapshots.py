@@ -80,7 +80,10 @@ def save_intermediate_snapshot(case_path, case, model, report, planned, boundary
                     case=dict(path=str(case_path), sha256=hashlib.sha256(case_path.read_bytes()).hexdigest()),
                     integrity='VERIFIED', capture='Clock paused; TCDM plus L2 temporary and output',
                     register_state='Not saved; resume needs self-configuring commands or validated configuration restore',
-                    async_queues='Drained according to command ABI', observations=verdict,
+                    async_queues='Model-command queues drained according to command ABI; '
+                                 'private command-reader jobs are outside this guarantee',
+                    reader_state='Not saved; reset/re-entry discards and rebuilds private '
+                                 'command prefetch in unallocated scratch', observations=verdict,
                     memory_bytes=dict(tcdm=len(tcdm), temporary=len(temporary), output=len(output)))
     metadata.update({key: case[key] for key in ('model', 'source', 'firmware', 'input', 'reference_build')})
     metadata['comparison_evidence'] = sorted(

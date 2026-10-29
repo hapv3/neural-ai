@@ -1,4 +1,5 @@
 #include "npu_cmd_desc_v2.h"
+#include "npu_stream_prefetch.h"
 
 /* Simulation diagnostics: descriptors no longer always start at buffer[0]. */
 const nai_cmd_header_v2_t *volatile g_nai_current_command;
@@ -1296,9 +1297,7 @@ static uint32_t refill_command_window(const nai_model_reader_v1_t *reader,
     if (required > capacity || required > remaining) return 0u;
     if (*buffered_bytes >= required) return 1u;
     if (*cursor != 0u) {
-        volatile uint8_t *bytes = buffer;
-        for (uint32_t index = 0u; index < *buffered_bytes; index++)
-            bytes[index] = bytes[*cursor + index];
+        nai_stream_copy(buffer, buffer + *cursor, *buffered_bytes);
         *cursor = 0u;
     }
     uint32_t window = remaining < capacity ? remaining : capacity;

@@ -1,4 +1,5 @@
 #include "npu_cmd_desc_v2.h"
+#include "npu_stream_prefetch.h"
 
 #include <assert.h>
 #include <string.h>
@@ -11,12 +12,17 @@ static uint32_t g_expected_count;
 static uint32_t g_calls;
 static uint32_t g_begins;
 static uint32_t g_ends;
+static uint32_t s_prefetch_enabled;
+static uint8_t s_prefetch_scratch[8192];
+static uint32_t s_prefetch_id;
+static uint32_t s_prefetch_joins;
 
 typedef struct {
     uint32_t next;
     uint32_t end;
     uint32_t reads;
     uint32_t fail_read;
+    nai_stream_prefetch_t *prefetch;
 } reader_state_t;
 
 static uint32_t read_model(void *context, uint32_t offset, void *destination, uint32_t bytes)
@@ -25,9 +31,27 @@ static uint32_t read_model(void *context, uint32_t offset, void *destination, ui
     assert(offset == state->next); /* No reread/discard of a retained tail. */
     assert(bytes != 0 && bytes <= state->end - offset);
     if (++state->reads == state->fail_read) return 1;
-    memcpy(destination, g_model + offset, bytes);
+    if (state->prefetch != 0) {
+        if (nai_stream_prefetch_read(state->prefetch, offset, destination, bytes) != 0u) return 1u;
+    } else memcpy(destination, g_model + offset, bytes);
     state->next += bytes;
     return 0;
+}
+
+static uint32_t prefetch_submit(void *context, uint32_t source, void *destination, uint32_t bytes)
+{
+    (void)context;
+    assert(bytes <= 4096u - (source & 4095u));
+    memcpy(destination, g_model + source, bytes);
+    return ++s_prefetch_id;
+}
+
+static uint32_t prefetch_wait(void *context, uint32_t id)
+{
+    (void)context;
+    assert(id && id <= s_prefetch_id);
+    s_prefetch_joins++;
+    return 1u;
 }
 
 void nai_pmu_command_begin(uint32_t id)
@@ -122,7 +146,8 @@ static void run_window(uint32_t bytes, uint32_t capacity, uint32_t fail_read,
     nai_model_view_v1_t view = {0};
     nai_resolver_v1_t resolver = {0};
     nai_runtime_ops_v2_t ops = {0};
-    reader_state_t state = {32 + entry_skip, bytes, 0, fail_read};
+    reader_state_t state = {32 + entry_skip, bytes, 0, fail_read, 0};
+    nai_stream_prefetch_t prefetch = {0};
     nai_model_reader_v1_t reader = {&state, read_model};
     uint32_t completed = 0, failure = 0;
 
@@ -147,8 +172,17 @@ static void run_window(uint32_t bytes, uint32_t capacity, uint32_t fail_read,
     ops.barrier = barrier;
     ops.dma_1d = dma;
     g_calls = g_begins = g_ends = 0;
+    s_prefetch_id = s_prefetch_joins = 0;
+    if (s_prefetch_enabled) {
+        const nai_stream_prefetch_ops_t prefetch_ops = {0, prefetch_submit, prefetch_wait};
+        assert(nai_stream_prefetch_init(&prefetch, &prefetch_ops, 0,
+            32 + entry_skip, bytes, s_prefetch_scratch, 4096) == 0u);
+        state.prefetch = &prefetch;
+    }
     nai_dispatch_status_v2_t status = nai_cmd_dispatch_stream_v2(
         &view, &resolver, &ops, &reader, buffer, capacity, &completed, &failure);
+    assert(nai_stream_prefetch_finish(&prefetch) == 0u);
+    assert(s_prefetch_joins == s_prefetch_id);
     if (fail_read) {
         assert(status == NAI_DISPATCH_BAD_STREAM);
         assert(state.reads == fail_read);
@@ -172,6 +206,7 @@ static void run_window(uint32_t bytes, uint32_t capacity, uint32_t fail_read,
 
 int main(void)
 {
+    for (s_prefetch_enabled = 0; s_prefetch_enabled < 2; s_prefetch_enabled++) {
     uint32_t bytes = build_mixed();
     const uint32_t capacities[] = {96, 100, 112, 128, 160, 192, 224, 2048, 4096};
     for (uint32_t index = 0; index < sizeof(capacities) / sizeof(capacities[0]); index++)
@@ -194,5 +229,6 @@ int main(void)
     memmove(g_expected, g_expected + 1, 62 * sizeof(g_expected[0]));
     g_expected_count = 62;
     run_window(bytes, 2048, 0, 32, 62, 2016);
+    }
     return 0;
 }
