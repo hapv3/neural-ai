@@ -6,7 +6,7 @@ COCOTB_TESTCASE ?=
 
 .PHONY: all check check_cross_repo_abi check_firmware_loading firmware sim clean
 
-all: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy
+all: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy test_stream_prefetch
 
 test_model_abi: test_model_abi.c ../../lib/npu_model_abi.h ../../lib/npu_cmd_desc_v2.h ../../lib/npu_model_loader.h ../../lib/npu_model_loader.c ../../lib/npu_memory_map.h
 	$(CC) $(CFLAGS) -I../../lib test_model_abi.c ../../lib/npu_model_loader.c -o $@
@@ -21,6 +21,7 @@ check: all check_cross_repo_abi
 	./test_quant_buffer
 	./test_dma_async_state
 	./test_spatz_copy
+	./test_stream_prefetch
 
 check_cross_repo_abi:
 	NEURAL_COMPILER_ROOT="$(NEURAL_COMPILER_ROOT)" python3 ./check_cross_repo_abi.py
@@ -39,16 +40,16 @@ sim: firmware
 		CLUSTER_SIM_NAME=compiled_model \
 		SIM_BUILD="$(SIM_BUILD)"
 
-test_cmd_v2: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
+test_cmd_v2: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c ../../lib/npu_stream_prefetch.h
 	$(CC) $(CFLAGS) -I../../lib test_cmd_v2.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@
 
-test_cmd_v2_pmu: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
+test_cmd_v2_pmu: test_cmd_v2.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c ../../lib/npu_stream_prefetch.h
 	$(CC) $(CFLAGS) -DNAI_PMU_PROFILE=1 -I../../lib test_cmd_v2.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@
 
-test_cmd_stream_window: test_cmd_stream_window.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
+test_cmd_stream_window: test_cmd_stream_window.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c ../../lib/npu_stream_prefetch.h
 	$(CC) $(CFLAGS) -DNAI_PMU_PROFILE=1 -I../../lib test_cmd_stream_window.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@
 
-test_cmd_stream_window_trusted: test_cmd_stream_window.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c
+test_cmd_stream_window_trusted: test_cmd_stream_window.c ../../lib/npu_cmd_desc_v2.h ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c ../../lib/npu_stream_prefetch.h
 	$(CC) $(CFLAGS) -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -DNAI_TRUSTED_FIRMWARE=1 -DNAI_PMU_PROFILE=1 -I../../lib test_cmd_stream_window.c ../../lib/npu_cmd_desc_v2.c ../../lib/npu_model_loader.c -o $@
 
 test_copy_layout: test_copy_layout.c ../../lib/npu_layout_ops.h ../../lib/npu_layout_ops.c
@@ -63,5 +64,8 @@ test_dma_async_state: test_dma_async_state.c ../../lib/npu_dma_async_state.h ../
 test_spatz_copy: test_spatz_copy.c ../../lib/spatz_copy.h ../../lib/spatz_ops.h
 	$(CC) $(CFLAGS) -I../../lib test_spatz_copy.c -o $@
 
+test_stream_prefetch: test_stream_prefetch.c ../../lib/npu_stream_prefetch.h
+	$(CC) $(CFLAGS) -I../../lib test_stream_prefetch.c -o $@
+
 clean:
-	rm -f test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy
+	rm -f test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy test_stream_prefetch

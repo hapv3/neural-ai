@@ -57,6 +57,27 @@ static void check(spatz_copy_geometry_t copy, uint32_t source, uint32_t destinat
 
 int main(void)
 {
+    const uint32_t lengths[] = {0, 1, 31, 32, 63, 64, 127, 255, 256, 257, 511, 512, 513, 4096, 8191};
+    for (uint32_t offset = 0; offset < 4; offset++) {
+        for (uint32_t test = 0; test < sizeof(lengths) / sizeof(lengths[0]); test++) {
+            const uint32_t length = lengths[test];
+            for (uint32_t i = 0; i < sizeof(s_memory); i++) s_memory[i] = (int8_t)(i * 17u + 93u);
+            memcpy(s_expected, s_memory, sizeof(s_memory));
+            memcpy(s_expected + 16384 + offset, s_expected + offset, length);
+            s_copies = s_row_batches = 0;
+            spatz_copy_1d_i8(s_memory + offset, s_memory + 16384 + offset, length);
+            assert(memcmp(s_memory, s_expected, sizeof(s_memory)) == 0);
+            assert(s_row_batches == (length >= NAI_LONG_COPY_1D_MIN_BYTES));
+            assert(s_copies == (length < NAI_LONG_COPY_1D_MIN_BYTES));
+        }
+    }
+    /* Overlapping 1D ranges retain the original kernel, not a new memmove ABI. */
+    s_copies = s_row_batches = 0;
+    spatz_copy_1d_i8(s_memory, s_memory, 1024);
+    assert(s_copies == 1 && s_row_batches == 0);
+    s_copies = s_row_batches = 0;
+    spatz_copy_1d_i8(s_memory + 4, s_memory, 1024);
+    assert(s_copies == 1 && s_row_batches == 0);
     check((spatz_copy_geometry_t){16, 32, 16, 127, 4096, 2048, 3}, 0, 16384);
     assert(s_batches == 3 && s_copies == 0);
     check((spatz_copy_geometry_t){16, 16, 32, 127, 2048, 4096, 3}, 0, 16384);

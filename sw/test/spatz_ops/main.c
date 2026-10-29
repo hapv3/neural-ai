@@ -3,6 +3,8 @@
 #include "hal_afu.h"
 #include "spatz_ops.h"
 #include "spatz_copy.h"
+#include "npu_stream_prefetch.h"
+#include "idma_mm_utils.h"
 
 /*
  * Scenario: C-callable Spatz/AFU operator library smoke/regression test.
@@ -35,6 +37,8 @@
 #define SPATZ_OP_TEST_DFL16_PACK 21u
 #define SPATZ_OP_TEST_QUANT_SUB 22u
 #define SPATZ_OP_TEST_COPY_BATCH 23u
+#define SPATZ_OP_TEST_COPY_1D 24u
+#define SPATZ_OP_TEST_STREAM_PREFETCH 25u
 
 #ifndef SPATZ_OP_TEST_ID
 #define SPATZ_OP_TEST_ID SPATZ_OP_TEST_ALL
@@ -257,6 +261,100 @@ static void run_copy_batch(void) {
         for (uint32_t i = 0; i < destination_bytes; i++)
             if (destination[i] != expected[i]) fail(SPATZ_OP_TEST_COPY_BATCH, trial * 65536u + i,
                 destination[i], expected[i]);
+        mark_pass();
+    }
+}
+
+/* Backdoor-seeded source/canaries and independent host byte oracle avoid
+ * spending millions of simulation cycles on scalar test initialization. */
+static void run_copy_1d(void) {
+    static const uint32_t lengths[] = {0, 31, 255, 256, 257, 511, 512, 513, 4096, 8191, 51200};
+    volatile uint32_t *timings = (volatile uint32_t *)0x10170000u;
+    uint32_t destination = 0x10110000u;
+    for (uint32_t trial = 0; trial < sizeof(lengths) / sizeof(lengths[0]); trial++) {
+        const uint32_t length = lengths[trial];
+        const uint32_t allocation = (length + 95u) & ~31u;
+        const int8_t *source = (const int8_t *)(0x10100000u + (trial & 3u));
+        int8_t *legacy = (int8_t *)(destination + 32u + ((trial + 1u) & 3u));
+        int8_t *batched = (int8_t *)(destination + allocation + 32u + ((trial + 1u) & 3u));
+        uint32_t start, finish;
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(start) :: "memory");
+        spatz_vec_copy_i8(source, legacy, length);
+        __asm__ volatile ("fence" ::: "memory");
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(finish) :: "memory");
+        timings[trial * 3u] = finish - start;
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(start) :: "memory");
+        spatz_copy_1d_i8(source, batched, length);
+        __asm__ volatile ("fence" ::: "memory");
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(finish) :: "memory");
+        timings[trial * 3u + 1u] = finish - start;
+        timings[trial * 3u + 2u] = length;
+        destination += 2u * allocation;
+        mark_pass();
+    }
+    /* Preserve self/overlap behavior of the original 64-byte-VL kernel. */
+    spatz_copy_1d_i8((const int8_t *)0x10160000u, (int8_t *)0x10160000u, 513u);
+    spatz_vec_copy_i8((const int8_t *)0x10161000u, (int8_t *)0x10161020u, 513u);
+    spatz_copy_1d_i8((const int8_t *)0x10162000u, (int8_t *)0x10162020u, 513u);
+    __asm__ volatile ("fence" ::: "memory");
+    mark_pass();
+}
+
+typedef struct {
+    uint32_t submits;
+    uint32_t waits;
+} prefetch_test_context_t;
+
+static uint32_t stream_submit(void *context, uint32_t source, void *destination, uint32_t bytes) {
+    ((prefetch_test_context_t *)context)->submits++;
+    return (uint32_t)idma_L2ToL1(source, (uint32_t)(unsigned long)destination, bytes);
+}
+
+static uint32_t stream_wait(void *context, uint32_t id) {
+    ((prefetch_test_context_t *)context)->waits++;
+    return idma_mm_wait_for_completion(IDMA_DIR_L2_TO_L1, id);
+}
+
+static void run_stream_prefetch(void) {
+    static const uint32_t begins[] = {4095u, 32u, 4064u, 32u};
+    static const uint32_t lengths[] = {12321u, 16417u, 24593u, 128u};
+    static const uint32_t capacities[] = {1024u, 2048u, 4096u, 4096u};
+    volatile uint32_t *timings = (volatile uint32_t *)0x10170000u;
+    for (uint32_t trial = 0; trial < 4u; trial++) {
+        prefetch_test_context_t context = {0};
+        nai_stream_prefetch_ops_t ops = {&context, stream_submit, stream_wait};
+        nai_stream_prefetch_t state;
+        const uint32_t begin = begins[trial];
+        const uint32_t end = begin + (trial == 3u ? 16384u : lengths[trial]);
+        uint32_t start, finish;
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(start) :: "memory");
+        if (nai_stream_prefetch_init(&state, &ops, 0x81000000u, begin, end,
+                (void *)0x1016d000u, capacities[trial]) != 0u || context.waits != 0u)
+            fail(SPATZ_OP_TEST_STREAM_PREFETCH, trial, 1, 0);
+        uint32_t copied = 0u;
+        uint32_t step = 0u;
+        while (copied < lengths[trial]) {
+            uint32_t bytes = 1u + (step * 97u) % 2048u;
+            if (bytes > lengths[trial] - copied) bytes = lengths[trial] - copied;
+            if ((step % 7u) == 0u) {
+                const uint32_t id = (uint32_t)idma_L2ToL1(0x81000000u,
+                    0x10165000u + trial * 32u, 32u);
+                if (!idma_mm_wait_for_completion(IDMA_DIR_L2_TO_L1, id))
+                    fail(SPATZ_OP_TEST_STREAM_PREFETCH, trial, 2, 0);
+            }
+            if (nai_stream_prefetch_read(&state, begin + copied,
+                    (void *)(0x10110000u + trial * 0x10000u + 1u + copied), bytes) != 0u)
+                fail(SPATZ_OP_TEST_STREAM_PREFETCH, trial, 3, 0);
+            copied += bytes;
+            step++;
+        }
+        if (nai_stream_prefetch_finish(&state) != 0u || idma_mm_is_busy_dir(0u, 0u))
+            fail(SPATZ_OP_TEST_STREAM_PREFETCH, trial, 4, 0);
+        __asm__ volatile ("fence" ::: "memory");
+        __asm__ volatile ("csrr %0, 0xB00" : "=r"(finish) :: "memory");
+        timings[trial * 3u] = finish - start;
+        timings[trial * 3u + 1u] = context.submits;
+        timings[trial * 3u + 2u] = context.waits;
         mark_pass();
     }
 }
@@ -694,6 +792,8 @@ int main(void) {
         run_copy();
     }
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_COPY_BATCH) run_copy_batch();
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_COPY_1D) run_copy_1d();
+    if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_STREAM_PREFETCH) run_stream_prefetch();
     if (SPATZ_OP_TEST_ID == SPATZ_OP_TEST_ALL || SPATZ_OP_TEST_ID == SPATZ_OP_TEST_RELU) {
         run_relu();
     }

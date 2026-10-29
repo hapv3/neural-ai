@@ -88,6 +88,8 @@ class IntermediateSnapshotTest(unittest.TestCase):
             self.assertEqual(sidecar['model'], case['model'])
             self.assertEqual(sidecar['integrity'], 'VERIFIED')
             self.assertEqual(sidecar['observations']['status'], 'UNVERIFIED')
+            self.assertIn('private command-reader jobs are outside', sidecar['async_queues'])
+            self.assertIn('discards and rebuilds', sidecar['reader_state'])
             with self.assertRaisesRegex(ValueError, 'overwrite'):
                 save_intermediate_snapshot(path, case, model, {}, [], 1, state, replay.runtime)
 

@@ -2,6 +2,7 @@ import csv
 import inspect
 import logging
 import os
+import struct
 from pathlib import Path
 
 import cocotb
@@ -14,9 +15,12 @@ from npu_test_utils import (
     load_firmware_elf_axi,
     read_dtcm_word,
     read_tcdm_byte,
+    read_tcdm_bytes,
     release_fetch,
     reset_dut,
     wait_for_host_irq,
+    write_l2_bytes,
+    write_tcdm_bytes,
 )
 
 
@@ -697,7 +701,10 @@ async def run_firmware_case(
     await load_firmware_elf_axi(
         dut,
         axi_master,
-        firmware_path(__file__, f"{firmware_dir}/{fw_name}"),
+        firmware_path(
+            __file__,
+            f"{os.environ.get('SPATZ_OPERATOR_FIRMWARE_DIR', firmware_dir)}/{fw_name}",
+        ),
     )
     if pre_release is not None:
         await pre_release(dut)
@@ -855,6 +862,96 @@ async def test_spatz_op_copy_batch(dut):
     await run_firmware_case(
         dut, "spatz_ops_copy_batch.elf", "test_spatz_op_copy_batch", 20,
         check_timings, timeout_cycles=8000000,
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_copy_1d(dut):
+    lengths = (0, 31, 255, 256, 257, 511, 512, 513, 4096, 8191, 51200)
+    seeded = bytearray([0xA5]) * (512 * 1024)
+    seeded[:65536] = bytes((index * 37 + (index >> 8) + 11) & 255 for index in range(65536))
+    overlap_seed = bytes((index * 17 + 93) & 255 for index in range(4096))
+    for offset in (0x60000, 0x61000, 0x62000):
+        seeded[offset:offset + 4096] = overlap_seed
+    expected = bytearray(seeded)
+    destination = 0x10000
+    for trial, length in enumerate(lengths):
+        allocation = (length + 95) & ~31
+        source = trial & 3
+        for offset in (destination, destination + allocation):
+            begin = offset + 32 + ((trial + 1) & 3)
+            expected[begin:begin + length] = seeded[source:source + length]
+        destination += 2 * allocation
+    assert destination < 0x60000
+    async def preload(dut):
+        write_tcdm_bytes(dut, seeded)
+        await Timer(1, unit="ns")
+
+    def check(dut):
+        actual = read_tcdm_bytes(dut)
+        # Overlap is an old-kernel A/B preservation check, not an independent
+        # memmove oracle. Disjoint payloads and all canaries use seeded bytes.
+        control = actual[0x61000:0x62000]
+        assert control[:32] == overlap_seed[:32] and control[545:] == overlap_seed[545:]
+        expected[0x61000:0x62000] = control
+        expected[0x62000:0x63000] = control
+        # Timing table is the only non-payload write allowed.
+        expected[0x70000:0x70000 + len(lengths) * 12] = actual[0x70000:0x70000 + len(lengths) * 12]
+        assert actual == expected, "copy_1d payload, source, overlap or canary mismatch"
+        rows = []
+        for trial, length in enumerate(lengths):
+            legacy, batched, size = struct.unpack_from("<3I", actual, 0x70000 + trial * 12)
+            assert size == length and legacy > 0 and batched > 0
+            rows.append((trial, length, trial & 3, (trial + 1) & 3, legacy, batched))
+            dut._log.info("copy_1d[%d]: bytes=%d legacy=%d batched=%d", trial, length, legacy, batched)
+        output = Path(os.environ.get("SIM_BUILD", "."))
+        output.mkdir(parents=True, exist_ok=True)
+        with (output / "copy_1d_cycles.csv").open("w", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("case", "bytes", "source_alignment", "destination_alignment", "legacy_cycles", "batched_cycles"))
+            writer.writerows(rows)
+
+    await run_firmware_case(
+        dut, "spatz_ops_copy_1d.elf", "test_spatz_op_copy_1d", 12,
+        check, timeout_cycles=1000000, pre_release=preload,
+    )
+
+
+@cocotb.test()
+async def test_spatz_op_stream_prefetch(dut):
+    model = bytes((index * 37 + (index >> 8) + 11) & 255 for index in range(65536))
+    seeded = bytes([0xA5]) * (512 * 1024)
+    cases = ((4095, 12321, 1024), (32, 16417, 2048), (4064, 24593, 4096), (32, 128, 4096))
+
+    async def preload(dut):
+        write_tcdm_bytes(dut, seeded)
+        await write_l2_bytes(dut, 0x81000000, model)
+
+    def check(dut):
+        actual = read_tcdm_bytes(dut)
+        expected = bytearray(seeded)
+        rows = []
+        for trial, (begin, length, capacity) in enumerate(cases):
+            output = 0x10000 + trial * 0x10000 + 1
+            expected[output:output + length] = model[begin:begin + length]
+            expected[0x65000 + trial * 32:0x65000 + (trial + 1) * 32] = model[:32]
+            cycles, submits, waits = struct.unpack_from("<3I", actual, 0x70000 + trial * 12)
+            assert cycles > 0 and submits >= 2 and submits == waits
+            rows.append((trial, capacity, begin, length, cycles, submits, waits))
+        # A private, drained prefetch area may retain future command bytes.
+        expected[0x6D000:0x6F000] = actual[0x6D000:0x6F000]
+        expected[0x70000:0x70030] = actual[0x70000:0x70030]
+        assert actual == expected, "prefetch output, shared data-DMA or canary mismatch"
+        output = Path(os.environ.get("SIM_BUILD", "."))
+        output.mkdir(parents=True, exist_ok=True)
+        with (output / "stream_prefetch_cycles.csv").open("w", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(("case", "slot_bytes", "begin", "bytes_read", "cycles", "submits", "waits"))
+            writer.writerows(rows)
+
+    await run_firmware_case(
+        dut, "spatz_ops_stream_prefetch.elf", "test_spatz_op_stream_prefetch", 4,
+        check, timeout_cycles=2000000, pre_release=preload,
     )
 
 

@@ -24,6 +24,25 @@ void spatz_vec_copy_rows_i8(const int8_t *src, int8_t *dst,
                            uint32_t length, uint32_t runs,
                            uint32_t source_stride, uint32_t destination_stride);
 
+#define NAI_LONG_COPY_1D_MIN_BYTES 256u
+
+/* Unit-stride e8 supports byte alignment and VL tails. Only change grouping
+ * when the ranges are disjoint: overlapping copies retain their old ordering,
+ * rather than accidentally promising memmove semantics. Pointer differences
+ * avoid overflowing an RV32 end address. */
+static inline void spatz_copy_1d_i8(const int8_t *src, int8_t *dst, uint32_t length)
+{
+    const unsigned long source = (unsigned long)src;
+    const unsigned long destination = (unsigned long)dst;
+    const unsigned long distance = source < destination ?
+        destination - source : source - destination;
+    if (length >= NAI_LONG_COPY_1D_MIN_BYTES && length <= distance) {
+        spatz_vec_copy_rows_i8(src, dst, length, 1u, 0u, 0u);
+    } else {
+        spatz_vec_copy_i8(src, dst, length);
+    }
+}
+
 /* Regor/loader already prove the complete TCDM spans in the trusted runtime.
  * Keep wide arithmetic for the standalone/legacy, untrusted helper. */
 #if defined(NAI_TRUSTED_FIRMWARE) && defined(__riscv) && __riscv_xlen == 32

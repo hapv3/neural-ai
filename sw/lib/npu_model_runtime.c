@@ -7,6 +7,11 @@
 #include "npu_model_loader.h"
 #include "npu_quant_buffer.h"
 #include "npu_runtime_ops.h"
+#include "npu_stream_prefetch.h"
+
+#ifndef NAI_COMMAND_PREFETCH
+#define NAI_COMMAND_PREFETCH 1
+#endif
 
 #if defined(NAI_TRUSTED_FIRMWARE)
 #define NAI_TRUSTED_INVALID(condition) 0u
@@ -19,12 +24,13 @@ typedef struct {
     uint32_t bytes;
     uint32_t staging_base;
     uint32_t staging_bytes;
+    nai_stream_prefetch_t *prefetch;
 } l2_reader_context_t;
 
 static nai_model_stream_storage_v1_t g_model_storage;
 static nai_binding_address_v1_t g_binding_addresses[NAI_MAX_BINDINGS_V1];
 /* Affine loop bodies are fetched once and expanded in DTCM. */
-static uint8_t g_command_buffer[NAI_AFFINE_LOOP_MAX_RECORD_BYTES];
+static uint8_t g_command_buffer[NAI_AFFINE_LOOP_MAX_RECORD_BYTES] __attribute__((aligned(32)));
 
 #if defined(NAI_PMU_PROFILE) && NAI_PMU_PROFILE
 void nai_pmu_command_begin(uint32_t command_id)
@@ -51,24 +57,31 @@ static inline void pmu_phase(uint32_t phase)
 static uint32_t l2_read(void *context_pointer, uint32_t offset, void *destination, uint32_t bytes)
 {
     l2_reader_context_t *context = (l2_reader_context_t *)context_pointer;
-    uint8_t *output = (uint8_t *)destination;
     volatile const uint8_t *staging = (volatile const uint8_t *)(unsigned long)context->staging_base;
 
+    if (context->prefetch != 0)
+        return nai_stream_prefetch_read(context->prefetch, offset, destination, bytes);
     if (bytes == 0u) return 0u;
     if (offset > context->bytes || bytes > context->bytes - offset || bytes > context->staging_bytes ||
         context->base > 0xffffffffu - offset) return 1u;
     if (!idma_memcpy_blocking(context->base + offset, context->staging_base, bytes)) return 1u;
-    if ((((uint32_t)(unsigned long)destination | context->staging_base | bytes) & 3u) == 0u) {
-        uint32_t *output_words = (uint32_t *)destination;
-        volatile const uint32_t *staging_words =
-            (volatile const uint32_t *)(unsigned long)context->staging_base;
-        for (uint32_t index = 0; index < bytes / 4u; index++)
-            output_words[index] = staging_words[index];
-    } else {
-        for (uint32_t index = 0; index < bytes; index++) output[index] = staging[index];
-    }
+    nai_stream_copy(destination, staging, bytes);
     return 0u;
 }
+
+#if NAI_COMMAND_PREFETCH
+static uint32_t prefetch_submit(void *context, uint32_t source, void *destination, uint32_t bytes)
+{
+    (void)context;
+    return (uint32_t)idma_L2ToL1(source, (uint32_t)(unsigned long)destination, bytes);
+}
+
+static uint32_t prefetch_wait(void *context, uint32_t transfer_id)
+{
+    (void)context;
+    return idma_mm_wait_for_completion(IDMA_DIR_L2_TO_L1, transfer_id);
+}
+#endif
 
 static uint32_t all_zero(const uint32_t *words, uint32_t count)
 {
@@ -169,12 +182,13 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
     nai_invocation_v1_t invocation;
     nai_model_view_v1_t view;
     nai_resolver_v1_t resolver;
-    l2_reader_context_t invocation_context = {invocation_base, invocation_bytes, staging_base, staging_bytes};
+    l2_reader_context_t invocation_context = {invocation_base, invocation_bytes, staging_base, staging_bytes, 0};
     nai_model_reader_v1_t invocation_reader = {&invocation_context, l2_read};
     l2_reader_context_t model_context;
     nai_model_reader_v1_t model_reader;
     uint32_t completed = 0u;
     uint32_t failure_offset = 0u;
+    nai_stream_prefetch_t prefetch = {0};
 
     pmu_phase(NPU_PMU_PHASE_INVOCATION);
     if (staging_base != NPU_CMD_TCDM_BASE || staging_bytes < NPU_CMD_TCDM_SIZE ||
@@ -184,7 +198,7 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
 
     pmu_phase(NPU_PMU_PHASE_MODEL);
     model_context = (l2_reader_context_t){invocation.model_base, invocation.model_bytes,
-        staging_base, NPU_CMD_TCDM_SIZE};
+        staging_base, NPU_CMD_TCDM_SIZE, 0};
     model_reader = (nai_model_reader_v1_t){&model_context, l2_read};
     if (nai_model_open_stream_v1(&model_reader, invocation.model_bytes, NAI_TARGET_ID,
         &g_model_storage, &view) != NAI_LOADER_OK)
@@ -193,7 +207,7 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
     if (invocation.binding_count != 0u) {
         pmu_phase(NPU_PMU_PHASE_BINDINGS);
         l2_reader_context_t binding_context = {invocation.binding_table_base,
-            invocation.binding_count * sizeof(nai_binding_address_v1_t), staging_base, NPU_CMD_TCDM_SIZE};
+            invocation.binding_count * sizeof(nai_binding_address_v1_t), staging_base, NPU_CMD_TCDM_SIZE, 0};
         nai_model_reader_v1_t binding_reader = {&binding_context, l2_read};
         if (binding_reader.read(binding_reader.context, 0u, g_binding_addresses,
             binding_context.bytes) != 0u) return fail(NPU_CMD_FAIL_BAD_BINDING,
@@ -210,10 +224,29 @@ uint32_t nai_runtime_dispatch_from_ctrl(uint32_t invocation_base,
     REG_WRITE(NPU_CMD_STATUS, NPU_CMD_STATUS_RUNNING);
     pmu_phase(NPU_PMU_PHASE_FETCH);
     const nai_runtime_ops_v2_t *runtime_ops = nai_default_runtime_ops_v2();
+#if NAI_COMMAND_PREFETCH
+    const uint32_t available = view.header->required_tcdm_bytes <= NPU_CMD_TCDM_BASE - NPU_TCDM_BASE ?
+        NPU_CMD_TCDM_BASE - NPU_TCDM_BASE - view.header->required_tcdm_bytes : 0u;
+    const uint32_t slot_bytes = nai_stream_prefetch_capacity(available);
+    const uint32_t stream_end = view.commands->offset + view.commands->size;
+    /* A stream fitting one dispatch window has no later fetch to hide. */
+    if (slot_bytes != 0u && stream_end - view.header->entry_command_off > sizeof(g_command_buffer)) {
+        const nai_stream_prefetch_ops_t prefetch_ops = {0, prefetch_submit, prefetch_wait};
+        if (nai_stream_prefetch_init(&prefetch, &prefetch_ops, invocation.model_base,
+                view.header->entry_command_off, stream_end,
+                (void *)(unsigned long)(NPU_CMD_TCDM_BASE - 2u * slot_bytes), slot_bytes) != 0u) {
+            (void)nai_stream_prefetch_finish(&prefetch);
+            return fail(NPU_CMD_FAIL_BAD_MODEL, invocation.model_base, 0u);
+        }
+        model_context.prefetch = &prefetch;
+    }
+#endif
     nai_dispatch_status_v2_t status = nai_cmd_dispatch_stream_v2(&view, &resolver,
         runtime_ops, &model_reader, g_command_buffer, sizeof(g_command_buffer),
         &completed, &failure_offset);
     pmu_phase(NPU_PMU_PHASE_BARRIER);
+    if (nai_stream_prefetch_finish(&prefetch) != 0u && status == NAI_DISPATCH_OK)
+        status = NAI_DISPATCH_OPERATION_FAILED;
     if (runtime_ops->barrier == 0 || runtime_ops->barrier(runtime_ops->context) != 0u) {
         if (status == NAI_DISPATCH_OK) status = NAI_DISPATCH_OPERATION_FAILED;
     }
