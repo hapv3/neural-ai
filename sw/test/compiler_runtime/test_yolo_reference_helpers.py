@@ -13,7 +13,9 @@ from yolo_reference_replay import (
     execution_model, invocation_address, load_case, output_comparison,
     plan_checkpoints, plan_lut_restore, plan_post_cascade_checkpoints, plan_restore_preamble, reset_buffers,
     POST_CASCADE_ROLES,
-    runtime, save_checkpoint_result, validate_cascade_coverage, validate_output_scope,
+    require_compatible_reference, require_resident_l2_result, runtime, save_checkpoint_result,
+    save_resident_l2_result,
+    validate_cascade_coverage, validate_output_scope, validate_reference_contract,
 )
 
 
@@ -428,6 +430,99 @@ class ReferenceReplayTest(unittest.TestCase):
                             {"resumed_c2f_checkpoints": True}, {"resumed_output_checkpoints": True}):
                 with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "all remaining commands"):
                     validate_output_scope({**case, **changes}, model)
+
+    def test_remaining_scope_accepts_verified_concat_prefix_with_optional_downsample(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, model = self.remaining_case(Path(directory))
+            case.update(resumed_pointwise_checkpoints=False, resumed_output_checkpoints=True)
+            for downsample in (False, True):
+                with self.subTest(downsample=downsample):
+                    validate_output_scope({**case, "l2_downsample_checkpoints": downsample}, model)
+            original, _ = runtime._logical_command_records(model)
+            selected, _ = runtime._logical_command_records(execution_model(case, model))
+            self.assertEqual(selected, original[case["first_command"]:])
+            for changes in ({"resumed_output_checkpoints": False},
+                            {"resumed_pointwise_checkpoints": True}, {"end_command": 4},
+                            {"resumed_c2f_checkpoints": True}, {"snapshot": None}):
+                with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "all remaining commands"):
+                    validate_output_scope({**case, **changes}, model)
+
+    def test_explicit_afu_reference_pins_kind_sources_input_and_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case, _ = self.full_case(Path(directory))
+            case.update(reference_build={"library": "pinned"}, reference_kind="neural_ai_afu_dfl_reference")
+            proof = dict(description=dict(contract="afu_dfl16_deployed_signed_delta_v1",
+                                          source_sha256=case['source']['sha256']),
+                         input_sha256=case['input']['sha256'], reference_build=case['reference_build'],
+                         output_sha256=case['final_output']['expected']['sha256'],
+                         sources={name: case['source'] for name in ('runtime.py', 'afu_dfl.py')})
+            case['reference_contract'] = proof
+            validate_reference_contract(case)
+            for key, value in [('input_sha256', 'wrong'), ('reference_build', {}),
+                               ('output_sha256', 'wrong'), ('sources', {}),
+                               ('description', {**proof['description'], 'contract': 'wrong'})]:
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    validate_reference_contract({**case, 'reference_contract': {**proof, key: value}})
+            with self.assertRaises(ValueError):
+                validate_reference_contract({**case, 'reference_kind': 'unknown'})
+            # Old retained cases preserve their original numerical contract.
+            del case['reference_contract']
+            with self.assertRaisesRegex(ValueError, "Missing explicit"):
+                validate_reference_contract(case)
+            del case['reference_kind']
+            validate_reference_contract(case)
+
+    def test_final_output_preflight_rejects_mac_only_for_deployed_afu(self):
+        def model(kinds):
+            records = b''.join(runtime._command_header(kind, 96, flags=flags) + bytes(80)
+                               for kind, flags in kinds)
+            return runtime._package(records + runtime._command_header(0, 32) + bytes(16),
+                                    b'', b'', len(kinds), 1024, 1, 1)
+        for kinds, selected in [([(28, 0)], 'neural_ai_afu_dfl_reference'),
+                                ([(14, 16)], 'neural_ai_afu_mean_reference')]:
+            content = model(kinds)
+            require_compatible_reference(content, selected, True)
+            require_compatible_reference(content, 'neural_ai_reference', False)
+            with self.subTest(kinds=kinds), self.assertRaisesRegex(ValueError, '--reference-kind'):
+                require_compatible_reference(content, 'neural_ai_reference', True)
+        for selected in ('neural_ai_afu_dfl_reference', 'neural_ai_afu_mean_reference'):
+            with self.assertRaisesRegex(ValueError, '--reference-kind'):
+                require_compatible_reference(model([(28, 0), (14, 16)]), selected, True)
+
+    def test_live_resident_l2_evidence_survives_later_memory_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.remaining_case(folder)
+            check = dict(command=3, rows=2, channels=3, expected=case["final_output"]["expected"])
+            actual = np.arange(6, dtype=np.int8).reshape(2, 3)
+            report = dict(status="running")
+            stats = save_resident_l2_result(folder, report, check, actual, True)
+            self.assertEqual(stats["mismatches"], 0)
+            actual[:] = -1  # A later layer legitimately reuses the same L2 allocation.
+            self.assertEqual(require_resident_l2_result(report, check)["mismatches"], 0)
+            self.assertEqual((folder / "resident-l2-actual.bin").read_bytes(), bytes(range(6)))
+            self.assertEqual(json.loads((folder / "byte_exact.json").read_text()), report)
+            with self.assertRaisesRegex(ValueError, "Duplicate"):
+                save_resident_l2_result(folder, report, check, actual)
+            for broken, plan in (({}, check), (report, {**check, "command": 4}),
+                                 ({"resumed_output_l2": {**report["resumed_output_l2"], "bytes": 5}}, check)):
+                with self.subTest(plan=plan), self.assertRaisesRegex(ValueError, "Missing or stale"):
+                    require_resident_l2_result(broken, plan)
+
+    def test_live_resident_l2_mismatch_is_persisted_before_fail_fast(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            case, _ = self.remaining_case(folder)
+            check = dict(command=3, rows=2, channels=3, expected=case["final_output"]["expected"])
+            actual = np.arange(6, dtype=np.int8).reshape(2, 3)
+            actual[1, 2] ^= 1
+            report = dict(status="running")
+            stats = save_resident_l2_result(folder, report, check, actual, True)
+            self.assertEqual(stats["mismatches"], 1)
+            saved = json.loads((folder / "byte_exact.json").read_text())
+            self.assertEqual(saved["status"], "FAIL")
+            self.assertEqual(saved["failed_command"], 3)
+            self.assertEqual(require_resident_l2_result(saved, check)["mismatches"], 1)
 
     def test_remaining_scope_rejects_ambiguous_modes_and_nonboolean_flag(self):
         with tempfile.TemporaryDirectory() as directory:

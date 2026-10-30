@@ -38,6 +38,12 @@ from replay_snapshots import parse_snapshot_boundaries, validate_snapshot_bounda
 from compute_dumps import validate_compute_dump_case
 
 
+AFU_REFERENCE_CONTRACTS = {
+    "neural_ai_afu_dfl_reference": ("afu_dfl16_deployed_signed_delta_v1", "afu_dfl.py"),
+    "neural_ai_afu_mean_reference": ("afu_mean_int8_fused_single_round_v1", "afu_mean.py"),
+}
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -745,10 +751,12 @@ def validate_output_scope(case, full_model):
     if full_graph and (case.get("start_mode") != "reset" or case["first_command"] != 0 or
             case["snapshot"] is not None or case["end_command"] != len(commands)):
         raise ValueError("Full-graph replay must start from reset and run every command")
+    remaining_modes = sum(case.get(flag) is True for flag in
+                          ("resumed_pointwise_checkpoints", "resumed_output_checkpoints"))
     if remaining and (case.get("start_mode") != "snapshot" or case["snapshot"] is None or
             type(case["first_command"]) is not int or not 0 < case["first_command"] < len(commands) or
-            case["end_command"] != len(commands) or case.get("resumed_pointwise_checkpoints") is not True or
-            any(case.get(flag, False) for flag in ("resumed_c2f_checkpoints", "resumed_output_checkpoints")) or
+            case["end_command"] != len(commands) or remaining_modes != 1 or
+            case.get("resumed_c2f_checkpoints", False) or
             type(case.get("remaining_prefix_end_command")) is not int or
             not case["first_command"] < case["remaining_prefix_end_command"] <= len(commands)):
         raise ValueError("Remaining-graph replay requires a verified self-configuring snapshot prefix "
@@ -761,6 +769,49 @@ def validate_output_scope(case, full_model):
             math.prod(shape) != case["output_bytes"] or
             len(checked_read(final_output["expected"])) != case["output_bytes"]):
         raise ValueError("Final output shape/dtype/size differs from the output binding")
+
+
+def validate_reference_contract(case):
+    """Pin explicitly selected AFU arithmetic without relabeling legacy cases."""
+    proof = case.get("reference_contract")
+    kind = case.get("reference_kind")
+    if proof is None:
+        if kind in AFU_REFERENCE_CONTRACTS and case.get("reference_provenance") is None:
+            raise ValueError("Missing explicit reference contract")
+        return
+    if kind not in AFU_REFERENCE_CONTRACTS or not isinstance(proof, dict):
+        raise ValueError("Unsupported explicit reference contract")
+    contract, filename = AFU_REFERENCE_CONTRACTS[kind]
+    description = proof.get("description", {})
+    sources = proof.get("sources", {})
+    if (not isinstance(description, dict) or description.get("contract") != contract or
+            description.get("source_sha256") != case["source"]["sha256"] or
+            proof.get("input_sha256") != case["input"]["sha256"] or
+            proof.get("reference_build") != case["reference_build"] or
+            not isinstance(sources, dict) or set(sources) != {"runtime.py", filename}):
+        raise ValueError("Explicit reference contract identity mismatch")
+    for record in sources.values():
+        checked_read(record)
+    if (case.get("final_output") is not None and
+            proof.get("output_sha256") != case["final_output"]["expected"]["sha256"]):
+        raise ValueError("Final output differs from the explicit reference contract")
+
+
+def require_compatible_reference(model, kind, final_output=False):
+    """Reject a known arithmetic mismatch before preparing an expensive run."""
+    if not final_output:
+        return
+    commands, _ = runtime._logical_command_records(model)
+    required = set()
+    for command in commands:
+        command_type, _, flags = struct.unpack_from("<HHI", command)
+        if command_type == 28:
+            required.add("neural_ai_afu_dfl_reference")
+        if command_type == 14 and flags & 16:
+            required.add("neural_ai_afu_mean_reference")
+    if required and required != {kind}:
+        raise ValueError("Final-output replay requires an explicit compatible --reference-kind: " +
+                         ", ".join(sorted(required)))
 
 
 def execution_model(case, full_model):
@@ -794,6 +845,32 @@ def save_checkpoint_result(folder, report, check, actual, fail_fast=False, field
                       error=f"Byte-exact mismatch at command {check['command']}, tensor {check['tensor']}")
     (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
     return stats
+
+
+def save_resident_l2_result(folder, report, check, actual, fail_fast=False):
+    """Persist a live retained output before later commands reuse its L2 bytes."""
+    if "resumed_output_l2" in report:
+        raise ValueError("Duplicate resident L2 comparison")
+    expected = np.frombuffer(checked_read(check["expected"]), np.int8).reshape(actual.shape)
+    stats = compare_bytes(actual, expected)
+    folder = Path(folder)
+    (folder / "resident-l2-actual.bin").write_bytes(actual.tobytes())
+    report["resumed_output_l2"] = {**check, **stats}
+    if fail_fast and stats["mismatches"]:
+        report.update(status="FAIL", failed_command=check["command"],
+                      error="Live resident L2 output mismatch")
+    (folder / "byte_exact.json").write_text(json.dumps(report, indent=2) + "\n")
+    return stats
+
+
+def require_resident_l2_result(report, check):
+    """A missing live comparison cannot be replaced by reading reused memory."""
+    saved = report.get("resumed_output_l2")
+    if (not isinstance(saved, dict) or any(saved.get(key) != value for key, value in check.items()) or
+            saved.get("bytes") != check["rows"] * check["channels"] or
+            type(saved.get("mismatches")) is not int or not 0 <= saved["mismatches"] <= saved["bytes"]):
+        raise ValueError("Missing or stale live resident L2 comparison")
+    return saved
 
 
 def snapshot_identity_model(case, full_model):
@@ -873,6 +950,10 @@ def load_case(path):
     checked_read(case["firmware"])
     input_data = checked_read(case["input"])
     validate_output_scope(case, full_model)
+    validate_reference_contract(case)
+    if case.get("reference_contract") is not None:
+        require_compatible_reference(full_model, case["reference_kind"],
+                                     case.get("full_graph", False) or case.get("remaining_graph", False))
     identity_model = snapshot_identity_model(case, full_model)
     if case.get("start_mode", "snapshot") == "reset":
         if case["snapshot"] is not None or case["first_command"] != 0:
@@ -1064,8 +1145,10 @@ def load_case(path):
                 for actual, expected in zip(saved, planned))):
             raise ValueError("Missing or stale resident output checkpoint mapping")
         ready = completed_replay_boundary(full_model, end)
+        expected_end = (case["remaining_prefix_end_command"] if case.get("remaining_graph", False)
+                        else case["end_command"])
         if (not case.get("l2_downsample_checkpoints", False) and
-                (ready != case["end_command"] or len(saved) != len(case["checkpoints"]))):
+                (ready != expected_end or len(saved) != len(case["checkpoints"]))):
             raise ValueError("Resident output must end at its first drained retained-output boundary")
         if validate_grouped_coverage(saved, shapes, OUTPUT_ROLES) != case["resumed_output_coverage"]:
             raise ValueError("Stale resident output coverage")
@@ -1073,6 +1156,8 @@ def load_case(path):
         if (saved_l2 is None or any(saved_l2.get(key) != value for key, value in retained.items()) or
                 len(checked_read(saved_l2["expected"])) != retained["rows"] * retained["channels"]):
             raise ValueError("Missing or stale retained resident L2 output")
+        if saved_l2.get("command") != (ready if case.get("remaining_graph", False) else None):
+            raise ValueError("Missing or stale live resident L2 comparison boundary")
         extract_checkpoint(temporary, saved_l2)
         if case.get("l2_downsample_checkpoints", False):
             downsample_shapes = case["l2_downsample_shapes"]
@@ -1087,7 +1172,7 @@ def load_case(path):
                         any(actual.get(key) != value for key, value in expected.items())
                         for actual, expected in zip(downsample_saved, planned))):
                 raise ValueError("Missing or stale L2 downsample mapping")
-            if completed_replay_boundary(full_model, end) != case["end_command"]:
+            if completed_replay_boundary(full_model, end) != expected_end:
                 raise ValueError("L2 downsample must end at its first drained boundary")
             if (validate_grouped_coverage(downsample_saved, downsample_shapes, L2_DOWNSAMPLE_ROLES) !=
                     case["l2_downsample_coverage"]):
@@ -1101,6 +1186,9 @@ def main():
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--source", type=Path,
                         help="Source TFLite (default: YOLO320); use --consumer-tiles 0 for other full graphs")
+    parser.add_argument("--reference-kind", default="neural_ai_reference",
+                        choices=["neural_ai_reference", *AFU_REFERENCE_CONTRACTS],
+                        help="Explicit arithmetic contract; use AFU DFL for deployed YOLO or AFU Mean for MobileNet")
     start = parser.add_mutually_exclusive_group(required=True)
     start.add_argument("--snapshot", type=Path)
     start.add_argument("--from-reset", action="store_true")
@@ -1145,10 +1233,10 @@ def main():
         parser.error("--allow-compatible-snapshot requires --remaining-graph")
     if args.diagnostic_checkpoints is not None and not args.remaining_graph:
         parser.error("--diagnostic-checkpoints requires --remaining-graph")
-    if args.remaining_graph:
-        args.resume_grouped_pointwise_checkpoints = True
     if args.resume_l2_downsample_checkpoints:
         args.resume_c2f_output_checkpoints = True
+    if args.remaining_graph and not args.resume_c2f_output_checkpoints:
+        args.resume_grouped_pointwise_checkpoints = True
     if args.resume_c2f_chain_checkpoints:
         args.resume_grouped_pointwise_checkpoints = True
     if args.downsample_checkpoints:
@@ -1169,9 +1257,10 @@ def main():
         parser.error("Choose a fresh output directory")
     if args.full_graph and not args.from_reset:
         parser.error("--full-graph requires --from-reset; memory-only snapshots omit hardware registers")
-    if args.remaining_graph and (args.full_graph or args.resume_c2f_chain_checkpoints or
-                                args.resume_c2f_output_checkpoints):
-        parser.error("--remaining-graph requires only its self-configuring grouped pointwise prefix")
+    if args.remaining_graph and (args.full_graph or args.resume_c2f_chain_checkpoints):
+        parser.error("--remaining-graph requires a self-configuring pointwise or concat-output prefix")
+    if args.allow_compatible_snapshot and args.resume_c2f_output_checkpoints:
+        parser.error("Compatible-model snapshots are supported only for grouped pointwise prefixes")
     if args.all_cascade_checkpoints and (not args.from_reset or args.full_graph or not args.consumer_tiles):
         parser.error("--all-cascade-checkpoints requires bounded --from-reset with cascade mapping enabled")
     if args.timeout_cycles is not None and args.timeout_cycles <= 0:
@@ -1184,6 +1273,7 @@ def main():
     full_model = model_path.read_bytes()
     if sha(full_model) != pinned[".nai"] or sha(firmware_path.read_bytes()) != pinned[".elf"]:
         raise ValueError("Pinned model/ELF identity mismatch")
+    require_compatible_reference(full_model, args.reference_kind, args.full_graph or args.remaining_graph)
     source = args.source or args.compiler_root / "test/model/yolov8n_320_int8.tflite"
     reference_build = json.loads((args.compiler_root / "tools/neural_ai_tflite_reference/build/manifest.json").read_text())
     snapshot_compatibility = None
@@ -1218,8 +1308,9 @@ def main():
             raise ValueError("Snapshot source/model provenance mismatch")
         first, memory, temporary, output = runtime._verify_yolo320_snapshot(
             full_model, args.snapshot.read_bytes(), expected_boundary=saved["prefix_commands"])
-    spec = importlib.util.spec_from_file_location(
-        "neural_ai_host_reference", args.compiler_root / "tools/neural_ai_tflite_reference/runtime.py")
+    reference_root = args.compiler_root / "tools/neural_ai_tflite_reference"
+    sys.path.insert(0, str(reference_root))
+    spec = importlib.util.spec_from_file_location("neural_ai_host_reference", reference_root / "runtime.py")
     reference_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference_module)
     interpreter = reference_module.make_interpreter(source, preserve=True)
@@ -1238,16 +1329,33 @@ def main():
         input_data = input_path.read_bytes()
     interpreter.set_tensor(inp["index"], np.frombuffer(input_data, np.int8).reshape(inp["shape"]))
     interpreter.invoke()
+    numerical_reference = interpreter
+    reference_contract = None
+    if args.reference_kind in AFU_REFERENCE_CONTRACTS:
+        numerical_reference = reference_module.make_interpreter(source, args.reference_kind, preserve=True)
+        numerical_reference.set_tensor(inp["index"], np.frombuffer(input_data, np.int8).reshape(inp["shape"]))
+        control, deployed_output, _ = numerical_reference.invoke_comparison()
+        detail = interpreter.get_output_details()[0]
+        if not np.array_equal(control, interpreter.get_tensor(detail["index"])):
+            raise ValueError("AFU reference control changed the original hybrid output")
+        coverage = reference_module.coverage(numerical_reference)
+        if coverage["mac_fallback_nodes"]:
+            raise ValueError("Unsupported MAC fallback in the selected AFU reference")
+        reference_contract = dict(description=numerical_reference.plan.description(),
+            input_sha256=sha(input_data), reference_build=reference_build,
+            control_output_sha256=sha(control.tobytes()), output_sha256=sha(deployed_output.tobytes()),
+            sources={name: artifact(reference_root / name) for name in
+                     ("runtime.py", AFU_REFERENCE_CONTRACTS[args.reference_kind][1])})
     initial = []
     if resuming:
-        expected = reference_tensor_slice(interpreter.get_tensor(snapshot_parent["tensor"]), snapshot_parent)
+        expected = reference_tensor_slice(numerical_reference.get_tensor(snapshot_parent["tensor"]), snapshot_parent)
         if expected.tobytes() != checked_read(snapshot_parent["expected"]):
             raise ValueError("Current reference differs from the verified snapshot oracle")
         initial = [{"command": first, **parent_stats}]
     for check in saved["checkpoints"]:
         actual = extract_c32(memory, check["tcdm_address"], check["rows"], check["channels"],
                              check["row_stride"], check["tile_cols"])
-        tensor = interpreter.get_tensor(check["tensor"]).reshape(-1, check["channels"])
+        tensor = numerical_reference.get_tensor(check["tensor"]).reshape(-1, check["channels"])
         offset = check["reference_first_row"]
         stats = compare_bytes(actual, tensor[offset:offset + check["rows"]])
         if stats["mismatches"]:
@@ -1339,6 +1447,7 @@ def main():
             resident_shapes["parent"] = list(map(int, interpreter.get_tensor(snapshot_parent["tensor"]).shape))
             checks, end, retained = plan_resident_pointwise_checkpoints(commands, snapshot_parent, resident_shapes,
                 len(memory), len(temporary))
+            resident_ready = completed_replay_boundary(full_model, end)
             if args.resume_l2_downsample_checkpoints:
                 downsample_id, l2_padding = resolve_l2_downsample_source(interpreter, tensor_ids[OUTPUT_ROLES[1]])
                 tensor_ids.update(zip(L2_DOWNSAMPLE_ROLES, (downsample_id, silu_output(ops, downsample_id))))
@@ -1377,7 +1486,7 @@ def main():
     details = {d["index"]: d for d in interpreter.get_tensor_details()}
     for check in checks:
         tensor_id = tensor_ids[check["tensor_role"]]
-        tensor = reference_tensor_slice(interpreter.get_tensor(tensor_id), check)
+        tensor = reference_tensor_slice(numerical_reference.get_tensor(tensor_id), check)
         filename = args.output / f"command-{check['command']}-expected.bin"
         filename.write_bytes(tensor.tobytes())
         check.update({"tensor": tensor_id, "tensor_name": details[tensor_id]["name"], "expected": artifact(filename)})
@@ -1387,7 +1496,7 @@ def main():
         if len(outputs) != 1 or outputs[0]["dtype"] != np.int8:
             raise ValueError("Full-graph replay requires exactly one INT8 reference output")
         detail = outputs[0]
-        expected = interpreter.get_tensor(detail["index"])
+        expected = numerical_reference.get_tensor(detail["index"])
         if expected.nbytes != len(output):
             raise ValueError("Reference output size differs from the compiled output binding")
         filename = args.output / "output-expected.bin"
@@ -1412,6 +1521,9 @@ def main():
             "initial_snapshot_checks": initial, "checkpoints": checks}
     if args.remaining_graph:
         case.update(remaining_graph=True, remaining_prefix_end_command=prefix_end)
+    if reference_contract is not None:
+        case.update(reference_kind=args.reference_kind, reference_contract=reference_contract,
+                    reference=f"{args.reference_kind} / {reference_contract['description']['contract']}")
     if args.snapshot_boundaries is not None:
         case['snapshot_boundaries'] = args.snapshot_boundaries
     if snapshot_compatibility is not None:
@@ -1455,12 +1567,14 @@ def main():
                         checks, chain_shapes, chain_roles(chain_layout["blocks"])))
     if args.resume_c2f_output_checkpoints:
         tensor_id = tensor_ids[OUTPUT_ROLES[1]]
-        expected = reference_tensor_slice(interpreter.get_tensor(tensor_id), retained)
+        expected = reference_tensor_slice(numerical_reference.get_tensor(tensor_id), retained)
         filename = args.output / "resident-l2-expected.bin"
         filename.write_bytes(expected.tobytes())
         case.update(resumed_output_checkpoints=True, resumed_output_shapes=resident_shapes,
                     resumed_output_coverage=validate_grouped_coverage(checks, resident_shapes, OUTPUT_ROLES),
                     resumed_output_l2={**retained, "tensor": tensor_id, "expected": artifact(filename)})
+        if args.remaining_graph:
+            case["resumed_output_l2"]["command"] = resident_ready
     if args.resume_l2_downsample_checkpoints:
         case.update(l2_downsample_checkpoints=True, l2_downsample_shapes=l2_shapes,
                     l2_downsample_padding=l2_padding,
