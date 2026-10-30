@@ -27,6 +27,25 @@ per operator while optimization is still local:
 Firmware records only dispatch failures. Cocotb reads output TCDM/L2 buffers
 for exact data comparison.
 
+### Structured PMU output
+
+Every operator gate writes `<test_name>_pmu.json` and `<test_name>_pmu.csv` under
+`SIM_BUILD` (or beside `COCOTB_RESULTS_FILE` when no build directory is set).
+They retain all 163 known counters and PMU metadata, including absolute peak/max
+values and the full overflow bitmap. Missing counters remain missing, not zero.
+The JSON includes counter completeness, status and `performance_valid`.
+
+`IRQ_REACHED` is preliminary. `PASS` is written only after firmware status and
+the host checker succeed; checker failures retain counters with `FAIL`. Timeout
+snapshots are labeled separately. These are aggregate firmware-window reports,
+including setup/control and in-firmware validation, not per-case or ABI-command
+PMU. Use `copy_batch_cycles.csv`, `copy_1d_cycles.csv` or
+`stream_prefetch_cycles.csv` for their explicitly bracketed call-side timings.
+No cycle timeline or waveform is enabled by this reporting.
+
+Already-running simulators retain the Python code loaded at startup. Updating
+these helpers does not retrofit a complete counter dump into an older run.
+
 The operator-suite loader uses the ELF for every Spatz/AFU case. It loads each
 PT_LOAD segment to its linked I-TCM or D-TCM address and zero-initializes
 NOLOAD/BSS memory. A `.bin` can include the gap to D-TCM plus `.rodata`/`.data`;

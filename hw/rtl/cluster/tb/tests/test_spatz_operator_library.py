@@ -11,8 +11,10 @@ from cocotb.triggers import Timer, with_timeout
 from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 from npu_test_utils import (
+    PMU_COUNTER_NAMES,
     firmware_path,
     load_firmware_elf_axi,
+    pmu_direct_snapshot,
     read_dtcm_word,
     read_tcdm_byte,
     read_tcdm_bytes,
@@ -22,6 +24,7 @@ from npu_test_utils import (
     write_l2_bytes,
     write_tcdm_bytes,
 )
+from pmu_report import write_pmu_report
 
 
 PASS_SIGNATURE = 0xDEADBEEF
@@ -727,13 +730,17 @@ async def run_firmware_case(
     await release_fetch(dut, axi_master=axi_master)
 
     try:
-        await wait_for_host_irq(
+        counters = await wait_for_host_irq(
             dut,
             timeout_cycles=timeout_cycles,
             axi_master=axi_master,
             report_name=report_name,
         )
     except AssertionError as exc:
+        write_pmu_report(
+            pmu_direct_snapshot(dut), report_name, PMU_COUNTER_NAMES,
+            status="TIMEOUT" if "timeout waiting for host irq" in str(exc) else "ERROR",
+        )
         afu_core_state = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_core.state_q)
         afu_elem_cnt = safe_signal_int(lambda: dut.u_npu_cluster.u_afu.i_core.elem_cnt_q)
         afu_core_done = safe_signal_paths_int(
@@ -834,10 +841,19 @@ async def run_firmware_case(
             f"afu_s_rdata={fmt_opt_hex(afu_s_rdata)} frontend_s_req={frontend_s_req} "
             f"frontend_s_rvalid={frontend_s_rvalid} frontend_s_rdata={fmt_opt_hex(frontend_s_rdata)}"
         ) from exc
-    check_status(dut, expected_pass_count)
-    check_result = checker(dut)
-    if inspect.isawaitable(check_result):
-        await check_result
+    # Persist the original frozen snapshot before any checker can fail. The
+    # active hardware counters must not be re-read after host-side checking.
+    write_pmu_report(counters, report_name, PMU_COUNTER_NAMES, status="IRQ_REACHED")
+    try:
+        check_status(dut, expected_pass_count)
+        check_result = checker(dut)
+        if inspect.isawaitable(check_result):
+            await check_result
+    except Exception:
+        write_pmu_report(counters, report_name, PMU_COUNTER_NAMES, status="FAIL")
+        raise
+    paths = write_pmu_report(counters, report_name, PMU_COUNTER_NAMES, status="PASS")
+    dut._log.info("Saved aggregate PMU JSON/CSV: %s, %s", *paths)
 
 
 @cocotb.test()
