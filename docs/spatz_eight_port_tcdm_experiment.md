@@ -296,3 +296,19 @@ The 51,200-byte case (source alignment 2, destination alignment 3) measured
 19,996 legacy versus 13,562 batched call-side cycles. Cases of 0, 31 and 255
 bytes each cost eight extra dispatch cycles. These are fixture timings, not
 full-model latency. Next required gate: `test_spatz_op_stream_prefetch`.
+
+### Stream prefetch — verified 2026-11-02
+
+`test_spatz_op_stream_prefetch` passed all four firmware checks and the host's
+full-memory payload/canary comparison on the eight-port candidate. Evidence is
+in `test_yolo_latest_compiler_20261030/gates-stream-prefetch/`. All 163 PMU
+counters and metadata match between CSV and JSON, with zero overflow and
+769,557 aggregate cycles. This includes scalar reader/control work and is not
+an isolated DMA-bandwidth measurement.
+
+The 1/2/4 KiB slot cases submitted/joined 14/14, 9/9 and 7/7 private jobs;
+early finish joined both outstanding jobs (2/2). Cases include 4 KiB boundary
+crossings and interleaved data DMA. Together with copy-batch and copy-1D, this
+closes the focused firmware gates before the updated full-model regression.
+The full run retains the already compiled 5,428-command NAI, input and deployed
+AFU oracle; it does not silently recompile using a subsequently advanced main.
