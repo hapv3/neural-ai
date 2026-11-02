@@ -4,7 +4,7 @@ NEURAL_COMPILER_ROOT ?= $(abspath ../../../..)/neural-compiler
 SIM_BUILD ?= /tmp/neural-ai-compiled-model
 COCOTB_TESTCASE ?=
 
-.PHONY: all check check_cross_repo_abi check_firmware_loading firmware sim clean
+.PHONY: all check check_cross_repo_abi check_firmware_loading check_stream_validation firmware sim clean
 
 all: test_model_abi test_cmd_v2 test_cmd_v2_pmu test_cmd_stream_window test_cmd_stream_window_trusted test_copy_layout test_quant_buffer test_dma_async_state test_spatz_copy test_stream_prefetch
 
@@ -28,6 +28,9 @@ check_cross_repo_abi:
 
 check_firmware_loading:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_firmware_loading.py
+
+check_stream_validation:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_command_stream_validation.py test_yolo_reference_helpers.py
 
 firmware:
 	$(MAKE) -C ../../runtime/neural_ai all

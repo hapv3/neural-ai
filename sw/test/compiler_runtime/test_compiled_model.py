@@ -1527,17 +1527,35 @@ def _command_section(model):
 
 def _logical_command_records(model):
     _descriptor, commands_offset, commands_size = _command_section(model)
+    if commands_offset > len(model) or commands_size > len(model) - commands_offset:
+        raise ValueError("commands section exceeds model bounds")
     encoded = memoryview(model)[commands_offset : commands_offset + commands_size]
+    declared_count = struct.unpack_from("<I", model, 32)[0]
     records = []
     offset = 0
+
+    def read_header(data, position):
+        if position > len(data) or len(data) - position < 16:
+            raise ValueError("truncated command header")
+        kind, size, flags = struct.unpack_from("<HHI", data, position)
+        if size < 32 or size % 32 or size > len(data) - position:
+            raise ValueError("invalid command size")
+        if (flags & ~31 or (flags & 4 and kind != 12) or
+                (flags & 8 and kind != 34) or (flags & 16 and kind != 14)):
+            raise ValueError("invalid command flags")
+        return kind, size, flags
+
     while offset < len(encoded):
-        command_type, command_size = struct.unpack_from("<HH", encoded, offset)
-        assert command_size >= 32 and command_size % 32 == 0
+        command_type, command_size, flags = read_header(encoded, offset)
         if command_type != 33:
             record = bytes(encoded[offset : offset + command_size])
             if command_type == 0:
-                assert offset + command_size == len(encoded)
+                if (command_size != 32 or offset + command_size != len(encoded) or
+                        any(record[16:]) or len(records) != declared_count):
+                    raise ValueError("invalid END or logical command count")
                 return records, record
+            if len(records) >= declared_count:
+                raise ValueError("stream exceeds declared logical command count")
             records.append(record)
             offset += command_size
             continue
@@ -1545,21 +1563,39 @@ def _logical_command_records(model):
         iterations, body_count, body_bytes, patch_count = struct.unpack_from(
             "<4I", encoded, offset + 16
         )
-        assert 2 <= iterations and 1 <= body_count <= 16 and patch_count <= 24
-        assert command_size == ((32 + patch_count * 8 + 31) & ~31)
+        if (flags or iterations < 2 or not 1 <= body_count <= 16 or patch_count > 24 or
+                command_size != ((32 + patch_count * 8 + 31) & ~31) or
+                body_bytes > 2048 - command_size or
+                body_bytes > len(encoded) - offset - command_size or
+                iterations * body_count > declared_count - len(records)):
+            raise ValueError("invalid affine loop bounds or logical count")
+        if any(encoded[offset + 32 + patch_count * 8:offset + command_size]):
+            raise ValueError("affine metadata padding must be zero")
         body = bytearray(encoded[offset + command_size : offset + command_size + body_bytes])
+        children = []
+        child_offset = 0
+        for _child in range(body_count):
+            child_type, child_size, _flags = read_header(body, child_offset)
+            if child_type in (0, 33):
+                raise ValueError("nested loop or END in affine body")
+            children.append((child_offset, child_size))
+            child_offset += child_size
+        if child_offset != body_bytes:
+            raise ValueError("affine children do not cover body")
         patches = [
             struct.unpack_from("<2I", encoded, offset + 32 + patch * 8)
             for patch in range(patch_count)
         ]
+        previous_word = -1
+        for word, _delta in patches:
+            if (word <= previous_word or word > 0x3fffffff or
+                    not any(start + 8 <= word * 4 and word * 4 + 4 <= start + size
+                            for start, size in children)):
+                raise ValueError("affine patch must be ordered and inside a child payload")
+            previous_word = word
         for _iteration in range(iterations):
-            body_offset = 0
-            for _child in range(body_count):
-                child_type, child_size = struct.unpack_from("<HH", body, body_offset)
-                assert child_type not in (0, 33) and child_size >= 32
+            for body_offset, child_size in children:
                 records.append(bytes(body[body_offset : body_offset + child_size]))
-                body_offset += child_size
-            assert body_offset == body_bytes
             for word_offset, delta in patches:
                 byte_offset = word_offset * 4
                 value = struct.unpack_from("<I", body, byte_offset)[0]

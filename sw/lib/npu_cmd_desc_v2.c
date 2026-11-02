@@ -1087,15 +1087,17 @@ static uint32_t affine_loop_descriptor_bytes(uint32_t patch_count)
 }
 
 static uint32_t validate_affine_loop(
-    const uint8_t *record, uint32_t available, uint32_t child_offsets[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS],
-    uint32_t child_sizes[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS])
+    const uint8_t *record, uint32_t available,
+    uint32_t child_offsets[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS])
 {
     const nai_cmd_affine_loop_v2_t *loop = (const nai_cmd_affine_loop_v2_t *)record;
     uint32_t body_offset;
     uint32_t cursor;
+#if !defined(NAI_TRUSTED_FIRMWARE)
     uint32_t previous_patch = 0u;
+#endif
     if (available < sizeof(*loop) || loop->header.type != NAI_CMD_AFFINE_LOOP ||
-        loop->header.flags != 0u || loop->iteration_count < 2u ||
+        NAI_TRUSTED_INVALID(loop->header.flags != 0u) || loop->iteration_count < 2u ||
         loop->body_command_count == 0u ||
         loop->body_command_count > NAI_AFFINE_LOOP_MAX_BODY_COMMANDS ||
         loop->patch_count > NAI_AFFINE_LOOP_MAX_PATCHES ||
@@ -1116,9 +1118,9 @@ static uint32_t validate_affine_loop(
             body_offset + loop->body_bytes - cursor < sizeof(nai_cmd_header_v2_t)) return 0u;
         header = (const nai_cmd_header_v2_t *)(record + cursor);
         if (!valid_executable_header(header, body_offset + loop->body_bytes - cursor) ||
-            header->type == NAI_CMD_END || header->type == NAI_CMD_AFFINE_LOOP) return 0u;
+            NAI_TRUSTED_INVALID(header->type == NAI_CMD_END ||
+                header->type == NAI_CMD_AFFINE_LOOP)) return 0u;
         child_offsets[child] = cursor - body_offset;
-        child_sizes[child] = header->size_bytes;
         cursor += header->size_bytes;
     }
     if (cursor != body_offset + loop->body_bytes) return 0u;
@@ -1127,20 +1129,27 @@ static uint32_t validate_affine_loop(
         (const nai_cmd_affine_patch_v2_t *)(record + sizeof(*loop));
     for (uint32_t patch = 0u; patch < loop->patch_count; patch++) {
         uint32_t byte_offset;
-        uint32_t patchable = 0u;
+        /* Keep every patch store inside the body even for trusted streams.
+         * Ordering and child-payload membership are checked by the compiler's
+         * final encoded-stream validator, not rescanned by trusted firmware. */
         if (patches[patch].body_word_offset > 0x3fffffffu) return 0u;
         byte_offset = patches[patch].body_word_offset * 4u;
-        if (byte_offset > loop->body_bytes || loop->body_bytes - byte_offset < 4u ||
-            (patch != 0u && patches[patch].body_word_offset <= previous_patch)) return 0u;
+        if (byte_offset > loop->body_bytes || loop->body_bytes - byte_offset < 4u) return 0u;
+#if !defined(NAI_TRUSTED_FIRMWARE)
+        uint32_t patchable = 0u;
+        if (patch != 0u && patches[patch].body_word_offset <= previous_patch) return 0u;
         for (uint32_t child = 0u; child < loop->body_command_count; child++) {
+            const nai_cmd_header_v2_t *header =
+                (const nai_cmd_header_v2_t *)(record + body_offset + child_offsets[child]);
             if (byte_offset >= child_offsets[child] + 8u &&
-                byte_offset + 4u <= child_offsets[child] + child_sizes[child]) {
+                byte_offset + 4u <= child_offsets[child] + header->size_bytes) {
                 patchable = 1u;
                 break;
             }
         }
         if (!patchable) return 0u;
         previous_patch = patches[patch].body_word_offset;
+#endif
     }
     return 1u;
 }
@@ -1152,11 +1161,11 @@ static nai_dispatch_status_v2_t run_affine_loop_direct(
     uint32_t *failure_relative)
 {
     uint32_t child_offsets[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS];
-    uint32_t child_sizes[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS];
     uint32_t child_words[sizeof(nai_cmd_linebuf_binary_v2_t) / 4u];
     const nai_cmd_affine_loop_v2_t *loop = (const nai_cmd_affine_loop_v2_t *)record;
-    if (!validate_affine_loop(record, available, child_offsets, child_sizes) ||
-        loop->iteration_count > (command_limit - *completed) / loop->body_command_count)
+    if (!validate_affine_loop(record, available, child_offsets) ||
+        *completed > command_limit ||
+        (uint64_t)loop->iteration_count * loop->body_command_count > command_limit - *completed)
         return NAI_DISPATCH_BAD_STREAM;
     const nai_cmd_affine_patch_v2_t *patches =
         (const nai_cmd_affine_patch_v2_t *)(record + sizeof(*loop));
@@ -1164,9 +1173,10 @@ static nai_dispatch_status_v2_t run_affine_loop_direct(
     for (uint32_t iteration = 0u; iteration < loop->iteration_count; iteration++) {
         for (uint32_t child = 0u; child < loop->body_command_count; child++) {
             const uint32_t child_offset = child_offsets[child];
-            const uint32_t child_size = child_sizes[child];
+            const uint32_t child_size =
+                ((const nai_cmd_header_v2_t *)(record + body_offset + child_offset))->size_bytes;
             if (child_size > sizeof(child_words)) return NAI_DISPATCH_BAD_STREAM;
-            __builtin_memcpy(child_words, record + body_offset + child_offset, child_size);
+            nai_stream_copy(child_words, record + body_offset + child_offset, child_size);
             for (uint32_t patch = 0u; patch < loop->patch_count; patch++) {
                 const uint32_t byte_offset = patches[patch].body_word_offset * 4u;
                 if (byte_offset >= child_offset && byte_offset < child_offset + child_size) {
@@ -1195,25 +1205,29 @@ static nai_dispatch_status_v2_t run_affine_loop_buffer(
     uint32_t *failure_relative)
 {
     uint32_t child_offsets[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS];
-    uint32_t child_sizes[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS];
-    nai_cmd_affine_loop_v2_t loop;
-    nai_cmd_affine_patch_v2_t patches[NAI_AFFINE_LOOP_MAX_PATCHES];
-    __builtin_memcpy(&loop, record, sizeof(loop));
-    if (!validate_affine_loop(record, available, child_offsets, child_sizes) ||
-        loop.iteration_count > (command_limit - *completed) / loop.body_command_count)
+    const nai_cmd_affine_loop_v2_t *loop = (const nai_cmd_affine_loop_v2_t *)record;
+    if (!validate_affine_loop(record, available, child_offsets) ||
+        *completed > command_limit ||
+        (uint64_t)loop->iteration_count * loop->body_command_count > command_limit - *completed)
         return NAI_DISPATCH_BAD_STREAM;
-    __builtin_memcpy(patches, record + sizeof(loop),
-        loop.patch_count * sizeof(nai_cmd_affine_patch_v2_t));
-    const uint32_t body_offset = loop.header.size_bytes;
-    for (uint32_t iteration = 0u; iteration < loop.iteration_count; iteration++) {
+    /* Metadata precedes the mutable body and cannot be overwritten by a
+     * valid patch. The dispatch window stays owned until the loop returns. */
+    const nai_cmd_affine_patch_v2_t *patches =
+        (const nai_cmd_affine_patch_v2_t *)(record + sizeof(*loop));
+    const uint32_t body_offset = loop->header.size_bytes;
+    const uint32_t body_bytes = loop->body_bytes;
+    const uint32_t iteration_count = loop->iteration_count;
+    const uint32_t body_command_count = loop->body_command_count;
+    const uint32_t patch_count = loop->patch_count;
+    for (uint32_t iteration = 0u; iteration < iteration_count; iteration++) {
         if (iteration != 0u) {
-            for (uint32_t patch = 0u; patch < loop.patch_count; patch++) {
+            for (uint32_t patch = 0u; patch < patch_count; patch++) {
                 uint32_t *word = (uint32_t *)(record + body_offset +
                     patches[patch].body_word_offset * 4u);
                 *word += patches[patch].delta;
             }
         }
-        for (uint32_t child = 0u; child < loop.body_command_count; child++) {
+        for (uint32_t child = 0u; child < body_command_count; child++) {
             nai_cmd_header_v2_t *header = (nai_cmd_header_v2_t *)(record + body_offset +
                 child_offsets[child]);
             nai_dispatch_status_v2_t status = run_profiled_command(
@@ -1225,7 +1239,7 @@ static nai_dispatch_status_v2_t run_affine_loop_buffer(
             ++*completed;
         }
     }
-    *consumed = loop.header.size_bytes + loop.body_bytes;
+    *consumed = body_offset + body_bytes;
     return NAI_DISPATCH_OK;
 }
 
@@ -1290,12 +1304,11 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
  * moving the whole retained window after each command costs thousands of scalar
  * loads/stores even for a barrier. Forward copying is safe for overlapping tails.
  */
-static uint32_t refill_command_window(const nai_model_reader_v1_t *reader,
+static __attribute__((noinline)) uint32_t refill_command_window(const nai_model_reader_v1_t *reader,
     uint8_t *buffer, uint32_t capacity, uint32_t *cursor, uint32_t *buffered_bytes,
     uint32_t required, uint32_t model_offset, uint32_t remaining)
 {
     if (required > capacity || required > remaining) return 0u;
-    if (*buffered_bytes >= required) return 1u;
     if (*cursor != 0u) {
         nai_stream_copy(buffer, buffer + *cursor, *buffered_bytes);
         *cursor = 0u;
@@ -1306,6 +1319,16 @@ static uint32_t refill_command_window(const nai_model_reader_v1_t *reader,
             buffer + *buffered_bytes, refill) != 0u) return 0u;
     *buffered_bytes = window;
     return 1u;
+}
+
+/* Keep the common already-buffered path free of a call frame at -Os. */
+static inline __attribute__((always_inline)) uint32_t ensure_command_window(
+    const nai_model_reader_v1_t *reader, uint8_t *buffer, uint32_t capacity,
+    uint32_t *cursor, uint32_t *buffered_bytes, uint32_t required,
+    uint32_t model_offset, uint32_t remaining)
+{
+    return *buffered_bytes >= required || refill_command_window(reader, buffer,
+        capacity, cursor, buffered_bytes, required, model_offset, remaining);
 }
 
 nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *view,
@@ -1327,9 +1350,12 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
     if (failure_command_offset != 0) *failure_command_offset = 0u;
     if (view == 0 || view->header == 0 || view->commands == 0 || resolver == 0 || ops == 0 ||
         reader == 0 || reader->read == 0 || command_buffer == 0 ||
+        ((unsigned long)command_buffer & 3u) != 0u ||
         command_buffer_bytes < sizeof(nai_cmd_gemm32_v2_t) ||
         view->header->entry_command_off < view->commands->offset) return NAI_DISPATCH_BAD_STREAM;
     offset = view->header->entry_command_off - view->commands->offset;
+    if ((offset & 31u) != 0u) return NAI_DISPATCH_BAD_STREAM;
+    command_buffer = __builtin_assume_aligned(command_buffer, 4);
 
     while (offset < view->commands->size && completed <= view->header->command_count) {
         nai_cmd_header_v2_t header;
@@ -1337,17 +1363,17 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
         uint32_t model_offset = view->commands->offset + offset;
         uint32_t consumed = 0u;
         if (!valid_range(offset, sizeof(header), view->commands->size) ||
-            !refill_command_window(reader, command_buffer, command_buffer_bytes,
+            !ensure_command_window(reader, command_buffer, command_buffer_bytes,
                 &cursor, &buffered_bytes, sizeof(header), model_offset,
                 view->commands->size - offset)) {
             if (completed_commands != 0) *completed_commands = completed;
             if (failure_command_offset != 0) *failure_command_offset = model_offset;
             return NAI_DISPATCH_BAD_STREAM;
         }
-        __builtin_memcpy(&header, (uint8_t *)command_buffer + cursor, sizeof(header));
+        header = *(const nai_cmd_header_v2_t *)((uint8_t *)command_buffer + cursor);
         if (!valid_executable_header(&header, view->commands->size - offset)) {
             status = NAI_DISPATCH_BAD_COMMAND;
-        } else if (!refill_command_window(reader, command_buffer, command_buffer_bytes,
+        } else if (!ensure_command_window(reader, command_buffer, command_buffer_bytes,
                 &cursor, &buffered_bytes, header.size_bytes, model_offset,
                 view->commands->size - offset)) status = NAI_DISPATCH_BAD_STREAM;
         uint8_t *record = (uint8_t *)command_buffer + cursor;
@@ -1378,7 +1404,7 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *v
                     !valid_range(offset, consumed, view->commands->size))
                     status = NAI_DISPATCH_BAD_STREAM;
                 else {
-                    if (!refill_command_window(reader, command_buffer, command_buffer_bytes,
+                    if (!ensure_command_window(reader, command_buffer, command_buffer_bytes,
                             &cursor, &buffered_bytes, consumed, model_offset,
                             view->commands->size - offset)) status = NAI_DISPATCH_BAD_STREAM;
                     if (status == NAI_DISPATCH_OK)

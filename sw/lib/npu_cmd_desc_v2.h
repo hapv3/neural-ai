@@ -481,6 +481,8 @@ nai_dispatch_status_v2_t nai_cmd_dispatch_v2(const nai_model_view_v1_t *view,
                                              const nai_runtime_ops_v2_t *ops,
                                              uint32_t *completed_commands,
                                              uint32_t *failure_command_offset);
+/* The mutable dispatch window must be word-aligned. ABI records remain
+ * 32-byte sized/aligned within it; refill owns it until a loop completes. */
 nai_dispatch_status_v2_t nai_cmd_dispatch_stream_v2(const nai_model_view_v1_t *view,
                                                     const nai_resolver_v1_t *resolver,
                                                     const nai_runtime_ops_v2_t *ops,
