@@ -253,3 +253,29 @@ Firmware-exported detailed stats were zero, so they are not used for performance
 claims. The RTL PMU report is available in the log. All required functional gates
 for this unmasked experiment are now passed; full-model correctness/performance
 remain pending until the separate full YOLO runs complete.
+
+## Firmware integration gate — audited 2026-11-02
+
+After importing the affine-copy, long-row and guarded-prefetch firmware from
+main and merging `origin/main`, the eight-port `test_spatz_op_copy_batch` gate
+passed all 20 firmware byte-oracle/canary cases. Evidence is under
+`hw/rtl/cluster/tb/sim/test_yolo_latest_compiler_20261030/gates-copy-batch-main-merge/`.
+The test completed on 2026-10-30; its XML and all 20 timing rows were audited on
+2026-11-02. Other XML tests are explicitly skipped by the selected test filter.
+
+Overall PMU cycles were 4,557,519, including scalar fixture initialization and
+in-firmware validation. The sum of the separately bracketed call-side timings
+was 84,488 legacy cycles versus 11,694 batched cycles (7.225x for this fixture,
+not full-model speedup). Cases 8, 17 and 18 regressed: 2,114 -> 2,336,
+280 -> 334 and 512 -> 588 cycles. No numerical tolerance was relaxed.
+
+This run loaded the older reporter, so its aggregate PMU is retained in
+`sim.log`, not a reconstructed 163-counter JSON. Subsequent operator runs use
+the complete JSON/CSV exporter introduced in `1996df5`. Standalone firmware
+does not open ABI command contexts: `spatz_active_cycles` can therefore remain
+zero despite nonzero issue/response and TCDM traffic. Do not interpret that zero
+as an inactive VPU or use it as a utilization denominator for these gates.
+
+Next: verify long 1D copy, then stream prefetch on eight ports, before running
+the prepared 5,428-command full-reset YOLO with the updated firmware. These
+remaining gates are separate simulations, not automatically chained runs.
