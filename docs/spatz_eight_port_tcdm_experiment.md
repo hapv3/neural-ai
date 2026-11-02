@@ -279,3 +279,20 @@ as an inactive VPU or use it as a utilization denominator for these gates.
 Next: verify long 1D copy, then stream prefetch on eight ports, before running
 the prepared 5,428-command full-reset YOLO with the updated firmware. These
 remaining gates are separate simulations, not automatically chained runs.
+
+### Long 1D copy — verified 2026-11-02
+
+`test_spatz_op_copy_1d` passed all 12 firmware checks and the host's full-memory
+payload/canary comparison. Eleven timing records cover lengths 0 through
+51,200 bytes, independent source/destination byte alignment and VL tails. The
+additional check preserves legacy self/overlap behavior, not a memmove contract.
+Evidence: `test_yolo_latest_compiler_20261030/gates-copy-1d/` below the simulation
+root used above.
+
+Aggregate PMU cycles were 44,099. All 163 counters and metadata match exactly
+between `test_spatz_op_copy_1d_pmu.json` and the single-row CSV, with zero
+overflow. The exporter reports PASS only after the host comparison succeeds.
+The 51,200-byte case (source alignment 2, destination alignment 3) measured
+19,996 legacy versus 13,562 batched call-side cycles. Cases of 0, 31 and 255
+bytes each cost eight extra dispatch cycles. These are fixture timings, not
+full-model latency. Next required gate: `test_spatz_op_stream_prefetch`.
