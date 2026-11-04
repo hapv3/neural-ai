@@ -312,3 +312,75 @@ crossings and interleaved data DMA. Together with copy-batch and copy-1D, this
 closes the focused firmware gates before the updated full-model regression.
 The full run retains the already compiled 5,428-command NAI, input and deployed
 AFU oracle; it does not silently recompile using a subsequently advanced main.
+
+## Updated-firmware full YOLO — verified 2026-11-04
+
+The full-reset run completed on 2026-11-03 and its artifacts were independently
+audited on 2026-11-04. Evidence, relative to the experiment simulation root:
+
+`o3_20261102/paired-rerun1/os/`
+
+This is the eight-port candidate using the archived GCC `-Os` simulator, not
+the original two-port hardware baseline. It retains the NAI produced by compiler
+commit `3d6a1e2418635c306c7f34460447989bc87ffe14`; no compilation from a later
+compiler HEAD is implied. The integrated firmware includes the separately
+verified copy-batch, long-copy and guarded command-prefetch changes.
+
+| Pinned artifact | SHA-256 |
+|---|---|
+| Simulator | `64f195052e737f188bebb28b8b25aa877e91599c7e8066a24f33cad15c6bed4a` |
+| NAI | `ecde7fa438d9e9f0a45cab510d0dca3748d836442d073a341731af656a2c1c68` |
+| Firmware ELF | `de037cedaa8127ab08d4008d8ac7b7aa566bef714cf6555783c22508ce2bc989` |
+| Actual and expected output | `17ddd14ec29fec3e1e1705f4e1241adc50fe05cb02c6137534336742465f5962` |
+
+Verification results:
+
+- Cocotb passed its single selected test; all **5,428 commands** completed.
+- All **176,400 INT8 output bytes** match the pinned Neural-AI MAC/AFU DFL
+  reference: zero mismatches, MAE=0, max_abs=0. This is one pinned input and the
+  deployed arithmetic contract, not an unmodified-TFLite or dataset-accuracy claim.
+- All 16 intermediate snapshots plus the final command-5428 snapshot passed
+  format/identity/integrity checks. The final snapshot output also equals the
+  actual output and oracle. Intermediate snapshots have no numerical-oracle
+  observations; integrity alone is not an intermediate tensor correctness PASS.
+- `command_pmu.csv` contains 5,428 dense, ordered command rows and 169 columns:
+  six identity fields plus all 163 raw counters. Global overflow status is zero.
+- `verification-audit-20261104.json` records output, CSV, XML and snapshot hashes
+  and the independent checks. Logs, snapshots and raw reports remain local.
+
+| Measured counter | Cycles |
+|---|---:|
+| Total firmware/command execution PMU window | 13,183,595 |
+| Sum of per-command windows / command_active_cycles | 10,732,584 |
+| Systolic active | 4,047,055 |
+| Spatz active | 2,266,939 |
+| AFU active | 1,309,885 |
+| Command engine idle | 3,463,898 |
+
+Engine/state counters can overlap and must not be added as exclusive runtime
+shares. The per-command windows do not cover all global-window gaps; command
+engine idle is not interchangeable with time outside command contexts.
+Cocotb host wall time was 93,700.316 seconds (about 26 h 1 min 40 s), including
+simulation and host-side verification, not physical inference latency.
+
+The earlier candidate run in `full-yolo/candidate/` used the **same simulator**,
+source model, input and final-output oracle, but different NAI/firmware. Its
+5,520 commands took 18,365,775 cycles. The updated software/artifact combination
+therefore reduces total cycles by **28.22%**, to 13,183,595. This is not an
+isolated compiler-only, firmware-only, hardware-port-count or host-optimization
+speedup. The earlier two-port/eight-port A/B remains a separate experiment.
+
+### Host O3 experiment disposition
+
+The paired GCC O3 run was explicitly stopped on 2026-11-03 after 2,991 commands,
+without a final inference verdict. Its 2,991 PMU rows match the completed Os run
+across all 169 columns, and all seven shared snapshots are byte-identical.
+`o3_20261102/paired-rerun1/o3/simulation-stop.json` records the user-requested
+SIGTERM; retain the interrupted results and do not count them as a full PASS.
+
+At shared checkpoint 2824, O3 required 38.36% more elapsed host time. That is a
+partial, concurrent host measurement, not extra simulated NPU cycles or a
+full-model O3 result. The local `host-profile-20261103.json` and
+`host-optimization-analysis-20261103.md` contain the non-stopping CPU profile,
+code-size/disassembly evidence and phase/confounding limitations. No O2 build
+or replacement simulation was started; the user-stopped O3 run stays stopped.
