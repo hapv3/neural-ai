@@ -384,3 +384,39 @@ full-model O3 result. The local `host-profile-20261103.json` and
 `host-optimization-analysis-20261103.md` contain the non-stopping CPU profile,
 code-size/disassembly evidence and phase/confounding limitations. No O2 build
 or replacement simulation was started; the user-stopped O3 run stays stopped.
+
+## Fresh latest-compiler full YOLO — verified 2026-11-05
+
+The requested fresh compilation used compiler commit
+`7a9f4f5b63a1c705a67ca66030ce5ce4c463107b`. The Release Python backend was
+rebuilt with 10 jobs before compiling the pinned YOLO320 source; its SHA-256 is
+`39bcb9768127a76c1acdb25cd88530c4ab8c8f8f401ae4fc482feb8454a5ed74`.
+The newly generated NAI is byte-identical to the prior `ecde7fa4...` package:
+5,428 logical commands. This records a new compilation, not relabeled old
+compiler provenance. The independent source/input reference was also recomputed
+and matched the existing pinned oracle before simulation.
+
+The full reset run retains the verified GCC Os simulator and `de037ced...`
+firmware above. It does **not** merge the newer main-repository CPU FETCH
+firmware, change RTL or restart O3. Evidence under cluster `tb/sim`:
+
+`test_yolo_latest_compiler_20261104/full_yolo/`
+
+- Cocotb PASS and simulator exit 0; all 5,428 command descriptors match the
+  dense, ordered 169-column PMU CSV.
+- All 176,400 final output bytes are exact against the pinned Neural-AI
+  MAC/deployed-AFU-DFL reference; zero mismatches, MAE=0, max_abs=0.
+- Total PMU cycles remain **13,183,595**; command windows sum to **10,732,584**.
+  All 163 global counters, PMU metadata and every command CSV row match the
+  previous completed Os baseline exactly. Counter overflow remains zero.
+- All 16 intermediate snapshots and the final command-5428 snapshot pass
+  format, model identity, size and payload CRC checks, and are byte-identical
+  to the corresponding baseline snapshots. Final snapshot output equals the
+  actual output and oracle. Intermediate independent tensor-oracle comparisons
+  remain zero; baseline equality is not all-layer TensorFlow verification.
+- `verification-audit-20261105.json` records the independent audit and artifact
+  hashes. Logs, CSV, snapshots, reference and compiled artifacts stay local.
+
+Host elapsed time was 22:03:51. Different host load prevents treating its
+difference from the earlier run as an isolated optimization gain. Simulated
+NPU cycles are unchanged, as expected for unchanged NAI, firmware and RTL.
