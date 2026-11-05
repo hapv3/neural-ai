@@ -6,7 +6,7 @@
 
 extern const nai_cmd_header_v2_t *volatile g_nai_current_command;
 
-static uint8_t g_model[16416];
+static uint8_t g_model[16416] __attribute__((aligned(32)));
 static nai_cmd_header_v2_t g_expected[512];
 static uint32_t g_expected_count;
 static uint32_t g_calls;
@@ -134,6 +134,52 @@ static uint32_t build_mixed(void)
     return append_control(offset, NAI_CMD_END, 0);
 }
 
+static uint32_t build_wide_affine(uint32_t with_patches)
+{
+    memset(g_model, 0, sizeof(g_model));
+    g_expected_count = 0;
+    uint32_t offset = 32;
+    for (uint32_t child = 0; child < 7; child++)
+        offset = append_control(offset, NAI_CMD_BARRIER, child);
+    nai_cmd_affine_loop_v2_t loop = {0};
+    loop.header.type = NAI_CMD_AFFINE_LOOP;
+    loop.patch_count = with_patches ? NAI_AFFINE_LOOP_MAX_PATCHES : 0;
+    loop.header.size_bytes = (sizeof(loop) + loop.patch_count * sizeof(nai_cmd_affine_patch_v2_t) + 31u) & ~31u;
+    loop.iteration_count = 7;
+    loop.body_command_count = NAI_AFFINE_LOOP_MAX_BODY_COMMANDS;
+    loop.body_bytes = loop.body_command_count * sizeof(nai_cmd_control_v2_t);
+    memcpy(g_model + offset, &loop, sizeof(loop));
+    uint32_t patch = 0;
+    nai_cmd_control_v2_t body[NAI_AFFINE_LOOP_MAX_BODY_COMMANDS] = {0};
+    for (uint32_t child = 0; child < loop.body_command_count; child++) {
+        body[child].header.type = NAI_CMD_BARRIER;
+        body[child].header.size_bytes = sizeof(body[child]);
+        body[child].header.layer_id = 0xfffffffeu - child;
+        body[child].header.tile_id = 0xfffffffeu + child;
+        if (with_patches) {
+            if (child < 8) {
+                const nai_cmd_affine_patch_v2_t item = {child * 8u + 2u, 0xfffffffdu};
+                memcpy(g_model + offset + sizeof(loop) + patch++ * sizeof(item), &item, sizeof(item));
+            }
+            const nai_cmd_affine_patch_v2_t item = {child * 8u + 3u, 5};
+            memcpy(g_model + offset + sizeof(loop) + patch++ * sizeof(item), &item, sizeof(item));
+        }
+    }
+    assert(patch == loop.patch_count);
+    memcpy(g_model + offset + loop.header.size_bytes, body, sizeof(body));
+    for (uint32_t iteration = 0; iteration < loop.iteration_count; iteration++) {
+        for (uint32_t child = 0; child < loop.body_command_count; child++) {
+            nai_cmd_header_v2_t expected = body[child].header;
+            if (with_patches) {
+                if (child < 8) expected.layer_id += iteration * 0xfffffffdu;
+                expected.tile_id += iteration * 5u;
+            }
+            g_expected[g_expected_count++] = expected;
+        }
+    }
+    return append_control(offset + loop.header.size_bytes + sizeof(body), NAI_CMD_END, 0);
+}
+
 static void run_window(uint32_t bytes, uint32_t capacity, uint32_t fail_read,
     uint32_t entry_skip, uint32_t expected_count, uint32_t unchanged_prefix)
 {
@@ -204,6 +250,69 @@ static void run_window(uint32_t bytes, uint32_t capacity, uint32_t fail_read,
 #endif
 }
 
+/* Bounds guards remain active in both strict and trusted firmware. */
+static void check_affine_bounds(void)
+{
+    for (uint32_t fault = 0; fault < 15; fault++) {
+        memset(g_model, 0, sizeof(g_model));
+        nai_cmd_affine_loop_v2_t *loop = (nai_cmd_affine_loop_v2_t *)(g_model + 32);
+        nai_cmd_affine_patch_v2_t *patch = (nai_cmd_affine_patch_v2_t *)(g_model + 64);
+        nai_cmd_control_v2_t *child = (nai_cmd_control_v2_t *)(g_model + 96);
+        nai_cmd_control_v2_t *end = (nai_cmd_control_v2_t *)(g_model + 128);
+        loop->header.type = NAI_CMD_AFFINE_LOOP;
+        loop->header.size_bytes = 64;
+        loop->iteration_count = 2;
+        loop->body_command_count = 1;
+        loop->body_bytes = 32;
+        loop->patch_count = 1;
+        *patch = (nai_cmd_affine_patch_v2_t){3, 1};
+        child->header.type = NAI_CMD_BARRIER;
+        child->header.size_bytes = 32;
+        end->header.size_bytes = 32;
+        nai_model_header_v1_t header = {0};
+        header.entry_command_off = 32;
+        header.command_count = 2;
+        nai_section_v1_t section = {0};
+        section.offset = 32;
+        section.size = 128;
+        uint32_t storage[NAI_AFFINE_LOOP_MAX_RECORD_BYTES / 4 + 2];
+        memset(storage, 0xa5, sizeof(storage));
+        void *buffer = storage + 1;
+        switch (fault) {
+            case 0: patch->body_word_offset = 8; break;
+            case 1: patch->body_word_offset = 0xffffffffu; break;
+            case 2: loop->patch_count = NAI_AFFINE_LOOP_MAX_PATCHES + 1; break;
+            case 3: loop->body_command_count = NAI_AFFINE_LOOP_MAX_BODY_COMMANDS + 1; break;
+            case 4: loop->body_command_count = 0; break;
+            case 5: loop->body_bytes = 0xffffffe0u; break;
+            case 6: child->header.size_bytes = 0; break;
+            case 7: child->header.size_bytes = 64; break;
+            case 8: loop->iteration_count = 0; break;
+            case 9: loop->iteration_count = 1; break;
+            case 10: loop->iteration_count = 0xffffffffu; break;
+            case 11: header.command_count = 1; break;
+            case 12: header.entry_command_off++; break;
+            case 13: buffer = (uint8_t *)buffer + 1; break;
+            case 14: section.size = 80; break;
+        }
+        nai_model_view_v1_t view = {0};
+        view.header = &header;
+        view.commands = &section;
+        nai_resolver_v1_t resolver = {0};
+        nai_runtime_ops_v2_t ops = {0};
+        ops.barrier = barrier;
+        reader_state_t state = {header.entry_command_off, section.offset + section.size, 0, 0, 0};
+        nai_model_reader_v1_t reader = {&state, read_model};
+        uint32_t completed = 0, failure = 0;
+        g_calls = g_begins = g_ends = 0;
+        assert(nai_cmd_dispatch_stream_v2(&view, &resolver, &ops, &reader, buffer,
+            NAI_AFFINE_LOOP_MAX_RECORD_BYTES, &completed, &failure) == NAI_DISPATCH_BAD_STREAM);
+        assert(completed == 0 && g_calls == 0 && g_begins == 0 && g_ends == 0);
+        assert(storage[0] == 0xa5a5a5a5u &&
+            storage[NAI_AFFINE_LOOP_MAX_RECORD_BYTES / 4 + 1] == 0xa5a5a5a5u);
+    }
+}
+
 int main(void)
 {
     for (s_prefetch_enabled = 0; s_prefetch_enabled < 2; s_prefetch_enabled++) {
@@ -229,6 +338,15 @@ int main(void)
     memmove(g_expected, g_expected + 1, 62 * sizeof(g_expected[0]));
     g_expected_count = 62;
     run_window(bytes, 2048, 0, 32, 62, 2016);
+    for (uint32_t patches = 0; patches < 2; patches++) {
+        bytes = build_wide_affine(patches);
+        const uint32_t wide_capacities[] = {736, 740, 768, 1024, 2048, 4096};
+        for (uint32_t index = 0; index < sizeof(wide_capacities) / sizeof(wide_capacities[0]); index++)
+            run_window(bytes, wide_capacities[index], 0, 0, g_expected_count,
+                wide_capacities[index] >= bytes - 32 ? 7 * 32 + (patches ? 224 : 32) : 0);
+        run_window(bytes, 736, 2, 0, g_expected_count, 0);
     }
+    }
+    check_affine_bounds();
     return 0;
 }
