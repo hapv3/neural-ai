@@ -420,3 +420,61 @@ firmware, change RTL or restart O3. Evidence under cluster `tb/sim`:
 Host elapsed time was 22:03:51. Different host load prevents treating its
 difference from the earlier run as an isolated optimization gain. Simulated
 NPU cycles are unchanged, as expected for unchanged NAI, firmware and RTL.
+
+## Main merge: full YOLO and MobileNet — verified 2026-11-09
+
+Merge commit `c775b1e6a69616d17078d433510d6f9683e0aada` integrates main's CPU
+FETCH firmware into the eight-port branch without changing RTL. Both models
+were freshly compiled with compiler `3bd1bbc683e49fb83eacfed5ca6d6356644629b6`.
+The rebuilt firmware SHA-256 is
+`90e85d25080bb81d51719868e2029921a57114334ddba1a77b9fc62aba7598a6`.
+The simulator remains the verified GCC Os binary `64f19505...`; no O3 run was
+restarted. Source, input and independent reference artifacts were pinned before
+the two full-reset runs were launched with 50M-cycle timeouts.
+
+Evidence is under cluster `tb/sim/test_main_merge_models_20261105/`, in separate
+`yolo/` and `mobilenet/` directories. Both cocotb tests pass and simulator exit
+codes are zero. Independent output comparisons and descriptor/PMU audits give:
+
+| Full-reset result | YOLO320 | MobileNet224 |
+|---|---:|---:|
+| Commands completed and audited | 5,428 | 12,784 |
+| Output bytes compared | 176,400 | 1,000 |
+| Mismatches / max_abs | 0 / 0 | 0 / 0 |
+| Total PMU cycles | 12,479,475 | 14,585,749 |
+| Command execute windows | 10,748,490 | 12,024,562 |
+| FETCH cycles | 1,689,244 | 2,519,446 |
+| Command CSV rows / columns | 5,428 / 169 | 12,784 / 169 |
+| Counter overflow | 0 | 0 |
+
+YOLO retains NAI `ecde7fa4...` and the Neural-AI MAC/deployed-AFU-DFL reference;
+MobileNet uses newly generated NAI
+`6c4d58c6388a03f8db2a03eec320c3d96a392412c02db7705c062b77ddb4c94c` and the
+Neural-AI MAC/AFU-Mean reference. This is final-output numerical coverage for
+one pinned input per model, not unmodified-TFLite or dataset-wide accuracy.
+
+All 16 intermediate snapshots plus the final snapshot of each model pass
+format, identity, size, payload CRC and model-command restart-boundary checks.
+Final snapshot outputs equal actual outputs and their respective oracles.
+Intermediate independent tensor-oracle comparison counts are zero; snapshot
+integrity alone does not establish per-layer numerical correctness. Private
+command-reader jobs remain outside the model-command restart guarantee.
+
+The prior eight-port YOLO run used identical NAI/source/input/oracle but older
+firmware: 13,183,595 -> 12,479,475 cycles, **704,120 saved / 5.34% reduction**.
+FETCH saves 720,026 cycles while execute windows increase 15,906; other phases
+are unchanged, reconciling the invocation saving exactly. Systolic useful
+cycles, AFU active cycles and global AXI bytes are unchanged.
+
+For a separate hardware-configuration comparison, the verified main-repository
+MobileNet run in `test_mobilenet_recompile_20261105/full_mobilenet/` uses the
+same NAI, firmware, source, input and oracle: 16,364,403 -> 14,585,749 cycles,
+**1,778,654 saved / 10.87% reduction**. FETCH is identical; the reduction is
+entirely in execute windows. This compares the complete original-main and
+eight-port/64-bank mixed-width configurations, not Spatz port count in isolation.
+
+Each model's `verification-audit-20261109.json` records the independent checks,
+artifact hashes, raw PMU and scoped baseline comparison. Command-type CSVs and
+`verification-summary-20261109.json` are archived beside the runs and stay local.
+Host wall times were 23:01:54 (YOLO) and 25:44:59 (MobileNet), with concurrent
+simulations; these are not isolated host benchmarks or inference latency.
